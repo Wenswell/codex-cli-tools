@@ -7,7 +7,8 @@
     "ccs": "./dist/bin/ccs.js",
     "cxs": "./dist/bin/cxs.js",
     "cxsx": "./dist/bin/cxsx.js",
-    "envsync": "./dist/bin/envsync.js"
+    "envsync": "./dist/bin/envsync.js",
+    "codex-session-move": "./dist/bin/codex-session-move.js"
   },
   "files": [
     "dist"
