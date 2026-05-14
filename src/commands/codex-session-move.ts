@@ -1,0 +1,327 @@
+import { constants } from "node:fs";
+import { access, copyFile, readdir, readFile, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { ensureDir, writeTextFile } from "../lib/fs.js";
+import { codexDir } from "../lib/paths.js";
+import { sqliteJson, sqliteRun, sqlString } from "../lib/sqlite.js";
+
+type Args = {
+  oldPath: string;
+  newPath: string;
+  prefix: boolean;
+  apply: boolean;
+};
+
+type ThreadRow = {
+  id: string;
+  cwd: string;
+  rollout_path: string;
+};
+
+type PlannedRow = ThreadRow & {
+  newCwd: string;
+};
+
+type SessionMeta = {
+  type?: string;
+  payload?: {
+    cwd?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+function parseArgs(argv: string[]): Args {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    printHelp();
+    process.exit(0);
+  }
+
+  const positional: string[] = [];
+  let prefix = false;
+  let apply = false;
+
+  for (const arg of argv) {
+    if (arg === "--prefix") {
+      prefix = true;
+      continue;
+    }
+    if (arg === "--apply") {
+      apply = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      apply = false;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new Error(`unknown argument: ${arg}`);
+    }
+    positional.push(arg);
+  }
+
+  if (positional.length !== 2) {
+    printHelp();
+    throw new Error("expected OLD_PATH and NEW_PATH");
+  }
+
+  return {
+    oldPath: normalizeInputPath(positional[0]),
+    newPath: normalizeInputPath(positional[1]),
+    prefix,
+    apply,
+  };
+}
+
+function normalizeInputPath(path: string): string {
+  return resolve(path).replace(/\/+$/, "");
+}
+
+function printHelp(): void {
+  console.log([
+    "codex-session-move OLD_PATH NEW_PATH",
+    "codex-session-move OLD_PATH NEW_PATH --prefix",
+    "codex-session-move OLD_PATH NEW_PATH --prefix --apply",
+    "",
+    "Default mode is dry-run. Use --apply to modify Codex state.",
+  ].join("\n"));
+}
+
+async function findStateDb(): Promise<string> {
+  const dir = codexDir();
+  const entries = await readdir(dir);
+  const candidates = await Promise.all(
+    entries
+      .filter((entry) => /^state.*\.sqlite$/.test(entry))
+      .map(async (entry) => {
+        const path = join(dir, entry);
+        const info = await stat(path);
+        return { path, mtimeMs: info.mtimeMs };
+      }),
+  );
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const latest = candidates[0];
+  if (!latest) {
+    throw new Error(`no state*.sqlite found in ${dir}`);
+  }
+  return latest.path;
+}
+
+function matchWhere(args: Args): string {
+  const old = sqlString(args.oldPath);
+  if (!args.prefix) {
+    return `cwd = ${old}`;
+  }
+
+  const oldWithSlash = sqlString(`${args.oldPath}/`);
+  return `(cwd = ${old} OR substr(cwd, 1, ${args.oldPath.length + 1}) = ${oldWithSlash})`;
+}
+
+async function loadMatches(dbPath: string, args: Args): Promise<PlannedRow[]> {
+  const rows = await sqliteJson<ThreadRow>(
+    dbPath,
+    `select id, cwd, rollout_path from threads where ${matchWhere(args)} order by updated_at desc, id desc;`,
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    newCwd: args.prefix
+      ? `${args.newPath}${row.cwd.slice(args.oldPath.length)}`
+      : args.newPath,
+  }));
+}
+
+async function countMatches(dbPath: string, args: Args): Promise<number> {
+  const rows = await sqliteJson<{ count: number }>(
+    dbPath,
+    `select count(*) as count from threads where ${matchWhere(args)};`,
+  );
+  return rows[0]?.count ?? 0;
+}
+
+async function countNewCwds(dbPath: string, planned: PlannedRow[]): Promise<number> {
+  if (planned.length === 0) {
+    return 0;
+  }
+  const values = planned.map((row) => sqlString(row.newCwd)).join(", ");
+  const rows = await sqliteJson<{ count: number }>(
+    dbPath,
+    `select count(*) as count from threads where cwd in (${values});`,
+  );
+  return rows[0]?.count ?? 0;
+}
+
+function uniqueRolloutPaths(rows: PlannedRow[]): string[] {
+  return [...new Set(rows.map((row) => row.rollout_path))];
+}
+
+async function assertFileReadable(path: string): Promise<void> {
+  try {
+    await access(path, constants.R_OK);
+  } catch {
+    throw new Error(`rollout file is not readable: ${path}`);
+  }
+}
+
+function parseFirstJsonLine(text: string, path: string): { meta: SessionMeta; rest: string; lineEnding: string } {
+  const newlineIndex = text.indexOf("\n");
+  const firstWithMaybeCr = newlineIndex === -1 ? text : text.slice(0, newlineIndex);
+  const lineEnding = firstWithMaybeCr.endsWith("\r") ? "\r\n" : "\n";
+  const first = firstWithMaybeCr.endsWith("\r") ? firstWithMaybeCr.slice(0, -1) : firstWithMaybeCr;
+  const rest = newlineIndex === -1 ? "" : text.slice(newlineIndex + 1);
+
+  try {
+    const meta = JSON.parse(first) as SessionMeta;
+    if (!meta || typeof meta !== "object" || !meta.payload || typeof meta.payload !== "object") {
+      throw new Error("first JSON line is not session_meta payload");
+    }
+    return { meta, rest, lineEnding };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`failed to parse first line of ${path}: ${reason}`);
+  }
+}
+
+async function preflightRollouts(rows: PlannedRow[]): Promise<void> {
+  const byPath = new Map<string, PlannedRow[]>();
+  for (const row of rows) {
+    const group = byPath.get(row.rollout_path) ?? [];
+    group.push(row);
+    byPath.set(row.rollout_path, group);
+  }
+
+  for (const [path, group] of byPath) {
+    await assertFileReadable(path);
+    const text = await readFile(path, "utf8");
+    const { meta } = parseFirstJsonLine(text, path);
+    const first = group[0];
+    if (meta.payload?.cwd !== first.cwd) {
+      throw new Error(`rollout cwd mismatch: ${path} has ${String(meta.payload?.cwd)}, sqlite has ${first.cwd}`);
+    }
+  }
+}
+
+function backupDestination(backupDir: string, path: string): string {
+  const rel = relative(codexDir(), path);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+    return join(backupDir, rel);
+  }
+  return join(backupDir, "external", basename(path));
+}
+
+async function createBackup(dbPath: string, rolloutPaths: string[]): Promise<string> {
+  const backupDir = join(codexDir(), "backups", `session-cwd-migration-${timestamp()}`);
+  await ensureDir(backupDir);
+
+  const dbBackup = join(backupDir, basename(dbPath));
+  await copyFile(dbPath, dbBackup);
+
+  for (const path of rolloutPaths) {
+    const target = backupDestination(backupDir, path);
+    await ensureDir(dirname(target));
+    await copyFile(path, target);
+  }
+
+  return backupDir;
+}
+
+function timestamp(): string {
+  const date = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function buildUpdateSql(rows: PlannedRow[]): string {
+  const statements = rows.map((row) => (
+    `update threads set cwd = ${sqlString(row.newCwd)} where id = ${sqlString(row.id)};`
+  ));
+  return ["begin immediate;", ...statements, "commit;"].join("\n");
+}
+
+async function updateRollout(path: string, fromCwd: string, toCwd: string): Promise<void> {
+  const text = await readFile(path, "utf8");
+  const { meta, rest, lineEnding } = parseFirstJsonLine(text, path);
+  if (meta.payload?.cwd !== fromCwd) {
+    throw new Error(`rollout cwd changed before write: ${path}`);
+  }
+  meta.payload.cwd = toCwd;
+  await writeTextFile(path, `${JSON.stringify(meta)}${lineEnding}${rest}`);
+}
+
+async function applyMigration(dbPath: string, rows: PlannedRow[]): Promise<number> {
+  await sqliteRun(dbPath, buildUpdateSql(rows));
+
+  let updated = 0;
+  for (const row of rows) {
+    await updateRollout(row.rollout_path, row.cwd, row.newCwd);
+    updated += 1;
+  }
+  return updated;
+}
+
+async function verifyRollouts(rows: PlannedRow[]): Promise<number> {
+  let synced = 0;
+  for (const row of rows) {
+    const text = await readFile(row.rollout_path, "utf8");
+    const { meta } = parseFirstJsonLine(text, row.rollout_path);
+    if (meta.payload?.cwd !== row.newCwd) {
+      throw new Error(`verification failed for ${row.rollout_path}: expected ${row.newCwd}, got ${String(meta.payload?.cwd)}`);
+    }
+    synced += 1;
+  }
+  return synced;
+}
+
+function printDryRun(args: Args, dbPath: string, rows: PlannedRow[]): void {
+  console.log(`mode: ${args.prefix ? "prefix" : "exact"}`);
+  console.log(`state: ${dbPath}`);
+  console.log(`old: ${args.oldPath}`);
+  console.log(`new: ${args.newPath}`);
+  console.log(`matched sessions: ${rows.length}`);
+  console.log("");
+  console.log("will update:");
+  for (const row of rows) {
+    console.log(`  ${row.cwd} -> ${row.newCwd}`);
+  }
+  console.log("");
+  console.log("rollout files:");
+  for (const path of uniqueRolloutPaths(rows)) {
+    console.log(`  ${path}`);
+  }
+  console.log("");
+  console.log("dry-run only. Add --apply to write changes.");
+}
+
+export async function runCodexSessionMove(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  const dbPath = await findStateDb();
+  const rows = await loadMatches(dbPath, args);
+
+  if (rows.length === 0) {
+    console.log(`mode: ${args.prefix ? "prefix" : "exact"}`);
+    console.log(`state: ${dbPath}`);
+    console.log(`matched sessions: 0`);
+    return;
+  }
+
+  await preflightRollouts(rows);
+
+  if (!args.apply) {
+    printDryRun(args, dbPath, rows);
+    return;
+  }
+
+  const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));
+  const jsonlUpdated = await applyMigration(dbPath, rows);
+  const oldRemaining = await countMatches(dbPath, args);
+  const newCount = await countNewCwds(dbPath, rows);
+  const synced = await verifyRollouts(rows);
+
+  console.log(`backup: ${backupDir}`);
+  console.log(`sqlite updated: ${rows.length}`);
+  console.log(`jsonl updated: ${jsonlUpdated}`);
+  console.log(`old cwd remaining: ${oldRemaining}`);
+  console.log(`new cwd count: ${newCount}`);
+  console.log(`jsonl synced: ${synced}`);
+}
