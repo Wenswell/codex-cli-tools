@@ -1,0 +1,26 @@
+{
+  "name": "codex-tools",
+  "version": "0.1.0",
+  "description": "Personal Codex CLI helpers",
+  "type": "module",
+  "bin": {
+    "ccs": "./dist/bin/ccs.js",
+    "cxs": "./dist/bin/cxs.js",
+    "cxsx": "./dist/bin/cxsx.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.1",
+    "typescript": "^5.8.3"
+  },
+  "packageManager": "pnpm@10.22.0"
+}
