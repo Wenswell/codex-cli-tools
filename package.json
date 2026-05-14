@@ -6,7 +6,8 @@
   "bin": {
     "ccs": "./dist/bin/ccs.js",
     "cxs": "./dist/bin/cxs.js",
-    "cxsx": "./dist/bin/cxsx.js"
+    "cxsx": "./dist/bin/cxsx.js",
+    "envsync": "./dist/bin/envsync.js"
   },
   "files": [
     "dist"

@@ -1,0 +1,242 @@
+import { copyFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { existsSync } from "node:fs";
+import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+
+const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+type RawEntry = {
+  type: "raw";
+  text: string;
+};
+
+type EnvEntry = {
+  type: "env";
+  key: string;
+  value: string;
+};
+
+type Entry = RawEntry | EnvEntry;
+
+type ExistingValue = {
+  key: string;
+  value: string;
+};
+
+type Args = {
+  source: string;
+  target: string;
+  backup: boolean;
+};
+
+type Summary = {
+  added: string[];
+  filledDefaults: string[];
+  preserved: string[];
+  preservedEmpty: string[];
+  extra: string[];
+};
+
+function parseArgs(argv: string[]): Args {
+  const args: Args = {
+    source: ".env.example",
+    target: ".env",
+    backup: false,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--source") {
+      args.source = requireValue(argv, index);
+      index += 1;
+      continue;
+    }
+    if (arg === "--target") {
+      args.target = requireValue(argv, index);
+      index += 1;
+      continue;
+    }
+    if (arg === "--backup") {
+      args.backup = true;
+      continue;
+    }
+    if (arg === "--help" || arg === "-h") {
+      printHelp();
+      process.exit(0);
+    }
+
+    throw new Error(`unknown argument: ${arg}`);
+  }
+
+  return args;
+}
+
+function requireValue(argv: string[], index: number): string {
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`${argv[index]} requires a value`);
+  }
+  return value;
+}
+
+function printHelp(): void {
+  console.log([
+    "envsync",
+    "envsync --source .env.example --target .env",
+    "envsync --backup",
+  ].join("\n"));
+}
+
+function splitLines(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+}
+
+function parseTemplate(text: string): Entry[] {
+  const lines = splitLines(text);
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  return lines.map((line) => {
+    const match = envLinePattern.exec(line);
+    if (!match) {
+      return { type: "raw", text: line };
+    }
+    return { type: "env", key: match[1], value: match[2] };
+  });
+}
+
+function parseExisting(text: string): Map<string, ExistingValue> {
+  const values = new Map<string, ExistingValue>();
+  const lines = splitLines(text);
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  for (const line of lines) {
+    const match = envLinePattern.exec(line);
+    if (!match) {
+      continue;
+    }
+    values.set(match[1], { key: match[1], value: match[2] });
+  }
+
+  return values;
+}
+
+function buildEnv(exampleText: string, existingText: string): { text: string; summary: Summary } {
+  const template = parseTemplate(exampleText);
+  const existing = parseExisting(existingText);
+  const seen = new Set<string>();
+  const output: string[] = [];
+  const summary: Summary = {
+    added: [],
+    filledDefaults: [],
+    preserved: [],
+    preservedEmpty: [],
+    extra: [],
+  };
+
+  for (const entry of template) {
+    if (entry.type === "raw") {
+      output.push(entry.text);
+      continue;
+    }
+
+    seen.add(entry.key);
+    const current = existing.get(entry.key);
+    if (!current) {
+      output.push(`${entry.key}=${entry.value}`);
+      summary.added.push(entry.key);
+      continue;
+    }
+
+    if (current.value !== "") {
+      output.push(`${entry.key}=${current.value}`);
+      summary.preserved.push(entry.key);
+      continue;
+    }
+
+    if (entry.value !== "") {
+      output.push(`${entry.key}=${entry.value}`);
+      summary.filledDefaults.push(entry.key);
+      continue;
+    }
+
+    output.push(`${entry.key}=`);
+    summary.preservedEmpty.push(entry.key);
+  }
+
+  const extras = [...existing.values()].filter((entry) => !seen.has(entry.key));
+  if (extras.length > 0) {
+    if (output.length > 0 && output.at(-1) !== "") {
+      output.push("");
+    }
+    output.push("# Extra keys from existing .env");
+    for (const extra of extras) {
+      output.push(`${extra.key}=${extra.value}`);
+      summary.extra.push(extra.key);
+    }
+  }
+
+  return {
+    text: `${output.join("\n")}\n`,
+    summary,
+  };
+}
+
+function timestamp(): string {
+  const date = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("");
+}
+
+function printSummary(target: string, summary: Summary): void {
+  console.log(`updated: ${target}`);
+  console.log(`added: ${summary.added.length}`);
+  console.log(`filled defaults: ${summary.filledDefaults.length}`);
+  console.log(`preserved: ${summary.preserved.length}`);
+  console.log(`preserved empty: ${summary.preservedEmpty.length}`);
+  console.log(`extra: ${summary.extra.length}`);
+  printKeys("added keys", summary.added);
+  printKeys("filled defaults keys", summary.filledDefaults);
+  printKeys("extra keys", summary.extra);
+}
+
+function printKeys(label: string, keys: string[]): void {
+  if (keys.length === 0) {
+    return;
+  }
+  console.log(`${label}:`);
+  for (const key of keys) {
+    console.log(`  ${key}`);
+  }
+}
+
+export async function runEnvsync(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  const exampleText = await readTextIfExists(args.source);
+  if (exampleText === null) {
+    throw new Error(`source file not found: ${args.source}`);
+  }
+
+  const existingText = (await readTextIfExists(args.target)) ?? "";
+  const result = buildEnv(exampleText, existingText);
+
+  if (args.backup && existsSync(args.target)) {
+    const backupPath = `${args.target}.backup-${timestamp()}`;
+    await copyFile(args.target, backupPath);
+    console.log(`backup: ${backupPath}`);
+  }
+
+  await writeTextFile(args.target, result.text);
+  printSummary(basename(args.target), result.summary);
+}
