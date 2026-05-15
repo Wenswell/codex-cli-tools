@@ -96,6 +96,8 @@ Profile config lives at:
 ~/.codex/auth.json
 ```
 
+Run `ccs` without arguments to print the current profile plus command help.
+
 Supported commands:
 
 ```bash
@@ -136,6 +138,20 @@ config/ccs-profiles.json
 
 Fill in the API keys manually. The file is written with `0600` permissions.
 
+`ccs init` also fills missing defaults in:
+
+```text
+~/.codex/config.toml
+```
+
+Those defaults come from:
+
+```text
+config/codex-config.toml
+```
+
+This is used for baseline Codex settings such as top-level model/provider fields, `[features]`, and `[model_providers.codex]`. Existing keys and unrelated sections, such as trusted projects, are kept.
+
 If `config/ccs-profiles.json` changes later, run:
 
 ```bash
@@ -143,6 +159,8 @@ ccs sync
 ```
 
 `ccs sync` merges template profiles into `~/.config/codex-tools/profiles.json` and keeps existing local API keys. It also keeps local profiles that are not in the template.
+
+`ccs sync` also fills missing defaults from `config/codex-config.toml` into `~/.codex/config.toml`.
 
 Switching profile:
 
