@@ -281,11 +281,14 @@ Equivalent to:
 envsync --source .env.example --target .env
 ```
 
+Default mode is dry-run. Nothing is modified unless `-y` or `--yes` is provided.
+
 Options:
 
 ```bash
-envsync --source .env.example --target .env.local
-envsync --backup
+envsync -y
+envsync --source .env.example --target .env.local -y
+envsync --backup -y
 ```
 
 Parsing:
@@ -311,7 +314,7 @@ Merge behavior:
 
 Important: an intentionally empty target value is filled when the source has a non-empty default. This is for default-value migration, not for cases where empty means disabled.
 
-CLI output includes the updated file and counts/lists for added, filled defaults, preserved, preserved empty, and extra keys.
+CLI output includes the target file and counts/lists for added, filled defaults, preserved, preserved empty, and extra keys.
 
 ## codex-session-move
 
@@ -368,11 +371,13 @@ Apply behavior:
 - Finds the latest `~/.codex/state*.sqlite`.
 - Reads matching rows from `threads`.
 - Preflights every rollout JSONL file.
+- Builds and re-checks planned JSONL writes before updating SQLite.
 - Creates a backup directory under `~/.codex/backups/session-cwd-migration-YYYYMMDD-HHMMSS/`.
 - Backs up the state SQLite file and every rollout JSONL that will be modified.
 - Updates SQLite in a transaction.
 - Updates only the first line of each rollout JSONL.
-- Verifies old cwd remaining count, new cwd count, and JSONL first-line sync.
+- If a JSONL update fails after SQLite is updated, attempts to roll back SQLite and already-written JSONL files.
+- Verifies old cwd remaining count, threads at the new cwd, and JSONL first-line sync.
 
 Dry-run output lists matched sessions and rollout files.
 
@@ -383,7 +388,7 @@ backup: ...
 sqlite updated: ...
 jsonl updated: ...
 old cwd remaining: ...
-new cwd count: ...
+threads at new cwd: ...
 jsonl synced: ...
 ```
 

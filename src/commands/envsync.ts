@@ -1,6 +1,6 @@
 import { copyFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
-import { existsSync } from "node:fs";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
@@ -27,6 +27,7 @@ type Args = {
   source: string;
   target: string;
   backup: boolean;
+  apply: boolean;
 };
 
 type Summary = {
@@ -42,6 +43,7 @@ function parseArgs(argv: string[]): Args {
     source: ".env.example",
     target: ".env",
     backup: false,
+    apply: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -58,6 +60,14 @@ function parseArgs(argv: string[]): Args {
     }
     if (arg === "--backup") {
       args.backup = true;
+      continue;
+    }
+    if (arg === "-y" || arg === "--yes") {
+      args.apply = true;
+      continue;
+    }
+    if (arg === "-n" || arg === "--dry-run") {
+      args.apply = false;
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -82,8 +92,11 @@ function requireValue(argv: string[], index: number): string {
 function printHelp(): void {
   console.log([
     "envsync",
-    "envsync --source .env.example --target .env",
-    "envsync --backup",
+    "envsync -y",
+    "envsync --source .env.example --target .env -y",
+    "envsync --backup -y",
+    "",
+    "Default mode is dry-run. Use -y or --yes to write changes.",
   ].join("\n"));
 }
 
@@ -188,6 +201,7 @@ function buildEnv(exampleText: string, existingText: string): { text: string; su
 function timestamp(): string {
   const date = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
+  const milliseconds = date.getMilliseconds().toString().padStart(3, "0");
   return [
     date.getFullYear(),
     pad(date.getMonth() + 1),
@@ -196,11 +210,16 @@ function timestamp(): string {
     pad(date.getHours()),
     pad(date.getMinutes()),
     pad(date.getSeconds()),
+    "-",
+    milliseconds,
   ].join("");
 }
 
-function printSummary(target: string, summary: Summary): void {
-  console.log(`updated: ${target}`);
+function printSummary(target: string, summary: Summary, apply: boolean): void {
+  console.log(`${apply ? "updated" : "would update"}: ${target}`);
+  if (!apply) {
+    console.log("dry-run only. Re-run with -y or --yes to apply changes.");
+  }
   console.log(`added: ${summary.added.length}`);
   console.log(`filled defaults: ${summary.filledDefaults.length}`);
   console.log(`preserved: ${summary.preserved.length}`);
@@ -221,6 +240,22 @@ function printKeys(label: string, keys: string[]): void {
   }
 }
 
+async function createBackup(target: string): Promise<string> {
+  const base = `${target}.backup-${timestamp()}`;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const backupPath = attempt === 0 ? base : `${base}-${attempt}`;
+    try {
+      await copyFile(target, backupPath, fsConstants.COPYFILE_EXCL);
+      return backupPath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`failed to create unique backup for ${target}`);
+}
+
 export async function runEnvsync(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   const exampleText = await readTextIfExists(args.source);
@@ -228,15 +263,20 @@ export async function runEnvsync(argv: string[]): Promise<void> {
     throw new Error(`source file not found: ${args.source}`);
   }
 
-  const existingText = (await readTextIfExists(args.target)) ?? "";
+  const existingTargetText = await readTextIfExists(args.target);
+  const existingText = existingTargetText ?? "";
   const result = buildEnv(exampleText, existingText);
 
-  if (args.backup && existsSync(args.target)) {
-    const backupPath = `${args.target}.backup-${timestamp()}`;
-    await copyFile(args.target, backupPath);
+  if (!args.apply) {
+    printSummary(basename(args.target), result.summary, false);
+    return;
+  }
+
+  if (args.backup && existingTargetText !== null) {
+    const backupPath = await createBackup(args.target);
     console.log(`backup: ${backupPath}`);
   }
 
   await writeTextFile(args.target, result.text);
-  printSummary(basename(args.target), result.summary);
+  printSummary(basename(args.target), result.summary, true);
 }
