@@ -5,8 +5,9 @@
   "type": "module",
   "bin": {
     "ccs": "./dist/bin/ccs.js",
-    "cxs": "./dist/bin/cxs.js",
-    "cxsx": "./dist/bin/cxsx.js",
+    "cx": "./dist/bin/cx.js",
+    "cxx": "./dist/bin/cxx.js",
+    "cxxs": "./dist/bin/cxxs.js",
     "envsync": "./dist/bin/envsync.js",
     "codex-session-move": "./dist/bin/codex-session-move.js"
   },
@@ -15,7 +16,7 @@
     "config"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
