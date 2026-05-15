@@ -106,12 +106,12 @@ ccs init
 ccs sync
 ccs status
 ccs list
-ccs add
+ccs add [PROFILE]
 ccs remove NAME
 ccs test001
 ccs test002
 ccs PROFILE
-ccs toggle
+ccs toggle [PROFILE]
 ```
 
 Initial profile defaults are stored in this repository:
@@ -176,9 +176,10 @@ Add or update a profile interactively:
 
 ```bash
 ccs add
+ccs add test002
 ```
 
-When editing an existing profile, press Enter to keep the current value.
+When editing an existing profile, press Enter to keep the current value. If `PROFILE` is passed, the name prompt uses it as the default.
 
 Remove a profile:
 
@@ -191,10 +192,15 @@ ccs remove local
 Switching profile:
 
 ```bash
-ccs test001
-ccs test002
-ccs PROFILE
+ccs toggle test001
+ccs toggle test002
 ccs toggle
+```
+
+Show a profile without switching:
+
+```bash
+ccs PROFILE
 ```
 
 Behavior:

@@ -125,14 +125,14 @@ async function syncProfiles(): Promise<ProfilesFile> {
   return next;
 }
 
-async function addProfile(): Promise<void> {
+async function addProfile(defaultName?: string): Promise<void> {
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
   const input = createPrompt();
   let name = "";
 
   try {
-    name = await askRequired(input, "name");
+    name = await askRequired(input, "name", defaultName);
     const existing = profiles[name];
     const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
     const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
@@ -144,6 +144,17 @@ async function addProfile(): Promise<void> {
 
   await writeProfiles({ ...data, profiles, current: data.current ?? name });
   console.log(`profile saved: ${name}`);
+}
+
+function printProfile(name: string, profiles: ProfilesFile): void {
+  const profile = profiles.profiles?.[name];
+  if (!profile) {
+    throw new Error(`profile not found: ${name}`);
+  }
+  const normalized = assertProfile(profile, name);
+  console.log(`profile: ${name}`);
+  console.log(`baseURL: ${normalized.baseURL}`);
+  console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
 }
 
 async function askRequired(
@@ -263,15 +274,15 @@ async function printStatus(): Promise<void> {
 function printHelp(): void {
   console.log([
     "Usage:",
-    "  ccs",
-    "  ccs init",
-    "  ccs sync",
-    "  ccs status",
-    "  ccs list",
-    "  ccs add",
-    "  ccs remove NAME",
-    "  ccs PROFILE",
-    "  ccs toggle",
+    "  ccs                    # show current profile and usage",
+    "  ccs init               # initialize profiles and reset Codex config",
+    "  ccs sync               # sync profile template",
+    "  ccs status             # show current profile",
+    "  ccs list               # list profiles with masked keys",
+    "  ccs add [PROFILE]      # add or update a profile interactively",
+    "  ccs remove PROFILE     # remove a profile",
+    "  ccs PROFILE            # show profile details",
+    "  ccs toggle [PROFILE]   # switch profile, or toggle configured profiles",
   ].join("\n"));
 }
 
@@ -321,7 +332,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "add") {
-    await addProfile();
+    await addProfile(argv[1]);
     return;
   }
 
@@ -336,6 +347,11 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "toggle") {
+    if (argv[1]) {
+      await switchProfile(argv[1]);
+      return;
+    }
+
     const toggle = profiles.toggle ?? [];
     if (toggle.length < 2) {
       throw new Error("toggle requires at least two profile names in profiles.json toggle");
@@ -347,7 +363,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (profiles.profiles?.[command]) {
-    await switchProfile(command);
+    printProfile(command, profiles);
     return;
   }
 
