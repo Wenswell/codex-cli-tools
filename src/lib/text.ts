@@ -34,3 +34,19 @@ export function textGreen(value: string): string {
 export function textRed(value: string): string {
   return withAnsi(31, value);
 }
+
+export function bgBlue(value: string): string {
+  return withAnsi(44, value);
+}
+
+export function bgGreen(value: string): string {
+  return withAnsi(42, value);
+}
+
+export function bgRed(value: string): string {
+  return withAnsi(41, value);
+}
+
+export function bgGray(value: string): string {
+  return withAnsi(100, value);
+}
