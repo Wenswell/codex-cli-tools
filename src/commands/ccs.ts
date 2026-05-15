@@ -4,7 +4,7 @@ import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAuthPath, codexConfigPath, codexDir, profilesPath } from "../lib/paths.js";
 import { maskSecret } from "../lib/text.js";
-import { updateTomlBaseUrl } from "../lib/toml.js";
+import { ensureTomlDefaults, updateTomlBaseUrl } from "../lib/toml.js";
 
 type Profile = {
   baseURL: string;
@@ -51,6 +51,15 @@ async function readDefaultProfiles(): Promise<ProfilesFile> {
   return parseJsonObject(text) as ProfilesFile;
 }
 
+async function readDefaultCodexConfig(): Promise<string> {
+  const path = fileURLToPath(new URL("../../config/codex-config.toml", import.meta.url));
+  const text = await readTextIfExists(path);
+  if (!text) {
+    throw new Error(`default Codex config template not found: ${path}`);
+  }
+  return text;
+}
+
 async function ensureProfilesFile(): Promise<ProfilesFile> {
   const existing = await readProfiles();
   if (existing.profiles && Object.keys(existing.profiles).length > 0) {
@@ -60,6 +69,13 @@ async function ensureProfilesFile(): Promise<ProfilesFile> {
   const initial = await readDefaultProfiles();
   await writeProfiles(initial);
   return initial;
+}
+
+async function ensureCodexConfig(): Promise<void> {
+  await ensureDir(codexDir());
+  const current = (await readTextIfExists(codexConfigPath())) ?? "";
+  const defaults = await readDefaultCodexConfig();
+  await writeTextFile(codexConfigPath(), ensureTomlDefaults(current, defaults));
 }
 
 async function syncProfiles(): Promise<ProfilesFile> {
@@ -119,17 +135,47 @@ async function switchProfile(name: string): Promise<void> {
   console.log(`apiKey: ${maskSecret(normalized.apiKey)}`);
 }
 
-function help(): void {
+async function printStatus(): Promise<void> {
+  const profiles = await readProfiles();
+  const current = profiles.current ?? "input";
+  const profile = profiles.profiles?.[current];
+  if (!profile) {
+    console.log("current: none");
+    console.log(`profiles: ${profilesPath()}`);
+    console.log(`codex config: ${codexConfigPath()}`);
+    return;
+  }
+  const normalized = assertProfile(profile, current);
+  console.log(`current: ${current}`);
+  console.log(`baseURL: ${normalized.baseURL}`);
+  console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
+  console.log(`profiles: ${profilesPath()}`);
+  console.log(`codex config: ${codexConfigPath()}`);
+}
+
+function printHelp(): void {
   console.log([
-    "ccs",
-    "ccs status",
-    "ccs init",
-    "ccs sync",
-    "ccs input",
-    "ccs ciii",
-    "ccs PROFILE",
-    "ccs toggle",
-    "ccs list",
+    "Usage:",
+    "  ccs                 Show current profile and this help",
+    "  ccs status          Show current profile, baseURL, masked apiKey, and config paths",
+    "  ccs init            Create profile config if needed and fill missing ~/.codex/config.toml defaults",
+    "  ccs sync            Sync default profile/config templates into local files",
+    "  ccs list            List configured profiles",
+    "  ccs PROFILE         Switch to any configured profile, for example: ccs input",
+    "  ccs toggle          Toggle between input and ciii",
+    "",
+    "Files:",
+    `  profiles:     ${profilesPath()}`,
+    `  codex config: ${codexConfigPath()}`,
+    `  codex auth:   ${codexAuthPath()}`,
+    "",
+    "Templates:",
+    "  config/ccs-profiles.json",
+    "  config/codex-config.toml",
+    "",
+    "Notes:",
+    "  API keys are stored only in the local profiles file and are masked in output.",
+    "  ccs init/sync fill missing Codex config defaults such as [features]; they keep unrelated config.",
   ].join("\n"));
 }
 
@@ -137,23 +183,34 @@ export async function runCcs(argv: string[]): Promise<void> {
   const command = argv[0] ?? "";
   const profiles = await readProfiles();
 
-  if (!command || command === "help" || command === "--help" || command === "-h") {
-    help();
+  if (!command) {
+    await printStatus();
+    console.log("");
+    printHelp();
+    return;
+  }
+
+  if (command === "help" || command === "--help" || command === "-h") {
+    printHelp();
     return;
   }
 
   if (command === "init") {
     await ensureProfilesFile();
+    await ensureCodexConfig();
     console.log(`profiles written: ${profilesPath()}`);
+    console.log(`codex config updated: ${codexConfigPath()}`);
     return;
   }
 
   if (command === "sync") {
     const synced = await syncProfiles();
+    await ensureCodexConfig();
     console.log(`profiles synced: ${profilesPath()}`);
     for (const name of Object.keys(synced.profiles ?? {})) {
       console.log(`  ${name}`);
     }
+    console.log(`codex config synced: ${codexConfigPath()}`);
     return;
   }
 
@@ -166,16 +223,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "status") {
-    const current = profiles.current ?? "input";
-    const profile = profiles.profiles?.[current];
-    if (!profile) {
-      console.log("no active profile");
-      return;
-    }
-    const normalized = assertProfile(profile, current);
-    console.log(`current: ${current}`);
-    console.log(`baseURL: ${normalized.baseURL}`);
-    console.log(`apiKey: ${maskSecret(normalized.apiKey)}`);
+    await printStatus();
     return;
   }
 

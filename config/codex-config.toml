@@ -1,0 +1,20 @@
+model_provider = "codex"
+personality = "pragmatic"
+model_reasoning_effort = "medium"
+disable_response_storage = true
+network_access = "enabled"
+approvals_reviewer = "user"
+service_tier = "fast"
+model = "gpt-5.5"
+
+[features]
+hooks = true
+enable_fanout = true
+default_mode_request_user_input = true
+goals = true
+
+[model_providers.codex]
+name = "codex"
+base_url = "https://codex.ciii.club"
+wire_api = "responses"
+requires_openai_auth = true
