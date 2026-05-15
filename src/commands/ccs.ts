@@ -37,10 +37,16 @@ type CcsFileBackup = {
 };
 
 type ConfigSyncPlan = {
+  existingContent: string;
   nextContent: string;
-  provider: string;
-  baseURL: string | null;
+  existingProvider: string | null;
+  nextProvider: string;
+  existingBaseURL: string | null;
+  nextBaseURL: string | null;
   extraProviders: string[];
+  addedSections: string[];
+  removedSections: string[];
+  changedTopLevelKeys: Array<{ key: string; before: string | null; after: string | null }>;
 };
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -148,12 +154,14 @@ function formatTimestamp(date: Date): string {
 async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
   const defaults = await readDefaultCodexConfig();
   const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-  const provider = readTopLevelTomlString(existing, "model_provider")
+  const existingProvider = readTopLevelTomlString(existing, "model_provider");
+  const provider = existingProvider
     ?? readTopLevelTomlString(defaults, "model_provider")
     ?? "codex";
   const baseURL = readTomlBaseUrl(existing);
   const templateSections = new Set(listTomlSectionNames(defaults));
-  const extraProviders = listTomlSectionNames(existing)
+  const existingSections = listTomlSectionNames(existing);
+  const extraProviders = existingSections
     .filter((name) => name.startsWith("model_providers.") && !templateSections.has(name))
     .map((name) => name.slice("model_providers.".length));
 
@@ -163,11 +171,29 @@ async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
     next = updateTomlBaseUrl(next, baseURL);
   }
 
+  const nextSections = listTomlSectionNames(next);
+  const existingTopLevel = parseTopLevelAssignments(existing);
+  const nextTopLevel = parseTopLevelAssignments(next);
+  const topLevelKeys = new Set([...Object.keys(existingTopLevel), ...Object.keys(nextTopLevel)]);
+  const changedTopLevelKeys = [...topLevelKeys]
+    .filter((key) => existingTopLevel[key] !== nextTopLevel[key])
+    .map((key) => ({
+      key,
+      before: existingTopLevel[key] ?? null,
+      after: nextTopLevel[key] ?? null,
+    }));
+
   return {
+    existingContent: existing,
     nextContent: next,
-    provider,
-    baseURL,
+    existingProvider,
+    nextProvider: provider,
+    existingBaseURL: baseURL,
+    nextBaseURL: readTomlBaseUrl(next),
     extraProviders,
+    addedSections: nextSections.filter((name) => !existingSections.includes(name)),
+    removedSections: existingSections.filter((name) => !nextSections.includes(name)),
+    changedTopLevelKeys,
   };
 }
 
@@ -236,14 +262,20 @@ function hasFlag(argv: string[], flag: string): boolean {
   return argv.includes(flag);
 }
 
+function hasPreviewFlag(argv: string[]): boolean {
+  return hasFlag(argv, "-n") || hasFlag(argv, "--dry-run");
+}
+
 function summarizeProfileNames(profiles: ProfilesFile): string[] {
   return Object.keys(profiles.profiles ?? {});
 }
 
-function diffProfileNames(before: ProfilesFile, after: ProfilesFile): {
+function diffProfiles(before: ProfilesFile, after: ProfilesFile): {
   added: string[];
   removed: string[];
-  updated: string[];
+  updated: Array<{ name: string; before: Profile; after: Profile }>;
+  currentChanged: { before: string | null; after: string | null } | null;
+  toggleChanged: { before: string[]; after: string[] } | null;
 } {
   const beforeProfiles = before.profiles ?? {};
   const afterProfiles = after.profiles ?? {};
@@ -258,25 +290,104 @@ function diffProfileNames(before: ProfilesFile, after: ProfilesFile): {
     const prev = beforeProfiles[name];
     const next = afterProfiles[name];
     return prev?.baseURL !== next?.baseURL || prev?.apiKey !== next?.apiKey;
-  });
-  return { added, removed, updated };
+  }).map((name) => ({
+    name,
+    before: beforeProfiles[name],
+    after: afterProfiles[name],
+  }));
+
+  const beforeCurrent = before.current ?? null;
+  const afterCurrent = after.current ?? null;
+  const currentChanged = beforeCurrent !== afterCurrent
+    ? { before: beforeCurrent, after: afterCurrent }
+    : null;
+
+  const beforeToggle = before.toggle ?? [];
+  const afterToggle = after.toggle ?? [];
+  const toggleChanged = beforeToggle.join("\0") !== afterToggle.join("\0")
+    ? { before: beforeToggle, after: afterToggle }
+    : null;
+
+  return { added, removed, updated, currentChanged, toggleChanged };
+}
+
+function parseTopLevelAssignments(content: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of content.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) {
+      break;
+    }
+    const match = /^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
+    if (match) {
+      result[match[1]] = match[2];
+    }
+  }
+  return result;
+}
+
+function formatValue(value: string | null): string {
+  return value === null || value === "" ? "(none)" : value;
+}
+
+function formatProfileSummary(profile: Profile): string {
+  return `baseURL=${profile.baseURL} apiKey=${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`;
+}
+
+function printProfileChanges(before: ProfilesFile, after: ProfilesFile): void {
+  const diff = diffProfiles(before, after);
+  console.log(`profiles current: ${before.current ?? "(none)"} -> ${after.current ?? "(none)"}`);
+  if (diff.toggleChanged) {
+    console.log(`profiles toggle: ${diff.toggleChanged.before.join(", ") || "(none)"} -> ${diff.toggleChanged.after.join(", ") || "(none)"}`);
+  }
+  if (diff.added.length === 0 && diff.removed.length === 0 && diff.updated.length === 0) {
+    console.log("profiles changes: (none)");
+    return;
+  }
+  for (const name of diff.added) {
+    const profile = after.profiles?.[name];
+    if (profile) {
+      console.log(`+ profile ${name}: ${formatProfileSummary(profile)}`);
+    }
+  }
+  for (const change of diff.updated) {
+    console.log(`~ profile ${change.name}: ${formatProfileSummary(change.before)} -> ${formatProfileSummary(change.after)}`);
+  }
+  for (const name of diff.removed) {
+    const profile = before.profiles?.[name];
+    if (profile) {
+      console.log(`- profile ${name}: ${formatProfileSummary(profile)}`);
+    }
+  }
+}
+
+function printConfigChanges(plan: ConfigSyncPlan): void {
+  console.log(`config model_provider: ${formatValue(plan.existingProvider)} -> ${formatValue(plan.nextProvider)}`);
+  console.log(`config active base_url: ${formatValue(plan.existingBaseURL)} -> ${formatValue(plan.nextBaseURL)}`);
+  if (plan.changedTopLevelKeys.length === 0) {
+    console.log("config top-level changes: (none)");
+  } else {
+    for (const change of plan.changedTopLevelKeys) {
+      console.log(`~ config ${change.key}: ${formatValue(change.before)} -> ${formatValue(change.after)}`);
+    }
+  }
+  console.log(`config added sections: ${plan.addedSections.join(", ") || "(none)"}`);
+  console.log(`config removed sections: ${plan.removedSections.join(", ") || "(none)"}`);
+  console.log(`config preserved extra providers: ${plan.extraProviders.join(", ") || "(none)"}`);
 }
 
 async function printInitDryRun(): Promise<void> {
+  const existingProfiles = await readProfiles();
   const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planInitProfilesFromCurrent();
   const configPlan = await planCodexConfigSync();
 
-  console.log("dry-run: ccs init");
+  console.log("preview: ccs init");
   console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
   console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
   console.log(`profiles target: ${profilesPath()}`);
-  console.log(`profiles current: ${nextProfiles.current ?? "(none)"}`);
-  console.log(`profiles names: ${summarizeProfileNames(nextProfiles).join(", ")}`);
+  printProfileChanges(existingProfiles, nextProfiles);
   console.log(`config target: ${codexConfigPath()}`);
-  console.log(`model_provider: ${configPlan.provider}`);
-  console.log(`preserved baseURL: ${configPlan.baseURL ?? "(none)"}`);
-  console.log(`preserved extra providers: ${configPlan.extraProviders.length > 0 ? configPlan.extraProviders.join(", ") : "(none)"}`);
+  printConfigChanges(configPlan);
   console.log("files changed: profiles.json, config.toml, auth.json(if current apiKey exists)");
 }
 
@@ -284,21 +395,15 @@ async function printSyncDryRun(): Promise<void> {
   const existingProfiles = await readProfiles();
   const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planSyncProfiles();
-  const profileDiff = diffProfileNames(existingProfiles, nextProfiles);
   const configPlan = await planCodexConfigSync();
 
-  console.log("dry-run: ccs sync");
+  console.log("preview: ccs sync");
   console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
   console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
   console.log(`profiles target: ${profilesPath()}`);
-  console.log(`profiles added: ${profileDiff.added.length > 0 ? profileDiff.added.join(", ") : "(none)"}`);
-  console.log(`profiles updated: ${profileDiff.updated.length > 0 ? profileDiff.updated.join(", ") : "(none)"}`);
-  console.log(`profiles removed: ${profileDiff.removed.length > 0 ? profileDiff.removed.join(", ") : "(none)"}`);
-  console.log(`profiles final: ${summarizeProfileNames(nextProfiles).join(", ")}`);
+  printProfileChanges(existingProfiles, nextProfiles);
   console.log(`config target: ${codexConfigPath()}`);
-  console.log(`model_provider: ${configPlan.provider}`);
-  console.log(`preserved baseURL: ${configPlan.baseURL ?? "(none)"}`);
-  console.log(`preserved extra providers: ${configPlan.extraProviders.length > 0 ? configPlan.extraProviders.join(", ") : "(none)"}`);
+  printConfigChanges(configPlan);
   console.log("files changed: profiles.json, config.toml");
 }
 
@@ -452,8 +557,8 @@ function printHelp(): void {
   console.log([
     "Usage:",
     "  ccs                    # show current profile and usage",
-    "  ccs init [--dry-run]   # initialize profiles and sync Codex config",
-    "  ccs sync [--dry-run]   # sync profile template and Codex config",
+    "  ccs init [-n]          # preview or run init",
+    "  ccs sync [-n]          # preview or run sync",
     "  ccs status             # show current profile",
     "  ccs list               # list profiles with masked keys",
     "  ccs add [PROFILE]      # add or update a profile interactively",
@@ -480,7 +585,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
-    if (hasFlag(argv.slice(1), "--dry-run")) {
+    if (hasPreviewFlag(argv.slice(1))) {
       await printInitDryRun();
       return;
     }
@@ -500,7 +605,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "sync") {
-    if (hasFlag(argv.slice(1), "--dry-run")) {
+    if (hasPreviewFlag(argv.slice(1))) {
       await printSyncDryRun();
       return;
     }

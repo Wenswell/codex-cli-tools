@@ -102,8 +102,8 @@ Supported commands:
 
 ```bash
 ccs
-ccs init [--dry-run]
-ccs sync [--dry-run]
+ccs init [-n]
+ccs sync [-n]
 ccs status
 ccs list
 ccs add [PROFILE]
@@ -173,8 +173,10 @@ Before writing, it backs up the current files to:
 Preview without writing:
 
 ```bash
-ccs init --dry-run
+ccs init -n
 ```
+
+Preview shows concrete changes for `profiles.json` and `config.toml`, including profile add/update/remove, current profile switch, top-level config key changes, and sections that would be removed.
 
 If `config/ccs-profiles.json` changes later, run:
 
@@ -187,7 +189,7 @@ ccs sync
 Preview without writing:
 
 ```bash
-ccs sync --dry-run
+ccs sync -n
 ```
 
 Add or update a profile interactively:
