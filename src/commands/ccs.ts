@@ -10,7 +10,15 @@ import {
   codexToolsConfigDir,
   profilesPath,
 } from "../lib/paths.js";
-import { maskSecret } from "../lib/text.js";
+import {
+  maskSecret,
+  textBlue,
+  textBold,
+  textDim,
+  textGreen,
+  textRed,
+  textYellow,
+} from "../lib/text.js";
 import {
   listTomlSectionNames,
   mergeTomlModelProviderSections,
@@ -333,46 +341,63 @@ function formatProfileSummary(profile: Profile): string {
   return `baseURL=${profile.baseURL} apiKey=${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`;
 }
 
+function printPreviewLine(label: string, value: string): void {
+  console.log(`${textBold(label)} ${value}`);
+}
+
 function printProfileChanges(before: ProfilesFile, after: ProfilesFile): void {
   const diff = diffProfiles(before, after);
-  console.log(`profiles current: ${before.current ?? "(none)"} -> ${after.current ?? "(none)"}`);
+  printPreviewLine("profiles current:", `${textBlue(before.current ?? "(none)")} ${textDim("->")} ${textBlue(after.current ?? "(none)")}`);
   if (diff.toggleChanged) {
-    console.log(`profiles toggle: ${diff.toggleChanged.before.join(", ") || "(none)"} -> ${diff.toggleChanged.after.join(", ") || "(none)"}`);
+    printPreviewLine(
+      "profiles toggle:",
+      `${textBlue(diff.toggleChanged.before.join(", ") || "(none)")} ${textDim("->")} ${textBlue(diff.toggleChanged.after.join(", ") || "(none)")}`,
+    );
   }
   if (diff.added.length === 0 && diff.removed.length === 0 && diff.updated.length === 0) {
-    console.log("profiles changes: (none)");
+    printPreviewLine("profiles changes:", textDim("(none)"));
     return;
   }
   for (const name of diff.added) {
     const profile = after.profiles?.[name];
     if (profile) {
-      console.log(`+ profile ${name}: ${formatProfileSummary(profile)}`);
+      console.log(`${textGreen("+")} profile ${textBold(name)}: ${formatProfileSummary(profile)}`);
     }
   }
   for (const change of diff.updated) {
-    console.log(`~ profile ${change.name}: ${formatProfileSummary(change.before)} -> ${formatProfileSummary(change.after)}`);
+    console.log(
+      `${textYellow("~")} profile ${textBold(change.name)}: ${formatProfileSummary(change.before)} ${textDim("->")} ${formatProfileSummary(change.after)}`,
+    );
   }
   for (const name of diff.removed) {
     const profile = before.profiles?.[name];
     if (profile) {
-      console.log(`- profile ${name}: ${formatProfileSummary(profile)}`);
+      console.log(`${textRed("-")} profile ${textBold(name)}: ${formatProfileSummary(profile)}`);
     }
   }
 }
 
 function printConfigChanges(plan: ConfigSyncPlan): void {
-  console.log(`config model_provider: ${formatValue(plan.existingProvider)} -> ${formatValue(plan.nextProvider)}`);
-  console.log(`config active base_url: ${formatValue(plan.existingBaseURL)} -> ${formatValue(plan.nextBaseURL)}`);
+  printPreviewLine(
+    "config model_provider:",
+    `${textBlue(formatValue(plan.existingProvider))} ${textDim("->")} ${textBlue(formatValue(plan.nextProvider))}`,
+  );
+  printPreviewLine(
+    "config active base_url:",
+    `${textBlue(formatValue(plan.existingBaseURL))} ${textDim("->")} ${textBlue(formatValue(plan.nextBaseURL))}`,
+  );
   if (plan.changedTopLevelKeys.length === 0) {
-    console.log("config top-level changes: (none)");
+    printPreviewLine("config top-level changes:", textDim("(none)"));
   } else {
     for (const change of plan.changedTopLevelKeys) {
-      console.log(`~ config ${change.key}: ${formatValue(change.before)} -> ${formatValue(change.after)}`);
+      console.log(
+        `${textYellow("~")} config ${textBold(change.key)}: ${formatValue(change.before)} ${textDim("->")} ${formatValue(change.after)}`,
+      );
     }
   }
-  console.log(`config added sections: ${plan.addedSections.join(", ") || "(none)"}`);
-  console.log(`config removed sections: ${plan.removedSections.join(", ") || "(none)"}`);
-  console.log(`config preserved extra providers: ${plan.extraProviders.join(", ") || "(none)"}`);
+  printPreviewLine("config added sections:", plan.addedSections.join(", ") || textDim("(none)"));
+  printPreviewLine("config removed sections:", plan.removedSections.join(", ") || textDim("(none)"));
+  printPreviewLine("config preserved extra providers:", plan.extraProviders.join(", ") || textDim("(none)"));
 }
 
 async function printInitDryRun(): Promise<void> {
@@ -381,14 +406,14 @@ async function printInitDryRun(): Promise<void> {
   const nextProfiles = await planInitProfilesFromCurrent();
   const configPlan = await planCodexConfigSync();
 
-  console.log("preview: ccs init");
-  console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
-  console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
-  console.log(`profiles target: ${profilesPath()}`);
+  console.log(textBold("preview: ccs init"));
+  printPreviewLine("backup dir:", textBlue(join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")));
+  printPreviewLine("backup files:", backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : textDim("(none)"));
+  printPreviewLine("profiles target:", textBlue(profilesPath()));
   printProfileChanges(existingProfiles, nextProfiles);
-  console.log(`config target: ${codexConfigPath()}`);
+  printPreviewLine("config target:", textBlue(codexConfigPath()));
   printConfigChanges(configPlan);
-  console.log("files changed: profiles.json, config.toml, auth.json(if current apiKey exists)");
+  printPreviewLine("files changed:", "profiles.json, config.toml, auth.json(if current apiKey exists)");
 }
 
 async function printSyncDryRun(): Promise<void> {
@@ -397,14 +422,14 @@ async function printSyncDryRun(): Promise<void> {
   const nextProfiles = await planSyncProfiles();
   const configPlan = await planCodexConfigSync();
 
-  console.log("preview: ccs sync");
-  console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
-  console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
-  console.log(`profiles target: ${profilesPath()}`);
+  console.log(textBold("preview: ccs sync"));
+  printPreviewLine("backup dir:", textBlue(join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")));
+  printPreviewLine("backup files:", backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : textDim("(none)"));
+  printPreviewLine("profiles target:", textBlue(profilesPath()));
   printProfileChanges(existingProfiles, nextProfiles);
-  console.log(`config target: ${codexConfigPath()}`);
+  printPreviewLine("config target:", textBlue(codexConfigPath()));
   printConfigChanges(configPlan);
-  console.log("files changed: profiles.json, config.toml");
+  printPreviewLine("files changed:", "profiles.json, config.toml");
 }
 
 async function addProfile(defaultName?: string): Promise<void> {
