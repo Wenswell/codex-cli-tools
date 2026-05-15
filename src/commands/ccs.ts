@@ -1,6 +1,7 @@
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import {
@@ -15,6 +16,7 @@ import {
   textBlue,
   textBold,
   textDim,
+  textGreen,
   textRed,
 } from "../lib/text.js";
 import {
@@ -44,14 +46,14 @@ type CcsFileBackup = {
 
 type ConfigSyncPlan = {
   nextContent: string;
-  existingProvider: string | null;
-  nextProvider: string;
-  existingBaseURL: string | null;
-  nextBaseURL: string | null;
-  extraProviders: string[];
-  addedSections: string[];
   removedSections: string[];
-  changedTopLevelKeys: Array<{ key: string; before: string | null; after: string | null }>;
+};
+
+type PreviewFile = {
+  label: string;
+  path: string;
+  current: string;
+  next: string;
 };
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -159,16 +161,12 @@ function formatTimestamp(date: Date): string {
 async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
   const defaults = await readDefaultCodexConfig();
   const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-  const existingProvider = readTopLevelTomlString(existing, "model_provider");
-  const provider = existingProvider
+  const provider = readTopLevelTomlString(existing, "model_provider")
     ?? readTopLevelTomlString(defaults, "model_provider")
     ?? "codex";
   const baseURL = readTomlBaseUrl(existing);
   const templateSections = new Set(listTomlSectionNames(defaults));
   const existingSections = listTomlSectionNames(existing);
-  const extraProviders = existingSections
-    .filter((name) => name.startsWith("model_providers.") && !templateSections.has(name))
-    .map((name) => name.slice("model_providers.".length));
 
   let next = mergeTomlModelProviderSections(defaults, existing);
   next = updateTopLevelTomlString(next, "model_provider", provider);
@@ -177,27 +175,10 @@ async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
   }
 
   const nextSections = listTomlSectionNames(next);
-  const existingTopLevel = parseTopLevelAssignments(existing);
-  const nextTopLevel = parseTopLevelAssignments(next);
-  const topLevelKeys = new Set([...Object.keys(existingTopLevel), ...Object.keys(nextTopLevel)]);
-  const changedTopLevelKeys = [...topLevelKeys]
-    .filter((key) => existingTopLevel[key] !== nextTopLevel[key])
-    .map((key) => ({
-      key,
-      before: existingTopLevel[key] ?? null,
-      after: nextTopLevel[key] ?? null,
-    }));
 
   return {
     nextContent: next,
-    existingProvider,
-    nextProvider: provider,
-    existingBaseURL: baseURL,
-    nextBaseURL: readTomlBaseUrl(next),
-    extraProviders,
-    addedSections: nextSections.filter((name) => !existingSections.includes(name)),
     removedSections: existingSections.filter((name) => !nextSections.includes(name)),
-    changedTopLevelKeys,
   };
 }
 
@@ -283,310 +264,162 @@ function hasPreviewFlag(argv: string[]): boolean {
   return hasFlag(argv, "-n") || hasFlag(argv, "--dry-run");
 }
 
-function diffProfiles(before: ProfilesFile, after: ProfilesFile): {
-  added: string[];
-  removed: string[];
-  updated: Array<{ name: string; before: Profile; after: Profile }>;
-  currentChanged: { before: string | null; after: string | null } | null;
-  toggleChanged: { before: string[]; after: string[] } | null;
-} {
-  const beforeProfiles = before.profiles ?? {};
-  const afterProfiles = after.profiles ?? {};
-  const beforeNames = new Set(Object.keys(beforeProfiles));
-  const afterNames = new Set(Object.keys(afterProfiles));
-  const added = [...afterNames].filter((name) => !beforeNames.has(name));
-  const removed = [...beforeNames].filter((name) => !afterNames.has(name));
-  const updated = [...afterNames].filter((name) => {
-    if (!beforeNames.has(name)) {
-      return false;
-    }
-    const prev = beforeProfiles[name];
-    const next = afterProfiles[name];
-    return prev?.baseURL !== next?.baseURL || prev?.apiKey !== next?.apiKey;
-  }).map((name) => ({
-    name,
-    before: beforeProfiles[name],
-    after: afterProfiles[name],
-  }));
-
-  const beforeCurrent = before.current ?? null;
-  const afterCurrent = after.current ?? null;
-  const currentChanged = beforeCurrent !== afterCurrent
-    ? { before: beforeCurrent, after: afterCurrent }
-    : null;
-
-  const beforeToggle = before.toggle ?? [];
-  const afterToggle = after.toggle ?? [];
-  const toggleChanged = beforeToggle.join("\0") !== afterToggle.join("\0")
-    ? { before: beforeToggle, after: afterToggle }
-    : null;
-
-  return { added, removed, updated, currentChanged, toggleChanged };
-}
-
-function parseTopLevelAssignments(content: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const line of content.split(/\r?\n/)) {
-    if (/^\s*\[/.test(line)) {
-      break;
-    }
-    const match = /^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
-    if (match) {
-      result[match[1]] = match[2];
-    }
-  }
-  return result;
-}
-
-function formatValue(value: string | null): string {
-  return value === null || value === "" ? "(none)" : value;
-}
-
-type PreviewPlan = {
-  title: string;
-  modifiedFiles: string[];
-  backupFiles: string[];
-  warnings: string[];
-  sections: Array<{
-    title: string;
-    lines: string[];
-  }>;
-};
-
-function formatProfileKey(value: string): string {
-  return value ? maskSecret(value) : "(empty)";
-}
-
-function formatArrow(before: string, after: string): string {
-  return `${before} ${textDim("->")} ${after}`;
-}
-
 function formatList(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "(none)";
 }
 
-function buildProfilesSection(before: ProfilesFile, after: ProfilesFile): { lines: string[]; warnings: string[] } {
-  const diff = diffProfiles(before, after);
-  const lines: string[] = [];
-  const warnings: string[] = [];
-  const added: string[] = [];
-  const updated: string[] = [];
-  const kept: string[] = [];
-  const removed: string[] = [];
-
-  lines.push(`Current: ${formatArrow(before.current ?? "(none)", after.current ?? "(none)")}`);
-  if (diff.toggleChanged) {
-    lines.push(`Toggle: ${formatArrow(formatList(diff.toggleChanged.before), formatList(diff.toggleChanged.after))}`);
-  }
-
-  for (const name of diff.added) {
-    const profile = after.profiles?.[name];
-    if (profile) {
-      added.push(`${name}: baseURL=${profile.baseURL}, apiKey=${formatProfileKey(profile.apiKey)}`);
-    }
-  }
-  for (const change of diff.updated) {
-    if (change.before.baseURL !== change.after.baseURL) {
-      updated.push(`${change.name}.baseURL  ${formatArrow(change.before.baseURL, change.after.baseURL)}`);
-    } else {
-      kept.push(`${change.name}.baseURL`);
-    }
-    if (change.before.apiKey !== change.after.apiKey) {
-      updated.push(`${change.name}.apiKey   ${formatArrow(formatProfileKey(change.before.apiKey), formatProfileKey(change.after.apiKey))}`);
-    } else {
-      kept.push(`${change.name}.apiKey`);
-    }
-  }
-  for (const name of diff.removed) {
-    const profile = before.profiles?.[name];
-    if (profile) {
-      removed.push(`${name}: baseURL=${profile.baseURL}, apiKey=${formatProfileKey(profile.apiKey)}`);
-    }
-  }
-
-  lines.push(`Add: ${formatList(added)}`);
-  lines.push(`Update: ${formatList(updated)}`);
-  lines.push(`Keep: ${formatList(kept)}`);
-  lines.push(`Remove: ${formatList(removed)}`);
-
-  if (diff.currentChanged) {
-    warnings.push(`profile current will change from ${diff.currentChanged.before ?? "(none)"} to ${diff.currentChanged.after ?? "(none)"}`);
-  }
-  if (removed.length > 0) {
-    warnings.push(`profiles will be removed: ${diff.removed.join(", ")}`);
-  }
-
-  return { lines, warnings };
-}
-
 function buildConfigSection(plan: ConfigSyncPlan): { lines: string[]; warnings: string[] } {
-  const lines: string[] = [];
   const warnings: string[] = [];
-  const keepItems: string[] = [];
-  const updateItems: string[] = [];
-  const addItems: string[] = [];
-  const removeItems: string[] = [];
-
-  if (plan.existingProvider === plan.nextProvider) {
-    keepItems.push(`model_provider = ${plan.nextProvider}`);
-  } else {
-    updateItems.push(`model_provider  ${formatArrow(formatValue(plan.existingProvider), plan.nextProvider)}`);
-  }
-
-  if (plan.existingBaseURL === plan.nextBaseURL) {
-    keepItems.push(`active base_url = ${formatValue(plan.nextBaseURL)}`);
-  } else {
-    updateItems.push(`active base_url  ${formatArrow(formatValue(plan.existingBaseURL), formatValue(plan.nextBaseURL))}`);
-  }
-
-  for (const change of plan.changedTopLevelKeys) {
-    if (change.key === "model_provider") {
-      continue;
-    }
-    updateItems.push(`${change.key}  ${formatArrow(formatValue(change.before), formatValue(change.after))}`);
-  }
-
-  for (const section of plan.addedSections) {
-    addItems.push(section);
-  }
   for (const section of plan.removedSections) {
-    removeItems.push(section);
     warnings.push(`config section [${section}] will be removed`);
   }
-  if (plan.extraProviders.length > 0) {
-    keepItems.push(`extra providers: ${plan.extraProviders.join(", ")}`);
-  }
-
-  lines.push(`Keep: ${formatList(keepItems)}`);
-  lines.push(`Update: ${formatList(updateItems)}`);
-  lines.push(`Add sections: ${formatList(addItems)}`);
-  lines.push(`Remove sections: ${formatList(removeItems)}`);
-  return { lines, warnings };
+  return { lines: [], warnings };
 }
 
-function buildAuthSection(existingApiKey: string, nextApiKey: string): { lines: string[]; warnings: string[] } {
-  const lines: string[] = [];
-  if (!nextApiKey) {
-    lines.push("Keep: (none)");
-    lines.push("Update: (none)");
-    return { lines, warnings: [] };
-  }
-
-  if (existingApiKey === nextApiKey) {
-    lines.push(`Keep: OPENAI_API_KEY = ${formatProfileKey(nextApiKey)}`);
-    lines.push("Update: (none)");
-  } else {
-    lines.push("Keep: (none)");
-    lines.push(`Update: OPENAI_API_KEY  ${formatArrow(formatProfileKey(existingApiKey), formatProfileKey(nextApiKey))}`);
-  }
-  return { lines, warnings: [] };
+function printPreviewSummary(
+  title: string,
+  modifiedFiles: string[],
+  backupFiles: string[],
+  warnings: string[],
+): void {
+  console.log(textBold(`Plan: ${title}`));
+  console.log(`Will modify: ${formatList(modifiedFiles)}`);
+  console.log(`Will back up: ${formatList(backupFiles)}`);
+  console.log(`Warnings: ${warnings.length}`);
 }
 
-function printPreviewPlan(plan: PreviewPlan): void {
-  console.log(textBold(`Plan: ${plan.title}`));
-  console.log(`Will modify: ${formatList(plan.modifiedFiles)}`);
-  console.log(`Will back up: ${formatList(plan.backupFiles)}`);
-  console.log(`Warnings: ${plan.warnings.length}`);
+function printDiffBlock(file: PreviewFile): void {
+  const current = redactPreviewSecrets(file.current);
+  const next = redactPreviewSecrets(file.next);
+  if (current === next) {
+    return;
+  }
+  const patch = createTwoFilesPatch(
+    `current/${file.label}`,
+    `next/${file.label}`,
+    current,
+    next,
+    "",
+    "",
+    { context: 3 },
+  );
+  const lines = patch.split("\n");
+
   console.log("");
-
-  for (const section of plan.sections) {
-    console.log(textBold(`== ${section.title} ==`));
-    for (const line of section.lines) {
-      const labelMatch = /^([A-Za-z ]+:)\s*(.*)$/.exec(line);
-      if (labelMatch) {
-        console.log(`${textBlue(labelMatch[1])} ${labelMatch[2] || textDim("(none)")}`);
-      } else {
-        console.log(line);
-      }
+  console.log(`${textBold("File:")} ${textBlue(file.path)}`);
+  for (const line of lines) {
+    if (line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@")) {
+      console.log(textBlue(line));
+      continue;
     }
-    console.log("");
+    if (line.startsWith("+")) {
+      console.log(textGreen(line));
+      continue;
+    }
+    if (line.startsWith("-")) {
+      console.log(textRed(line));
+      continue;
+    }
+    console.log(line);
   }
+}
 
+function redactPreviewSecrets(content: string): string {
+  return content
+    .replace(/("apiKey"\s*:\s*")([^"]*)(")/g, (_match, before: string, value: string, after: string) => {
+      return `${before}${maskSecretValue(value)}${after}`;
+    })
+    .replace(/("OPENAI_API_KEY"\s*:\s*")([^"]*)(")/g, (_match, before: string, value: string, after: string) => {
+      return `${before}${maskSecretValue(value)}${after}`;
+    });
+}
+
+function maskSecretValue(value: string): string {
+  if (!value) {
+    return value;
+  }
+  return maskSecret(value);
+}
+
+function printWarnings(warnings: string[]): void {
+  console.log("");
   console.log(textBold("Warnings:"));
-  if (plan.warnings.length === 0) {
+  if (warnings.length === 0) {
     console.log(textDim("  (none)"));
     return;
   }
-  for (const warning of plan.warnings) {
+  for (const warning of warnings) {
     console.log(`  ${textRed("-")} ${warning}`);
   }
 }
 
 async function printInitDryRun(): Promise<void> {
-  const existingProfiles = await readProfiles();
   const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planInitProfilesFromCurrent();
   const configPlan = await planCodexConfigSync();
+  const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
+  const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
+  const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
   const current = await readCurrentCodexProfile();
-  const profilesSection = buildProfilesSection(existingProfiles, nextProfiles);
   const configSection = buildConfigSection(configPlan);
-  const authSection = buildAuthSection(current.apiKey, current.apiKey);
+  const nextAuthText = current.apiKey
+    ? stringifyJson({ OPENAI_API_KEY: current.apiKey })
+    : currentAuthText;
   const modifiedFiles = ["profiles.json", "config.toml"];
   if (current.apiKey) {
     modifiedFiles.push("auth.json");
   }
+  const warnings = [...configSection.warnings];
+  if ((await readProfiles()).current !== "current") {
+    warnings.unshift("profile current will change to current");
+  }
 
-  printPreviewPlan({
-    title: "ccs init",
-    modifiedFiles,
-    backupFiles: backupFiles.map((file) => file.target),
-    warnings: [...profilesSection.warnings, ...configSection.warnings],
-    sections: [
-      {
-        title: "profiles.json",
-        lines: [
-          `Target: ${profilesPath()}`,
-          ...profilesSection.lines,
-        ],
-      },
-      {
-        title: "config.toml",
-        lines: [
-          `Target: ${codexConfigPath()}`,
-          ...configSection.lines,
-        ],
-      },
-      {
-        title: "auth.json",
-        lines: [
-          `Target: ${codexAuthPath()}`,
-          ...authSection.lines,
-        ],
-      },
-    ],
+  printPreviewSummary("ccs init", modifiedFiles, backupFiles.map((file) => file.target), warnings);
+  printDiffBlock({
+    label: "profiles.json",
+    path: profilesPath(),
+    current: currentProfilesText,
+    next: stringifyJson(nextProfiles),
   });
+  printDiffBlock({
+    label: "config.toml",
+    path: codexConfigPath(),
+    current: currentConfigText,
+    next: configPlan.nextContent,
+  });
+  if (current.apiKey) {
+    printDiffBlock({
+      label: "auth.json",
+      path: codexAuthPath(),
+      current: currentAuthText,
+      next: nextAuthText,
+    });
+  }
+  printWarnings(warnings);
 }
 
 async function printSyncDryRun(): Promise<void> {
-  const existingProfiles = await readProfiles();
   const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planSyncProfiles();
   const configPlan = await planCodexConfigSync();
-  const profilesSection = buildProfilesSection(existingProfiles, nextProfiles);
+  const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
+  const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
   const configSection = buildConfigSection(configPlan);
 
-  printPreviewPlan({
-    title: "ccs sync",
-    modifiedFiles: ["profiles.json", "config.toml"],
-    backupFiles: backupFiles.map((file) => file.target),
-    warnings: [...profilesSection.warnings, ...configSection.warnings],
-    sections: [
-      {
-        title: "profiles.json",
-        lines: [
-          `Target: ${profilesPath()}`,
-          ...profilesSection.lines,
-        ],
-      },
-      {
-        title: "config.toml",
-        lines: [
-          `Target: ${codexConfigPath()}`,
-          ...configSection.lines,
-        ],
-      },
-    ],
+  printPreviewSummary("ccs sync", ["profiles.json", "config.toml"], backupFiles.map((file) => file.target), configSection.warnings);
+  printDiffBlock({
+    label: "profiles.json",
+    path: profilesPath(),
+    current: currentProfilesText,
+    next: stringifyJson(nextProfiles),
   });
+  printDiffBlock({
+    label: "config.toml",
+    path: codexConfigPath(),
+    current: currentConfigText,
+    next: configPlan.nextContent,
+  });
+  printWarnings(configSection.warnings);
 }
 
 async function addProfile(defaultName?: string): Promise<void> {
