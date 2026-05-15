@@ -214,8 +214,19 @@ async function syncCodexConfigFromTemplate(): Promise<ConfigSyncPlan> {
 
 async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
+  const existing = await readProfiles();
   const current = await readCurrentCodexProfile();
-  const profiles: Record<string, Profile> = { ...(defaults.profiles ?? {}) };
+  const defaultProfiles = defaults.profiles ?? {};
+  const existingProfiles = existing.profiles ?? {};
+  const profiles: Record<string, Profile> = { ...existingProfiles };
+
+  for (const [name, defaultProfile] of Object.entries(defaultProfiles)) {
+    const existingProfile = existingProfiles[name];
+    profiles[name] = {
+      baseURL: defaultProfile.baseURL,
+      apiKey: existingProfile?.apiKey || defaultProfile.apiKey,
+    };
+  }
 
   profiles.current = {
     baseURL: current.baseURL,
@@ -223,9 +234,11 @@ async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
   };
 
   const next = {
+    ...existing,
     ...defaults,
     profiles,
     current: "current",
+    toggle: existing.toggle ?? defaults.toggle,
   };
   return next;
 }
