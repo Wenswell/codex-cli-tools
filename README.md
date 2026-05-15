@@ -288,8 +288,10 @@ Options:
 ```bash
 envsync -y
 envsync --source .env.example --target .env.local -y
-envsync --backup -y
+envsync -b -y
 ```
+
+`-b` is short for `--backup`.
 
 Parsing:
 
