@@ -12,6 +12,10 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import {
+  bgBlue,
+  bgGray,
+  bgGreen,
+  bgRed,
   maskSecret,
   textBlue,
   textBold,
@@ -129,8 +133,7 @@ async function getExistingBackupFiles(): Promise<CcsFileBackup[]> {
   return existing;
 }
 
-async function backupCcsFiles(): Promise<string | null> {
-  const files = await getExistingBackupFiles();
+async function backupCcsFiles(files: CcsFileBackup[]): Promise<string | null> {
   const backupDir = join(codexToolsConfigDir(), "backups", `ccs-${formatTimestamp(new Date())}`);
 
   for (const file of files) {
@@ -192,7 +195,8 @@ async function syncCodexConfigFromTemplate(): Promise<ConfigSyncPlan> {
 async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
   const existing = await readProfiles();
-  const current = await readCurrentCodexProfile();
+  const existingProfilesText = await readTextIfExists(profilesPath());
+  const shouldCaptureCurrent = existingProfilesText === null;
   const defaultProfiles = defaults.profiles ?? {};
   const existingProfiles = existing.profiles ?? {};
   const profiles: Record<string, Profile> = { ...existingProfiles };
@@ -205,16 +209,19 @@ async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
     };
   }
 
-  profiles.current = {
-    baseURL: current.baseURL,
-    apiKey: current.apiKey,
-  };
+  if (shouldCaptureCurrent) {
+    const current = await readCurrentCodexProfile();
+    profiles.current = {
+      baseURL: current.baseURL,
+      apiKey: current.apiKey,
+    };
+  }
 
   const next = {
     ...existing,
     ...defaults,
     profiles,
-    current: "current",
+    current: shouldCaptureCurrent ? "current" : (existing.current ?? defaults.current),
     toggle: existing.toggle ?? defaults.toggle,
   };
   return next;
@@ -288,6 +295,15 @@ function printPreviewSummary(
   console.log(`Warnings: ${warnings.length}`);
 }
 
+function collectChangedPreviewFiles(files: PreviewFile[]): PreviewFile[] {
+  return files.filter((file) => redactPreviewSecrets(file.current) !== redactPreviewSecrets(file.next));
+}
+
+function collectExistingBackupFilesForPaths(paths: string[]): Promise<CcsFileBackup[]> {
+  const wanted = new Set(paths);
+  return getExistingBackupFiles().then((files) => files.filter((file) => wanted.has(file.source)));
+}
+
 function printDiffBlock(file: PreviewFile): void {
   const current = redactPreviewSecrets(file.current);
   const next = redactPreviewSecrets(file.next);
@@ -308,16 +324,20 @@ function printDiffBlock(file: PreviewFile): void {
   console.log("");
   console.log(`${textBold("File:")} ${textBlue(file.path)}`);
   for (const line of lines) {
-    if (line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@")) {
-      console.log(textBlue(line));
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      console.log(bgBlue(line));
+      continue;
+    }
+    if (line.startsWith("@@")) {
+      console.log(bgGray(line));
       continue;
     }
     if (line.startsWith("+")) {
-      console.log(textGreen(line));
+      console.log(bgGreen(textGreen(line)));
       continue;
     }
     if (line.startsWith("-")) {
-      console.log(textRed(line));
+      console.log(bgRed(textRed(line)));
       continue;
     }
     console.log(line);
@@ -354,71 +374,87 @@ function printWarnings(warnings: string[]): void {
 }
 
 async function printInitDryRun(): Promise<void> {
-  const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planInitProfilesFromCurrent();
   const configPlan = await planCodexConfigSync();
   const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
   const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
   const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
-  const current = await readCurrentCodexProfile();
   const configSection = buildConfigSection(configPlan);
-  const nextAuthText = current.apiKey
-    ? stringifyJson({ OPENAI_API_KEY: current.apiKey })
+  const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
+  const nextAuthText = nextCurrentProfile?.apiKey
+    ? stringifyJson({ OPENAI_API_KEY: nextCurrentProfile.apiKey })
     : currentAuthText;
-  const modifiedFiles = ["profiles.json", "config.toml"];
-  if (current.apiKey) {
-    modifiedFiles.push("auth.json");
-  }
   const warnings = [...configSection.warnings];
-  if ((await readProfiles()).current !== "current") {
+  const currentProfiles = await readProfiles();
+  if ((currentProfiles.current ?? null) !== (nextProfiles.current ?? null)) {
     warnings.unshift("profile current will change to current");
   }
 
-  printPreviewSummary("ccs init", modifiedFiles, backupFiles.map((file) => file.target), warnings);
-  printDiffBlock({
-    label: "profiles.json",
-    path: profilesPath(),
-    current: currentProfilesText,
-    next: stringifyJson(nextProfiles),
-  });
-  printDiffBlock({
-    label: "config.toml",
-    path: codexConfigPath(),
-    current: currentConfigText,
-    next: configPlan.nextContent,
-  });
-  if (current.apiKey) {
-    printDiffBlock({
+  const previewFiles = collectChangedPreviewFiles([
+    {
+      label: "profiles.json",
+      path: profilesPath(),
+      current: currentProfilesText,
+      next: stringifyJson(nextProfiles),
+    },
+    {
+      label: "config.toml",
+      path: codexConfigPath(),
+      current: currentConfigText,
+      next: configPlan.nextContent,
+    },
+    {
       label: "auth.json",
       path: codexAuthPath(),
       current: currentAuthText,
       next: nextAuthText,
-    });
+    },
+  ]);
+  const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
+
+  printPreviewSummary(
+    "ccs init",
+    previewFiles.map((file) => file.label),
+    backupFiles.map((file) => file.target),
+    warnings,
+  );
+  for (const file of previewFiles) {
+    printDiffBlock(file);
   }
   printWarnings(warnings);
 }
 
 async function printSyncDryRun(): Promise<void> {
-  const backupFiles = await getExistingBackupFiles();
   const nextProfiles = await planSyncProfiles();
   const configPlan = await planCodexConfigSync();
   const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
   const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
   const configSection = buildConfigSection(configPlan);
+  const previewFiles = collectChangedPreviewFiles([
+    {
+      label: "profiles.json",
+      path: profilesPath(),
+      current: currentProfilesText,
+      next: stringifyJson(nextProfiles),
+    },
+    {
+      label: "config.toml",
+      path: codexConfigPath(),
+      current: currentConfigText,
+      next: configPlan.nextContent,
+    },
+  ]);
+  const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
 
-  printPreviewSummary("ccs sync", ["profiles.json", "config.toml"], backupFiles.map((file) => file.target), configSection.warnings);
-  printDiffBlock({
-    label: "profiles.json",
-    path: profilesPath(),
-    current: currentProfilesText,
-    next: stringifyJson(nextProfiles),
-  });
-  printDiffBlock({
-    label: "config.toml",
-    path: codexConfigPath(),
-    current: currentConfigText,
-    next: configPlan.nextContent,
-  });
+  printPreviewSummary(
+    "ccs sync",
+    previewFiles.map((file) => file.label),
+    backupFiles.map((file) => file.target),
+    configSection.warnings,
+  );
+  for (const file of previewFiles) {
+    printDiffBlock(file);
+  }
   printWarnings(configSection.warnings);
 }
 
@@ -604,7 +640,23 @@ export async function runCcs(argv: string[]): Promise<void> {
       await printInitDryRun();
       return;
     }
-    const backupDir = await backupCcsFiles();
+    const nextProfiles = await planInitProfilesFromCurrent();
+    const configPlan = await planCodexConfigSync();
+    const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
+    const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
+    const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
+    const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
+    const nextAuthText = nextCurrentProfile?.apiKey
+      ? stringifyJson({ OPENAI_API_KEY: nextCurrentProfile.apiKey })
+      : currentAuthText;
+    const backupFiles = await collectExistingBackupFilesForPaths(
+      collectChangedPreviewFiles([
+        { label: "profiles.json", path: profilesPath(), current: currentProfilesText, next: stringifyJson(nextProfiles) },
+        { label: "config.toml", path: codexConfigPath(), current: currentConfigText, next: configPlan.nextContent },
+        { label: "auth.json", path: codexAuthPath(), current: currentAuthText, next: nextAuthText },
+      ]).map((file) => file.path),
+    );
+    const backupDir = await backupCcsFiles(backupFiles);
     const initialized = await initProfilesFromCurrent();
     await syncCodexConfigFromTemplate();
     const profile = initialized.profiles?.[initialized.current ?? ""];
@@ -624,7 +676,25 @@ export async function runCcs(argv: string[]): Promise<void> {
       await printSyncDryRun();
       return;
     }
-    const backupDir = await backupCcsFiles();
+    const nextProfiles = await planSyncProfiles();
+    const configPlan = await planCodexConfigSync();
+    const backupFiles = await collectExistingBackupFilesForPaths(
+      collectChangedPreviewFiles([
+        {
+          label: "profiles.json",
+          path: profilesPath(),
+          current: (await readTextIfExists(profilesPath())) ?? "",
+          next: stringifyJson(nextProfiles),
+        },
+        {
+          label: "config.toml",
+          path: codexConfigPath(),
+          current: (await readTextIfExists(codexConfigPath())) ?? "",
+          next: configPlan.nextContent,
+        },
+      ]).map((file) => file.path),
+    );
+    const backupDir = await backupCcsFiles(backupFiles);
     const synced = await syncProfiles();
     await syncCodexConfigFromTemplate();
     if (backupDir) {
