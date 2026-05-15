@@ -4,7 +4,7 @@ import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAuthPath, codexConfigPath, codexDir, profilesPath } from "../lib/paths.js";
 import { maskSecret } from "../lib/text.js";
-import { ensureTomlDefaults, updateTomlBaseUrl } from "../lib/toml.js";
+import { readTomlBaseUrl, updateTomlBaseUrl } from "../lib/toml.js";
 
 type Profile = {
   baseURL: string;
@@ -60,22 +60,58 @@ async function readDefaultCodexConfig(): Promise<string> {
   return text;
 }
 
-async function ensureProfilesFile(): Promise<ProfilesFile> {
-  const existing = await readProfiles();
-  if (existing.profiles && Object.keys(existing.profiles).length > 0) {
-    return existing;
-  }
-
-  const initial = await readDefaultProfiles();
-  await writeProfiles(initial);
-  return initial;
+async function readCurrentCodexProfile(): Promise<Profile> {
+  const configText = (await readTextIfExists(codexConfigPath())) ?? "";
+  const authText = (await readTextIfExists(codexAuthPath())) ?? "";
+  const auth = authText ? parseJsonObject(authText) : {};
+  const apiKey = typeof auth.OPENAI_API_KEY === "string" ? auth.OPENAI_API_KEY : "";
+  return {
+    baseURL: readTomlBaseUrl(configText) ?? "",
+    apiKey,
+  };
 }
 
-async function ensureCodexConfig(): Promise<void> {
+function profileNameForCurrent(defaults: ProfilesFile, current: Profile): string {
+  const profiles = defaults.profiles ?? {};
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (profile.baseURL === current.baseURL) {
+      return name;
+    }
+  }
+  return current.baseURL ? "current" : (defaults.current ?? "input");
+}
+
+async function initProfilesFromCurrent(): Promise<ProfilesFile> {
+  const defaults = await readDefaultProfiles();
+  const current = await readCurrentCodexProfile();
+  const currentName = profileNameForCurrent(defaults, current);
+  const profiles: Record<string, Profile> = { ...(defaults.profiles ?? {}) };
+
+  if (current.baseURL) {
+    profiles[currentName] = {
+      baseURL: current.baseURL,
+      apiKey: current.apiKey,
+    };
+  } else if (profiles[currentName]) {
+    profiles[currentName] = {
+      ...profiles[currentName],
+      apiKey: current.apiKey,
+    };
+  }
+
+  const next = {
+    profiles,
+    current: currentName,
+  };
+  await writeProfiles(next);
+  return next;
+}
+
+async function overwriteCodexConfig(baseURL?: string): Promise<void> {
   await ensureDir(codexDir());
-  const current = (await readTextIfExists(codexConfigPath())) ?? "";
   const defaults = await readDefaultCodexConfig();
-  await writeTextFile(codexConfigPath(), ensureTomlDefaults(current, defaults));
+  const next = baseURL ? updateTomlBaseUrl(defaults, baseURL) : defaults;
+  await writeTextFile(codexConfigPath(), next);
 }
 
 async function syncProfiles(): Promise<ProfilesFile> {
@@ -156,26 +192,13 @@ async function printStatus(): Promise<void> {
 function printHelp(): void {
   console.log([
     "Usage:",
-    "  ccs                 Show current profile and this help",
-    "  ccs status          Show current profile, baseURL, masked apiKey, and config paths",
-    "  ccs init            Create profile config if needed and fill missing ~/.codex/config.toml defaults",
-    "  ccs sync            Sync default profile/config templates into local files",
-    "  ccs list            List configured profiles",
-    "  ccs PROFILE         Switch to any configured profile, for example: ccs input",
-    "  ccs toggle          Toggle between input and ciii",
-    "",
-    "Files:",
-    `  profiles:     ${profilesPath()}`,
-    `  codex config: ${codexConfigPath()}`,
-    `  codex auth:   ${codexAuthPath()}`,
-    "",
-    "Templates:",
-    "  config/ccs-profiles.json",
-    "  config/codex-config.toml",
-    "",
-    "Notes:",
-    "  API keys are stored only in the local profiles file and are masked in output.",
-    "  ccs init/sync fill missing Codex config defaults such as [features]; they keep unrelated config.",
+    "  ccs          Show current profile and usage",
+    "  ccs init     Read current API/key, write profiles, and overwrite ~/.codex/config.toml from template",
+    "  ccs sync     Sync profile template; keep local API keys",
+    "  ccs status   Show current profile",
+    "  ccs list     List profiles",
+    "  ccs PROFILE  Switch profile",
+    "  ccs toggle   Toggle input/ciii",
   ].join("\n"));
 }
 
@@ -196,21 +219,23 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
-    await ensureProfilesFile();
-    await ensureCodexConfig();
+    const initialized = await initProfilesFromCurrent();
+    const profile = initialized.profiles?.[initialized.current ?? ""];
+    await overwriteCodexConfig(profile?.baseURL);
+    if (profile?.apiKey) {
+      await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: profile.apiKey }), 0o600);
+    }
     console.log(`profiles written: ${profilesPath()}`);
-    console.log(`codex config updated: ${codexConfigPath()}`);
+    console.log(`codex config overwritten: ${codexConfigPath()}`);
     return;
   }
 
   if (command === "sync") {
     const synced = await syncProfiles();
-    await ensureCodexConfig();
     console.log(`profiles synced: ${profilesPath()}`);
     for (const name of Object.keys(synced.profiles ?? {})) {
       console.log(`  ${name}`);
     }
-    console.log(`codex config synced: ${codexConfigPath()}`);
     return;
   }
 
