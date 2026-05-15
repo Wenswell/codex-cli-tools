@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
 
-export function runCodexSearch(args: string[], bypassSandbox: boolean): void {
-  const codexArgs = bypassSandbox
-    ? ["--search", "--dangerously-bypass-approvals-and-sandbox", ...args]
-    : ["--search", ...args];
+export function runCodexSearch(args: string[], options: { bypassSandbox?: boolean; resume?: boolean } = {}): void {
+  const codexArgs = ["--search"];
+  if (options.bypassSandbox) {
+    codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+  if (options.resume) {
+    codexArgs.push("resume");
+  }
+  codexArgs.push(...args);
 
   const child = spawn("codex", codexArgs, {
     stdio: "inherit",

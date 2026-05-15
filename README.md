@@ -6,7 +6,7 @@ Personal Codex CLI helpers for Linux and macOS.
 
 - Node.js 20+
 - pnpm
-- `codex` CLI for `cxs` and `cxsx`
+- `codex` CLI for `cx`, `cxx`, and `cxxs`
 - `sqlite3` CLI for `codex-session-move`
 
 ## Install
@@ -45,18 +45,19 @@ pnpm link --global
 
 ```bash
 ccs
-cxs
-cxsx
+cx
+cxx
+cxxs
 envsync
 codex-session-move
 ```
 
-## cxs / cxsx
+## cx / cxx / cxxs
 
-`cxs` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
+`cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
 
 ```bash
-cxs ARGS...
+cx ARGS...
 ```
 
 Equivalent to:
@@ -65,10 +66,10 @@ Equivalent to:
 codex --search ARGS...
 ```
 
-`cxsx` also bypasses approvals and sandboxing.
+`cxx` also bypasses approvals and sandboxing.
 
 ```bash
-cxsx ARGS...
+cxx ARGS...
 ```
 
 Equivalent to:
@@ -77,7 +78,19 @@ Equivalent to:
 codex --search --dangerously-bypass-approvals-and-sandbox ARGS...
 ```
 
-Use `cxsx` only in directories and tasks you trust.
+`cxxs` resumes a Codex session with the same `cxx` flags.
+
+```bash
+cxxs ARGS...
+```
+
+Equivalent to:
+
+```bash
+codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
+```
+
+Use `cxx` and `cxxs` only in directories and tasks you trust.
 
 ## ccs
 
