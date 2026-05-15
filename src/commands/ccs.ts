@@ -14,6 +14,7 @@ type Profile = {
 type ProfilesFile = {
   profiles?: Record<string, Profile>;
   current?: string;
+  toggle?: string[];
 };
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -71,37 +72,20 @@ async function readCurrentCodexProfile(): Promise<Profile> {
   };
 }
 
-function profileNameForCurrent(defaults: ProfilesFile, current: Profile): string {
-  const profiles = defaults.profiles ?? {};
-  for (const [name, profile] of Object.entries(profiles)) {
-    if (profile.baseURL === current.baseURL) {
-      return name;
-    }
-  }
-  return current.baseURL ? "current" : (defaults.current ?? "input");
-}
-
 async function initProfilesFromCurrent(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
   const current = await readCurrentCodexProfile();
-  const currentName = profileNameForCurrent(defaults, current);
   const profiles: Record<string, Profile> = { ...(defaults.profiles ?? {}) };
 
-  if (current.baseURL) {
-    profiles[currentName] = {
-      baseURL: current.baseURL,
-      apiKey: current.apiKey,
-    };
-  } else if (profiles[currentName]) {
-    profiles[currentName] = {
-      ...profiles[currentName],
-      apiKey: current.apiKey,
-    };
-  }
+  profiles.current = {
+    baseURL: current.baseURL,
+    apiKey: current.apiKey,
+  };
 
   const next = {
+    ...defaults,
     profiles,
-    current: currentName,
+    current: "current",
   };
   await writeProfiles(next);
   return next;
@@ -133,10 +117,39 @@ async function syncProfiles(): Promise<ProfilesFile> {
     ...existing,
     profiles: nextProfiles,
     current: existing.current ?? defaults.current,
+    toggle: existing.toggle ?? defaults.toggle,
   };
 
   await writeProfiles(next);
   return next;
+}
+
+async function addProfile(name: string, baseURL: string, apiKey: string): Promise<void> {
+  if (!name || !baseURL) {
+    throw new Error("usage: ccs add NAME BASE_URL [API_KEY]");
+  }
+  const data = await readProfiles();
+  const profiles = data.profiles ?? {};
+  profiles[name] = { baseURL, apiKey };
+  await writeProfiles({ ...data, profiles, current: data.current ?? name });
+  console.log(`profile added: ${name}`);
+}
+
+async function removeProfile(name: string): Promise<void> {
+  if (!name) {
+    throw new Error("usage: ccs remove NAME");
+  }
+  const data = await readProfiles();
+  const profiles = data.profiles ?? {};
+  if (!profiles[name]) {
+    throw new Error(`profile not found: ${name}`);
+  }
+  delete profiles[name];
+  const names = Object.keys(profiles);
+  const current = data.current === name ? names[0] : data.current;
+  const toggle = data.toggle?.filter((item) => item !== name);
+  await writeProfiles({ ...data, profiles, current, toggle });
+  console.log(`profile removed: ${name}`);
 }
 
 async function switchProfile(name: string): Promise<void> {
@@ -192,13 +205,15 @@ async function printStatus(): Promise<void> {
 function printHelp(): void {
   console.log([
     "Usage:",
-    "  ccs          Show current profile and usage",
-    "  ccs init     Read current API/key, write profiles, and overwrite ~/.codex/config.toml from template",
-    "  ccs sync     Sync profile template; keep local API keys",
-    "  ccs status   Show current profile",
-    "  ccs list     List profiles",
-    "  ccs PROFILE  Switch profile",
-    "  ccs toggle   Toggle input/ciii",
+    "  ccs",
+    "  ccs init",
+    "  ccs sync",
+    "  ccs status",
+    "  ccs list",
+    "  ccs add NAME BASE_URL [API_KEY]",
+    "  ccs remove NAME",
+    "  ccs PROFILE",
+    "  ccs toggle",
   ].join("\n"));
 }
 
@@ -247,14 +262,28 @@ export async function runCcs(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === "add") {
+    await addProfile(argv[1], argv[2], argv[3] ?? "");
+    return;
+  }
+
+  if (command === "remove" || command === "rm" || command === "delete") {
+    await removeProfile(argv[1]);
+    return;
+  }
+
   if (command === "status") {
     await printStatus();
     return;
   }
 
   if (command === "toggle") {
-    const current = profiles.current === "ciii" ? "ciii" : "input";
-    const next = current === "input" ? "ciii" : "input";
+    const toggle = profiles.toggle ?? [];
+    if (toggle.length < 2) {
+      throw new Error("toggle requires at least two profile names in profiles.json toggle");
+    }
+    const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
+    const next = toggle[(index + 1) % toggle.length];
     await switchProfile(next);
     return;
   }

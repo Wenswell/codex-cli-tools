@@ -106,6 +106,8 @@ ccs init
 ccs sync
 ccs status
 ccs list
+ccs add NAME BASE_URL [API_KEY]
+ccs remove NAME
 ccs input
 ccs ciii
 ccs PROFILE
@@ -132,7 +134,8 @@ config/ccs-profiles.json
       "apiKey": ""
     }
   },
-  "current": "input"
+  "current": "input",
+  "toggle": ["input", "ciii"]
 }
 ```
 
@@ -145,7 +148,7 @@ Fill in the API keys manually. The file is written with `0600` permissions.
 ~/.codex/auth.json
 ```
 
-It uses the current `base_url` and `OPENAI_API_KEY` as the initial active profile. If the current `base_url` matches a template profile, that profile receives the current key; otherwise a `current` profile is created.
+It stores the current `base_url` and `OPENAI_API_KEY` as a profile named `current`, then makes `current` the active profile.
 
 `ccs init` then overwrites:
 
@@ -159,7 +162,7 @@ with:
 config/codex-config.toml
 ```
 
-After writing the template, it applies the active profile `baseURL` to `[model_providers.codex].base_url`. Later profile switches only change that API URL and `~/.codex/auth.json`.
+After writing the template, it reads the active provider from top-level `model_provider` and applies the active profile `baseURL` to `[model_providers.<provider>].base_url`. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
 If `config/ccs-profiles.json` changes later, run:
 
@@ -168,6 +171,15 @@ ccs sync
 ```
 
 `ccs sync` merges template profiles into `~/.config/codex-tools/profiles.json` and keeps existing local API keys. It also keeps local profiles that are not in the template. It does not rewrite `~/.codex/config.toml`.
+
+Add or remove profiles:
+
+```bash
+ccs add local http://localhost:8000 sk-local
+ccs remove local
+```
+
+`ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
 
 Switching profile:
 
@@ -180,7 +192,7 @@ ccs toggle
 
 Behavior:
 
-- Updates `base_url` in `~/.codex/config.toml`.
+- Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys.
 - Fails if the profile or API key is missing.

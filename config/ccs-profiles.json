@@ -9,5 +9,6 @@
       "apiKey": ""
     }
   },
-  "current": "input"
+  "current": "input",
+  "toggle": ["input", "ciii"]
 }
