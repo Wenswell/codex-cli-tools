@@ -102,8 +102,8 @@ Supported commands:
 
 ```bash
 ccs
-ccs init
-ccs sync
+ccs init [--dry-run]
+ccs sync [--dry-run]
 ccs status
 ccs list
 ccs add [PROFILE]
@@ -170,6 +170,12 @@ Before writing, it backs up the current files to:
 
 `ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, and restores the current provider's `base_url` after syncing the template. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
+Preview without writing:
+
+```bash
+ccs init --dry-run
+```
+
 If `config/ccs-profiles.json` changes later, run:
 
 ```bash
@@ -177,6 +183,12 @@ ccs sync
 ```
 
 `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
+
+Preview without writing:
+
+```bash
+ccs sync --dry-run
+```
 
 Add or update a profile interactively:
 

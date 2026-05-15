@@ -105,6 +105,10 @@ export function mergeTomlModelProviderSections(template: string, existing: strin
   return ensureTrailingNewline(next);
 }
 
+export function listTomlSectionNames(content: string): string[] {
+  return parseTomlSections(content).map((section) => section.name);
+}
+
 function upsertTopLevelTomlKey(content: string, key: string, value: string): string {
   const lines = content.split(/\r?\n/);
   let inserted = false;

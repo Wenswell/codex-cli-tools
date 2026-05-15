@@ -12,6 +12,7 @@ import {
 } from "../lib/paths.js";
 import { maskSecret } from "../lib/text.js";
 import {
+  listTomlSectionNames,
   mergeTomlModelProviderSections,
   readTomlBaseUrl,
   readTopLevelTomlString,
@@ -28,6 +29,18 @@ type ProfilesFile = {
   profiles?: Record<string, Profile>;
   current?: string;
   toggle?: string[];
+};
+
+type CcsFileBackup = {
+  source: string;
+  target: string;
+};
+
+type ConfigSyncPlan = {
+  nextContent: string;
+  provider: string;
+  baseURL: string | null;
+  extraProviders: string[];
 };
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -85,25 +98,35 @@ async function readCurrentCodexProfile(): Promise<Profile> {
   };
 }
 
-async function backupCcsFiles(): Promise<string | null> {
-  const files = [
+function getCcsBackupFiles(): CcsFileBackup[] {
+  return [
     { source: codexConfigPath(), target: "config.toml" },
     { source: codexAuthPath(), target: "auth.json" },
     { source: profilesPath(), target: "profiles.json" },
   ];
+}
+
+async function getExistingBackupFiles(): Promise<CcsFileBackup[]> {
+  const existing: CcsFileBackup[] = [];
+  for (const file of getCcsBackupFiles()) {
+    if ((await readTextIfExists(file.source)) !== null) {
+      existing.push(file);
+    }
+  }
+  return existing;
+}
+
+async function backupCcsFiles(): Promise<string | null> {
+  const files = await getExistingBackupFiles();
   const backupDir = join(codexToolsConfigDir(), "backups", `ccs-${formatTimestamp(new Date())}`);
-  let copied = 0;
 
   for (const file of files) {
     const content = await readTextIfExists(file.source);
-    if (content === null) {
-      continue;
-    }
+    if (content === null) continue;
     await writeTextFile(join(backupDir, file.target), content, 0o600);
-    copied += 1;
   }
 
-  return copied > 0 ? backupDir : null;
+  return files.length > 0 ? backupDir : null;
 }
 
 function formatTimestamp(date: Date): string {
@@ -122,14 +145,17 @@ function formatTimestamp(date: Date): string {
   ].join("");
 }
 
-async function syncCodexConfigFromTemplate(): Promise<void> {
-  await ensureDir(codexDir());
+async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
   const defaults = await readDefaultCodexConfig();
   const existing = (await readTextIfExists(codexConfigPath())) ?? "";
   const provider = readTopLevelTomlString(existing, "model_provider")
     ?? readTopLevelTomlString(defaults, "model_provider")
     ?? "codex";
   const baseURL = readTomlBaseUrl(existing);
+  const templateSections = new Set(listTomlSectionNames(defaults));
+  const extraProviders = listTomlSectionNames(existing)
+    .filter((name) => name.startsWith("model_providers.") && !templateSections.has(name))
+    .map((name) => name.slice("model_providers.".length));
 
   let next = mergeTomlModelProviderSections(defaults, existing);
   next = updateTopLevelTomlString(next, "model_provider", provider);
@@ -137,10 +163,22 @@ async function syncCodexConfigFromTemplate(): Promise<void> {
     next = updateTomlBaseUrl(next, baseURL);
   }
 
-  await writeTextFile(codexConfigPath(), next);
+  return {
+    nextContent: next,
+    provider,
+    baseURL,
+    extraProviders,
+  };
 }
 
-async function initProfilesFromCurrent(): Promise<ProfilesFile> {
+async function syncCodexConfigFromTemplate(): Promise<ConfigSyncPlan> {
+  await ensureDir(codexDir());
+  const plan = await planCodexConfigSync();
+  await writeTextFile(codexConfigPath(), plan.nextContent);
+  return plan;
+}
+
+async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
   const current = await readCurrentCodexProfile();
   const profiles: Record<string, Profile> = { ...(defaults.profiles ?? {}) };
@@ -155,11 +193,16 @@ async function initProfilesFromCurrent(): Promise<ProfilesFile> {
     profiles,
     current: "current",
   };
+  return next;
+}
+
+async function initProfilesFromCurrent(): Promise<ProfilesFile> {
+  const next = await planInitProfilesFromCurrent();
   await writeProfiles(next);
   return next;
 }
 
-async function syncProfiles(): Promise<ProfilesFile> {
+async function planSyncProfiles(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
   const existing = await readProfiles();
   const defaultProfiles = defaults.profiles ?? {};
@@ -180,9 +223,83 @@ async function syncProfiles(): Promise<ProfilesFile> {
     current: existing.current ?? defaults.current,
     toggle: existing.toggle ?? defaults.toggle,
   };
+  return next;
+}
 
+async function syncProfiles(): Promise<ProfilesFile> {
+  const next = await planSyncProfiles();
   await writeProfiles(next);
   return next;
+}
+
+function hasFlag(argv: string[], flag: string): boolean {
+  return argv.includes(flag);
+}
+
+function summarizeProfileNames(profiles: ProfilesFile): string[] {
+  return Object.keys(profiles.profiles ?? {});
+}
+
+function diffProfileNames(before: ProfilesFile, after: ProfilesFile): {
+  added: string[];
+  removed: string[];
+  updated: string[];
+} {
+  const beforeProfiles = before.profiles ?? {};
+  const afterProfiles = after.profiles ?? {};
+  const beforeNames = new Set(Object.keys(beforeProfiles));
+  const afterNames = new Set(Object.keys(afterProfiles));
+  const added = [...afterNames].filter((name) => !beforeNames.has(name));
+  const removed = [...beforeNames].filter((name) => !afterNames.has(name));
+  const updated = [...afterNames].filter((name) => {
+    if (!beforeNames.has(name)) {
+      return false;
+    }
+    const prev = beforeProfiles[name];
+    const next = afterProfiles[name];
+    return prev?.baseURL !== next?.baseURL || prev?.apiKey !== next?.apiKey;
+  });
+  return { added, removed, updated };
+}
+
+async function printInitDryRun(): Promise<void> {
+  const backupFiles = await getExistingBackupFiles();
+  const nextProfiles = await planInitProfilesFromCurrent();
+  const configPlan = await planCodexConfigSync();
+
+  console.log("dry-run: ccs init");
+  console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
+  console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
+  console.log(`profiles target: ${profilesPath()}`);
+  console.log(`profiles current: ${nextProfiles.current ?? "(none)"}`);
+  console.log(`profiles names: ${summarizeProfileNames(nextProfiles).join(", ")}`);
+  console.log(`config target: ${codexConfigPath()}`);
+  console.log(`model_provider: ${configPlan.provider}`);
+  console.log(`preserved baseURL: ${configPlan.baseURL ?? "(none)"}`);
+  console.log(`preserved extra providers: ${configPlan.extraProviders.length > 0 ? configPlan.extraProviders.join(", ") : "(none)"}`);
+  console.log("files changed: profiles.json, config.toml, auth.json(if current apiKey exists)");
+}
+
+async function printSyncDryRun(): Promise<void> {
+  const existingProfiles = await readProfiles();
+  const backupFiles = await getExistingBackupFiles();
+  const nextProfiles = await planSyncProfiles();
+  const profileDiff = diffProfileNames(existingProfiles, nextProfiles);
+  const configPlan = await planCodexConfigSync();
+
+  console.log("dry-run: ccs sync");
+  console.log(`backup dir: ${join(codexToolsConfigDir(), "backups", "ccs-YYYYMMDD-HHMMSS-mmm")}`);
+  console.log(`backup files: ${backupFiles.length > 0 ? backupFiles.map((file) => file.target).join(", ") : "(none)"}`);
+  console.log(`profiles target: ${profilesPath()}`);
+  console.log(`profiles added: ${profileDiff.added.length > 0 ? profileDiff.added.join(", ") : "(none)"}`);
+  console.log(`profiles updated: ${profileDiff.updated.length > 0 ? profileDiff.updated.join(", ") : "(none)"}`);
+  console.log(`profiles removed: ${profileDiff.removed.length > 0 ? profileDiff.removed.join(", ") : "(none)"}`);
+  console.log(`profiles final: ${summarizeProfileNames(nextProfiles).join(", ")}`);
+  console.log(`config target: ${codexConfigPath()}`);
+  console.log(`model_provider: ${configPlan.provider}`);
+  console.log(`preserved baseURL: ${configPlan.baseURL ?? "(none)"}`);
+  console.log(`preserved extra providers: ${configPlan.extraProviders.length > 0 ? configPlan.extraProviders.join(", ") : "(none)"}`);
+  console.log("files changed: profiles.json, config.toml");
 }
 
 async function addProfile(defaultName?: string): Promise<void> {
@@ -335,8 +452,8 @@ function printHelp(): void {
   console.log([
     "Usage:",
     "  ccs                    # show current profile and usage",
-    "  ccs init               # initialize profiles and reset Codex config",
-    "  ccs sync               # sync profile template",
+    "  ccs init [--dry-run]   # initialize profiles and sync Codex config",
+    "  ccs sync [--dry-run]   # sync profile template and Codex config",
     "  ccs status             # show current profile",
     "  ccs list               # list profiles with masked keys",
     "  ccs add [PROFILE]      # add or update a profile interactively",
@@ -363,6 +480,10 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
+    if (hasFlag(argv.slice(1), "--dry-run")) {
+      await printInitDryRun();
+      return;
+    }
     const backupDir = await backupCcsFiles();
     const initialized = await initProfilesFromCurrent();
     await syncCodexConfigFromTemplate();
@@ -379,6 +500,10 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "sync") {
+    if (hasFlag(argv.slice(1), "--dry-run")) {
+      await printSyncDryRun();
+      return;
+    }
     const backupDir = await backupCcsFiles();
     const synced = await syncProfiles();
     await syncCodexConfigFromTemplate();
