@@ -106,7 +106,7 @@ ccs init
 ccs sync
 ccs status
 ccs list
-ccs add NAME BASE_URL [API_KEY]
+ccs add
 ccs remove NAME
 ccs input
 ccs ciii
@@ -172,10 +172,17 @@ ccs sync
 
 `ccs sync` merges template profiles into `~/.config/codex-tools/profiles.json` and keeps existing local API keys. It also keeps local profiles that are not in the template. It does not rewrite `~/.codex/config.toml`.
 
-Add or remove profiles:
+Add or update a profile interactively:
 
 ```bash
-ccs add local http://localhost:8000 sk-local
+ccs add
+```
+
+When editing an existing profile, press Enter to keep the current value.
+
+Remove a profile:
+
+```bash
 ccs remove local
 ```
 
