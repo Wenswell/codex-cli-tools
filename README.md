@@ -16,7 +16,7 @@ From this repository:
 ```bash
 pnpm install
 pnpm build
-pnpm add -g .
+pnpm link --global
 ```
 
 From a private Git repository:
