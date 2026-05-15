@@ -176,7 +176,12 @@ Preview without writing:
 ccs init -n
 ```
 
-Preview shows concrete changes for `profiles.json` and `config.toml`, including profile add/update/remove, current profile switch, top-level config key changes, and sections that would be removed.
+Preview shows an execution plan:
+
+- summary of files that would be modified and backed up
+- `profiles.json` changes grouped by `Add` / `Update` / `Keep` / `Remove`
+- `config.toml` changes grouped by `Keep` / `Update` / `Add sections` / `Remove sections`
+- `Warnings` for risky changes such as removed sections or current-profile switches
 
 If `config/ccs-profiles.json` changes later, run:
 
