@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, copyFile, readdir, readFile, stat } from "node:fs/promises";
+import { access, copyFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureDir, writeTextFile } from "../lib/fs.js";
 import { codexDir } from "../lib/paths.js";
@@ -20,6 +20,14 @@ type ThreadRow = {
 
 type PlannedRow = ThreadRow & {
   newCwd: string;
+};
+
+type PlannedRollout = {
+  path: string;
+  fromCwd: string;
+  toCwd: string;
+  originalText: string;
+  nextText: string;
 };
 
 type SessionMeta = {
@@ -164,6 +172,14 @@ async function assertFileReadable(path: string): Promise<void> {
   }
 }
 
+async function assertFileWritable(path: string): Promise<void> {
+  try {
+    await access(path, constants.W_OK);
+  } catch {
+    throw new Error(`rollout file is not writable: ${path}`);
+  }
+}
+
 function parseFirstJsonLine(text: string, path: string): { meta: SessionMeta; rest: string; lineEnding: string } {
   const newlineIndex = text.indexOf("\n");
   const firstWithMaybeCr = newlineIndex === -1 ? text : text.slice(0, newlineIndex);
@@ -211,8 +227,9 @@ function backupDestination(backupDir: string, path: string): string {
 }
 
 async function createBackup(dbPath: string, rolloutPaths: string[]): Promise<string> {
-  const backupDir = join(codexDir(), "backups", `session-cwd-migration-${timestamp()}`);
-  await ensureDir(backupDir);
+  const backupRoot = join(codexDir(), "backups");
+  await ensureDir(backupRoot);
+  const backupDir = await createUniqueBackupDir(backupRoot, `session-cwd-migration-${timestamp()}`);
 
   const dbBackup = join(backupDir, basename(dbPath));
   await copyFile(dbPath, dbBackup);
@@ -226,10 +243,26 @@ async function createBackup(dbPath: string, rolloutPaths: string[]): Promise<str
   return backupDir;
 }
 
+async function createUniqueBackupDir(parent: string, name: string): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const path = join(parent, attempt === 0 ? name : `${name}-${attempt}`);
+    try {
+      await mkdir(path);
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`failed to create unique backup directory under ${parent}`);
+}
+
 function timestamp(): string {
   const date = new Date();
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  const milliseconds = date.getMilliseconds().toString().padStart(3, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${milliseconds}`;
 }
 
 function buildUpdateSql(rows: PlannedRow[]): string {
@@ -239,25 +272,111 @@ function buildUpdateSql(rows: PlannedRow[]): string {
   return ["begin immediate;", ...statements, "commit;"].join("\n");
 }
 
-async function updateRollout(path: string, fromCwd: string, toCwd: string): Promise<void> {
-  const text = await readFile(path, "utf8");
+function buildRollbackSql(rows: PlannedRow[]): string {
+  const statements = rows.map((row) => (
+    `update threads set cwd = ${sqlString(row.cwd)} where id = ${sqlString(row.id)};`
+  ));
+  return ["begin immediate;", ...statements, "commit;"].join("\n");
+}
+
+function buildRolloutText(text: string, path: string, fromCwd: string, toCwd: string): string {
   const { meta, rest, lineEnding } = parseFirstJsonLine(text, path);
   if (meta.payload?.cwd !== fromCwd) {
     throw new Error(`rollout cwd changed before write: ${path}`);
   }
   meta.payload.cwd = toCwd;
-  await writeTextFile(path, `${JSON.stringify(meta)}${lineEnding}${rest}`);
+  return `${JSON.stringify(meta)}${lineEnding}${rest}`;
 }
 
-async function applyMigration(dbPath: string, rows: PlannedRow[]): Promise<number> {
+async function planRolloutWrites(rows: PlannedRow[]): Promise<PlannedRollout[]> {
+  const byPath = new Map<string, PlannedRow[]>();
+  for (const row of rows) {
+    const group = byPath.get(row.rollout_path) ?? [];
+    group.push(row);
+    byPath.set(row.rollout_path, group);
+  }
+
+  const planned: PlannedRollout[] = [];
+  for (const [path, group] of byPath) {
+    await assertFileReadable(path);
+    await assertFileWritable(path);
+    const row = group[0];
+    if (group.some((item) => item.cwd !== row.cwd || item.newCwd !== row.newCwd)) {
+      throw new Error(`matching threads share one rollout file with different cwd changes: ${path}`);
+    }
+    const text = await readFile(path, "utf8");
+    planned.push({
+      path,
+      fromCwd: row.cwd,
+      toCwd: row.newCwd,
+      originalText: text,
+      nextText: buildRolloutText(text, path, row.cwd, row.newCwd),
+    });
+  }
+  return planned;
+}
+
+async function assertRolloutPlansFresh(plannedRollouts: PlannedRollout[]): Promise<void> {
+  for (const rollout of plannedRollouts) {
+    const text = await readFile(rollout.path, "utf8");
+    buildRolloutText(text, rollout.path, rollout.fromCwd, rollout.toCwd);
+  }
+}
+
+async function updateRollout(plan: PlannedRollout): Promise<void> {
+  const text = await readFile(plan.path, "utf8");
+  buildRolloutText(text, plan.path, plan.fromCwd, plan.toCwd);
+  await writeTextFile(plan.path, plan.nextText);
+}
+
+async function applyMigration(dbPath: string, rows: PlannedRow[], plannedRollouts: PlannedRollout[]): Promise<number> {
+  await assertRolloutPlansFresh(plannedRollouts);
   await sqliteRun(dbPath, buildUpdateSql(rows));
 
   let updated = 0;
-  for (const row of rows) {
-    await updateRollout(row.rollout_path, row.cwd, row.newCwd);
-    updated += 1;
+  try {
+    for (const rollout of plannedRollouts) {
+      await updateRollout(rollout);
+      updated += 1;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await rollbackMigration(dbPath, rows, plannedRollouts.slice(0, updated));
+    } catch (rollbackError) {
+      const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      throw new Error(`JSONL update failed after SQLite update: ${message}; rollback incomplete: ${rollbackMessage}`);
+    }
+    throw new Error(`JSONL update failed after SQLite update; rolled back migrated state: ${message}`);
   }
   return updated;
+}
+
+async function rollbackMigration(
+  dbPath: string,
+  rows: PlannedRow[],
+  writtenRollouts: PlannedRollout[],
+): Promise<void> {
+  const failures: string[] = [];
+  try {
+    await sqliteRun(dbPath, buildRollbackSql(rows));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    failures.push(`sqlite rollback failed: ${message}`);
+  }
+
+  for (const rollout of writtenRollouts) {
+    try {
+      await writeTextFile(rollout.path, rollout.originalText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`jsonl rollback failed for ${rollout.path}: ${message}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(failures.join("; "));
+  }
 }
 
 async function verifyRollouts(rows: PlannedRow[]): Promise<number> {
@@ -312,16 +431,17 @@ export async function runCodexSessionMove(argv: string[]): Promise<void> {
     return;
   }
 
+  const plannedRollouts = await planRolloutWrites(rows);
   const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));
-  const jsonlUpdated = await applyMigration(dbPath, rows);
+  const jsonlUpdated = await applyMigration(dbPath, rows, plannedRollouts);
   const oldRemaining = await countMatches(dbPath, args);
-  const newCount = await countNewCwds(dbPath, rows);
+  const threadsAtNewCwd = await countNewCwds(dbPath, rows);
   const synced = await verifyRollouts(rows);
 
   console.log(`backup: ${backupDir}`);
   console.log(`sqlite updated: ${rows.length}`);
   console.log(`jsonl updated: ${jsonlUpdated}`);
   console.log(`old cwd remaining: ${oldRemaining}`);
-  console.log(`new cwd count: ${newCount}`);
+  console.log(`threads at new cwd: ${threadsAtNewCwd}`);
   console.log(`jsonl synced: ${synced}`);
 }
