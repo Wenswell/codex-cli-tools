@@ -102,8 +102,8 @@ Supported commands:
 
 ```bash
 ccs
-ccs init [-n]
-ccs sync [-n]
+ccs init [-y]
+ccs sync [-y]
 ccs status
 ccs list
 ccs add [PROFILE]
@@ -162,6 +162,20 @@ from:
 config/codex-config.toml
 ```
 
+Preview first:
+
+```bash
+ccs init
+```
+
+Apply changes:
+
+```bash
+ccs init -y
+```
+
+`--yes` is also accepted. Preview output includes `Dry run only. Re-run with -y or --yes to apply changes.`
+
 Before writing, it backs up the current files to:
 
 ```text
@@ -170,13 +184,7 @@ Before writing, it backs up the current files to:
 
 `ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, and restores the current provider's `base_url` after syncing the template. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
-Preview without writing:
-
-```bash
-ccs init -n
-```
-
-Preview shows:
+`ccs init` without `-y` shows:
 
 - a short summary of files to modify and back up
 - unified diff style output for each file that would change
@@ -189,11 +197,20 @@ If `config/ccs-profiles.json` changes later, run:
 ccs sync
 ```
 
-`ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
-
-Preview without writing:
+`ccs sync` previews by default. To apply changes:
 
 ```bash
+ccs sync -y
+```
+
+`--yes` is also accepted.
+
+When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
+
+Explicit dry-run flags are also accepted:
+
+```bash
+ccs init -n
 ccs sync -n
 ```
 
