@@ -58,7 +58,7 @@ function parseArgs(argv: string[]): Args {
       index += 1;
       continue;
     }
-    if (arg === "--backup") {
+    if (arg === "-b" || arg === "--backup") {
       args.backup = true;
       continue;
     }
@@ -94,7 +94,7 @@ function printHelp(): void {
     "envsync",
     "envsync -y",
     "envsync --source .env.example --target .env -y",
-    "envsync --backup -y",
+    "envsync -b -y",
     "",
     "Default mode is dry-run. Use -y or --yes to write changes.",
   ].join("\n"));
