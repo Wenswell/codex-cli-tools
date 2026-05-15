@@ -1,8 +1,11 @@
 export function updateTomlBaseUrl(content: string, baseUrl: string): string {
-  return upsertTomlKey(content, "model_providers.codex", "base_url", JSON.stringify(baseUrl));
+  const provider = readTopLevelTomlString(content, "model_provider") ?? "codex";
+  return upsertTomlKey(content, `model_providers.${provider}`, "base_url", JSON.stringify(baseUrl));
 }
 
 export function readTomlBaseUrl(content: string): string | null {
+  const provider = readTopLevelTomlString(content, "model_provider") ?? "codex";
+  const sectionName = `model_providers.${provider}`;
   let currentSection = "";
   for (const line of content.split(/\r?\n/)) {
     const sectionMatch = /^\s*\[([^\]]+)\]\s*$/.exec(line);
@@ -11,11 +14,24 @@ export function readTomlBaseUrl(content: string): string | null {
       continue;
     }
 
-    if (currentSection !== "model_providers.codex") {
+    if (currentSection !== sectionName) {
       continue;
     }
 
     const match = /^\s*base_url\s*=\s*("([^"]*)"|'([^']*)'|([^\s#]+))/.exec(line);
+    if (match) {
+      return match[2] ?? match[3] ?? match[4] ?? "";
+    }
+  }
+  return null;
+}
+
+export function readTopLevelTomlString(content: string, key: string): string | null {
+  for (const line of content.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) {
+      return null;
+    }
+    const match = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s#]+))`).exec(line);
     if (match) {
       return match[2] ?? match[3] ?? match[4] ?? "";
     }

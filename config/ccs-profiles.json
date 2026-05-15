@@ -9,5 +9,6 @@
       "apiKey": ""
     }
   },
-  "current": "test001"
+  "current": "test001",
+  "toggle": ["test001", "test002"]
 }
