@@ -150,19 +150,25 @@ Fill in the API keys manually. The file is written with `0600` permissions.
 
 It stores the current `base_url` and `OPENAI_API_KEY` as a profile named `current`, then makes `current` the active profile.
 
-`ccs init` then overwrites:
+`ccs init` then syncs:
 
 ```text
 ~/.codex/config.toml
 ```
 
-with:
+from:
 
 ```text
 config/codex-config.toml
 ```
 
-After writing the template, it reads the active provider from top-level `model_provider` and applies the active profile `baseURL` to `[model_providers.<provider>].base_url`. Later profile switches only change that API URL and `~/.codex/auth.json`.
+Before writing, it backs up the current files to:
+
+```text
+~/.config/codex-tools/backups/ccs-YYYYMMDD-HHMMSS/
+```
+
+`ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, and restores the current provider's `base_url` after syncing the template. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
 If `config/ccs-profiles.json` changes later, run:
 
@@ -170,7 +176,7 @@ If `config/ccs-profiles.json` changes later, run:
 ccs sync
 ```
 
-`ccs sync` merges template profiles into `~/.config/codex-tools/profiles.json` and keeps existing local API keys. It also keeps local profiles that are not in the template. It does not rewrite `~/.codex/config.toml`.
+`ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
 
 Add or update a profile interactively:
 
