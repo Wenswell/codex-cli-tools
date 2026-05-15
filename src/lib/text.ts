@@ -23,14 +23,6 @@ export function textDim(value: string): string {
   return withAnsi(2, value);
 }
 
-export function textGreen(value: string): string {
-  return withAnsi(32, value);
-}
-
-export function textYellow(value: string): string {
-  return withAnsi(33, value);
-}
-
 export function textBlue(value: string): string {
   return withAnsi(34, value);
 }
