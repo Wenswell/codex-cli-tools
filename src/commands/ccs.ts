@@ -12,14 +12,11 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import {
-  bgBlue,
-  bgGray,
-  bgGreen,
-  bgRed,
   maskSecret,
   textBlue,
   textBold,
   textDim,
+  textGreen,
   textRed,
 } from "../lib/text.js";
 import {
@@ -270,6 +267,10 @@ function hasPreviewFlag(argv: string[]): boolean {
   return hasFlag(argv, "-n") || hasFlag(argv, "--dry-run");
 }
 
+function hasYesFlag(argv: string[]): boolean {
+  return hasFlag(argv, "-y") || hasFlag(argv, "--yes");
+}
+
 function formatList(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "(none)";
 }
@@ -289,13 +290,18 @@ function printPreviewSummary(
   warnings: string[],
 ): void {
   console.log(textBold(`Plan: ${title}`));
+  console.log("Dry run only. Re-run with -y or --yes to apply changes.");
   console.log(`Will modify: ${formatList(modifiedFiles)}`);
   console.log(`Will back up: ${formatList(backupFiles)}`);
   console.log(`Warnings: ${warnings.length}`);
 }
 
 function collectChangedPreviewFiles(files: PreviewFile[]): PreviewFile[] {
-  return files.filter((file) => redactPreviewSecrets(file.current) !== redactPreviewSecrets(file.next));
+  return files.filter((file) => {
+    const current = normalizePreviewContent(file.label, file.current);
+    const next = normalizePreviewContent(file.label, file.next);
+    return current !== next;
+  });
 }
 
 function collectExistingBackupFilesForPaths(paths: string[]): Promise<CcsFileBackup[]> {
@@ -304,42 +310,54 @@ function collectExistingBackupFilesForPaths(paths: string[]): Promise<CcsFileBac
 }
 
 function printDiffBlock(file: PreviewFile): void {
-  const current = normalizePreviewContent(file.label, redactPreviewSecrets(file.current));
-  const next = normalizePreviewContent(file.label, redactPreviewSecrets(file.next));
+  const current = normalizePreviewContent(file.label, file.current);
+  const next = normalizePreviewContent(file.label, file.next);
   if (current === next) {
     return;
   }
+  const redactedCurrent = normalizePreviewContent(file.label, redactPreviewSecrets(file.current));
+  const redactedNext = normalizePreviewContent(file.label, redactPreviewSecrets(file.next));
+
+  console.log("");
+  console.log(`${textBold("File:")} ${textBlue(file.path)}`);
+
+  if (redactedCurrent === redactedNext) {
+    console.log(textDim("  changes only affect masked secret values"));
+    return;
+  }
+
   const patch = createTwoFilesPatch(
     `current/${file.label}`,
     `next/${file.label}`,
-    current,
-    next,
+    redactedCurrent,
+    redactedNext,
     "",
     "",
     { context: 3 },
   );
   const lines = patch.split("\n");
 
-  console.log("");
-  console.log(`${textBold("File:")} ${textBlue(file.path)}`);
   for (const line of lines) {
+    if (line.startsWith("===")) {
+      continue;
+    }
     if (line.startsWith("--- ") || line.startsWith("+++ ")) {
-      console.log(bgBlue(line));
+      console.log(textDim(`  ${line}`));
       continue;
     }
     if (line.startsWith("@@")) {
-      console.log(bgGray(line));
+      console.log(textBlue(`  ${line}`));
       continue;
     }
     if (line.startsWith("+")) {
-      console.log(bgGreen(line));
+      console.log(textGreen(`  ${line}`));
       continue;
     }
     if (line.startsWith("-")) {
-      console.log(bgRed(line));
+      console.log(textRed(`  ${line}`));
       continue;
     }
-    console.log(line);
+    console.log(textDim(`  ${line}`));
   }
 }
 
@@ -463,7 +481,9 @@ async function printInitDryRun(): Promise<void> {
   const warnings = [...configSection.warnings];
   const currentProfiles = await readProfiles();
   if ((currentProfiles.current ?? null) !== (nextProfiles.current ?? null)) {
-    warnings.unshift("profile current will change to current");
+    warnings.unshift(
+      `profile current will change from ${currentProfiles.current ?? "(none)"} to ${nextProfiles.current ?? "(none)"}`,
+    );
   }
 
   const previewFiles = collectChangedPreviewFiles([
@@ -684,8 +704,8 @@ function printHelp(): void {
   console.log([
     "Usage:",
     "  ccs                    # show current profile and usage",
-    "  ccs init [-n]          # preview or run init",
-    "  ccs sync [-n]          # preview or run sync",
+    "  ccs init [-y]          # preview init, or apply with -y",
+    "  ccs sync [-y]          # preview sync, or apply with -y",
     "  ccs status             # show current profile",
     "  ccs list               # list profiles with masked keys",
     "  ccs add [PROFILE]      # add or update a profile interactively",
@@ -712,7 +732,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
-    if (hasPreviewFlag(argv.slice(1))) {
+    if (hasPreviewFlag(argv.slice(1)) || !hasYesFlag(argv.slice(1))) {
       await printInitDryRun();
       return;
     }
@@ -748,7 +768,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "sync") {
-    if (hasPreviewFlag(argv.slice(1))) {
+    if (hasPreviewFlag(argv.slice(1)) || !hasYesFlag(argv.slice(1))) {
       await printSyncDryRun();
       return;
     }
