@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "test001": {
+      "baseURL": "https://ai.example.com",
+      "apiKey": ""
+    },
+    "test002": {
+      "baseURL": "https://codex.example.com",
+      "apiKey": ""
+    }
+  },
+  "current": "test001"
+}

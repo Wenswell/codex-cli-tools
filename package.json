@@ -11,7 +11,8 @@
     "codex-session-move": "./dist/bin/codex-session-move.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "config"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
