@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
@@ -124,15 +125,72 @@ async function syncProfiles(): Promise<ProfilesFile> {
   return next;
 }
 
-async function addProfile(name: string, baseURL: string, apiKey: string): Promise<void> {
-  if (!name || !baseURL) {
-    throw new Error("usage: ccs add NAME BASE_URL [API_KEY]");
-  }
+async function addProfile(): Promise<void> {
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
-  profiles[name] = { baseURL, apiKey };
+  const input = createPrompt();
+  let name = "";
+
+  try {
+    name = await askRequired(input, "name");
+    const existing = profiles[name];
+    const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
+    const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
+
+    profiles[name] = { baseURL, apiKey };
+  } finally {
+    input.close();
+  }
+
   await writeProfiles({ ...data, profiles, current: data.current ?? name });
-  console.log(`profile added: ${name}`);
+  console.log(`profile saved: ${name}`);
+}
+
+async function askRequired(
+  input: Prompt,
+  label: string,
+  current?: string,
+): Promise<string> {
+  const value = await askOptional(input, label, current);
+  if (!value) {
+    throw new Error(`${label} is required`);
+  }
+  return value;
+}
+
+async function askOptional(
+  input: Prompt,
+  label: string,
+  current?: string,
+): Promise<string> {
+  const suffix = current ? ` [${label === "apiKey" ? maskSecret(current) : current}]` : "";
+  const value = await input.question(`${label}${suffix}: `);
+  return value || current || "";
+}
+
+type Prompt = {
+  question(prompt: string): Promise<string>;
+  close(): void;
+};
+
+function createPrompt(): Prompt {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY,
+  });
+  const iterator = rl[Symbol.asyncIterator]();
+
+  return {
+    async question(prompt: string): Promise<string> {
+      process.stdout.write(prompt);
+      const next = await iterator.next();
+      return next.done ? "" : next.value;
+    },
+    close(): void {
+      rl.close();
+    },
+  };
 }
 
 async function removeProfile(name: string): Promise<void> {
@@ -210,7 +268,7 @@ function printHelp(): void {
     "  ccs sync",
     "  ccs status",
     "  ccs list",
-    "  ccs add NAME BASE_URL [API_KEY]",
+    "  ccs add",
     "  ccs remove NAME",
     "  ccs PROFILE",
     "  ccs toggle",
@@ -257,13 +315,13 @@ export async function runCcs(argv: string[]): Promise<void> {
   if (command === "list") {
     const entries = Object.entries(profiles.profiles ?? {});
     for (const [name, profile] of entries) {
-      console.log(`${name}\t${profile.baseURL}`);
+      console.log(`${name}\t${profile.baseURL}\t${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);
     }
     return;
   }
 
   if (command === "add") {
-    await addProfile(argv[1], argv[2], argv[3] ?? "");
+    await addProfile();
     return;
   }
 
