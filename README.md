@@ -22,7 +22,23 @@ pnpm link --global
 From a private Git repository:
 
 ```bash
-pnpm add -g git+ssh://git@github.com/YOUR_NAME/codex-tools.git
+pnpm add -g git+ssh://git@github.com/YOUR_NAME/codex-tools.git#master
+```
+
+Update to the latest version on another machine with the same command:
+
+```bash
+pnpm add -g git+ssh://git@github.com/YOUR_NAME/codex-tools.git#master
+```
+
+If you clone the repository on that machine and want a live development link:
+
+```bash
+git clone git@github.com:YOUR_NAME/codex-tools.git
+cd codex-tools
+pnpm install
+pnpm build
+pnpm link --global
 ```
 
 ## Commands
