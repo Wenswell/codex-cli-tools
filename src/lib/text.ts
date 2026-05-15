@@ -8,7 +8,7 @@ export function maskSecret(value: string): string {
 
 const canColorize = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 
-function withAnsi(code: number, value: string): string {
+function withAnsi(code: number | string, value: string): string {
   if (!canColorize) {
     return value;
   }
@@ -36,17 +36,17 @@ export function textRed(value: string): string {
 }
 
 export function bgBlue(value: string): string {
-  return withAnsi(44, value);
+  return withAnsi("30;48;5;153", value);
 }
 
 export function bgGreen(value: string): string {
-  return withAnsi(42, value);
+  return withAnsi("30;48;5;194", value);
 }
 
 export function bgRed(value: string): string {
-  return withAnsi(41, value);
+  return withAnsi("30;48;5;224", value);
 }
 
 export function bgGray(value: string): string {
-  return withAnsi(100, value);
+  return withAnsi("30;48;5;252", value);
 }

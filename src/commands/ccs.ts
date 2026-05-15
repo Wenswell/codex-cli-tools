@@ -20,7 +20,6 @@ import {
   textBlue,
   textBold,
   textDim,
-  textGreen,
   textRed,
 } from "../lib/text.js";
 import {
@@ -305,8 +304,8 @@ function collectExistingBackupFilesForPaths(paths: string[]): Promise<CcsFileBac
 }
 
 function printDiffBlock(file: PreviewFile): void {
-  const current = redactPreviewSecrets(file.current);
-  const next = redactPreviewSecrets(file.next);
+  const current = normalizePreviewContent(file.label, redactPreviewSecrets(file.current));
+  const next = normalizePreviewContent(file.label, redactPreviewSecrets(file.next));
   if (current === next) {
     return;
   }
@@ -333,11 +332,11 @@ function printDiffBlock(file: PreviewFile): void {
       continue;
     }
     if (line.startsWith("+")) {
-      console.log(bgGreen(textGreen(line)));
+      console.log(bgGreen(line));
       continue;
     }
     if (line.startsWith("-")) {
-      console.log(bgRed(textRed(line)));
+      console.log(bgRed(line));
       continue;
     }
     console.log(line);
@@ -359,6 +358,83 @@ function maskSecretValue(value: string): string {
     return value;
   }
   return maskSecret(value);
+}
+
+function normalizePreviewContent(label: string, content: string): string {
+  if (label.endsWith(".json")) {
+    return normalizeJsonPreview(content);
+  }
+  if (label.endsWith(".toml")) {
+    return normalizeTomlPreview(content);
+  }
+  return content;
+}
+
+function normalizeJsonPreview(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return stringifyJson(JSON.parse(trimmed));
+  } catch {
+    return content;
+  }
+}
+
+function normalizeTomlPreview(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const lines = normalized
+    .split("\n")
+    .map((line) => stripTomlInlineComment(line).trimEnd());
+
+  const compact: string[] = [];
+  let previousBlank = false;
+  for (const line of lines) {
+    const isBlank = line.trim() === "";
+    if (isBlank) {
+      if (!previousBlank) {
+        compact.push("");
+      }
+      previousBlank = true;
+      continue;
+    }
+    compact.push(line);
+    previousBlank = false;
+  }
+
+  while (compact[0] === "") {
+    compact.shift();
+  }
+  while (compact.at(-1) === "") {
+    compact.pop();
+  }
+
+  return compact.length > 0 ? `${compact.join("\n")}\n` : "";
+}
+
+function stripTomlInlineComment(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const prev = i > 0 ? line[i - 1] : "";
+
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (char === "\"" && !inSingle && prev !== "\\") {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (char === "#" && !inSingle && !inDouble) {
+      return line.slice(0, i).trimEnd();
+    }
+  }
+
+  return line;
 }
 
 function printWarnings(warnings: string[]): void {
