@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "input": {
+      "baseURL": "https://ai.input.im",
+      "apiKey": ""
+    },
+    "ciii": {
+      "baseURL": "https://codex.ciii.club",
+      "apiKey": ""
+    }
+  },
+  "current": "input"
+}

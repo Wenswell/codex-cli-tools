@@ -85,14 +85,22 @@ Supported commands:
 ```bash
 ccs
 ccs init
+ccs sync
 ccs status
 ccs list
 ccs input
 ccs ciii
+ccs PROFILE
 ccs toggle
 ```
 
-`ccs init` creates `profiles.json` if it does not already contain profiles:
+Initial profile defaults are stored in this repository:
+
+```text
+config/ccs-profiles.json
+```
+
+`ccs init` creates `profiles.json` from that template if it does not already contain profiles:
 
 ```json
 {
@@ -112,11 +120,20 @@ ccs toggle
 
 Fill in the API keys manually. The file is written with `0600` permissions.
 
+If `config/ccs-profiles.json` changes later, run:
+
+```bash
+ccs sync
+```
+
+`ccs sync` merges template profiles into `~/.config/codex-tools/profiles.json` and keeps existing local API keys. It also keeps local profiles that are not in the template.
+
 Switching profile:
 
 ```bash
 ccs input
 ccs ciii
+ccs PROFILE
 ccs toggle
 ```
 

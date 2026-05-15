@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAuthPath, codexConfigPath, codexDir, profilesPath } from "../lib/paths.js";
@@ -43,28 +42,49 @@ async function writeProfiles(profiles: ProfilesFile): Promise<void> {
   await writeTextFile(profilesPath(), stringifyJson(profiles), 0o600);
 }
 
+async function readDefaultProfiles(): Promise<ProfilesFile> {
+  const path = fileURLToPath(new URL("../../config/ccs-profiles.json", import.meta.url));
+  const text = await readTextIfExists(path);
+  if (!text) {
+    throw new Error(`default profiles template not found: ${path}`);
+  }
+  return parseJsonObject(text) as ProfilesFile;
+}
+
 async function ensureProfilesFile(): Promise<ProfilesFile> {
   const existing = await readProfiles();
   if (existing.profiles && Object.keys(existing.profiles).length > 0) {
     return existing;
   }
 
-  const initial = {
-    profiles: {
-      input: {
-        baseURL: "https://ai.input.im",
-        apiKey: "",
-      },
-      ciii: {
-        baseURL: "https://codex.ciii.club",
-        apiKey: "",
-      },
-    },
-    current: "input",
-  };
-
+  const initial = await readDefaultProfiles();
   await writeProfiles(initial);
   return initial;
+}
+
+async function syncProfiles(): Promise<ProfilesFile> {
+  const defaults = await readDefaultProfiles();
+  const existing = await readProfiles();
+  const defaultProfiles = defaults.profiles ?? {};
+  const existingProfiles = existing.profiles ?? {};
+  const nextProfiles: Record<string, Profile> = { ...existingProfiles };
+
+  for (const [name, defaultProfile] of Object.entries(defaultProfiles)) {
+    const current = existingProfiles[name];
+    nextProfiles[name] = {
+      baseURL: defaultProfile.baseURL,
+      apiKey: current?.apiKey || defaultProfile.apiKey,
+    };
+  }
+
+  const next: ProfilesFile = {
+    ...existing,
+    profiles: nextProfiles,
+    current: existing.current ?? defaults.current,
+  };
+
+  await writeProfiles(next);
+  return next;
 }
 
 async function switchProfile(name: string): Promise<void> {
@@ -104,8 +124,10 @@ function help(): void {
     "ccs",
     "ccs status",
     "ccs init",
+    "ccs sync",
     "ccs input",
     "ccs ciii",
+    "ccs PROFILE",
     "ccs toggle",
     "ccs list",
   ].join("\n"));
@@ -123,6 +145,15 @@ export async function runCcs(argv: string[]): Promise<void> {
   if (command === "init") {
     await ensureProfilesFile();
     console.log(`profiles written: ${profilesPath()}`);
+    return;
+  }
+
+  if (command === "sync") {
+    const synced = await syncProfiles();
+    console.log(`profiles synced: ${profilesPath()}`);
+    for (const name of Object.keys(synced.profiles ?? {})) {
+      console.log(`  ${name}`);
+    }
     return;
   }
 
@@ -155,7 +186,7 @@ export async function runCcs(argv: string[]): Promise<void> {
     return;
   }
 
-  if (command === "input" || command === "ciii") {
+  if (profiles.profiles?.[command]) {
     await switchProfile(command);
     return;
   }
