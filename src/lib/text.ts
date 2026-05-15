@@ -27,6 +27,10 @@ export function textBlue(value: string): string {
   return withAnsi(34, value);
 }
 
+export function textGreen(value: string): string {
+  return withAnsi(32, value);
+}
+
 export function textRed(value: string): string {
   return withAnsi(31, value);
 }

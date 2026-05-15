@@ -176,12 +176,12 @@ Preview without writing:
 ccs init -n
 ```
 
-Preview shows an execution plan:
+Preview shows:
 
-- summary of files that would be modified and backed up
-- `profiles.json` changes grouped by `Add` / `Update` / `Keep` / `Remove`
-- `config.toml` changes grouped by `Keep` / `Update` / `Add sections` / `Remove sections`
-- `Warnings` for risky changes such as removed sections or current-profile switches
+- a short summary of files to modify and back up
+- unified diff style output for each file that would change
+- masked secrets in `profiles.json` and `auth.json`
+- warnings for risky changes such as removed sections or current-profile switches
 
 If `config/ccs-profiles.json` changes later, run:
 
