@@ -1,11 +1,23 @@
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAuthPath, codexConfigPath, codexDir, profilesPath } from "../lib/paths.js";
+import {
+  codexAuthPath,
+  codexConfigPath,
+  codexDir,
+  codexToolsConfigDir,
+  profilesPath,
+} from "../lib/paths.js";
 import { maskSecret } from "../lib/text.js";
-import { readTomlBaseUrl, updateTomlBaseUrl } from "../lib/toml.js";
+import {
+  mergeTomlModelProviderSections,
+  readTomlBaseUrl,
+  readTopLevelTomlString,
+  updateTomlBaseUrl,
+  updateTopLevelTomlString,
+} from "../lib/toml.js";
 
 type Profile = {
   baseURL: string;
@@ -73,6 +85,61 @@ async function readCurrentCodexProfile(): Promise<Profile> {
   };
 }
 
+async function backupCcsFiles(): Promise<string | null> {
+  const files = [
+    { source: codexConfigPath(), target: "config.toml" },
+    { source: codexAuthPath(), target: "auth.json" },
+    { source: profilesPath(), target: "profiles.json" },
+  ];
+  const backupDir = join(codexToolsConfigDir(), "backups", `ccs-${formatTimestamp(new Date())}`);
+  let copied = 0;
+
+  for (const file of files) {
+    const content = await readTextIfExists(file.source);
+    if (content === null) {
+      continue;
+    }
+    await writeTextFile(join(backupDir, file.target), content, 0o600);
+    copied += 1;
+  }
+
+  return copied > 0 ? backupDir : null;
+}
+
+function formatTimestamp(date: Date): string {
+  const pad = (value: number): string => value.toString().padStart(2, "0");
+  const milliseconds = date.getMilliseconds().toString().padStart(3, "0");
+  return [
+    date.getFullYear().toString(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+    "-",
+    milliseconds,
+  ].join("");
+}
+
+async function syncCodexConfigFromTemplate(): Promise<void> {
+  await ensureDir(codexDir());
+  const defaults = await readDefaultCodexConfig();
+  const existing = (await readTextIfExists(codexConfigPath())) ?? "";
+  const provider = readTopLevelTomlString(existing, "model_provider")
+    ?? readTopLevelTomlString(defaults, "model_provider")
+    ?? "codex";
+  const baseURL = readTomlBaseUrl(existing);
+
+  let next = mergeTomlModelProviderSections(defaults, existing);
+  next = updateTopLevelTomlString(next, "model_provider", provider);
+  if (baseURL !== null) {
+    next = updateTomlBaseUrl(next, baseURL);
+  }
+
+  await writeTextFile(codexConfigPath(), next);
+}
+
 async function initProfilesFromCurrent(): Promise<ProfilesFile> {
   const defaults = await readDefaultProfiles();
   const current = await readCurrentCodexProfile();
@@ -90,13 +157,6 @@ async function initProfilesFromCurrent(): Promise<ProfilesFile> {
   };
   await writeProfiles(next);
   return next;
-}
-
-async function overwriteCodexConfig(baseURL?: string): Promise<void> {
-  await ensureDir(codexDir());
-  const defaults = await readDefaultCodexConfig();
-  const next = baseURL ? updateTomlBaseUrl(defaults, baseURL) : defaults;
-  await writeTextFile(codexConfigPath(), next);
 }
 
 async function syncProfiles(): Promise<ProfilesFile> {
@@ -303,20 +363,30 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
+    const backupDir = await backupCcsFiles();
     const initialized = await initProfilesFromCurrent();
+    await syncCodexConfigFromTemplate();
     const profile = initialized.profiles?.[initialized.current ?? ""];
-    await overwriteCodexConfig(profile?.baseURL);
     if (profile?.apiKey) {
       await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: profile.apiKey }), 0o600);
     }
+    if (backupDir) {
+      console.log(`backup: ${backupDir}`);
+    }
     console.log(`profiles written: ${profilesPath()}`);
-    console.log(`codex config overwritten: ${codexConfigPath()}`);
+    console.log(`codex config synced: ${codexConfigPath()}`);
     return;
   }
 
   if (command === "sync") {
+    const backupDir = await backupCcsFiles();
     const synced = await syncProfiles();
+    await syncCodexConfigFromTemplate();
+    if (backupDir) {
+      console.log(`backup: ${backupDir}`);
+    }
     console.log(`profiles synced: ${profilesPath()}`);
+    console.log(`codex config synced: ${codexConfigPath()}`);
     for (const name of Object.keys(synced.profiles ?? {})) {
       console.log(`  ${name}`);
     }
