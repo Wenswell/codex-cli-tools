@@ -272,14 +272,16 @@ Behavior:
 Default:
 
 ```bash
-envsync
+envsync -y
 ```
 
 Equivalent to:
 
 ```bash
-envsync --source .env.example --target .env
+envsync --source .env.example --target .env -y
 ```
+
+Run `envsync` without arguments to print help.
 
 Default mode is dry-run. Nothing is modified unless `-y` or `--yes` is provided.
 

@@ -39,6 +39,11 @@ type Summary = {
 };
 
 function parseArgs(argv: string[]): Args {
+  if (argv.length === 0) {
+    printHelp();
+    process.exit(0);
+  }
+
   const args: Args = {
     source: ".env.example",
     target: ".env",
