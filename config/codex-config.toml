@@ -1,20 +1,76 @@
-model_provider = "codex"
-personality = "pragmatic"
-model_reasoning_effort = "medium"
-disable_response_storage = true
-network_access = "enabled"
-approvals_reviewer = "user"
-service_tier = "fast"
-model = "gpt-5.5"
+model_provider = "codex" # 默认模型提供商，对应 [model_providers.codex]
+personality = "pragmatic" # Codex 交流和执行风格
+model_reasoning_effort = "medium" # 默认推理强度：low/medium/high/xhigh
+disable_response_storage = true # 禁止服务端保存响应内容
+network_access = "enabled" # 允许联网
+project_doc_fallback_filenames = ["CLAUDE.md"] # AGENTS.md 找不到时，继续查找这些项目文档
 
-[features]
-hooks = true
-enable_fanout = true
-default_mode_request_user_input = true
-goals = true
+approvals_reviewer = "user" # 审批交给用户确认
+service_tier = "fast" # 服务档位，fast 优先速度
+model = "gpt-5.5" # 默认使用的模型
 
-[model_providers.codex]
-name = "codex"
-base_url = "https://codex.ciii.club"
-wire_api = "responses"
-requires_openai_auth = true
+suppress_unstable_features_warning = true # 隐藏实验功能警告
+
+[model_providers.codex] # 默认名为 codex 的模型提供商配置
+name = "OpenAI" # 提供商名称
+base_url = "https://codex.ciii.club" # API 基础地址
+wire_api = "responses" # 使用 Responses API 协议
+requires_openai_auth = true # 需要 OpenAI 风格认证
+request_max_retries = 20 # 普通 HTTP 请求最大重试次数
+stream_max_retries = 20 # 流式响应最大重试次数
+stream_idle_timeout_ms = 600000 # 流式响应空闲超时，单位毫秒
+
+[features] # 功能开关，--enable xxx 等价于 features.xxx = true
+hooks = true # 启用生命周期 hooks
+enable_fanout = true # 启用任务并行分发
+default_mode_request_user_input = true # 默认模式启用结构化提问工具
+goals = true # 启用目标跟踪能力
+shell_tool = true # 启用 shell 工具，默认 true
+apply_patch_freeform = true # 启用自由格式 apply_patch 工具，默认 false
+shell_snapshot = true # 启用 shell 快照功能，默认 false
+undo = true # 启用 undo 功能，默认 true
+unified_exec = true # 使用统一 PTY 执行工具
+multi_agent = true # 启用多代理功能开关
+steer = true # 启用 steer 能力
+prevent_idle_sleep = true # 防止任务运行时系统空闲睡眠
+child_agents_md = true # 子代理读取/继承 AGENTS.md 规则
+collaboration_modes = true # 启用协作模式能力
+fast_mode = true # 启用快速模式
+image_detail_original = true # 允许按原始细节读取图片
+memories = true # 启用记忆能力
+
+[agents] # 子代理全局配置
+max_threads = 12 # 最大并行代理线程数
+max_depth = 2 # 子代理递归派生最大深度
+
+[agents.default] # 默认通用代理
+description = "General-purpose helper." # 代理用途说明
+model = "gpt-5.5" # 默认代理模型
+model_reasoning_effort = "high" # 默认代理推理强度
+
+[agents.worker] # 执行型代理
+description = "Execution-focused role for implementation and fixes." # 负责实现和修复
+model = "gpt-5.4" # worker 使用的模型
+model_reasoning_effort = "medium" # worker 推理强度
+
+[agents.explorer] # 探索型代理
+description = "Fast codebase explorer for read-heavy tasks." # 负责代码库阅读和定位
+model = "gpt-5.5" # explorer 使用的模型
+model_reasoning_effort = "high" # explorer 推理强度
+sandbox_mode = "read-only" # explorer 只读沙箱
+
+[agents.awaiter] # 等待/监控型代理
+description = "Long-running command and task monitoring role." # 负责长任务监控
+model = "gpt-5.4" # awaiter 使用的模型
+model_reasoning_effort = "medium" # awaiter 推理强度
+
+[agents.reviewer] # 审查型代理
+description = "Reviewer agent for code reviews and feedback." # 负责代码审查和反馈
+model = "gpt-5.5" # reviewer 使用的模型
+model_reasoning_effort = "high" # reviewer 推理强度
+
+[tui] # 终端 UI 配置
+show_tooltips = false # 是否显示工具提示
+status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "context-window-size", "total-input-tokens", "total-output-tokens", "fast-mode"] # 状态栏展示项
+
+
