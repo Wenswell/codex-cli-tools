@@ -12,9 +12,9 @@ export function readTomlBaseUrl(content: string): string | null {
   const sectionName = `model_providers.${provider}`;
   let currentSection = "";
   for (const line of content.split(/\r?\n/)) {
-    const sectionMatch = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    const sectionMatch = parseSectionHeader(line);
     if (sectionMatch) {
-      currentSection = sectionMatch[1];
+      currentSection = sectionMatch;
       continue;
     }
 
@@ -51,12 +51,12 @@ function upsertTomlKey(content: string, sectionName: string, key: string, value:
   let replaced = false;
 
   const next = lines.map((line, index) => {
-    const sectionMatch = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    const sectionMatch = parseSectionHeader(line);
     if (sectionMatch) {
       if (currentSection === sectionName && sectionEnd === lines.length) {
         sectionEnd = index;
       }
-      currentSection = sectionMatch[1];
+      currentSection = sectionMatch;
       if (currentSection === sectionName) {
         sectionStart = index;
       }
@@ -87,7 +87,7 @@ export function mergeTomlModelProviderSections(template: string, existing: strin
   const templateSections = parseTomlSections(template);
   const existingSections = parseTomlSections(existing);
   const extraSections = existingSections.filter((section) => {
-    return section.name.startsWith("model_providers.") &&
+    return shouldPreserveExtraSection(section.name) &&
       !templateSections.some((templateSection) => templateSection.name === section.name);
   });
 
@@ -155,10 +155,10 @@ function parseTomlSections(content: string): TomlSection[] {
   let current: TomlSection | null = null;
 
   for (const line of lines) {
-    const sectionMatch = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    const sectionMatch = parseSectionHeader(line);
     if (sectionMatch) {
       current = {
-        name: sectionMatch[1],
+        name: sectionMatch,
         lines: [line],
       };
       sections.push(current);
@@ -175,6 +175,17 @@ function parseTomlSections(content: string): TomlSection[] {
 
 function ensureTrailingNewline(content: string): string {
   return content.endsWith("\n") ? content : `${content}\n`;
+}
+
+function parseSectionHeader(line: string): string | null {
+  const match = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
+  return match?.[1] ?? null;
+}
+
+function shouldPreserveExtraSection(sectionName: string): boolean {
+  return sectionName.startsWith("model_providers.") ||
+    sectionName.startsWith("projects.") ||
+    sectionName === "tui.model_availability_nux";
 }
 
 function escapeRegExp(value: string): string {
