@@ -112,19 +112,15 @@ Supported commands:
 ```bash
 ccs
 ccs --no-usage
-ccs init [-y]
-ccs sync [-y]
 ccs status [--no-usage]
-ccs usage [PROFILE|--all]
-ccs list
-ccs list --usage
-ccs l
-ccs add [PROFILE]
-ccs remove NAME
-ccs input
-ccs ciii
 ccs PROFILE [--no-usage]
 ccs toggle [PROFILE] [--no-usage]
+ccs usage [PROFILE|-a|--all]
+ccs list | l [-u|--usage]
+ccs init [-n|--dry-run|-y|--yes]
+ccs sync [-n|--dry-run|-y|--yes]
+ccs add [PROFILE]
+ccs remove | rm | delete PROFILE
 ```
 
 Initial profile defaults are stored in this repository:
