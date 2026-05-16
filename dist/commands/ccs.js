@@ -547,6 +547,13 @@ function formatUsage(result) {
         `${textDim(prettifyBigNum(result.requests))}⤨`,
     ].join("  ");
 }
+async function formatProfileUsage(profile) {
+    if (!profile.apiKey || !profile.baseURL.trim()) {
+        return textDim("skipped");
+    }
+    const usage = await fetchUsage(profile);
+    return usage ? formatUsage(usage) : textRed("unavailable");
+}
 async function printUsageLine(profile) {
     const time = formatClockTime(new Date());
     if (!profile?.apiKey || !profile.baseURL.trim()) {
@@ -648,6 +655,22 @@ async function printStatus() {
     console.log(`codex config: ${textBlue(codexConfigPath())}`);
     return normalized;
 }
+async function printProfileList(profiles) {
+    const entries = Object.entries(profiles.profiles ?? {});
+    const rows = await Promise.all(entries.map(async ([name, profile]) => ({
+        name,
+        profile,
+        usage: await formatProfileUsage(profile),
+    })));
+    for (const row of rows) {
+        console.log([
+            textBlue(row.name),
+            row.profile.baseURL,
+            row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+            row.usage,
+        ].join("\t"));
+    }
+}
 function printHelp() {
     console.log([
         textBold("Commands:"),
@@ -655,7 +678,7 @@ function printHelp() {
         "  ccs init [-y]          # preview init, or apply with -y",
         "  ccs sync [-y]          # preview sync, or apply with -y",
         "  ccs status             # show current profile",
-        "  ccs list | l           # list profiles with masked keys",
+        "  ccs list | l           # list profiles with masked keys and usage",
         "  ccs add [PROFILE]      # add or update a profile interactively",
         "  ccs remove PROFILE     # remove a profile",
         "  ccs PROFILE            # show profile details",
@@ -744,10 +767,7 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "list" || command === "l") {
-        const entries = Object.entries(profiles.profiles ?? {});
-        for (const [name, profile] of entries) {
-            console.log(`${textBlue(name)}\t${profile.baseURL}\t${profile.apiKey ? textDim(maskSecret(profile.apiKey)) : textDim("(empty)")}`);
-        }
+        await printProfileList(profiles);
         return;
     }
     if (command === "add") {
