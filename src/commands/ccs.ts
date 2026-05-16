@@ -827,8 +827,8 @@ async function printStatus(): Promise<Profile | null> {
 
 function printHelp(): void {
   console.log([
-    "Usage:",
-    "  ccs                    # show current profile and usage",
+    "Commands:",
+    "  ccs                    # show current profile, usage, and commands",
     "  ccs init [-y]          # preview init, or apply with -y",
     "  ccs sync [-y]          # preview sync, or apply with -y",
     "  ccs status             # show current profile",
@@ -846,9 +846,9 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (!command) {
     const profile = await printStatus();
+    await printUsageLine(profile);
     console.log("");
     printHelp();
-    await printUsageLine(profile);
     return;
   }
 
