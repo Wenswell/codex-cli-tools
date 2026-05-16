@@ -16,9 +16,12 @@ import {
   maskSecret,
   textBlue,
   textBold,
+  textCyan,
   textDim,
   textGreen,
+  textMagenta,
   textRed,
+  textYellow,
   visibleLength,
 } from "../lib/text.js";
 import {
@@ -602,6 +605,22 @@ function formatApiKey(apiKey: string): string {
   return apiKey ? textDim(maskSecret(apiKey)) : textDim("(empty)");
 }
 
+function colorProfileName(value: string): string {
+  return textGreen(value);
+}
+
+function colorSystemLabel(value: string): string {
+  return textYellow(value);
+}
+
+function colorUrl(value: string): string {
+  return textCyan(value);
+}
+
+function colorPath(value: string): string {
+  return textBlue(value);
+}
+
 function formatSystemLabel(): string {
   const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
   const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
@@ -609,7 +628,7 @@ function formatSystemLabel(): string {
 }
 
 function printProfileSummary(label: string, name: string, profile: Profile): void {
-  printKeyValue(`${label}:`, `${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+  printKeyValue(`${label}:`, `${colorProfileName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
 }
 
 function printKeyValue(label: string, value: string): void {
@@ -703,9 +722,9 @@ function formatCost(value: number): string {
 
 function formatUsage(result: UsageResult): string {
   return [
-    textGreen(formatCost(result.used)),
-    `${textBlue(prettifyBigNum(result.inputTokens))}↑`,
-    `${textBlue(prettifyBigNum(result.outputTokens))}↓`,
+    textYellow(formatCost(result.used)),
+    `${textCyan(prettifyBigNum(result.inputTokens))}↑`,
+    `${textMagenta(prettifyBigNum(result.outputTokens))}↓`,
     `${textDim(prettifyBigNum(result.cacheReadTokens))}↻`,
     `${textDim(prettifyBigNum(result.requests))}⤨`,
   ].join("  ");
@@ -837,14 +856,14 @@ async function printStatus(): Promise<Profile | null> {
   const profile = profiles.profiles?.[current];
   const systemLabel = formatSystemLabel();
   if (!profile) {
-    printKeyValue("current:", `${textDim("none")}  ${textBlue(systemLabel)}`);
-    printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+    printKeyValue("current:", `${textDim("none")}  ${colorSystemLabel(systemLabel)}`);
+    printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
     return null;
   }
   const normalized = assertProfile(profile, current);
-  printKeyValue("current:", `${textBlue(current)}  ${textBlue(systemLabel)}`);
-  printKeyValue("api:", `${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
-  printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+  printKeyValue("current:", `${colorProfileName(current)}  ${colorSystemLabel(systemLabel)}`);
+  printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
+  printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
   return normalized;
 }
 
@@ -872,8 +891,8 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
 
   printTable(rows.map((row) => (
     [
-      textBlue(row.name),
-      row.profile.baseURL,
+      colorProfileName(row.name),
+      colorUrl(row.profile.baseURL),
       row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
       ...(includeUsage ? [row.usage] : []),
     ]
