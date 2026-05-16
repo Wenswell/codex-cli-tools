@@ -16,14 +16,21 @@ import {
   maskSecret,
   textBlue,
   textBold,
-  textCyan,
   textDim,
   textGreen,
-  textMagenta,
   textRed,
-  textYellow,
   visibleLength,
 } from "../lib/text.js";
+import {
+  colorCost,
+  colorHost,
+  colorInput,
+  colorName,
+  colorOutput,
+  colorPath,
+  colorUrl,
+  printKeyValue,
+} from "../lib/output.js";
 import {
   listTomlSectionNames,
   mergeTomlModelProviderSections,
@@ -67,6 +74,12 @@ type UsageResult = {
   outputTokens: number;
   cacheReadTokens: number;
   requests: number;
+};
+
+type ParsedCcsArgs = {
+  command: string;
+  args: string[];
+  includeUsage: boolean;
 };
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -605,22 +618,6 @@ function formatApiKey(apiKey: string): string {
   return apiKey ? textDim(maskSecret(apiKey)) : textDim("(empty)");
 }
 
-function colorProfileName(value: string): string {
-  return textGreen(value);
-}
-
-function colorSystemLabel(value: string): string {
-  return textYellow(value);
-}
-
-function colorUrl(value: string): string {
-  return textCyan(value);
-}
-
-function colorPath(value: string): string {
-  return textBlue(value);
-}
-
 function formatSystemLabel(): string {
   const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
   const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
@@ -628,11 +625,7 @@ function formatSystemLabel(): string {
 }
 
 function printProfileSummary(label: string, name: string, profile: Profile): void {
-  printKeyValue(`${label}:`, `${colorProfileName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
-}
-
-function printKeyValue(label: string, value: string): void {
-  console.log(`${label.padEnd(8)} ${value}`);
+  printKeyValue(`${label}:`, `${colorName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
 }
 
 function buildUsageUrl(baseURL: string): string | null {
@@ -722,9 +715,9 @@ function formatCost(value: number): string {
 
 function formatUsage(result: UsageResult): string {
   return [
-    textYellow(formatCost(result.used)),
-    `${textCyan(prettifyBigNum(result.inputTokens))}↑`,
-    `${textMagenta(prettifyBigNum(result.outputTokens))}↓`,
+    colorCost(formatCost(result.used)),
+    `${colorInput(prettifyBigNum(result.inputTokens))}↑`,
+    `${colorOutput(prettifyBigNum(result.outputTokens))}↓`,
     `${textDim(prettifyBigNum(result.cacheReadTokens))}↻`,
     `${textDim(prettifyBigNum(result.requests))}⤨`,
   ].join("  ");
@@ -856,12 +849,12 @@ async function printStatus(): Promise<Profile | null> {
   const profile = profiles.profiles?.[current];
   const systemLabel = formatSystemLabel();
   if (!profile) {
-    printKeyValue("current:", `${textDim("none")}  ${colorSystemLabel(systemLabel)}`);
+    printKeyValue("current:", `${textDim("none")}  ${colorHost(systemLabel)}`);
     printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
     return null;
   }
   const normalized = assertProfile(profile, current);
-  printKeyValue("current:", `${colorProfileName(current)}  ${colorSystemLabel(systemLabel)}`);
+  printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}`);
   printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
   printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
   return normalized;
@@ -891,7 +884,7 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
 
   printTable(rows.map((row) => (
     [
-      colorProfileName(row.name),
+      colorName(row.name),
       colorUrl(row.profile.baseURL),
       row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
       ...(includeUsage ? [row.usage] : []),
@@ -902,26 +895,77 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
 function printHelp(): void {
   console.log([
     textBold("Commands:"),
-    "  ccs                    # show current profile, usage, and commands",
-    "  ccs init [-y]          # preview init, or apply with -y",
-    "  ccs sync [-y]          # preview sync, or apply with -y",
-    "  ccs status             # show current profile",
-    "  ccs list | l [--usage] # list profiles, optionally fetching usage",
-    "  ccs add [PROFILE]      # add or update a profile interactively",
-    "  ccs remove PROFILE     # remove a profile",
-    "  ccs PROFILE            # show profile details",
-    "  ccs toggle [PROFILE]   # switch profile, or toggle configured profiles",
+    "  ccs [--no-usage]",
+    "  ccs status [--no-usage]",
+    "  ccs usage [PROFILE|--all]",
+    "  ccs list | l [--usage]",
+    "  ccs init [-y]",
+    "  ccs sync [-y]",
+    "  ccs add [PROFILE]",
+    "  ccs remove PROFILE",
+    "  ccs toggle [PROFILE]",
+    "  ccs PROFILE [--no-usage]",
   ].join("\n"));
 }
 
+function printUsageHelp(): void {
+  console.log(textDim("Usage: ccs [status|usage|list|init|sync|add|remove|toggle|PROFILE] [--no-usage]"));
+}
+
+function parseCcsArgs(argv: string[]): ParsedCcsArgs {
+  let includeUsage = true;
+  const args: string[] = [];
+  for (const arg of argv) {
+    if (arg === "--no-usage") {
+      includeUsage = false;
+      continue;
+    }
+    args.push(arg);
+  }
+
+  return {
+    command: args[0] ?? "",
+    args: args.slice(1),
+    includeUsage,
+  };
+}
+
+async function printUsageCommand(profiles: ProfilesFile, args: string[]): Promise<void> {
+  const includeAll = args.includes("--all") || args.includes("-a");
+  if (includeAll) {
+    const unknown = args.find((arg) => arg !== "--all" && arg !== "-a");
+    if (unknown) {
+      throw new Error(`unknown argument for ccs usage --all: ${unknown}`);
+    }
+    await printProfileList(profiles, true);
+    return;
+  }
+
+  if (args.length > 1) {
+    throw new Error("usage: ccs usage [PROFILE|--all]");
+  }
+
+  const name = args[0] ?? profiles.current ?? "input";
+  const profile = profiles.profiles?.[name];
+  if (!profile) {
+    throw new Error(`profile not found: ${name}`);
+  }
+  const normalized = assertProfile(profile, name);
+  printProfileSummary("profile", name, normalized);
+  await printUsageLine(normalized);
+}
+
 export async function runCcs(argv: string[]): Promise<void> {
-  const command = argv[0] ?? "";
+  const parsed = parseCcsArgs(argv);
+  const { command, args, includeUsage } = parsed;
   const profiles = await readProfiles();
 
   if (!command) {
     const profile = await printStatus();
-    await printUsageLine(profile);
-    printHelp();
+    if (includeUsage) {
+      await printUsageLine(profile);
+    }
+    printUsageHelp();
     return;
   }
 
@@ -931,7 +975,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "init") {
-    if (hasPreviewFlag(argv.slice(1)) || !hasYesFlag(argv.slice(1))) {
+    if (hasPreviewFlag(args) || !hasYesFlag(args)) {
       await printInitDryRun();
       return;
     }
@@ -967,7 +1011,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "sync") {
-    if (hasPreviewFlag(argv.slice(1)) || !hasYesFlag(argv.slice(1))) {
+    if (hasPreviewFlag(args) || !hasYesFlag(args)) {
       await printSyncDryRun();
       return;
     }
@@ -1004,35 +1048,43 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "list" || command === "l") {
-    const listArgs = argv.slice(1);
-    const unknown = listArgs.find((arg) => arg !== "--usage" && arg !== "-u");
+    const unknown = args.find((arg) => arg !== "--usage" && arg !== "-u");
     if (unknown) {
       throw new Error(`unknown argument for ccs list: ${unknown}`);
     }
-    await printProfileList(profiles, listArgs.some((arg) => arg === "--usage" || arg === "-u"));
+    await printProfileList(profiles, includeUsage && args.some((arg) => arg === "--usage" || arg === "-u"));
+    return;
+  }
+
+  if (command === "usage") {
+    await printUsageCommand(profiles, args);
     return;
   }
 
   if (command === "add") {
-    await addProfile(argv[1]);
+    await addProfile(args[0]);
     return;
   }
 
   if (command === "remove" || command === "rm" || command === "delete") {
-    await removeProfile(argv[1]);
+    await removeProfile(args[0]);
     return;
   }
 
   if (command === "status") {
     const profile = await printStatus();
-    await printUsageLine(profile);
+    if (includeUsage) {
+      await printUsageLine(profile);
+    }
     return;
   }
 
   if (command === "toggle") {
-    if (argv[1]) {
-      const profile = await switchProfile(argv[1]);
-      await printUsageLine(profile);
+    if (args[0]) {
+      const profile = await switchProfile(args[0]);
+      if (includeUsage) {
+        await printUsageLine(profile);
+      }
       return;
     }
 
@@ -1043,13 +1095,17 @@ export async function runCcs(argv: string[]): Promise<void> {
     const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
     const next = toggle[(index + 1) % toggle.length];
     const profile = await switchProfile(next);
-    await printUsageLine(profile);
+    if (includeUsage) {
+      await printUsageLine(profile);
+    }
     return;
   }
 
   if (profiles.profiles?.[command]) {
     printProfile(command, profiles);
-    await printUsageLine(assertProfile(profiles.profiles[command], command));
+    if (includeUsage) {
+      await printUsageLine(assertProfile(profiles.profiles[command], command));
+    }
     return;
   }
 
