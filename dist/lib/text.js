@@ -18,13 +18,13 @@ export function textDim(value) {
     return withAnsi(2, value);
 }
 export function textBlue(value) {
-    return withAnsi(34, value);
+    return withAnsi("38;5;81", value);
 }
 export function textGreen(value) {
-    return withAnsi(32, value);
+    return withAnsi("38;5;114", value);
 }
 export function textRed(value) {
-    return withAnsi(31, value);
+    return withAnsi("38;5;203", value);
 }
 export function bgBlue(value) {
     return withAnsi("30;48;5;153", value);
