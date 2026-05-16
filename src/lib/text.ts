@@ -24,15 +24,15 @@ export function textDim(value: string): string {
 }
 
 export function textBlue(value: string): string {
-  return withAnsi(34, value);
+  return withAnsi("38;5;81", value);
 }
 
 export function textGreen(value: string): string {
-  return withAnsi(32, value);
+  return withAnsi("38;5;114", value);
 }
 
 export function textRed(value: string): string {
-  return withAnsi(31, value);
+  return withAnsi("38;5;203", value);
 }
 
 export function bgBlue(value: string): string {
