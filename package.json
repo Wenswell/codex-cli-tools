@@ -8,8 +8,8 @@
     "cx": "./dist/bin/cx.js",
     "cxx": "./dist/bin/cxx.js",
     "cxxs": "./dist/bin/cxxs.js",
-    "envsync": "./dist/bin/envsync.js",
-    "codex-session-move": "./dist/bin/codex-session-move.js"
+    "senv": "./dist/bin/senv.js",
+    "codex-rename": "./dist/bin/codex-rename.js"
   },
   "files": [
     "dist",

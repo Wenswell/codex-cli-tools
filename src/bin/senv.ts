@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { runEnvsync } from "../commands/envsync.js";
+import { runEnvsync } from "../commands/senv.js";
 
 runEnvsync(process.argv.slice(2)).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`envsync: ${message}`);
+  console.error(`senv: ${message}`);
   process.exitCode = 1;
 });

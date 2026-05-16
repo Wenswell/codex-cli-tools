@@ -87,9 +87,9 @@ function normalizeInputPath(path: string): string {
 
 function printHelp(): void {
   console.log([
-    "codex-session-move OLD_PATH NEW_PATH",
-    "codex-session-move OLD_PATH NEW_PATH --prefix",
-    "codex-session-move OLD_PATH NEW_PATH --prefix --apply",
+    "codex-rename OLD_PATH NEW_PATH",
+    "codex-rename OLD_PATH NEW_PATH --prefix",
+    "codex-rename OLD_PATH NEW_PATH --prefix --apply",
     "",
     "Default mode is dry-run. Use --apply to modify Codex state.",
   ].join("\n"));

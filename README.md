@@ -7,7 +7,7 @@ Personal Codex CLI helpers for Linux and macOS.
 - Node.js 20+
 - pnpm
 - `codex` CLI for `cx`, `cxx`, and `cxxs`
-- `sqlite3` CLI for `codex-session-move`
+- `sqlite3` CLI for `codex-rename`
 
 ## Install
 
@@ -22,20 +22,20 @@ pnpm link --global
 From a private Git repository:
 
 ```bash
-pnpm add -g git+ssh://git@github.com/YOUR_NAME/codex-tools.git#master
+pnpm add -g github:Wenswell/codex-cli-tools
 ```
 
 Update to the latest version on another machine with the same command:
 
 ```bash
-pnpm add -g git+ssh://git@github.com/YOUR_NAME/codex-tools.git#master
+pnpm add -g github:Wenswell/codex-cli-tools
 ```
 
 If you clone the repository on that machine and want a live development link:
 
 ```bash
-git clone git@github.com:YOUR_NAME/codex-tools.git
-cd codex-tools
+git clone git@github.com:Wenswell/codex-cli-tools.git
+cd codex-cli-tools
 pnpm install
 pnpm build
 pnpm link --global
@@ -48,8 +48,8 @@ ccs
 cx
 cxx
 cxxs
-envsync
-codex-session-move
+senv
+codex-rename
 ```
 
 ## cx / cxx / cxxs
@@ -265,32 +265,32 @@ Behavior:
 - Does not print API keys directly; status output masks keys.
 - Fails if the profile or API key is missing.
 
-## envsync
+## senv
 
-`envsync` regenerates a target env file from an example env file while preserving existing values.
+`senv` regenerates a target env file from an example env file while preserving existing values.
 
 Default:
 
 ```bash
-envsync -y
+senv -y
 ```
 
 Equivalent to:
 
 ```bash
-envsync --source .env.example --target .env -y
+senv --source .env.example --target .env -y
 ```
 
-Run `envsync` without arguments to print help.
+Run `senv` without arguments to print help.
 
 Default mode is dry-run. Nothing is modified unless `-y` or `--yes` is provided.
 
 Options:
 
 ```bash
-envsync -y
-envsync --source .env.example --target .env.local -y
-envsync -b -y
+senv -y
+senv --source .env.example --target .env.local -y
+senv -b -y
 ```
 
 `-b` is short for `--backup`.
@@ -320,9 +320,9 @@ Important: an intentionally empty target value is filled when the source has a n
 
 CLI output includes the target file and counts/lists for added, filled defaults, preserved, preserved empty, and extra keys.
 
-## codex-session-move
+## codex-rename
 
-`codex-session-move` updates local Codex session directory associations after a project folder is renamed.
+`codex-rename` updates local Codex session directory associations after a project folder is renamed.
 
 Codex stores the directory association in:
 
@@ -337,9 +337,9 @@ Codex stores the directory association in:
 Usage:
 
 ```bash
-codex-session-move OLD_PATH NEW_PATH
-codex-session-move OLD_PATH NEW_PATH --prefix
-codex-session-move OLD_PATH NEW_PATH --prefix --apply
+codex-rename OLD_PATH NEW_PATH
+codex-rename OLD_PATH NEW_PATH --prefix
+codex-rename OLD_PATH NEW_PATH --prefix --apply
 ```
 
 Default mode is dry-run. Nothing is modified unless `--apply` is provided.
@@ -353,7 +353,7 @@ Path behavior:
 Example:
 
 ```bash
-codex-session-move /home/me/repos/old /home/me/repos/new --prefix --apply
+codex-rename /home/me/repos/old /home/me/repos/new --prefix --apply
 ```
 
 This maps:
@@ -406,8 +406,8 @@ pnpm build
 Run commands locally from `dist` after building:
 
 ```bash
-node dist/bin/envsync.js --help
-node dist/bin/codex-session-move.js --help
+node dist/bin/senv.js --help
+node dist/bin/codex-rename.js --help
 ```
 
 Check TypeScript:
