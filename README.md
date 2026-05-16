@@ -121,6 +121,7 @@ ccs init [-y]
 ccs sync [-y]
 ccs status
 ccs list
+ccs list --usage
 ccs l
 ccs add [PROFILE]
 ccs remove NAME
@@ -266,7 +267,7 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys.
-- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
+- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
 ## senv

@@ -4,6 +4,9 @@ export function maskSecret(value) {
     }
     return `${value.slice(0, 6)}***${value.slice(-3)}`;
 }
+export function visibleLength(value) {
+    return value.replace(/\u001b\[[0-9;]*m/g, "").length;
+}
 const canColorize = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 function withAnsi(code, value) {
     if (!canColorize) {
