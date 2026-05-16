@@ -2,6 +2,8 @@
 
 Personal Codex CLI helpers for Linux and macOS.
 
+TTY output uses color for status, paths, warnings, and summaries. Set `NO_COLOR=1` to disable colors.
+
 ## Requirements
 
 - Node.js 20+
