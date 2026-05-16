@@ -203,10 +203,10 @@ function buildConfigSection(plan) {
 }
 function printPreviewSummary(title, modifiedFiles, backupFiles, warnings) {
     console.log(textBold(`Plan: ${title}`));
-    console.log("Dry run only. Re-run with -y or --yes to apply changes.");
-    console.log(`Will modify: ${formatList(modifiedFiles)}`);
-    console.log(`Will back up: ${formatList(backupFiles)}`);
-    console.log(`Warnings: ${warnings.length}`);
+    console.log(textDim("Dry run only. Re-run with -y or --yes to apply changes."));
+    console.log(`Will modify: ${textBlue(formatList(modifiedFiles))}`);
+    console.log(`Will back up: ${textBlue(formatList(backupFiles))}`);
+    console.log(`Warnings: ${warnings.length === 0 ? textDim("0") : textRed(String(warnings.length))}`);
 }
 function collectChangedPreviewFiles(files) {
     return files.filter((file) => {
@@ -438,7 +438,7 @@ async function addProfile(defaultName) {
         input.close();
     }
     await writeProfiles({ ...data, profiles, current: data.current ?? name });
-    console.log(`profile saved: ${name}`);
+    console.log(`profile saved: ${textGreen(name)}`);
 }
 function printProfile(name, profiles) {
     const profile = profiles.profiles?.[name];
@@ -446,14 +446,14 @@ function printProfile(name, profiles) {
         throw new Error(`profile not found: ${name}`);
     }
     const normalized = assertProfile(profile, name);
-    console.log(`profile: ${name}`);
-    console.log(`baseURL: ${normalized.baseURL}`);
-    console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
+    console.log(`profile: ${textBlue(name)}`);
+    console.log(`baseURL: ${textBlue(normalized.baseURL)}`);
+    console.log(`apiKey: ${normalized.apiKey ? textDim(maskSecret(normalized.apiKey)) : textDim("(empty)")}`);
 }
-function printProfileDetails(label, profile) {
-    console.log(label);
-    console.log(`baseURL: ${profile.baseURL}`);
-    console.log(`apiKey: ${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);
+function printProfileDetails(name, profile) {
+    console.log(`profile: ${textBlue(name)}`);
+    console.log(`baseURL: ${textBlue(profile.baseURL)}`);
+    console.log(`apiKey: ${profile.apiKey ? textDim(maskSecret(profile.apiKey)) : textDim("(empty)")}`);
 }
 function buildUsageUrl(baseURL) {
     const value = baseURL.trim();
@@ -540,21 +540,21 @@ function formatCost(value) {
 }
 function formatUsage(result) {
     return [
-        formatCost(result.used),
-        `${prettifyBigNum(result.inputTokens)}↑`,
-        `${prettifyBigNum(result.outputTokens)}↓`,
-        `${prettifyBigNum(result.cacheReadTokens)}↻`,
-        `${prettifyBigNum(result.requests)}⤨`,
+        textGreen(formatCost(result.used)),
+        `${textBlue(prettifyBigNum(result.inputTokens))}↑`,
+        `${textBlue(prettifyBigNum(result.outputTokens))}↓`,
+        `${textDim(prettifyBigNum(result.cacheReadTokens))}↻`,
+        `${textDim(prettifyBigNum(result.requests))}⤨`,
     ].join("  ");
 }
 async function printUsageLine(profile) {
     const time = formatClockTime(new Date());
     if (!profile?.apiKey || !profile.baseURL.trim()) {
-        console.log(`usage: ${time} skipped`);
+        console.log(`usage: ${textDim(time)} ${textDim("skipped")}`);
         return;
     }
     const usage = await fetchUsage(profile);
-    console.log(`usage: ${time} ${usage ? formatUsage(usage) : "unavailable"}`);
+    console.log(`usage: ${textDim(time)} ${usage ? formatUsage(usage) : textRed("unavailable")}`);
 }
 function formatClockTime(date) {
     const pad = (value) => value.toString().padStart(2, "0");
@@ -604,7 +604,7 @@ async function removeProfile(name) {
     const current = data.current === name ? names[0] : data.current;
     const toggle = data.toggle?.filter((item) => item !== name);
     await writeProfiles({ ...data, profiles, current, toggle });
-    console.log(`profile removed: ${name}`);
+    console.log(`profile removed: ${textRed(name)}`);
 }
 async function switchProfile(name) {
     const data = await readProfiles();
@@ -627,7 +627,7 @@ async function switchProfile(name) {
         current: name,
         profiles,
     });
-    printProfileDetails(`profile: ${name}`, normalized);
+    printProfileDetails(name, normalized);
     return normalized;
 }
 async function printStatus() {
@@ -635,22 +635,22 @@ async function printStatus() {
     const current = profiles.current ?? "input";
     const profile = profiles.profiles?.[current];
     if (!profile) {
-        console.log("current: none");
-        console.log(`profiles: ${profilesPath()}`);
-        console.log(`codex config: ${codexConfigPath()}`);
+        console.log(`current: ${textDim("none")}`);
+        console.log(`profiles: ${textBlue(profilesPath())}`);
+        console.log(`codex config: ${textBlue(codexConfigPath())}`);
         return null;
     }
     const normalized = assertProfile(profile, current);
-    console.log(`current: ${current}`);
-    console.log(`baseURL: ${normalized.baseURL}`);
-    console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
-    console.log(`profiles: ${profilesPath()}`);
-    console.log(`codex config: ${codexConfigPath()}`);
+    console.log(`current: ${textBlue(current)}`);
+    console.log(`baseURL: ${textBlue(normalized.baseURL)}`);
+    console.log(`apiKey: ${normalized.apiKey ? textDim(maskSecret(normalized.apiKey)) : textDim("(empty)")}`);
+    console.log(`profiles: ${textBlue(profilesPath())}`);
+    console.log(`codex config: ${textBlue(codexConfigPath())}`);
     return normalized;
 }
 function printHelp() {
     console.log([
-        "Commands:",
+        textBold("Commands:"),
         "  ccs                    # show current profile, usage, and commands",
         "  ccs init [-y]          # preview init, or apply with -y",
         "  ccs sync [-y]          # preview sync, or apply with -y",
@@ -703,10 +703,10 @@ export async function runCcs(argv) {
             await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: profile.apiKey }), 0o600);
         }
         if (backupDir) {
-            console.log(`backup: ${backupDir}`);
+            console.log(`backup: ${textBlue(backupDir)}`);
         }
-        console.log(`profiles written: ${profilesPath()}`);
-        console.log(`codex config synced: ${codexConfigPath()}`);
+        console.log(`profiles written: ${textGreen(profilesPath())}`);
+        console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
         return;
     }
     if (command === "sync") {
@@ -734,19 +734,19 @@ export async function runCcs(argv) {
         const synced = await syncProfiles();
         await syncCodexConfigFromTemplate();
         if (backupDir) {
-            console.log(`backup: ${backupDir}`);
+            console.log(`backup: ${textBlue(backupDir)}`);
         }
-        console.log(`profiles synced: ${profilesPath()}`);
-        console.log(`codex config synced: ${codexConfigPath()}`);
+        console.log(`profiles synced: ${textGreen(profilesPath())}`);
+        console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
         for (const name of Object.keys(synced.profiles ?? {})) {
-            console.log(`  ${name}`);
+            console.log(`  ${textBlue(name)}`);
         }
         return;
     }
     if (command === "list" || command === "l") {
         const entries = Object.entries(profiles.profiles ?? {});
         for (const [name, profile] of entries) {
-            console.log(`${name}\t${profile.baseURL}\t${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);
+            console.log(`${textBlue(name)}\t${profile.baseURL}\t${profile.apiKey ? textDim(maskSecret(profile.apiKey)) : textDim("(empty)")}`);
         }
         return;
     }
@@ -784,6 +784,6 @@ export async function runCcs(argv) {
         await printUsageLine(assertProfile(profiles.profiles[command], command));
         return;
     }
-    console.error(`unknown command: ${basename(command)}`);
+    console.error(`${textRed("unknown command:")} ${basename(command)}`);
     process.exitCode = 1;
 }

@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { ensureDir, writeTextFile } from "../lib/fs.js";
 import { codexDir } from "../lib/paths.js";
 import { sqliteJson, sqliteRun, sqlString } from "../lib/sqlite.js";
+import { textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
 function parseArgs(argv) {
     if (argv.includes("--help") || argv.includes("-h")) {
         printHelp();
@@ -305,32 +306,32 @@ async function verifyRollouts(rows) {
     return synced;
 }
 function printDryRun(args, dbPath, rows) {
-    console.log(`mode: ${args.prefix ? "prefix" : "exact"}`);
-    console.log(`state: ${dbPath}`);
-    console.log(`old: ${args.oldPath}`);
-    console.log(`new: ${args.newPath}`);
-    console.log(`matched sessions: ${rows.length}`);
+    console.log(`mode: ${textBlue(args.prefix ? "prefix" : "exact")}`);
+    console.log(`state: ${textBlue(dbPath)}`);
+    console.log(`old: ${textRed(args.oldPath)}`);
+    console.log(`new: ${textGreen(args.newPath)}`);
+    console.log(`matched sessions: ${textGreen(String(rows.length))}`);
     console.log("");
-    console.log("will update:");
+    console.log(textBold("will update:"));
     for (const row of rows) {
-        console.log(`  ${row.cwd} -> ${row.newCwd}`);
+        console.log(`  ${textRed(row.cwd)} ${textDim("->")} ${textGreen(row.newCwd)}`);
     }
     console.log("");
-    console.log("rollout files:");
+    console.log(textBold("rollout files:"));
     for (const path of uniqueRolloutPaths(rows)) {
-        console.log(`  ${path}`);
+        console.log(`  ${textBlue(path)}`);
     }
     console.log("");
-    console.log("dry-run only. Add --apply to write changes.");
+    console.log(textDim("dry-run only. Add --apply to write changes."));
 }
 export async function runCodexSessionMove(argv) {
     const args = parseArgs(argv);
     const dbPath = await findStateDb();
     const rows = await loadMatches(dbPath, args);
     if (rows.length === 0) {
-        console.log(`mode: ${args.prefix ? "prefix" : "exact"}`);
-        console.log(`state: ${dbPath}`);
-        console.log(`matched sessions: 0`);
+        console.log(`mode: ${textBlue(args.prefix ? "prefix" : "exact")}`);
+        console.log(`state: ${textBlue(dbPath)}`);
+        console.log(`matched sessions: ${textDim("0")}`);
         return;
     }
     await preflightRollouts(rows);
@@ -344,10 +345,10 @@ export async function runCodexSessionMove(argv) {
     const oldRemaining = await countMatches(dbPath, args);
     const threadsAtNewCwd = await countNewCwds(dbPath, rows);
     const synced = await verifyRollouts(rows);
-    console.log(`backup: ${backupDir}`);
-    console.log(`sqlite updated: ${rows.length}`);
-    console.log(`jsonl updated: ${jsonlUpdated}`);
-    console.log(`old cwd remaining: ${oldRemaining}`);
-    console.log(`threads at new cwd: ${threadsAtNewCwd}`);
-    console.log(`jsonl synced: ${synced}`);
+    console.log(`backup: ${textBlue(backupDir)}`);
+    console.log(`sqlite updated: ${textGreen(String(rows.length))}`);
+    console.log(`jsonl updated: ${textGreen(String(jsonlUpdated))}`);
+    console.log(`old cwd remaining: ${oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining))}`);
+    console.log(`threads at new cwd: ${textGreen(String(threadsAtNewCwd))}`);
+    console.log(`jsonl synced: ${textGreen(String(synced))}`);
 }

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { textRed } from "../lib/text.js";
 
 export function runCodexSearch(args: string[], options: { bypassSandbox?: boolean; resume?: boolean } = {}): void {
   const codexArgs = ["--search"];
@@ -16,11 +17,11 @@ export function runCodexSearch(args: string[], options: { bypassSandbox?: boolea
 
   child.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
-      console.error("codex command not found. Install it with: pnpm add -g @openai/codex");
+      console.error(`${textRed("error:")} codex command not found. Install it with: pnpm add -g @openai/codex`);
       process.exit(127);
     }
 
-    console.error(`failed to run codex: ${error.message}`);
+    console.error(`${textRed("error:")} failed to run codex: ${error.message}`);
     process.exit(1);
   });
 

@@ -2,6 +2,7 @@ import { copyFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { textBlue, textBold, textDim, textGreen } from "../lib/text.js";
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 function parseArgs(argv) {
     if (argv.length === 0) {
@@ -164,15 +165,15 @@ function timestamp() {
     ].join("");
 }
 function printSummary(target, summary, apply) {
-    console.log(`${apply ? "updated" : "would update"}: ${target}`);
+    console.log(`${apply ? textGreen("updated") : textBlue("would update")}: ${textBlue(target)}`);
     if (!apply) {
-        console.log("dry-run only. Re-run with -y or --yes to apply changes.");
+        console.log(textDim("dry-run only. Re-run with -y or --yes to apply changes."));
     }
-    console.log(`added: ${summary.added.length}`);
-    console.log(`filled defaults: ${summary.filledDefaults.length}`);
-    console.log(`preserved: ${summary.preserved.length}`);
-    console.log(`preserved empty: ${summary.preservedEmpty.length}`);
-    console.log(`extra: ${summary.extra.length}`);
+    console.log(`added: ${textGreen(String(summary.added.length))}`);
+    console.log(`filled defaults: ${textGreen(String(summary.filledDefaults.length))}`);
+    console.log(`preserved: ${textDim(String(summary.preserved.length))}`);
+    console.log(`preserved empty: ${textDim(String(summary.preservedEmpty.length))}`);
+    console.log(`extra: ${textBlue(String(summary.extra.length))}`);
     printKeys("added keys", summary.added);
     printKeys("filled defaults keys", summary.filledDefaults);
     printKeys("extra keys", summary.extra);
@@ -181,9 +182,9 @@ function printKeys(label, keys) {
     if (keys.length === 0) {
         return;
     }
-    console.log(`${label}:`);
+    console.log(textBold(`${label}:`));
     for (const key of keys) {
-        console.log(`  ${key}`);
+        console.log(`  ${textBlue(key)}`);
     }
 }
 async function createBackup(target) {
@@ -217,7 +218,7 @@ export async function runEnvsync(argv) {
     }
     if (args.backup && existingTargetText !== null) {
         const backupPath = await createBackup(args.target);
-        console.log(`backup: ${backupPath}`);
+        console.log(`backup: ${textBlue(backupPath)}`);
     }
     await writeTextFile(args.target, result.text);
     printSummary(basename(args.target), result.summary, true);
