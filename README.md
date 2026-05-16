@@ -264,6 +264,7 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys.
+- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a final `usage:` line with local time. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable`, and missing keys print `usage: HH:MM:SS skipped`.
 - Fails if the profile or API key is missing.
 
 ## senv

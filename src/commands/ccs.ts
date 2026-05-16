@@ -56,6 +56,14 @@ type PreviewFile = {
   next: string;
 };
 
+type UsageResult = {
+  used: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  requests: number;
+};
+
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
     throw new Error(`profile ${name} is invalid`);
@@ -586,6 +594,123 @@ function printProfile(name: string, profiles: ProfilesFile): void {
   console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
 }
 
+function printProfileDetails(label: string, profile: Profile): void {
+  console.log(label);
+  console.log(`baseURL: ${profile.baseURL}`);
+  console.log(`apiKey: ${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);
+}
+
+function buildUsageUrl(baseURL: string): string | null {
+  const value = baseURL.trim();
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, "");
+    url.pathname = path === "" || path === "/v1" ? "/v1/usage" : `${path}/v1/usage`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function readNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function parseUsageResponse(value: unknown): UsageResult {
+  const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const usage = root.usage && typeof root.usage === "object" ? root.usage as Record<string, unknown> : {};
+  const today = usage.today && typeof usage.today === "object" ? usage.today as Record<string, unknown> : {};
+
+  return {
+    used: readNumber(today.actual_cost),
+    inputTokens: readNumber(today.input_tokens),
+    outputTokens: readNumber(today.output_tokens),
+    cacheReadTokens: readNumber(today.cache_read_tokens),
+    requests: readNumber(today.requests),
+  };
+}
+
+async function fetchUsage(profile: Profile): Promise<UsageResult | null> {
+  if (!profile.apiKey) {
+    return null;
+  }
+  const url = buildUsageUrl(profile.baseURL);
+  if (!url) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${profile.apiKey}`,
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return parseUsageResponse(await response.json());
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function prettifyBigNum(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${formatCompact(value / 1_000_000_000)}B`;
+  if (abs >= 1_000_000) return `${formatCompact(value / 1_000_000)}M`;
+  if (abs >= 1_000) return `${formatCompact(value / 1_000)}K`;
+  return Math.round(value).toString();
+}
+
+function formatCompact(value: number): string {
+  const fixed = value >= 10 ? value.toFixed(0) : value.toFixed(1);
+  return fixed.replace(/\.0$/, "");
+}
+
+function formatCost(value: number): string {
+  if (value === 0) return "$0";
+  if (value < 0.01) return `$${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatUsage(result: UsageResult): string {
+  return [
+    formatCost(result.used),
+    `${prettifyBigNum(result.inputTokens)}↑`,
+    `${prettifyBigNum(result.outputTokens)}↓`,
+    `${prettifyBigNum(result.cacheReadTokens)}↻`,
+    `${prettifyBigNum(result.requests)}⤨`,
+  ].join("  ");
+}
+
+async function printUsageLine(profile: Profile | null): Promise<void> {
+  const time = formatClockTime(new Date());
+  if (!profile?.apiKey || !profile.baseURL.trim()) {
+    console.log(`usage: ${time} skipped`);
+    return;
+  }
+
+  const usage = await fetchUsage(profile);
+  console.log(`usage: ${time} ${usage ? formatUsage(usage) : "unavailable"}`);
+}
+
+function formatClockTime(date: Date): string {
+  const pad = (value: number): string => value.toString().padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 async function askRequired(
   input: Prompt,
   label: string,
@@ -650,7 +775,7 @@ async function removeProfile(name: string): Promise<void> {
   console.log(`profile removed: ${name}`);
 }
 
-async function switchProfile(name: string): Promise<void> {
+async function switchProfile(name: string): Promise<Profile> {
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
   const profile = profiles[name];
@@ -677,12 +802,11 @@ async function switchProfile(name: string): Promise<void> {
     profiles,
   });
 
-  console.log(`profile: ${name}`);
-  console.log(`baseURL: ${normalized.baseURL}`);
-  console.log(`apiKey: ${maskSecret(normalized.apiKey)}`);
+  printProfileDetails(`profile: ${name}`, normalized);
+  return normalized;
 }
 
-async function printStatus(): Promise<void> {
+async function printStatus(): Promise<Profile | null> {
   const profiles = await readProfiles();
   const current = profiles.current ?? "input";
   const profile = profiles.profiles?.[current];
@@ -690,7 +814,7 @@ async function printStatus(): Promise<void> {
     console.log("current: none");
     console.log(`profiles: ${profilesPath()}`);
     console.log(`codex config: ${codexConfigPath()}`);
-    return;
+    return null;
   }
   const normalized = assertProfile(profile, current);
   console.log(`current: ${current}`);
@@ -698,6 +822,7 @@ async function printStatus(): Promise<void> {
   console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
   console.log(`profiles: ${profilesPath()}`);
   console.log(`codex config: ${codexConfigPath()}`);
+  return normalized;
 }
 
 function printHelp(): void {
@@ -720,9 +845,10 @@ export async function runCcs(argv: string[]): Promise<void> {
   const profiles = await readProfiles();
 
   if (!command) {
-    await printStatus();
+    const profile = await printStatus();
     console.log("");
     printHelp();
+    await printUsageLine(profile);
     return;
   }
 
@@ -823,13 +949,15 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "status") {
-    await printStatus();
+    const profile = await printStatus();
+    await printUsageLine(profile);
     return;
   }
 
   if (command === "toggle") {
     if (argv[1]) {
-      await switchProfile(argv[1]);
+      const profile = await switchProfile(argv[1]);
+      await printUsageLine(profile);
       return;
     }
 
@@ -839,12 +967,14 @@ export async function runCcs(argv: string[]): Promise<void> {
     }
     const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
     const next = toggle[(index + 1) % toggle.length];
-    await switchProfile(next);
+    const profile = await switchProfile(next);
+    await printUsageLine(profile);
     return;
   }
 
   if (profiles.profiles?.[command]) {
     printProfile(command, profiles);
+    await printUsageLine(assertProfile(profiles.profiles[command], command));
     return;
   }
 

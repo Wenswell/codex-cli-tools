@@ -450,6 +450,116 @@ function printProfile(name, profiles) {
     console.log(`baseURL: ${normalized.baseURL}`);
     console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
 }
+function printProfileDetails(label, profile) {
+    console.log(label);
+    console.log(`baseURL: ${profile.baseURL}`);
+    console.log(`apiKey: ${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);
+}
+function buildUsageUrl(baseURL) {
+    const value = baseURL.trim();
+    if (!value) {
+        return null;
+    }
+    try {
+        const url = new URL(value);
+        const path = url.pathname.replace(/\/+$/, "");
+        url.pathname = path === "" || path === "/v1" ? "/v1/usage" : `${path}/v1/usage`;
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+    }
+    catch {
+        return null;
+    }
+}
+function readNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function parseUsageResponse(value) {
+    const root = value && typeof value === "object" ? value : {};
+    const usage = root.usage && typeof root.usage === "object" ? root.usage : {};
+    const today = usage.today && typeof usage.today === "object" ? usage.today : {};
+    return {
+        used: readNumber(today.actual_cost),
+        inputTokens: readNumber(today.input_tokens),
+        outputTokens: readNumber(today.output_tokens),
+        cacheReadTokens: readNumber(today.cache_read_tokens),
+        requests: readNumber(today.requests),
+    };
+}
+async function fetchUsage(profile) {
+    if (!profile.apiKey) {
+        return null;
+    }
+    const url = buildUsageUrl(profile.baseURL);
+    if (!url) {
+        return null;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    try {
+        const response = await fetch(url, {
+            method: "GET",
+            headers: {
+                Authorization: `Bearer ${profile.apiKey}`,
+            },
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            return null;
+        }
+        return parseUsageResponse(await response.json());
+    }
+    catch {
+        return null;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+function prettifyBigNum(value) {
+    const abs = Math.abs(value);
+    if (abs >= 1_000_000_000)
+        return `${formatCompact(value / 1_000_000_000)}B`;
+    if (abs >= 1_000_000)
+        return `${formatCompact(value / 1_000_000)}M`;
+    if (abs >= 1_000)
+        return `${formatCompact(value / 1_000)}K`;
+    return Math.round(value).toString();
+}
+function formatCompact(value) {
+    const fixed = value >= 10 ? value.toFixed(0) : value.toFixed(1);
+    return fixed.replace(/\.0$/, "");
+}
+function formatCost(value) {
+    if (value === 0)
+        return "$0";
+    if (value < 0.01)
+        return `$${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+    return `$${value.toFixed(2)}`;
+}
+function formatUsage(result) {
+    return [
+        formatCost(result.used),
+        `${prettifyBigNum(result.inputTokens)}↑`,
+        `${prettifyBigNum(result.outputTokens)}↓`,
+        `${prettifyBigNum(result.cacheReadTokens)}↻`,
+        `${prettifyBigNum(result.requests)}⤨`,
+    ].join("  ");
+}
+async function printUsageLine(profile) {
+    const time = formatClockTime(new Date());
+    if (!profile?.apiKey || !profile.baseURL.trim()) {
+        console.log(`usage: ${time} skipped`);
+        return;
+    }
+    const usage = await fetchUsage(profile);
+    console.log(`usage: ${time} ${usage ? formatUsage(usage) : "unavailable"}`);
+}
+function formatClockTime(date) {
+    const pad = (value) => value.toString().padStart(2, "0");
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 async function askRequired(input, label, current) {
     const value = await askOptional(input, label, current);
     if (!value) {
@@ -517,9 +627,8 @@ async function switchProfile(name) {
         current: name,
         profiles,
     });
-    console.log(`profile: ${name}`);
-    console.log(`baseURL: ${normalized.baseURL}`);
-    console.log(`apiKey: ${maskSecret(normalized.apiKey)}`);
+    printProfileDetails(`profile: ${name}`, normalized);
+    return normalized;
 }
 async function printStatus() {
     const profiles = await readProfiles();
@@ -529,7 +638,7 @@ async function printStatus() {
         console.log("current: none");
         console.log(`profiles: ${profilesPath()}`);
         console.log(`codex config: ${codexConfigPath()}`);
-        return;
+        return null;
     }
     const normalized = assertProfile(profile, current);
     console.log(`current: ${current}`);
@@ -537,6 +646,7 @@ async function printStatus() {
     console.log(`apiKey: ${normalized.apiKey ? maskSecret(normalized.apiKey) : "(empty)"}`);
     console.log(`profiles: ${profilesPath()}`);
     console.log(`codex config: ${codexConfigPath()}`);
+    return normalized;
 }
 function printHelp() {
     console.log([
@@ -556,9 +666,10 @@ export async function runCcs(argv) {
     const command = argv[0] ?? "";
     const profiles = await readProfiles();
     if (!command) {
-        await printStatus();
+        const profile = await printStatus();
         console.log("");
         printHelp();
+        await printUsageLine(profile);
         return;
     }
     if (command === "help" || command === "--help" || command === "-h") {
@@ -648,12 +759,14 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "status") {
-        await printStatus();
+        const profile = await printStatus();
+        await printUsageLine(profile);
         return;
     }
     if (command === "toggle") {
         if (argv[1]) {
-            await switchProfile(argv[1]);
+            const profile = await switchProfile(argv[1]);
+            await printUsageLine(profile);
             return;
         }
         const toggle = profiles.toggle ?? [];
@@ -662,11 +775,13 @@ export async function runCcs(argv) {
         }
         const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
         const next = toggle[(index + 1) % toggle.length];
-        await switchProfile(next);
+        const profile = await switchProfile(next);
+        await printUsageLine(profile);
         return;
     }
     if (profiles.profiles?.[command]) {
         printProfile(command, profiles);
+        await printUsageLine(assertProfile(profiles.profiles[command], command));
         return;
     }
     console.error(`unknown command: ${basename(command)}`);
