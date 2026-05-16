@@ -5,7 +5,7 @@ import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
-import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, } from "../lib/text.js";
+import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
@@ -655,21 +655,28 @@ async function printStatus() {
     console.log(`codex config: ${textBlue(codexConfigPath())}`);
     return normalized;
 }
-async function printProfileList(profiles) {
+function padVisible(value, width) {
+    return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
+}
+function printTable(rows) {
+    const widths = rows[0]?.map((_, index) => (Math.max(...rows.map((row) => visibleLength(row[index] ?? ""))))) ?? [];
+    for (const row of rows) {
+        console.log(row.map((value, index) => padVisible(value, widths[index] ?? 0)).join("  ").trimEnd());
+    }
+}
+async function printProfileList(profiles, includeUsage) {
     const entries = Object.entries(profiles.profiles ?? {});
     const rows = await Promise.all(entries.map(async ([name, profile]) => ({
         name,
         profile,
-        usage: await formatProfileUsage(profile),
+        usage: includeUsage ? await formatProfileUsage(profile) : "",
     })));
-    for (const row of rows) {
-        console.log([
-            textBlue(row.name),
-            row.profile.baseURL,
-            row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-            row.usage,
-        ].join("\t"));
-    }
+    printTable(rows.map((row) => ([
+        textBlue(row.name),
+        row.profile.baseURL,
+        row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+        ...(includeUsage ? [row.usage] : []),
+    ])));
 }
 function printHelp() {
     console.log([
@@ -678,7 +685,7 @@ function printHelp() {
         "  ccs init [-y]          # preview init, or apply with -y",
         "  ccs sync [-y]          # preview sync, or apply with -y",
         "  ccs status             # show current profile",
-        "  ccs list | l           # list profiles with masked keys and usage",
+        "  ccs list | l [--usage] # list profiles, optionally fetching usage",
         "  ccs add [PROFILE]      # add or update a profile interactively",
         "  ccs remove PROFILE     # remove a profile",
         "  ccs PROFILE            # show profile details",
@@ -767,7 +774,12 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "list" || command === "l") {
-        await printProfileList(profiles);
+        const listArgs = argv.slice(1);
+        const unknown = listArgs.find((arg) => arg !== "--usage" && arg !== "-u");
+        if (unknown) {
+            throw new Error(`unknown argument for ccs list: ${unknown}`);
+        }
+        await printProfileList(profiles, listArgs.some((arg) => arg === "--usage" || arg === "-u"));
         return;
     }
     if (command === "add") {
