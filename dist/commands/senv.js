@@ -2,6 +2,7 @@ import { copyFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { colorCount, colorPath, printKeyValue } from "../lib/output.js";
 import { textBlue, textBold, textDim, textGreen } from "../lib/text.js";
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 function parseArgs(argv) {
@@ -165,15 +166,15 @@ function timestamp() {
     ].join("");
 }
 function printSummary(target, summary, apply) {
-    console.log(`${apply ? textGreen("updated") : textBlue("would update")}: ${textBlue(target)}`);
+    printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(target)}`, 16);
     if (!apply) {
         console.log(textDim("dry-run only. Re-run with -y or --yes to apply changes."));
     }
-    console.log(`added: ${textGreen(String(summary.added.length))}`);
-    console.log(`filled defaults: ${textGreen(String(summary.filledDefaults.length))}`);
-    console.log(`preserved: ${textDim(String(summary.preserved.length))}`);
-    console.log(`preserved empty: ${textDim(String(summary.preservedEmpty.length))}`);
-    console.log(`extra: ${textBlue(String(summary.extra.length))}`);
+    printKeyValue("added:", colorCount(String(summary.added.length)), 16);
+    printKeyValue("filled defaults:", colorCount(String(summary.filledDefaults.length)), 16);
+    printKeyValue("preserved:", textDim(String(summary.preserved.length)), 16);
+    printKeyValue("preserved empty:", textDim(String(summary.preservedEmpty.length)), 16);
+    printKeyValue("extra:", textBlue(String(summary.extra.length)), 16);
     printKeys("added keys", summary.added);
     printKeys("filled defaults keys", summary.filledDefaults);
     printKeys("extra keys", summary.extra);
