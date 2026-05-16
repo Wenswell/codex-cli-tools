@@ -609,7 +609,11 @@ function formatSystemLabel(): string {
 }
 
 function printProfileSummary(label: string, name: string, profile: Profile): void {
-  console.log(`${label}: ${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+  printKeyValue(`${label}:`, `${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+}
+
+function printKeyValue(label: string, value: string): void {
+  console.log(`${label.padEnd(8)} ${value}`);
 }
 
 function buildUsageUrl(baseURL: string): string | null {
@@ -719,12 +723,12 @@ async function formatProfileUsage(profile: Profile): Promise<string> {
 async function printUsageLine(profile: Profile | null): Promise<void> {
   const time = formatClockTime(new Date());
   if (!profile?.apiKey || !profile.baseURL.trim()) {
-    console.log(`usage: ${textDim(time)} ${textDim("skipped")}`);
+    printKeyValue("usage:", `${textDim(time)} ${textDim("skipped")}`);
     return;
   }
 
   const usage = await fetchUsage(profile);
-  console.log(`usage: ${textDim(time)} ${usage ? formatUsage(usage) : textRed("unavailable")}`);
+  printKeyValue("usage:", `${textDim(time)} ${usage ? formatUsage(usage) : textRed("unavailable")}`);
 }
 
 function formatClockTime(date: Date): string {
@@ -833,14 +837,14 @@ async function printStatus(): Promise<Profile | null> {
   const profile = profiles.profiles?.[current];
   const systemLabel = formatSystemLabel();
   if (!profile) {
-    console.log(`current: ${textDim("none")}  ${textBlue(systemLabel)}`);
-    console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+    printKeyValue("current:", `${textDim("none")}  ${textBlue(systemLabel)}`);
+    printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
     return null;
   }
   const normalized = assertProfile(profile, current);
-  console.log(`current: ${textBlue(current)}  ${textBlue(systemLabel)}`);
-  console.log(`api: ${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
-  console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+  printKeyValue("current:", `${textBlue(current)}  ${textBlue(systemLabel)}`);
+  printKeyValue("api:", `${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
+  printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
   return normalized;
 }
 
