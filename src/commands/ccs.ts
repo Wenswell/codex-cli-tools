@@ -892,24 +892,33 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
   )));
 }
 
-function printHelp(): void {
-  console.log([
-    textBold("Commands:"),
+function usageLines(): string[] {
+  return [
     "  ccs [--no-usage]",
     "  ccs status [--no-usage]",
-    "  ccs usage [PROFILE|--all]",
-    "  ccs list | l [--usage]",
-    "  ccs init [-y]",
-    "  ccs sync [-y]",
-    "  ccs add [PROFILE]",
-    "  ccs remove PROFILE",
-    "  ccs toggle [PROFILE]",
     "  ccs PROFILE [--no-usage]",
+    "  ccs toggle [PROFILE] [--no-usage]",
+    "  ccs usage [PROFILE|-a|--all]",
+    "  ccs list | l [-u|--usage]",
+    "  ccs init [-n|--dry-run|-y|--yes]",
+    "  ccs sync [-n|--dry-run|-y|--yes]",
+    "  ccs add [PROFILE]",
+    "  ccs remove | rm | delete PROFILE",
+  ];
+}
+
+function printHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    ...usageLines(),
   ].join("\n"));
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("Usage: ccs [status|usage|list|init|sync|add|remove|toggle|PROFILE] [--no-usage]"));
+  console.log([
+    textDim("Usage:"),
+    ...usageLines().map((line) => textDim(line)),
+  ].join("\n"));
 }
 
 function parseCcsArgs(argv: string[]): ParsedCcsArgs {
