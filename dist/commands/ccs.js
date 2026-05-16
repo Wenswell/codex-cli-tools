@@ -545,7 +545,7 @@ function printHelp() {
         "  ccs init [-y]          # preview init, or apply with -y",
         "  ccs sync [-y]          # preview sync, or apply with -y",
         "  ccs status             # show current profile",
-        "  ccs list               # list profiles with masked keys",
+        "  ccs list | l           # list profiles with masked keys",
         "  ccs add [PROFILE]      # add or update a profile interactively",
         "  ccs remove PROFILE     # remove a profile",
         "  ccs PROFILE            # show profile details",
@@ -632,7 +632,7 @@ export async function runCcs(argv) {
         }
         return;
     }
-    if (command === "list") {
+    if (command === "list" || command === "l") {
         const entries = Object.entries(profiles.profiles ?? {});
         for (const [name, profile] of entries) {
             console.log(`${name}\t${profile.baseURL}\t${profile.apiKey ? maskSecret(profile.apiKey) : "(empty)"}`);

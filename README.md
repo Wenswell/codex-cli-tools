@@ -119,6 +119,7 @@ ccs init [-y]
 ccs sync [-y]
 ccs status
 ccs list
+ccs l
 ccs add [PROFILE]
 ccs remove NAME
 ccs input
