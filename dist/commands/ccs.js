@@ -650,8 +650,8 @@ async function printStatus() {
 }
 function printHelp() {
     console.log([
-        "Usage:",
-        "  ccs                    # show current profile and usage",
+        "Commands:",
+        "  ccs                    # show current profile, usage, and commands",
         "  ccs init [-y]          # preview init, or apply with -y",
         "  ccs sync [-y]          # preview sync, or apply with -y",
         "  ccs status             # show current profile",
@@ -667,9 +667,9 @@ export async function runCcs(argv) {
     const profiles = await readProfiles();
     if (!command) {
         const profile = await printStatus();
+        await printUsageLine(profile);
         console.log("");
         printHelp();
-        await printUsageLine(profile);
         return;
     }
     if (command === "help" || command === "--help" || command === "-h") {
