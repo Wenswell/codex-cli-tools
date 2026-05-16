@@ -1,3 +1,4 @@
+import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -446,14 +447,21 @@ function printProfile(name, profiles) {
         throw new Error(`profile not found: ${name}`);
     }
     const normalized = assertProfile(profile, name);
-    console.log(`profile: ${textBlue(name)}`);
-    console.log(`baseURL: ${textBlue(normalized.baseURL)}`);
-    console.log(`apiKey: ${normalized.apiKey ? textDim(maskSecret(normalized.apiKey)) : textDim("(empty)")}`);
+    printProfileSummary("profile", name, normalized);
 }
 function printProfileDetails(name, profile) {
-    console.log(`profile: ${textBlue(name)}`);
-    console.log(`baseURL: ${textBlue(profile.baseURL)}`);
-    console.log(`apiKey: ${profile.apiKey ? textDim(maskSecret(profile.apiKey)) : textDim("(empty)")}`);
+    printProfileSummary("profile", name, profile);
+}
+function formatApiKey(apiKey) {
+    return apiKey ? textDim(maskSecret(apiKey)) : textDim("(empty)");
+}
+function formatSystemLabel() {
+    const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
+    const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
+    return `${username}@${host}`;
+}
+function printProfileSummary(label, name, profile) {
+    console.log(`${label}: ${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
 }
 function buildUsageUrl(baseURL) {
     const value = baseURL.trim();
@@ -641,18 +649,16 @@ async function printStatus() {
     const profiles = await readProfiles();
     const current = profiles.current ?? "input";
     const profile = profiles.profiles?.[current];
+    const systemLabel = formatSystemLabel();
     if (!profile) {
-        console.log(`current: ${textDim("none")}`);
-        console.log(`profiles: ${textBlue(profilesPath())}`);
-        console.log(`codex config: ${textBlue(codexConfigPath())}`);
+        console.log(`current: ${textDim("none")}  ${textBlue(systemLabel)}`);
+        console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
         return null;
     }
     const normalized = assertProfile(profile, current);
-    console.log(`current: ${textBlue(current)}`);
-    console.log(`baseURL: ${textBlue(normalized.baseURL)}`);
-    console.log(`apiKey: ${normalized.apiKey ? textDim(maskSecret(normalized.apiKey)) : textDim("(empty)")}`);
-    console.log(`profiles: ${textBlue(profilesPath())}`);
-    console.log(`codex config: ${textBlue(codexConfigPath())}`);
+    console.log(`current: ${textBlue(current)}  ${textBlue(systemLabel)}`);
+    console.log(`api: ${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
+    console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
     return normalized;
 }
 function padVisible(value, width) {
@@ -698,7 +704,6 @@ export async function runCcs(argv) {
     if (!command) {
         const profile = await printStatus();
         await printUsageLine(profile);
-        console.log("");
         printHelp();
         return;
     }
