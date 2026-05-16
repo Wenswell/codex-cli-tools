@@ -13,7 +13,7 @@ TTY output uses color for status, paths, warnings, and summaries. Set `NO_COLOR=
 
 ## Install
 
-From this repository:
+From a local clone:
 
 ```bash
 pnpm install
@@ -21,13 +21,7 @@ pnpm build
 pnpm link --global
 ```
 
-From a private Git repository:
-
-```bash
-pnpm add -g github:Wenswell/codex-cli-tools
-```
-
-Update to the latest version on another machine with the same command:
+From GitHub:
 
 ```bash
 pnpm add -g github:Wenswell/codex-cli-tools
@@ -111,15 +105,17 @@ Profile config lives at:
 ~/.codex/auth.json
 ```
 
-Run `ccs` without arguments to print the current profile, `user@host`, usage, and command help.
+Run `ccs` without arguments to print the current profile, `user@host`, usage, and one usage line.
 
 Supported commands:
 
 ```bash
 ccs
+ccs --no-usage
 ccs init [-y]
 ccs sync [-y]
-ccs status
+ccs status [--no-usage]
+ccs usage [PROFILE|--all]
 ccs list
 ccs list --usage
 ccs l
@@ -127,8 +123,8 @@ ccs add [PROFILE]
 ccs remove NAME
 ccs input
 ccs ciii
-ccs PROFILE
-ccs toggle [PROFILE]
+ccs PROFILE [--no-usage]
+ccs toggle [PROFILE] [--no-usage]
 ```
 
 Initial profile defaults are stored in this repository:
@@ -267,7 +263,7 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
-- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
+- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time unless `--no-usage` is passed. `ccs usage [PROFILE|--all]` fetches usage directly. `ccs list --usage` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
 ## senv

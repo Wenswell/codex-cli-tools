@@ -3,6 +3,7 @@ import { access, copyFile, mkdir, readdir, readFile, stat } from "node:fs/promis
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureDir, writeTextFile } from "../lib/fs.js";
 import { codexDir } from "../lib/paths.js";
+import { colorPath, printKeyValue } from "../lib/output.js";
 import { sqliteJson, sqliteRun, sqlString } from "../lib/sqlite.js";
 import { textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
 function parseArgs(argv) {
@@ -306,11 +307,11 @@ async function verifyRollouts(rows) {
     return synced;
 }
 function printDryRun(args, dbPath, rows) {
-    console.log(`mode: ${textBlue(args.prefix ? "prefix" : "exact")}`);
-    console.log(`state: ${textBlue(dbPath)}`);
-    console.log(`old: ${textRed(args.oldPath)}`);
-    console.log(`new: ${textGreen(args.newPath)}`);
-    console.log(`matched sessions: ${textGreen(String(rows.length))}`);
+    printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
+    printKeyValue("state:", colorPath(dbPath), 18);
+    printKeyValue("old:", textRed(args.oldPath), 18);
+    printKeyValue("new:", textGreen(args.newPath), 18);
+    printKeyValue("matched sessions:", textGreen(String(rows.length)), 18);
     console.log("");
     console.log(textBold("will update:"));
     for (const row of rows) {
@@ -329,9 +330,9 @@ export async function runCodexSessionMove(argv) {
     const dbPath = await findStateDb();
     const rows = await loadMatches(dbPath, args);
     if (rows.length === 0) {
-        console.log(`mode: ${textBlue(args.prefix ? "prefix" : "exact")}`);
-        console.log(`state: ${textBlue(dbPath)}`);
-        console.log(`matched sessions: ${textDim("0")}`);
+        printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
+        printKeyValue("state:", colorPath(dbPath), 18);
+        printKeyValue("matched sessions:", textDim("0"), 18);
         return;
     }
     await preflightRollouts(rows);
@@ -345,10 +346,10 @@ export async function runCodexSessionMove(argv) {
     const oldRemaining = await countMatches(dbPath, args);
     const threadsAtNewCwd = await countNewCwds(dbPath, rows);
     const synced = await verifyRollouts(rows);
-    console.log(`backup: ${textBlue(backupDir)}`);
-    console.log(`sqlite updated: ${textGreen(String(rows.length))}`);
-    console.log(`jsonl updated: ${textGreen(String(jsonlUpdated))}`);
-    console.log(`old cwd remaining: ${oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining))}`);
-    console.log(`threads at new cwd: ${textGreen(String(threadsAtNewCwd))}`);
-    console.log(`jsonl synced: ${textGreen(String(synced))}`);
+    printKeyValue("backup:", colorPath(backupDir), 18);
+    printKeyValue("sqlite updated:", textGreen(String(rows.length)), 18);
+    printKeyValue("jsonl updated:", textGreen(String(jsonlUpdated)), 18);
+    printKeyValue("old cwd remaining:", oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining)), 18);
+    printKeyValue("threads at new cwd:", textGreen(String(threadsAtNewCwd)), 18);
+    printKeyValue("jsonl synced:", textGreen(String(synced)), 18);
 }
