@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { runCodexSessionMove } from "../commands/codex-session-move.js";
+import { runCodexSessionMove } from "../commands/codex-rename.js";
 
 runCodexSessionMove(process.argv.slice(2)).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`codex-session-move: ${message}`);
+  console.error(`codex-rename: ${message}`);
   process.exitCode = 1;
 });

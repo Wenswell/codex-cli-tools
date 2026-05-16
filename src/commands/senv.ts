@@ -96,10 +96,10 @@ function requireValue(argv: string[], index: number): string {
 
 function printHelp(): void {
   console.log([
-    "envsync",
-    "envsync -y",
-    "envsync --source .env.example --target .env -y",
-    "envsync -b -y",
+    "senv",
+    "senv -y",
+    "senv --source .env.example --target .env -y",
+    "senv -b -y",
     "",
     "Default mode is dry-run. Use -y or --yes to write changes.",
   ].join("\n"));
