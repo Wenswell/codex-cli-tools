@@ -23,11 +23,20 @@ export function textDim(value) {
 export function textBlue(value) {
     return withAnsi("38;5;81", value);
 }
+export function textCyan(value) {
+    return withAnsi("38;5;45", value);
+}
 export function textGreen(value) {
     return withAnsi("38;5;114", value);
 }
+export function textMagenta(value) {
+    return withAnsi("38;5;213", value);
+}
 export function textRed(value) {
     return withAnsi("38;5;203", value);
+}
+export function textYellow(value) {
+    return withAnsi("38;5;221", value);
 }
 export function bgBlue(value) {
     return withAnsi("30;48;5;153", value);
