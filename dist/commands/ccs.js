@@ -461,7 +461,10 @@ function formatSystemLabel() {
     return `${username}@${host}`;
 }
 function printProfileSummary(label, name, profile) {
-    console.log(`${label}: ${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+    printKeyValue(`${label}:`, `${textBlue(name)}  ${textBlue(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+}
+function printKeyValue(label, value) {
+    console.log(`${label.padEnd(8)} ${value}`);
 }
 function buildUsageUrl(baseURL) {
     const value = baseURL.trim();
@@ -565,11 +568,11 @@ async function formatProfileUsage(profile) {
 async function printUsageLine(profile) {
     const time = formatClockTime(new Date());
     if (!profile?.apiKey || !profile.baseURL.trim()) {
-        console.log(`usage: ${textDim(time)} ${textDim("skipped")}`);
+        printKeyValue("usage:", `${textDim(time)} ${textDim("skipped")}`);
         return;
     }
     const usage = await fetchUsage(profile);
-    console.log(`usage: ${textDim(time)} ${usage ? formatUsage(usage) : textRed("unavailable")}`);
+    printKeyValue("usage:", `${textDim(time)} ${usage ? formatUsage(usage) : textRed("unavailable")}`);
 }
 function formatClockTime(date) {
     const pad = (value) => value.toString().padStart(2, "0");
@@ -651,14 +654,14 @@ async function printStatus() {
     const profile = profiles.profiles?.[current];
     const systemLabel = formatSystemLabel();
     if (!profile) {
-        console.log(`current: ${textDim("none")}  ${textBlue(systemLabel)}`);
-        console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+        printKeyValue("current:", `${textDim("none")}  ${textBlue(systemLabel)}`);
+        printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
         return null;
     }
     const normalized = assertProfile(profile, current);
-    console.log(`current: ${textBlue(current)}  ${textBlue(systemLabel)}`);
-    console.log(`api: ${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
-    console.log(`files: ${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
+    printKeyValue("current:", `${textBlue(current)}  ${textBlue(systemLabel)}`);
+    printKeyValue("api:", `${textBlue(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
+    printKeyValue("files:", `${textBlue(profilesPath())}  ${textBlue(codexConfigPath())}`);
     return normalized;
 }
 function padVisible(value, width) {
