@@ -687,16 +687,14 @@ async function printProfileList(profiles, includeUsage) {
 }
 function usageLines() {
     return [
-        "  ccs [--no-usage]",
-        "  ccs status [--no-usage]",
-        "  ccs PROFILE [--no-usage]",
-        "  ccs toggle [PROFILE] [--no-usage]",
-        "  ccs usage [PROFILE|-a|--all]",
-        "  ccs list | l [-u|--usage]",
-        "  ccs init [-n|--dry-run|-y|--yes]",
-        "  ccs sync [-n|--dry-run|-y|--yes]",
-        "  ccs add [PROFILE]",
-        "  ccs remove | rm | delete PROFILE",
+        "  ccs                                  # show current profile and usage",
+        "  ccs PROFILE                          # show profile details and usage",
+        "  ccs toggle [PROFILE]                 # switch profile",
+        "  ccs list | l [-u|--usage]             # list profiles",
+        "  ccs init [-n|--dry-run|-y|--yes]      # preview or create config",
+        "  ccs sync [-n|--dry-run|-y|--yes]      # preview or sync config",
+        "  ccs add [PROFILE]                     # add or update a profile",
+        "  ccs remove | rm | delete PROFILE      # remove a profile",
     ];
 }
 function printHelp() {
@@ -711,53 +709,13 @@ function printUsageHelp() {
         ...usageLines().map((line) => textDim(line)),
     ].join("\n"));
 }
-function parseCcsArgs(argv) {
-    let includeUsage = true;
-    const args = [];
-    for (const arg of argv) {
-        if (arg === "--no-usage") {
-            includeUsage = false;
-            continue;
-        }
-        args.push(arg);
-    }
-    return {
-        command: args[0] ?? "",
-        args: args.slice(1),
-        includeUsage,
-    };
-}
-async function printUsageCommand(profiles, args) {
-    const includeAll = args.includes("--all") || args.includes("-a");
-    if (includeAll) {
-        const unknown = args.find((arg) => arg !== "--all" && arg !== "-a");
-        if (unknown) {
-            throw new Error(`unknown argument for ccs usage --all: ${unknown}`);
-        }
-        await printProfileList(profiles, true);
-        return;
-    }
-    if (args.length > 1) {
-        throw new Error("usage: ccs usage [PROFILE|--all]");
-    }
-    const name = args[0] ?? profiles.current ?? "input";
-    const profile = profiles.profiles?.[name];
-    if (!profile) {
-        throw new Error(`profile not found: ${name}`);
-    }
-    const normalized = assertProfile(profile, name);
-    printProfileSummary("profile", name, normalized);
-    await printUsageLine(normalized);
-}
 export async function runCcs(argv) {
-    const parsed = parseCcsArgs(argv);
-    const { command, args, includeUsage } = parsed;
+    const command = argv[0] ?? "";
+    const args = argv.slice(1);
     const profiles = await readProfiles();
     if (!command) {
         const profile = await printStatus();
-        if (includeUsage) {
-            await printUsageLine(profile);
-        }
+        await printUsageLine(profile);
         printUsageHelp();
         return;
     }
@@ -837,11 +795,7 @@ export async function runCcs(argv) {
         if (unknown) {
             throw new Error(`unknown argument for ccs list: ${unknown}`);
         }
-        await printProfileList(profiles, includeUsage && args.some((arg) => arg === "--usage" || arg === "-u"));
-        return;
-    }
-    if (command === "usage") {
-        await printUsageCommand(profiles, args);
+        await printProfileList(profiles, args.some((arg) => arg === "--usage" || arg === "-u"));
         return;
     }
     if (command === "add") {
@@ -852,19 +806,10 @@ export async function runCcs(argv) {
         await removeProfile(args[0]);
         return;
     }
-    if (command === "status") {
-        const profile = await printStatus();
-        if (includeUsage) {
-            await printUsageLine(profile);
-        }
-        return;
-    }
     if (command === "toggle") {
         if (args[0]) {
             const profile = await switchProfile(args[0]);
-            if (includeUsage) {
-                await printUsageLine(profile);
-            }
+            await printUsageLine(profile);
             return;
         }
         const toggle = profiles.toggle ?? [];
@@ -874,16 +819,12 @@ export async function runCcs(argv) {
         const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
         const next = toggle[(index + 1) % toggle.length];
         const profile = await switchProfile(next);
-        if (includeUsage) {
-            await printUsageLine(profile);
-        }
+        await printUsageLine(profile);
         return;
     }
     if (profiles.profiles?.[command]) {
         printProfile(command, profiles);
-        if (includeUsage) {
-            await printUsageLine(assertProfile(profiles.profiles[command], command));
-        }
+        await printUsageLine(assertProfile(profiles.profiles[command], command));
         return;
     }
     console.error(`${textRed("unknown command:")} ${basename(command)}`);
