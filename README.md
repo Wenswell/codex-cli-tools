@@ -111,11 +111,8 @@ Supported commands:
 
 ```bash
 ccs
-ccs --no-usage
-ccs status [--no-usage]
-ccs PROFILE [--no-usage]
-ccs toggle [PROFILE] [--no-usage]
-ccs usage [PROFILE|-a|--all]
+ccs PROFILE
+ccs toggle [PROFILE]
 ccs list | l [-u|--usage]
 ccs init [-n|--dry-run|-y|--yes]
 ccs sync [-n|--dry-run|-y|--yes]
@@ -259,7 +256,7 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
-- `ccs`, `ccs status`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time unless `--no-usage` is passed. `ccs usage [PROFILE|--all]` fetches usage directly. `ccs list --usage` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
+- `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints it as the last column. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
 ## senv
