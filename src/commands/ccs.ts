@@ -907,10 +907,7 @@ function printHelp(): void {
 }
 
 function printUsageHelp(): void {
-  console.log([
-    textDim("Usage:"),
-    ...usageLines().map((line) => textDim(line)),
-  ].join("\n"));
+  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | list [-u] | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {

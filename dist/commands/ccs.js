@@ -704,10 +704,7 @@ function printHelp() {
     ].join("\n"));
 }
 function printUsageHelp() {
-    console.log([
-        textDim("Usage:"),
-        ...usageLines().map((line) => textDim(line)),
-    ].join("\n"));
+    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | list [-u] | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
