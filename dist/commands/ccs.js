@@ -203,9 +203,11 @@ function buildConfigSection(plan) {
     }
     return { lines: [], warnings };
 }
-function printPreviewSummary(title, modifiedFiles, backupFiles, warnings) {
+function printPreviewSummary(title, modifiedFiles, backupFiles, warnings, dryRun) {
     console.log(textBold(`Plan: ${title}`));
-    console.log(textDim("Dry run only. Re-run with -y or --yes to apply changes."));
+    if (dryRun) {
+        console.log(textDim("Dry run only. Re-run with -y or --yes to apply changes."));
+    }
     console.log(`Will modify: ${textBlue(formatList(modifiedFiles))}`);
     console.log(`Will back up: ${textBlue(formatList(backupFiles))}`);
     console.log(`Warnings: ${warnings.length === 0 ? textDim("0") : textRed(String(warnings.length))}`);
@@ -354,7 +356,7 @@ function printWarnings(warnings) {
         console.log(`  ${textRed("-")} ${warning}`);
     }
 }
-async function printInitDryRun() {
+async function buildInitPreviewPlan() {
     const nextProfiles = await planInitProfilesFromCurrent();
     const configPlan = await planCodexConfigSync();
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
@@ -391,13 +393,14 @@ async function printInitDryRun() {
         },
     ]);
     const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
-    printPreviewSummary("ccs init", previewFiles.map((file) => file.label), backupFiles.map((file) => file.target), warnings);
-    for (const file of previewFiles) {
-        printDiffBlock(file);
-    }
-    printWarnings(warnings);
+    return {
+        title: "ccs init",
+        previewFiles,
+        backupFiles,
+        warnings,
+    };
 }
-async function printSyncDryRun() {
+async function buildSyncPreviewPlan() {
     const nextProfiles = await planSyncProfiles();
     const configPlan = await planCodexConfigSync();
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
@@ -418,11 +421,25 @@ async function printSyncDryRun() {
         },
     ]);
     const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
-    printPreviewSummary("ccs sync", previewFiles.map((file) => file.label), backupFiles.map((file) => file.target), configSection.warnings);
-    for (const file of previewFiles) {
+    return {
+        title: "ccs sync",
+        previewFiles,
+        backupFiles,
+        warnings: configSection.warnings,
+    };
+}
+function printPreviewPlan(plan, dryRun) {
+    printPreviewSummary(plan.title, plan.previewFiles.map((file) => file.label), plan.backupFiles.map((file) => file.target), plan.warnings, dryRun);
+    for (const file of plan.previewFiles) {
         printDiffBlock(file);
     }
-    printWarnings(configSection.warnings);
+    printWarnings(plan.warnings);
+}
+async function printInitDryRun() {
+    printPreviewPlan(await buildInitPreviewPlan(), true);
+}
+async function printSyncDryRun() {
+    printPreviewPlan(await buildSyncPreviewPlan(), true);
 }
 async function addProfile(defaultName) {
     const data = await readProfiles();
@@ -735,21 +752,9 @@ export async function runCcs(argv) {
             await printInitDryRun();
             return;
         }
-        const nextProfiles = await planInitProfilesFromCurrent();
-        const configPlan = await planCodexConfigSync();
-        const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
-        const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
-        const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
-        const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
-        const nextAuthText = nextCurrentProfile?.apiKey
-            ? stringifyJson({ OPENAI_API_KEY: nextCurrentProfile.apiKey })
-            : currentAuthText;
-        const backupFiles = await collectExistingBackupFilesForPaths(collectChangedPreviewFiles([
-            { label: "profiles.json", path: profilesPath(), current: currentProfilesText, next: stringifyJson(nextProfiles) },
-            { label: "config.toml", path: codexConfigPath(), current: currentConfigText, next: configPlan.nextContent },
-            { label: "auth.json", path: codexAuthPath(), current: currentAuthText, next: nextAuthText },
-        ]).map((file) => file.path));
-        const backupDir = await backupCcsFiles(backupFiles);
+        const previewPlan = await buildInitPreviewPlan();
+        printPreviewPlan(previewPlan, false);
+        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const initialized = await initProfilesFromCurrent();
         await syncCodexConfigFromTemplate();
         const profile = initialized.profiles?.[initialized.current ?? ""];
@@ -768,23 +773,9 @@ export async function runCcs(argv) {
             await printSyncDryRun();
             return;
         }
-        const nextProfiles = await planSyncProfiles();
-        const configPlan = await planCodexConfigSync();
-        const backupFiles = await collectExistingBackupFilesForPaths(collectChangedPreviewFiles([
-            {
-                label: "profiles.json",
-                path: profilesPath(),
-                current: (await readTextIfExists(profilesPath())) ?? "",
-                next: stringifyJson(nextProfiles),
-            },
-            {
-                label: "config.toml",
-                path: codexConfigPath(),
-                current: (await readTextIfExists(codexConfigPath())) ?? "",
-                next: configPlan.nextContent,
-            },
-        ]).map((file) => file.path));
-        const backupDir = await backupCcsFiles(backupFiles);
+        const previewPlan = await buildSyncPreviewPlan();
+        printPreviewPlan(previewPlan, false);
+        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const synced = await syncProfiles();
         await syncCodexConfigFromTemplate();
         if (backupDir) {
