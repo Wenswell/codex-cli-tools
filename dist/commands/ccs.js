@@ -461,6 +461,16 @@ function formatSystemLabel() {
     const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
     return `${username}@${host}`;
 }
+function formatDisplayPath(path) {
+    const home = process.env.HOME;
+    if (!home) {
+        return path;
+    }
+    if (path === home) {
+        return "~";
+    }
+    return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
 function printProfileSummary(label, name, profile) {
     printKeyValue(`${label}:`, `${colorName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
 }
@@ -653,13 +663,13 @@ async function printStatus() {
     const systemLabel = formatSystemLabel();
     if (!profile) {
         printKeyValue("current:", `${textDim("none")}  ${colorHost(systemLabel)}`);
-        printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
+        printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
         return null;
     }
     const normalized = assertProfile(profile, current);
     printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}`);
     printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
-    printKeyValue("files:", `${colorPath(profilesPath())}  ${colorPath(codexConfigPath())}`);
+    printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
     return normalized;
 }
 function padVisible(value, width) {
