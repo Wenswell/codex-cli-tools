@@ -51,8 +51,8 @@ model_reasoning_effort = "high" # 默认代理推理强度
 
 [agents.worker] # 执行型代理
 description = "Execution-focused role for implementation and fixes." # 负责实现和修复
-model = "gpt-5.4" # worker 使用的模型
-model_reasoning_effort = "medium" # worker 推理强度
+model = "gpt-5.5" # worker 使用的模型
+model_reasoning_effort = "high" # worker 推理强度
 
 [agents.explorer] # 探索型代理
 description = "Fast codebase explorer for read-heavy tasks." # 负责代码库阅读和定位
@@ -62,7 +62,7 @@ sandbox_mode = "read-only" # explorer 只读沙箱
 
 [agents.awaiter] # 等待/监控型代理
 description = "Long-running command and task monitoring role." # 负责长任务监控
-model = "gpt-5.4" # awaiter 使用的模型
+model = "gpt-5.5" # awaiter 使用的模型
 model_reasoning_effort = "medium" # awaiter 推理强度
 
 [agents.reviewer] # 审查型代理
