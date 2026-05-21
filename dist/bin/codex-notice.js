@@ -1,15 +1,20 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { codexToolsConfigDir } from "../lib/paths.js";
+import { colorPath, printKeyValue } from "../lib/output.js";
+import { textBlue, textDim, textGreen, textRed } from "../lib/text.js";
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
 const maxAnswerPreviewChars = 360;
 const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "";
-if (command === "--help" || command === "-h" || command === "help") {
+if (!command) {
+    await printStatus();
+}
+else if (command === "--help" || command === "-h" || command === "help") {
     printHelp();
 }
 else if (command === "status") {
@@ -17,6 +22,9 @@ else if (command === "status") {
 }
 else if (command === "logs") {
     await printLogs(Number(argv[1] ?? "5"));
+}
+else if (command === "config") {
+    await configureWebhook(argv[1] ?? "");
 }
 else if (command === "test") {
     await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
@@ -38,6 +46,7 @@ function printHelp() {
         "  codex-notice hook JSON_PAYLOAD",
         "  codex-notice test [MESSAGE]",
         "  codex-notice logs [N]",
+        "  codex-notice config WEBHOOK",
         "  codex-notice status",
     ].join("\n"));
 }
@@ -94,16 +103,21 @@ async function readWebhookFromFile(path) {
 async function printStatus() {
     const hasEnv = Boolean(process.env.FEISHU_BOT_WEBHOOK);
     const configWebhook = await readWebhookFromFile(noticeEnvPath);
-    const webhookSource = hasEnv
-        ? "env"
-        : configWebhook
-            ? noticeEnvPath
-            : "missing";
-    console.log([
-        `webhook: ${webhookSource}`,
-        `config:  ${noticeEnvPath}`,
-        `log:     ${logPath().pathname}`,
-    ].join("\n"));
+    const webhook = process.env.FEISHU_BOT_WEBHOOK || configWebhook;
+    printKeyValue("webhook:", webhook ? textGreen(webhook) : textRed("missing"), 10);
+    printKeyValue("config:", colorPath(noticeEnvPath), 10);
+    printKeyValue("log:", colorPath(logPath().pathname), 10);
+    printKeyValue("notify:", `${textBlue("codex-notice hook")} ${textDim("JSON_PAYLOAD")}`, 10);
+}
+async function configureWebhook(webhook) {
+    if (!webhook) {
+        throw new Error("usage: codex-notice config WEBHOOK");
+    }
+    await mkdir(dirname(noticeEnvPath), { recursive: true, mode: 0o700 });
+    await chmod(dirname(noticeEnvPath), 0o700);
+    await writeFile(noticeEnvPath, `FEISHU_BOT_WEBHOOK=${webhook}\n`, { mode: 0o600 });
+    await chmod(noticeEnvPath, 0o600);
+    printKeyValue("updated:", colorPath(noticeEnvPath), 10);
 }
 async function printLogs(limit) {
     const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5;
