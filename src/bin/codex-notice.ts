@@ -105,6 +105,7 @@ const command = argv[0] ?? "";
 
 if (!command) {
   await printStatus();
+  printCommands();
 } else if (command === "--help" || command === "-h" || command === "help") {
   printHelp();
 } else if (command === "status") {
@@ -135,6 +136,10 @@ function printHelp(): void {
     "  codex-notice config WEBHOOK [-y|--yes]",
     "  codex-notice status",
   ].join("\n"));
+}
+
+function printCommands(): void {
+  printKeyValue("commands:", "codex-notice | status | config WEBHOOK [-y] | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
 }
 
 async function sendPayload(payload: CodexNotifyPayload): Promise<void> {

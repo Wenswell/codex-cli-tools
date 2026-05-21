@@ -13,6 +13,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "";
 if (!command) {
     await printStatus();
+    printCommands();
 }
 else if (command === "--help" || command === "-h" || command === "help") {
     printHelp();
@@ -49,6 +50,9 @@ function printHelp() {
         "  codex-notice config WEBHOOK [-y|--yes]",
         "  codex-notice status",
     ].join("\n"));
+}
+function printCommands() {
+    printKeyValue("commands:", "codex-notice | status | config WEBHOOK [-y] | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
 }
 async function sendPayload(payload) {
     const webhook = await readWebhook();
