@@ -417,17 +417,20 @@ Usage:
 ```bash
 codex-rename OLD_PATH NEW_PATH
 codex-rename OLD_PATH NEW_PATH --prefix
+codex-rename OLD_PATH NEW_PATH --sessions-only --prefix
 codex-rename OLD_PATH NEW_PATH --prefix --apply
 ```
 
 Default mode is dry-run. Nothing is modified unless `--apply` is provided.
 Apply mode first prints the same directory, session, and rollout-file plan as dry-run, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
+Use `--sessions-only` when the directory has already been renamed and only Codex session cwd values need to be updated.
 
 Path behavior:
 
 - `OLD_PATH` must exist and must be a directory.
 - `NEW_PATH` must not exist.
 - `NEW_PATH` must not be inside `OLD_PATH`.
+- `--sessions-only` skips all filesystem rename checks and operations.
 - Default: migrate sessions whose `cwd` is exactly `OLD_PATH`.
 - `--prefix`: migrate `OLD_PATH` and every child path under it.
 - Prefix mode preserves the relative path below `OLD_PATH` for session cwd updates. The actual directory operation is still one rename from `OLD_PATH` to `NEW_PATH`.

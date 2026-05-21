@@ -14,9 +14,14 @@ function parseArgs(argv) {
     const positional = [];
     let prefix = false;
     let apply = false;
+    let sessionsOnly = false;
     for (const arg of argv) {
         if (arg === "--prefix") {
             prefix = true;
+            continue;
+        }
+        if (arg === "--sessions-only") {
+            sessionsOnly = true;
             continue;
         }
         if (arg === "--apply") {
@@ -41,6 +46,7 @@ function parseArgs(argv) {
         newPath: normalizeInputPath(positional[1]),
         prefix,
         apply,
+        sessionsOnly,
     };
 }
 function normalizeInputPath(path) {
@@ -51,9 +57,11 @@ function printHelp() {
     console.log([
         "codex-rename OLD_PATH NEW_PATH",
         "codex-rename OLD_PATH NEW_PATH --prefix",
+        "codex-rename OLD_PATH NEW_PATH --sessions-only --prefix",
         "codex-rename OLD_PATH NEW_PATH --prefix --apply",
         "",
         "Default mode is dry-run. Use --apply to rename the directory and update Codex sessions.",
+        "Use --sessions-only when the directory has already been renamed.",
     ].join("\n"));
 }
 async function pathExists(path) {
@@ -69,6 +77,9 @@ async function pathExists(path) {
     }
 }
 async function planDirectoryRename(args) {
+    if (args.sessionsOnly) {
+        return { action: "skip", oldPath: args.oldPath, newPath: args.newPath };
+    }
     if (args.oldPath === "/" || args.newPath === "/") {
         throw new Error("refusing to rename filesystem root");
     }
@@ -91,9 +102,12 @@ async function planDirectoryRename(args) {
         throw new Error(`target path already exists: ${args.newPath}`);
     }
     await access(dirname(args.newPath), constants.W_OK);
-    return { oldPath: args.oldPath, newPath: args.newPath };
+    return { action: "rename", oldPath: args.oldPath, newPath: args.newPath };
 }
 async function applyDirectoryRename(plan) {
+    if (plan.action === "skip") {
+        return false;
+    }
     await rename(plan.oldPath, plan.newPath);
     return true;
 }
@@ -349,7 +363,7 @@ async function verifyRollouts(rows) {
     return synced;
 }
 function printDirectoryPlan(plan) {
-    printKeyValue("directory:", textBlue("rename"), 18);
+    printKeyValue("directory:", textBlue(plan.action), 18);
     printKeyValue("from:", colorPath(plan.oldPath), 18);
     printKeyValue("to:", colorPath(plan.newPath), 18);
 }
@@ -387,7 +401,7 @@ export async function runCodexRename(argv) {
         printKeyValue("matched sessions:", textDim("0"), 18);
         if (args.apply) {
             const renamed = await applyDirectoryRename(directoryPlan);
-            printKeyValue("directory renamed:", renamed ? textGreen("yes") : textDim("no"), 18);
+            printKeyValue("directory changed:", renamed ? textGreen("yes") : textDim("no"), 18);
         }
         else if (!args.apply) {
             console.log("");
@@ -410,7 +424,7 @@ export async function runCodexRename(argv) {
     const threadsAtNewCwd = await countNewCwds(dbPath, rows);
     const synced = await verifyRollouts(rows);
     printKeyValue("backup:", colorPath(backupDir), 18);
-    printKeyValue("directory renamed:", directoryRenamed ? textGreen("yes") : textDim("no"), 18);
+    printKeyValue("directory changed:", directoryRenamed ? textGreen("yes") : textDim("no"), 18);
     printKeyValue("sqlite updated:", textGreen(String(rows.length)), 18);
     printKeyValue("jsonl updated:", textGreen(String(jsonlUpdated)), 18);
     printKeyValue("old cwd remaining:", oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining)), 18);
