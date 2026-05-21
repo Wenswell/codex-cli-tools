@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
+import { hostname, userInfo } from "node:os";
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
 const maxAnswerPreviewChars = 360;
@@ -50,20 +51,13 @@ function stripEnvQuotes(value) {
     return value;
 }
 function buildCard(payload) {
-    const title = payload.type ? `Codex ${payload.type}` : "Codex notification";
+    const title = `Codex ${formatSystemLabel()}`;
     const input = readInputMessages(payload["input-messages"]);
     const answer = payload["last-assistant-message"] ??
         payload.last_assistant_message ??
         payload.lastAssistantMessage;
     const answerText = answer ?? `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
     const answerParts = splitPreview(answerText, maxAnswerPreviewChars);
-    const metaLines = [];
-    if (payload.cwd) {
-        metaLines.push(`**cwd:** ${formatHomePath(payload.cwd)}`);
-    }
-    if (input.latest) {
-        metaLines.push(`**user:** ${truncate(input.latest, maxInlineUserChars)}`);
-    }
     return {
         schema: "2.0",
         header: {
@@ -75,13 +69,8 @@ function buildCard(payload) {
         },
         body: {
             elements: [
-                ...(metaLines.length > 0
-                    ? [{
-                            tag: "markdown",
-                            content: metaLines.join("\n"),
-                        }]
-                    : []),
-                buildSeparator(),
+                ...buildMetaColumns(payload.cwd, input.latest),
+                buildHr(),
                 {
                     tag: "markdown",
                     content: answerParts.preview,
@@ -91,14 +80,58 @@ function buildCard(payload) {
         },
     };
 }
+function formatSystemLabel() {
+    const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
+    const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
+    return `${username}@${host}`;
+}
 function getHeaderTemplate(payload) {
     const type = payload.type?.toLowerCase() ?? "";
     return type.includes("error") || type.includes("fail") ? "red" : "blue";
 }
-function buildSeparator() {
+function buildMetaColumns(cwd, latestInput) {
+    return [
+        {
+            tag: "column_set",
+            flex_mode: "none",
+            background_style: "grey",
+            columns: [
+                {
+                    tag: "column",
+                    width: "weighted",
+                    weight: 1,
+                    elements: [
+                        {
+                            tag: "markdown",
+                            content: `📁 ${cwd ? formatHomePath(cwd) : "-"}`,
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            tag: "column_set",
+            flex_mode: "none",
+            background_style: "grey",
+            columns: [
+                {
+                    tag: "column",
+                    width: "weighted",
+                    weight: 1,
+                    elements: [
+                        {
+                            tag: "markdown",
+                            content: `💬 ${latestInput ? truncate(latestInput, maxInlineUserChars) : "-"}`,
+                        },
+                    ],
+                },
+            ],
+        },
+    ];
+}
+function buildHr() {
     return {
-        tag: "markdown",
-        content: "---",
+        tag: "hr",
     };
 }
 function buildCollapsibleReply(content) {

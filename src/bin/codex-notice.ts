@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
+import { hostname, userInfo } from "node:os";
 
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
@@ -36,6 +37,23 @@ type FeishuCardBody = {
         | {
             tag: "markdown";
             content: string;
+          }
+        | {
+            tag: "hr";
+          }
+        | {
+            tag: "column_set";
+            flex_mode: "none";
+            background_style: "grey";
+            columns: Array<{
+              tag: "column";
+              width: "weighted";
+              weight: number;
+              elements: Array<{
+                tag: "markdown";
+                content: string;
+              }>;
+            }>;
           }
         | {
             tag: "collapsible_panel";
@@ -135,7 +153,7 @@ function stripEnvQuotes(value: string): string {
 }
 
 function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
-  const title = payload.type ? `Codex ${payload.type}` : "Codex notification";
+  const title = `Codex ${formatSystemLabel()}`;
   const input = readInputMessages(payload["input-messages"]);
   const answer =
     payload["last-assistant-message"] ??
@@ -143,15 +161,6 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
     payload.lastAssistantMessage;
   const answerText = answer ?? `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
   const answerParts = splitPreview(answerText, maxAnswerPreviewChars);
-  const metaLines: string[] = [];
-
-  if (payload.cwd) {
-    metaLines.push(`**cwd:** ${formatHomePath(payload.cwd)}`);
-  }
-  if (input.latest) {
-    metaLines.push(`**user:** ${truncate(input.latest, maxInlineUserChars)}`);
-  }
-
   return {
     schema: "2.0",
     header: {
@@ -163,13 +172,8 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
     },
     body: {
       elements: [
-        ...(metaLines.length > 0
-          ? [{
-              tag: "markdown" as const,
-              content: metaLines.join("\n"),
-            }]
-          : []),
-        buildSeparator(),
+        ...buildMetaColumns(payload.cwd, input.latest),
+        buildHr(),
         {
           tag: "markdown" as const,
           content: answerParts.preview,
@@ -180,15 +184,64 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
   };
 }
 
+function formatSystemLabel(): string {
+  const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
+  const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
+  return `${username}@${host}`;
+}
+
 function getHeaderTemplate(payload: CodexNotifyPayload): "blue" | "red" {
   const type = payload.type?.toLowerCase() ?? "";
   return type.includes("error") || type.includes("fail") ? "red" : "blue";
 }
 
-function buildSeparator(): FeishuCardBody["card"]["body"]["elements"][number] {
+function buildMetaColumns(
+  cwd: string | undefined,
+  latestInput: string,
+): Array<FeishuCardBody["card"]["body"]["elements"][number]> {
+  return [
+    {
+      tag: "column_set",
+      flex_mode: "none",
+      background_style: "grey",
+      columns: [
+        {
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [
+            {
+              tag: "markdown",
+              content: `📁 ${cwd ? formatHomePath(cwd) : "-"}`,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      tag: "column_set",
+      flex_mode: "none",
+      background_style: "grey",
+      columns: [
+        {
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [
+            {
+              tag: "markdown",
+              content: `💬 ${latestInput ? truncate(latestInput, maxInlineUserChars) : "-"}`,
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function buildHr(): FeishuCardBody["card"]["body"]["elements"][number] {
   return {
-    tag: "markdown",
-    content: "---",
+    tag: "hr",
   };
 }
 

@@ -1,6 +1,6 @@
 model_provider = "codex" # 默认模型提供商，对应 [model_providers.codex]
 personality = "pragmatic" # Codex 交流和执行风格
-model_reasoning_effort = "medium" # 默认推理强度：low/medium/high/xhigh
+model_reasoning_effort = "high" # 默认推理强度：low/medium/high/xhigh
 disable_response_storage = true # 禁止服务端保存响应内容
 network_access = "enabled" # 允许联网
 project_doc_fallback_filenames = ["CLAUDE.md"] # AGENTS.md 找不到时，继续查找这些项目文档
