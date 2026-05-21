@@ -9,12 +9,10 @@ if (!webhook) {
     throw new Error("FEISHU_BOT_WEBHOOK is required in .env or environment");
 }
 const payload = JSON.parse(rawPayload);
-const message = buildMessage(payload);
+const card = buildCard(payload);
 await postFeishu(webhook, {
-    msg_type: "text",
-    content: {
-        text: message,
-    },
+    msg_type: "interactive",
+    card,
 });
 async function readWebhookFromEnvFile() {
     const envPath = new URL("../../.env", import.meta.url);
@@ -48,25 +46,63 @@ function stripEnvQuotes(value) {
     }
     return value;
 }
-function buildMessage(payload) {
-    const lines = [payload.type ? `Codex ${payload.type}` : "Codex notification"];
+function buildCard(payload) {
+    const title = payload.type ? `Codex ${payload.type}` : "Codex notification";
     const input = readInputMessage(payload["input-messages"]);
     const answer = payload["last-assistant-message"] ??
         payload.last_assistant_message ??
         payload.lastAssistantMessage;
+    const metaLines = [];
     if (payload.cwd) {
-        lines.push(`cwd: ${formatHomePath(payload.cwd)}`);
+        metaLines.push(`**cwd:** ${formatHomePath(payload.cwd)}`);
     }
     if (input) {
-        lines.push(`user: ${input}`);
+        metaLines.push(`**user:** ${input}`);
     }
-    if (answer) {
-        lines.push("", answer);
-    }
-    if (!input && !answer) {
-        lines.push("", JSON.stringify(payload, null, 2));
-    }
-    return lines.join("\n");
+    return {
+        config: {
+            wide_screen_mode: true,
+        },
+        header: {
+            title: {
+                tag: "plain_text",
+                content: title,
+            },
+            template: "blue",
+        },
+        elements: [
+            ...(metaLines.length > 0
+                ? [{
+                        tag: "div",
+                        text: {
+                            tag: "lark_md",
+                            content: metaLines.join("\n"),
+                        },
+                    }]
+                : []),
+            ...(answer
+                ? [
+                    { tag: "hr" },
+                    {
+                        tag: "div",
+                        text: {
+                            tag: "lark_md",
+                            content: answer,
+                        },
+                    },
+                ]
+                : [
+                    { tag: "hr" },
+                    {
+                        tag: "div",
+                        text: {
+                            tag: "lark_md",
+                            content: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``,
+                        },
+                    },
+                ]),
+        ],
+    };
 }
 function readInputMessage(value) {
     if (Array.isArray(value)) {
