@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, copyFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, readdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ensureDir, writeTextFile } from "../lib/fs.js";
 import { codexDir } from "../lib/paths.js";
@@ -44,7 +44,8 @@ function parseArgs(argv) {
     };
 }
 function normalizeInputPath(path) {
-    return resolve(path).replace(/\/+$/, "");
+    const resolved = resolve(path);
+    return resolved === "/" ? resolved : resolved.replace(/\/+$/, "");
 }
 function printHelp() {
     console.log([
@@ -52,8 +53,49 @@ function printHelp() {
         "codex-rename OLD_PATH NEW_PATH --prefix",
         "codex-rename OLD_PATH NEW_PATH --prefix --apply",
         "",
-        "Default mode is dry-run. Use --apply to modify Codex state.",
+        "Default mode is dry-run. Use --apply to rename the directory and update Codex sessions.",
     ].join("\n"));
+}
+async function pathExists(path) {
+    try {
+        await access(path, constants.F_OK);
+        return true;
+    }
+    catch (error) {
+        if (error.code === "ENOENT") {
+            return false;
+        }
+        throw error;
+    }
+}
+async function planDirectoryRename(args) {
+    if (args.oldPath === "/" || args.newPath === "/") {
+        throw new Error("refusing to rename filesystem root");
+    }
+    if (args.oldPath === args.newPath) {
+        throw new Error("OLD_PATH and NEW_PATH must be different");
+    }
+    if (args.newPath.startsWith(`${args.oldPath}/`)) {
+        throw new Error("NEW_PATH must not be inside OLD_PATH");
+    }
+    const oldExists = await pathExists(args.oldPath);
+    const newExists = await pathExists(args.newPath);
+    if (!oldExists) {
+        throw new Error(`source path not found: ${args.oldPath}`);
+    }
+    const oldInfo = await lstat(args.oldPath);
+    if (!oldInfo.isDirectory()) {
+        throw new Error(`source path is not a directory: ${args.oldPath}`);
+    }
+    if (newExists) {
+        throw new Error(`target path already exists: ${args.newPath}`);
+    }
+    await access(dirname(args.newPath), constants.W_OK);
+    return { oldPath: args.oldPath, newPath: args.newPath };
+}
+async function applyDirectoryRename(plan) {
+    await rename(plan.oldPath, plan.newPath);
+    return true;
 }
 async function findStateDb() {
     const dir = codexDir();
@@ -306,7 +348,13 @@ async function verifyRollouts(rows) {
     }
     return synced;
 }
-function printPlan(args, dbPath, rows, dryRun) {
+function printDirectoryPlan(plan) {
+    printKeyValue("directory:", textBlue("rename"), 18);
+    printKeyValue("from:", colorPath(plan.oldPath), 18);
+    printKeyValue("to:", colorPath(plan.newPath), 18);
+}
+function printPlan(args, directoryPlan, dbPath, rows, dryRun) {
+    printDirectoryPlan(directoryPlan);
     printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
     printKeyValue("state:", colorPath(dbPath), 18);
     printKeyValue("old:", textRed(args.oldPath), 18);
@@ -327,30 +375,42 @@ function printPlan(args, dbPath, rows, dryRun) {
         console.log(textDim("dry-run only. Add --apply to write changes."));
     }
 }
-export async function runCodexSessionMove(argv) {
+export async function runCodexRename(argv) {
     const args = parseArgs(argv);
+    const directoryPlan = await planDirectoryRename(args);
     const dbPath = await findStateDb();
     const rows = await loadMatches(dbPath, args);
     if (rows.length === 0) {
+        printDirectoryPlan(directoryPlan);
         printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
         printKeyValue("state:", colorPath(dbPath), 18);
         printKeyValue("matched sessions:", textDim("0"), 18);
+        if (args.apply) {
+            const renamed = await applyDirectoryRename(directoryPlan);
+            printKeyValue("directory renamed:", renamed ? textGreen("yes") : textDim("no"), 18);
+        }
+        else if (!args.apply) {
+            console.log("");
+            console.log(textDim("dry-run only. Add --apply to write changes."));
+        }
         return;
     }
     await preflightRollouts(rows);
     if (!args.apply) {
-        printPlan(args, dbPath, rows, true);
+        printPlan(args, directoryPlan, dbPath, rows, true);
         return;
     }
-    printPlan(args, dbPath, rows, false);
+    printPlan(args, directoryPlan, dbPath, rows, false);
     console.log("");
     const plannedRollouts = await planRolloutWrites(rows);
     const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));
+    const directoryRenamed = await applyDirectoryRename(directoryPlan);
     const jsonlUpdated = await applyMigration(dbPath, rows, plannedRollouts);
     const oldRemaining = await countMatches(dbPath, args);
     const threadsAtNewCwd = await countNewCwds(dbPath, rows);
     const synced = await verifyRollouts(rows);
     printKeyValue("backup:", colorPath(backupDir), 18);
+    printKeyValue("directory renamed:", directoryRenamed ? textGreen("yes") : textDim("no"), 18);
     printKeyValue("sqlite updated:", textGreen(String(rows.length)), 18);
     printKeyValue("jsonl updated:", textGreen(String(jsonlUpdated)), 18);
     printKeyValue("old cwd remaining:", oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining)), 18);
