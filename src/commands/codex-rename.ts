@@ -12,9 +12,11 @@ type Args = {
   newPath: string;
   prefix: boolean;
   apply: boolean;
+  sessionsOnly: boolean;
 };
 
 type DirectoryPlan = {
+  action: "rename" | "skip";
   oldPath: string;
   newPath: string;
 };
@@ -55,10 +57,15 @@ function parseArgs(argv: string[]): Args {
   const positional: string[] = [];
   let prefix = false;
   let apply = false;
+  let sessionsOnly = false;
 
   for (const arg of argv) {
     if (arg === "--prefix") {
       prefix = true;
+      continue;
+    }
+    if (arg === "--sessions-only") {
+      sessionsOnly = true;
       continue;
     }
     if (arg === "--apply") {
@@ -85,6 +92,7 @@ function parseArgs(argv: string[]): Args {
     newPath: normalizeInputPath(positional[1]),
     prefix,
     apply,
+    sessionsOnly,
   };
 }
 
@@ -97,9 +105,11 @@ function printHelp(): void {
   console.log([
     "codex-rename OLD_PATH NEW_PATH",
     "codex-rename OLD_PATH NEW_PATH --prefix",
+    "codex-rename OLD_PATH NEW_PATH --sessions-only --prefix",
     "codex-rename OLD_PATH NEW_PATH --prefix --apply",
     "",
     "Default mode is dry-run. Use --apply to rename the directory and update Codex sessions.",
+    "Use --sessions-only when the directory has already been renamed.",
   ].join("\n"));
 }
 
@@ -116,6 +126,9 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 async function planDirectoryRename(args: Args): Promise<DirectoryPlan> {
+  if (args.sessionsOnly) {
+    return { action: "skip", oldPath: args.oldPath, newPath: args.newPath };
+  }
   if (args.oldPath === "/" || args.newPath === "/") {
     throw new Error("refusing to rename filesystem root");
   }
@@ -138,10 +151,13 @@ async function planDirectoryRename(args: Args): Promise<DirectoryPlan> {
     throw new Error(`target path already exists: ${args.newPath}`);
   }
   await access(dirname(args.newPath), constants.W_OK);
-  return { oldPath: args.oldPath, newPath: args.newPath };
+  return { action: "rename", oldPath: args.oldPath, newPath: args.newPath };
 }
 
 async function applyDirectoryRename(plan: DirectoryPlan): Promise<boolean> {
+  if (plan.action === "skip") {
+    return false;
+  }
   await rename(plan.oldPath, plan.newPath);
   return true;
 }
@@ -444,7 +460,7 @@ async function verifyRollouts(rows: PlannedRow[]): Promise<number> {
 }
 
 function printDirectoryPlan(plan: DirectoryPlan): void {
-  printKeyValue("directory:", textBlue("rename"), 18);
+  printKeyValue("directory:", textBlue(plan.action), 18);
   printKeyValue("from:", colorPath(plan.oldPath), 18);
   printKeyValue("to:", colorPath(plan.newPath), 18);
 }
@@ -485,7 +501,7 @@ export async function runCodexRename(argv: string[]): Promise<void> {
     printKeyValue("matched sessions:", textDim("0"), 18);
     if (args.apply) {
       const renamed = await applyDirectoryRename(directoryPlan);
-      printKeyValue("directory renamed:", renamed ? textGreen("yes") : textDim("no"), 18);
+      printKeyValue("directory changed:", renamed ? textGreen("yes") : textDim("no"), 18);
     } else if (!args.apply) {
       console.log("");
       console.log(textDim("dry-run only. Add --apply to write changes."));
@@ -511,7 +527,7 @@ export async function runCodexRename(argv: string[]): Promise<void> {
   const synced = await verifyRollouts(rows);
 
   printKeyValue("backup:", colorPath(backupDir), 18);
-  printKeyValue("directory renamed:", directoryRenamed ? textGreen("yes") : textDim("no"), 18);
+  printKeyValue("directory changed:", directoryRenamed ? textGreen("yes") : textDim("no"), 18);
   printKeyValue("sqlite updated:", textGreen(String(rows.length)), 18);
   printKeyValue("jsonl updated:", textGreen(String(jsonlUpdated)), 18);
   printKeyValue("old cwd remaining:", oldRemaining === 0 ? textGreen("0") : textRed(String(oldRemaining)), 18);
