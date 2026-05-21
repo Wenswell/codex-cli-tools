@@ -113,14 +113,14 @@ Local test:
 codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
 
-Message format:
+Message format uses a Feishu interactive card. Metadata and assistant output are sent as `lark_md`, so common Markdown such as bold, italic, lists, links, and code blocks can render in Feishu.
 
 ```text
-Codex agent-turn-complete
-cwd: ~/project
-user: do it
+[Codex agent-turn-complete]
+**cwd:** ~/project
+**user:** do it
 
-done
+**done**
 ```
 
 ## ccs

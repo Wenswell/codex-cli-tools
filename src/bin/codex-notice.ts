@@ -11,10 +11,31 @@ type CodexNotifyPayload = {
   [key: string]: unknown;
 };
 
-type FeishuTextBody = {
-  msg_type: "text";
-  content: {
-    text: string;
+type FeishuCardBody = {
+  msg_type: "interactive";
+  card: {
+    config: {
+      wide_screen_mode: boolean;
+    };
+    header: {
+      title: {
+        tag: "plain_text";
+        content: string;
+      };
+      template: "blue";
+    };
+    elements: Array<
+      | {
+          tag: "div";
+          text: {
+            tag: "lark_md";
+            content: string;
+          };
+        }
+      | {
+          tag: "hr";
+        }
+    >;
   };
 };
 
@@ -31,13 +52,11 @@ if (!webhook) {
 }
 
 const payload = JSON.parse(rawPayload) as CodexNotifyPayload;
-const message = buildMessage(payload);
+const card = buildCard(payload);
 
 await postFeishu(webhook, {
-  msg_type: "text",
-  content: {
-    text: message,
-  },
+  msg_type: "interactive",
+  card,
 });
 
 async function readWebhookFromEnvFile(): Promise<string> {
@@ -77,28 +96,66 @@ function stripEnvQuotes(value: string): string {
   return value;
 }
 
-function buildMessage(payload: CodexNotifyPayload): string {
-  const lines = [payload.type ? `Codex ${payload.type}` : "Codex notification"];
+function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
+  const title = payload.type ? `Codex ${payload.type}` : "Codex notification";
   const input = readInputMessage(payload["input-messages"]);
   const answer =
     payload["last-assistant-message"] ??
     payload.last_assistant_message ??
     payload.lastAssistantMessage;
+  const metaLines: string[] = [];
 
   if (payload.cwd) {
-    lines.push(`cwd: ${formatHomePath(payload.cwd)}`);
+    metaLines.push(`**cwd:** ${formatHomePath(payload.cwd)}`);
   }
   if (input) {
-    lines.push(`user: ${input}`);
-  }
-  if (answer) {
-    lines.push("", answer);
-  }
-  if (!input && !answer) {
-    lines.push("", JSON.stringify(payload, null, 2));
+    metaLines.push(`**user:** ${input}`);
   }
 
-  return lines.join("\n");
+  return {
+    config: {
+      wide_screen_mode: true,
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: title,
+      },
+      template: "blue",
+    },
+    elements: [
+      ...(metaLines.length > 0
+        ? [{
+            tag: "div" as const,
+            text: {
+              tag: "lark_md" as const,
+              content: metaLines.join("\n"),
+            },
+          }]
+        : []),
+      ...(answer
+        ? [
+            { tag: "hr" as const },
+            {
+              tag: "div" as const,
+              text: {
+                tag: "lark_md" as const,
+                content: answer,
+              },
+            },
+          ]
+        : [
+            { tag: "hr" as const },
+            {
+              tag: "div" as const,
+              text: {
+                tag: "lark_md" as const,
+                content: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``,
+              },
+            },
+          ]),
+    ],
+  };
 }
 
 function readInputMessage(value: unknown): string {
@@ -119,7 +176,7 @@ function formatHomePath(path: string): string {
   return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 
-async function postFeishu(url: string, body: FeishuTextBody): Promise<void> {
+async function postFeishu(url: string, body: FeishuCardBody): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
