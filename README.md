@@ -52,6 +52,8 @@ codex-notice
 ## CLI conventions
 
 - No-argument/status commands print active configuration values, not just file paths.
+- New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
+- Commands that modify files default to preview/dry-run and require an explicit apply flag.
 - Write/apply commands first print the same plan as dry-run, then print the actual result.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
@@ -143,12 +145,13 @@ Other commands:
 codex-notice
 codex-notice status
 codex-notice config 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx'
+codex-notice config 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' -y
 codex-notice logs
 codex-notice logs 10
 codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
 
-`codex-notice` and `codex-notice status` print the active webhook URL, config path, log path, and Codex notify command. `codex-notice config WEBHOOK` writes `~/.config/codex-tools/notice.env` with `0600` permissions.
+`codex-notice` and `codex-notice status` print the active webhook URL, config path, log path, and Codex notify command. `codex-notice config WEBHOOK` previews the config write; add `-y` or `--yes` to write `~/.config/codex-tools/notice.env` with `0600` permissions.
 
 Message format uses a Feishu interactive card. The title is `Codex user@host`; cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 

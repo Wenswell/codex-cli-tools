@@ -112,7 +112,7 @@ if (!command) {
 } else if (command === "logs") {
   await printLogs(Number(argv[1] ?? "5"));
 } else if (command === "config") {
-  await configureWebhook(argv[1] ?? "");
+  await configureWebhook(argv.slice(1));
 } else if (command === "test") {
   await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
 } else if (command === "hook") {
@@ -132,7 +132,7 @@ function printHelp(): void {
     "  codex-notice hook JSON_PAYLOAD",
     "  codex-notice test [MESSAGE]",
     "  codex-notice logs [N]",
-    "  codex-notice config WEBHOOK",
+    "  codex-notice config WEBHOOK [-y|--yes]",
     "  codex-notice status",
   ].join("\n"));
 }
@@ -203,15 +203,22 @@ async function printStatus(): Promise<void> {
   printKeyValue("notify:", `${textBlue("codex-notice hook")} ${textDim("JSON_PAYLOAD")}`, 10);
 }
 
-async function configureWebhook(webhook: string): Promise<void> {
+async function configureWebhook(argv: string[]): Promise<void> {
+  const apply = argv.includes("-y") || argv.includes("--yes");
+  const webhook = argv.find((arg) => arg !== "-y" && arg !== "--yes") ?? "";
   if (!webhook) {
-    throw new Error("usage: codex-notice config WEBHOOK");
+    throw new Error("usage: codex-notice config WEBHOOK [-y|--yes]");
+  }
+  printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(noticeEnvPath)}`, 10);
+  printKeyValue("webhook:", textGreen(webhook), 10);
+  if (!apply) {
+    console.log(textDim("dry-run only. Re-run with -y or --yes to apply changes."));
+    return;
   }
   await mkdir(dirname(noticeEnvPath), { recursive: true, mode: 0o700 });
   await chmod(dirname(noticeEnvPath), 0o700);
   await writeFile(noticeEnvPath, `FEISHU_BOT_WEBHOOK=${webhook}\n`, { mode: 0o600 });
   await chmod(noticeEnvPath, 0o600);
-  printKeyValue("updated:", colorPath(noticeEnvPath), 10);
 }
 
 async function printLogs(limit: number): Promise<void> {
