@@ -90,7 +90,7 @@ function parseArgs(argv: string[]): Args {
 
 function requireValue(argv: string[], index: number): string {
   const value = argv[index + 1];
-  if (!value || value.startsWith("--")) {
+  if (!value || value.startsWith("-")) {
     throw new Error(`${argv[index]} requires a value`);
   }
   return value;

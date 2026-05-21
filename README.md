@@ -55,6 +55,7 @@ codex-notice
 - New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
 - Commands that modify files default to preview/dry-run and require an explicit apply flag.
 - Write/apply commands first print the same plan as dry-run, then print the actual result.
+- Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
 

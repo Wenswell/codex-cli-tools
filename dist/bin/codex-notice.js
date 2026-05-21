@@ -11,33 +11,43 @@ const maxAnswerPreviewChars = 360;
 const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "";
-if (!command) {
-    await printStatus();
-    printCommands();
-}
-else if (command === "--help" || command === "-h" || command === "help") {
-    printHelp();
-}
-else if (command === "status") {
-    await printStatus();
-}
-else if (command === "logs") {
-    await printLogs(Number(argv[1] ?? "5"));
-}
-else if (command === "config") {
-    await configureWebhook(argv.slice(1));
-}
-else if (command === "test") {
-    await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
-}
-else if (command === "hook") {
-    const rawPayload = argv.length > 1 ? argv.at(-1) : "";
-    if (!rawPayload) {
-        throw new Error("codex-notice hook requires Codex notify JSON payload");
+main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${textRed("codex-notice:")} ${message}`);
+    process.exitCode = 1;
+});
+async function main() {
+    if (!command) {
+        await printStatus();
+        printCommands();
+        return;
     }
-    await sendPayload(JSON.parse(rawPayload));
-}
-else {
+    if (command === "--help" || command === "-h" || command === "help") {
+        printHelp();
+        return;
+    }
+    if (command === "status") {
+        requireNoExtraArgs(argv.slice(1), "codex-notice status");
+        await printStatus();
+        return;
+    }
+    if (command === "logs") {
+        await printLogs(parseLogLimit(argv.slice(1)));
+        return;
+    }
+    if (command === "config") {
+        await configureWebhook(argv.slice(1));
+        return;
+    }
+    if (command === "test") {
+        await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
+        return;
+    }
+    if (command === "hook") {
+        await sendPayload(parseHookPayload(argv.slice(1)));
+        return;
+    }
+    console.error(`${textRed("unknown command:")} ${command}`);
     printHelp();
     process.exitCode = 1;
 }
@@ -53,6 +63,37 @@ function printHelp() {
 }
 function printCommands() {
     printKeyValue("commands:", "codex-notice | status | config WEBHOOK [-y] | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
+}
+function requireNoExtraArgs(args, usage) {
+    if (args.length > 0) {
+        throw new Error(`usage: ${usage}`);
+    }
+}
+function parseLogLimit(args) {
+    if (args.length > 1) {
+        throw new Error("usage: codex-notice logs [N]");
+    }
+    const raw = args[0] ?? "5";
+    if (!/^[1-9]\d*$/.test(raw)) {
+        throw new Error("logs N must be a positive integer");
+    }
+    return Number(raw);
+}
+function parseHookPayload(args) {
+    if (args.length !== 1) {
+        throw new Error("usage: codex-notice hook JSON_PAYLOAD");
+    }
+    try {
+        const payload = JSON.parse(args[0]);
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new Error("payload must be a JSON object");
+        }
+        return payload;
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`invalid JSON payload: ${message}`);
+    }
 }
 async function sendPayload(payload) {
     const webhook = await readWebhook();
@@ -105,7 +146,6 @@ async function readWebhookFromFile(path) {
     return "";
 }
 async function printStatus() {
-    const hasEnv = Boolean(process.env.FEISHU_BOT_WEBHOOK);
     const configWebhook = await readWebhookFromFile(noticeEnvPath);
     const webhook = process.env.FEISHU_BOT_WEBHOOK || configWebhook;
     printKeyValue("webhook:", webhook ? textGreen(webhook) : textRed("missing"), 10);
@@ -113,11 +153,13 @@ async function printStatus() {
     printKeyValue("log:", colorPath(logPath().pathname), 10);
 }
 async function configureWebhook(argv) {
-    const apply = argv.includes("-y") || argv.includes("--yes");
-    const webhook = argv.find((arg) => arg !== "-y" && arg !== "--yes") ?? "";
-    if (!webhook) {
+    const apply = parseConfigApply(argv);
+    const values = argv.filter((arg) => arg !== "-y" && arg !== "--yes");
+    if (values.length !== 1) {
         throw new Error("usage: codex-notice config WEBHOOK [-y|--yes]");
     }
+    const webhook = values[0];
+    validateWebhook(webhook);
     printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(noticeEnvPath)}`, 10);
     printKeyValue("webhook:", textGreen(webhook), 10);
     if (!apply) {
@@ -128,6 +170,31 @@ async function configureWebhook(argv) {
     await chmod(dirname(noticeEnvPath), 0o700);
     await writeFile(noticeEnvPath, `FEISHU_BOT_WEBHOOK=${webhook}\n`, { mode: 0o600 });
     await chmod(noticeEnvPath, 0o600);
+}
+function parseConfigApply(args) {
+    let apply = false;
+    for (const arg of args) {
+        if (arg === "-y" || arg === "--yes") {
+            apply = true;
+            continue;
+        }
+        if (arg.startsWith("-")) {
+            throw new Error(`unknown argument for codex-notice config: ${arg}`);
+        }
+    }
+    return apply;
+}
+function validateWebhook(value) {
+    try {
+        const url = new URL(value);
+        if (url.protocol !== "https:" && url.protocol !== "http:") {
+            throw new Error("webhook must be an http or https URL");
+        }
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`invalid webhook URL: ${message}`);
+    }
 }
 async function printLogs(limit) {
     const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5;
@@ -148,7 +215,14 @@ async function printLogs(limit) {
         return;
     }
     for (const line of lines) {
-        const entry = JSON.parse(line);
+        let entry;
+        try {
+            entry = JSON.parse(line);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
+        }
         const title = entry.request?.card?.header?.title?.content ?? "Codex";
         const status = entry.response?.status ?? "?";
         const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
