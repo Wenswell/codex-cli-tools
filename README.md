@@ -113,15 +113,12 @@ Read order:
 ```text
 FEISHU_BOT_WEBHOOK environment variable
 ~/.config/codex-tools/notice.env
-package .env
 ```
-
-The package `.env` fallback is mainly for local development.
 
 Add this to `~/.codex/config.toml`:
 
 ```toml
-notify = ["codex-notice"]
+notify = ["codex-notice", "hook"]
 ```
 
 `ccs init` and `ccs sync` include this `notify` line in the default Codex config template.
@@ -129,7 +126,17 @@ notify = ["codex-notice"]
 Local test:
 
 ```bash
-codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
+codex-notice test
+codex-notice test "done"
+```
+
+Other commands:
+
+```bash
+codex-notice status
+codex-notice logs
+codex-notice logs 10
+codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
 
 Message format uses a Feishu interactive card. The title is `Codex user@host`; cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
