@@ -116,9 +116,11 @@ codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-mess
 Message format uses a Feishu interactive card. Metadata is shown at the top, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
 ```text
-[Codex agent-turn-complete]
-**cwd:** ~/project
-**user:** do it
+[Codex user@host]
+📁 ~/project
+
+💬 do it
+
 ---
 
 done
