@@ -49,11 +49,40 @@ function stripEnvQuotes(value) {
     return value;
 }
 function buildMessage(payload) {
-    const title = payload.type ? `Codex: ${payload.type}` : "Codex notification";
-    const body = payload.last_assistant_message ??
-        payload.lastAssistantMessage ??
-        JSON.stringify(payload, null, 2);
-    return `${title}\n${body}`;
+    const lines = [payload.type ? `Codex ${payload.type}` : "Codex notification"];
+    const input = readInputMessage(payload["input-messages"]);
+    const answer = payload["last-assistant-message"] ??
+        payload.last_assistant_message ??
+        payload.lastAssistantMessage;
+    if (payload.cwd) {
+        lines.push(`cwd: ${formatHomePath(payload.cwd)}`);
+    }
+    if (input) {
+        lines.push(`user: ${input}`);
+    }
+    if (answer) {
+        lines.push("", answer);
+    }
+    if (!input && !answer) {
+        lines.push("", JSON.stringify(payload, null, 2));
+    }
+    return lines.join("\n");
+}
+function readInputMessage(value) {
+    if (Array.isArray(value)) {
+        return value.filter((item) => typeof item === "string").join("\n");
+    }
+    return typeof value === "string" ? value : "";
+}
+function formatHomePath(path) {
+    const home = process.env.HOME;
+    if (!home) {
+        return path;
+    }
+    if (path === home) {
+        return "~";
+    }
+    return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 async function postFeishu(url, body) {
     const response = await fetch(url, {
