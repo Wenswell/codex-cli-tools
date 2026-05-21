@@ -7,6 +7,7 @@ import { codexToolsConfigDir } from "../lib/paths.js";
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
 const maxAnswerPreviewChars = 360;
+const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 
 type CodexNotifyPayload = {
   type?: string;
@@ -97,32 +98,66 @@ type FeishuPostResult = {
   responseJson: unknown;
 };
 
-const rawPayload = process.argv.length > 2 ? process.argv.at(-1) : "";
+const argv = process.argv.slice(2);
+const command = argv[0] ?? "";
 
-if (!rawPayload) {
-  throw new Error("Codex notify JSON payload is required as the last argument");
-}
-
-const webhook = process.env.FEISHU_BOT_WEBHOOK || await readWebhookFromEnvFile();
-
-if (!webhook) {
-  throw new Error("FEISHU_BOT_WEBHOOK is required in .env or environment");
-}
-
-const payload = JSON.parse(rawPayload) as CodexNotifyPayload;
-const card = buildCard(payload);
-
-await postFeishu(webhook, {
-  msg_type: "interactive",
-  card,
-});
-
-async function readWebhookFromEnvFile(): Promise<string> {
-  const configWebhook = await readWebhookFromFile(join(codexToolsConfigDir(), "notice.env"));
-  if (configWebhook) {
-    return configWebhook;
+if (command === "--help" || command === "-h" || command === "help") {
+  printHelp();
+} else if (command === "status") {
+  await printStatus();
+} else if (command === "logs") {
+  await printLogs(Number(argv[1] ?? "5"));
+} else if (command === "test") {
+  await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
+} else if (command === "hook") {
+  const rawPayload = argv.length > 1 ? argv.at(-1) : "";
+  if (!rawPayload) {
+    throw new Error("codex-notice hook requires Codex notify JSON payload");
   }
-  return readWebhookFromFile(new URL("../../.env", import.meta.url));
+  await sendPayload(JSON.parse(rawPayload) as CodexNotifyPayload);
+} else {
+  printHelp();
+  process.exitCode = 1;
+}
+
+function printHelp(): void {
+  console.log([
+    "Usage:",
+    "  codex-notice hook JSON_PAYLOAD",
+    "  codex-notice test [MESSAGE]",
+    "  codex-notice logs [N]",
+    "  codex-notice status",
+  ].join("\n"));
+}
+
+async function sendPayload(payload: CodexNotifyPayload): Promise<void> {
+  const webhook = await readWebhook();
+  const card = buildCard(payload);
+  await postFeishu(webhook, {
+    msg_type: "interactive",
+    card,
+  });
+}
+
+async function readWebhook(): Promise<string> {
+  const webhook = process.env.FEISHU_BOT_WEBHOOK || await readWebhookFromConfigFile();
+  if (!webhook) {
+    throw new Error("FEISHU_BOT_WEBHOOK is required in environment or ~/.config/codex-tools/notice.env");
+  }
+  return webhook;
+}
+
+function buildTestPayload(message: string): CodexNotifyPayload {
+  return {
+    type: "agent-turn-complete",
+    cwd: process.cwd(),
+    "input-messages": ["codex-notice test"],
+    "last-assistant-message": message,
+  };
+}
+
+async function readWebhookFromConfigFile(): Promise<string> {
+  return readWebhookFromFile(noticeEnvPath);
 }
 
 async function readWebhookFromFile(path: string | URL): Promise<string> {
@@ -149,6 +184,52 @@ async function readWebhookFromFile(path: string | URL): Promise<string> {
   }
 
   return "";
+}
+
+async function printStatus(): Promise<void> {
+  const hasEnv = Boolean(process.env.FEISHU_BOT_WEBHOOK);
+  const configWebhook = await readWebhookFromFile(noticeEnvPath);
+  const webhookSource = hasEnv
+    ? "env"
+    : configWebhook
+      ? noticeEnvPath
+      : "missing";
+  console.log([
+    `webhook: ${webhookSource}`,
+    `config:  ${noticeEnvPath}`,
+    `log:     ${logPath().pathname}`,
+  ].join("\n"));
+}
+
+async function printLogs(limit: number): Promise<void> {
+  const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5;
+  let text = "";
+  try {
+    text = await readFile(logPath(), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      console.log("no logs");
+      return;
+    }
+    throw error;
+  }
+  const lines = text.split(/\r?\n/).filter(Boolean).slice(-count);
+  if (lines.length === 0) {
+    console.log("no logs");
+    return;
+  }
+  for (const line of lines) {
+    const entry = JSON.parse(line) as {
+      at?: string;
+      request?: { card?: { header?: { title?: { content?: string } } } };
+      response?: { status?: number; responseJson?: { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string } };
+    };
+    const title = entry.request?.card?.header?.title?.content ?? "Codex";
+    const status = entry.response?.status ?? "?";
+    const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
+    const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
+    console.log(`${entry.at ?? ""}  ${status}  ${code}  ${title}${msg ? `  ${msg}` : ""}`);
+  }
 }
 
 function stripEnvQuotes(value: string): string {
@@ -406,7 +487,7 @@ function parseJson(text: string): unknown {
 }
 
 async function writeSendLog(request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
-  const path = new URL("../../codex-notice.log.jsonl", import.meta.url);
+  const path = logPath();
   let existing = "";
   try {
     existing = await readFile(path, "utf8");
@@ -427,4 +508,8 @@ async function writeSendLog(request: FeishuCardBody, result: FeishuPostResult): 
   }));
 
   await writeFile(path, `${entries.join("\n")}\n`, { mode: 0o600 });
+}
+
+function logPath(): URL {
+  return new URL("../../codex-notice.log.jsonl", import.meta.url);
 }

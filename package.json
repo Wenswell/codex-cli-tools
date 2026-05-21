@@ -14,8 +14,7 @@
   },
   "files": [
     "dist",
-    "config",
-    ".env.example"
+    "config"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",

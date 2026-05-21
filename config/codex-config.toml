@@ -9,7 +9,7 @@ developer_instructions = "开发原则：\n1.尽可能多使用subAgent来辅助
 approvals_reviewer = "user" # 审批交给用户确认
 service_tier = "fast" # 服务档位，fast 优先速度
 model = "gpt-5.5" # 默认使用的模型
-notify = ["codex-notice"] # Codex 原生 notify hook，发送到飞书
+notify = ["codex-notice", "hook"] # Codex 原生 notify hook，发送到飞书
 
 suppress_unstable_features_warning = true # 隐藏实验功能警告
 
