@@ -400,7 +400,7 @@ CLI output includes the target file and counts/lists for added, filled defaults,
 
 ## codex-rename
 
-`codex-rename` updates local Codex session directory associations after a project folder is renamed.
+`codex-rename` renames a project folder and updates local Codex session directory associations in the same command.
 
 Codex stores the directory association in:
 
@@ -421,13 +421,16 @@ codex-rename OLD_PATH NEW_PATH --prefix --apply
 ```
 
 Default mode is dry-run. Nothing is modified unless `--apply` is provided.
-Apply mode first prints the same planned session and rollout-file details as dry-run, then prints backup, update, and verification counts.
+Apply mode first prints the same directory, session, and rollout-file plan as dry-run, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
 
 Path behavior:
 
+- `OLD_PATH` must exist and must be a directory.
+- `NEW_PATH` must not exist.
+- `NEW_PATH` must not be inside `OLD_PATH`.
 - Default: migrate sessions whose `cwd` is exactly `OLD_PATH`.
 - `--prefix`: migrate `OLD_PATH` and every child path under it.
-- Prefix mode preserves the relative path below `OLD_PATH`.
+- Prefix mode preserves the relative path below `OLD_PATH` for session cwd updates. The actual directory operation is still one rename from `OLD_PATH` to `NEW_PATH`.
 
 Example:
 
@@ -457,6 +460,7 @@ Apply behavior:
 - Builds and re-checks planned JSONL writes before updating SQLite.
 - Creates a backup directory under `~/.codex/backups/session-cwd-migration-YYYYMMDD-HHMMSS/`.
 - Backs up the state SQLite file and every rollout JSONL that will be modified.
+- Renames `OLD_PATH` to `NEW_PATH` with the native filesystem rename operation.
 - Updates SQLite in a transaction.
 - Updates only the first line of each rollout JSONL.
 - If a JSONL update fails after SQLite is updated, attempts to roll back SQLite and already-written JSONL files.
