@@ -237,6 +237,15 @@ function printSummary(target: string, summary: Summary, apply: boolean): void {
   printKeys("extra keys", summary.extra);
 }
 
+function printPlan(target: string, summary: Summary): void {
+  printSummary(target, summary, false);
+}
+
+function printResult(target: string, summary: Summary): void {
+  console.log("");
+  printSummary(target, summary, true);
+}
+
 function printKeys(label: string, keys: string[]): void {
   if (keys.length === 0) {
     return;
@@ -275,9 +284,11 @@ export async function runEnvsync(argv: string[]): Promise<void> {
   const result = buildEnv(exampleText, existingText);
 
   if (!args.apply) {
-    printSummary(basename(args.target), result.summary, false);
+    printPlan(basename(args.target), result.summary);
     return;
   }
+
+  printPlan(basename(args.target), result.summary);
 
   if (args.backup && existingTargetText !== null) {
     const backupPath = await createBackup(args.target);
@@ -285,5 +296,5 @@ export async function runEnvsync(argv: string[]): Promise<void> {
   }
 
   await writeTextFile(args.target, result.text);
-  printSummary(basename(args.target), result.summary, true);
+  printResult(basename(args.target), result.summary);
 }

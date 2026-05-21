@@ -179,6 +179,13 @@ function printSummary(target, summary, apply) {
     printKeys("filled defaults keys", summary.filledDefaults);
     printKeys("extra keys", summary.extra);
 }
+function printPlan(target, summary) {
+    printSummary(target, summary, false);
+}
+function printResult(target, summary) {
+    console.log("");
+    printSummary(target, summary, true);
+}
 function printKeys(label, keys) {
     if (keys.length === 0) {
         return;
@@ -214,13 +221,14 @@ export async function runEnvsync(argv) {
     const existingText = existingTargetText ?? "";
     const result = buildEnv(exampleText, existingText);
     if (!args.apply) {
-        printSummary(basename(args.target), result.summary, false);
+        printPlan(basename(args.target), result.summary);
         return;
     }
+    printPlan(basename(args.target), result.summary);
     if (args.backup && existingTargetText !== null) {
         const backupPath = await createBackup(args.target);
         console.log(`backup: ${textBlue(backupPath)}`);
     }
     await writeTextFile(args.target, result.text);
-    printSummary(basename(args.target), result.summary, true);
+    printResult(basename(args.target), result.summary);
 }
