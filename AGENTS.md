@@ -1,7 +1,9 @@
 - Keep command surfaces small. Prefer one obvious command over aliases or compatibility shims.
+- New user-facing tools must include a basic CLI surface, not only an internal hook/script entry. At minimum consider no-argument/status output and `--help`; add focused `config`, `test`, or `logs` commands when the tool has configuration, delivery, or debug state.
 - Remove legacy behavior instead of preserving fallback modes when the command contract changes.
 - For status/no-argument commands, print the actual active configuration values, not just where to find them. Example: `codex-notice` prints the active webhook URL plus config/log paths.
 - Apply/write modes must first print the same plan/details as dry-run, then print the actual write/backup/verification result.
+- Any command that modifies files must default to preview/dry-run and require an explicit apply flag such as `-y`, `--yes`, or `--apply`.
 - Dry-run output should directly tell the apply flag, such as `-y`, `--yes`, or `--apply`.
 - Keep output compact and aligned with key/value labels where practical.
 - When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
