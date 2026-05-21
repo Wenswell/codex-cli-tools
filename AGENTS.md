@@ -1,0 +1,9 @@
+- Keep command surfaces small. Prefer one obvious command over aliases or compatibility shims.
+- Remove legacy behavior instead of preserving fallback modes when the command contract changes.
+- For status/no-argument commands, print the actual active configuration values, not just where to find them. Example: `codex-notice` prints the active webhook URL plus config/log paths.
+- Apply/write modes must first print the same plan/details as dry-run, then print the actual write/backup/verification result.
+- Dry-run output should directly tell the apply flag, such as `-y`, `--yes`, or `--apply`.
+- Keep output compact and aligned with key/value labels where practical.
+- When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
+- For config under this toolset, use `~/.config/codex-tools` unless there is a strong reason not to.
+- Do not add package-directory secret fallbacks. Secrets belong in environment variables or `~/.config/codex-tools/*`.
