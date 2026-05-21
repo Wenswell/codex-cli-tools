@@ -93,11 +93,30 @@ Use `cxx` and `cxxs` only in directories and tasks you trust.
 
 `codex-notice` receives Codex native `notify` payloads and forwards them to a Feishu custom bot.
 
-Set `FEISHU_BOT_WEBHOOK` in the environment, or create `.env` in this package directory:
+Set `FEISHU_BOT_WEBHOOK` in the environment, or create `~/.config/codex-tools/notice.env`:
 
-```dotenv
+```bash
+mkdir -p ~/.config/codex-tools
+chmod 700 ~/.config/codex-tools
+printf 'FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx\n' > ~/.config/codex-tools/notice.env
+chmod 600 ~/.config/codex-tools/notice.env
+```
+
+File format:
+
+```text
 FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 ```
+
+Read order:
+
+```text
+FEISHU_BOT_WEBHOOK environment variable
+~/.config/codex-tools/notice.env
+package .env
+```
+
+The package `.env` fallback is mainly for local development.
 
 Add this to `~/.codex/config.toml`:
 
@@ -113,7 +132,7 @@ Local test:
 codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
 
-Message format uses a Feishu interactive card. Metadata is shown at the top, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
+Message format uses a Feishu interactive card. The title is `Codex user@host`; cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
 ```text
 [Codex user@host]
@@ -320,6 +339,7 @@ senv --source .env.example --target .env -y
 Run `senv` without arguments to print help.
 
 Default mode is dry-run. Nothing is modified unless `-y` or `--yes` is provided.
+Apply mode first prints the same planned summary as dry-run, then prints the updated result after writing.
 
 Options:
 
@@ -379,6 +399,7 @@ codex-rename OLD_PATH NEW_PATH --prefix --apply
 ```
 
 Default mode is dry-run. Nothing is modified unless `--apply` is provided.
+Apply mode first prints the same planned session and rollout-file details as dry-run, then prints backup, update, and verification counts.
 
 Path behavior:
 

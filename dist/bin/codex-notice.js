@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
+import { join } from "node:path";
+import { codexToolsConfigDir } from "../lib/paths.js";
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
 const maxAnswerPreviewChars = 360;
@@ -19,10 +21,16 @@ await postFeishu(webhook, {
     card,
 });
 async function readWebhookFromEnvFile() {
-    const envPath = new URL("../../.env", import.meta.url);
+    const configWebhook = await readWebhookFromFile(join(codexToolsConfigDir(), "notice.env"));
+    if (configWebhook) {
+        return configWebhook;
+    }
+    return readWebhookFromFile(new URL("../../.env", import.meta.url));
+}
+async function readWebhookFromFile(path) {
     let text = "";
     try {
-        text = await readFile(envPath, "utf8");
+        text = await readFile(path, "utf8");
     }
     catch (error) {
         if (error.code === "ENOENT") {

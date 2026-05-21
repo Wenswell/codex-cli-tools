@@ -394,7 +394,7 @@ async function verifyRollouts(rows: PlannedRow[]): Promise<number> {
   return synced;
 }
 
-function printDryRun(args: Args, dbPath: string, rows: PlannedRow[]): void {
+function printPlan(args: Args, dbPath: string, rows: PlannedRow[], dryRun: boolean): void {
   printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
   printKeyValue("state:", colorPath(dbPath), 18);
   printKeyValue("old:", textRed(args.oldPath), 18);
@@ -410,8 +410,10 @@ function printDryRun(args: Args, dbPath: string, rows: PlannedRow[]): void {
   for (const path of uniqueRolloutPaths(rows)) {
     console.log(`  ${textBlue(path)}`);
   }
-  console.log("");
-  console.log(textDim("dry-run only. Add --apply to write changes."));
+  if (dryRun) {
+    console.log("");
+    console.log(textDim("dry-run only. Add --apply to write changes."));
+  }
 }
 
 export async function runCodexSessionMove(argv: string[]): Promise<void> {
@@ -429,10 +431,12 @@ export async function runCodexSessionMove(argv: string[]): Promise<void> {
   await preflightRollouts(rows);
 
   if (!args.apply) {
-    printDryRun(args, dbPath, rows);
+    printPlan(args, dbPath, rows, true);
     return;
   }
 
+  printPlan(args, dbPath, rows, false);
+  console.log("");
   const plannedRollouts = await planRolloutWrites(rows);
   const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));
   const jsonlUpdated = await applyMigration(dbPath, rows, plannedRollouts);

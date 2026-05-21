@@ -306,7 +306,7 @@ async function verifyRollouts(rows) {
     }
     return synced;
 }
-function printDryRun(args, dbPath, rows) {
+function printPlan(args, dbPath, rows, dryRun) {
     printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
     printKeyValue("state:", colorPath(dbPath), 18);
     printKeyValue("old:", textRed(args.oldPath), 18);
@@ -322,8 +322,10 @@ function printDryRun(args, dbPath, rows) {
     for (const path of uniqueRolloutPaths(rows)) {
         console.log(`  ${textBlue(path)}`);
     }
-    console.log("");
-    console.log(textDim("dry-run only. Add --apply to write changes."));
+    if (dryRun) {
+        console.log("");
+        console.log(textDim("dry-run only. Add --apply to write changes."));
+    }
 }
 export async function runCodexSessionMove(argv) {
     const args = parseArgs(argv);
@@ -337,9 +339,11 @@ export async function runCodexSessionMove(argv) {
     }
     await preflightRollouts(rows);
     if (!args.apply) {
-        printDryRun(args, dbPath, rows);
+        printPlan(args, dbPath, rows, true);
         return;
     }
+    printPlan(args, dbPath, rows, false);
+    console.log("");
     const plannedRollouts = await planRolloutWrites(rows);
     const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));
     const jsonlUpdated = await applyMigration(dbPath, rows, plannedRollouts);
