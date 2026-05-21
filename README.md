@@ -113,15 +113,20 @@ Local test:
 codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
 
-Message format uses a Feishu interactive card. Metadata and assistant output are sent as `lark_md`, so common Markdown such as bold, italic, lists, links, and code blocks can render in Feishu.
+Message format uses a Feishu interactive card. Metadata is shown at the top, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
 ```text
 [Codex agent-turn-complete]
 **cwd:** ~/project
 **user:** do it
+---
 
-**done**
+done
+
+剩余回复（点击展开）
 ```
+
+`codex-notice` keeps the latest 10 full webhook request/response entries in `codex-notice.log.jsonl` for debugging. The log is ignored by Git.
 
 ## ccs
 
