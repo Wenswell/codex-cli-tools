@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 
 type CodexNotifyPayload = {
   type?: string;
+  cwd?: string;
+  "input-messages"?: unknown;
+  "last-assistant-message"?: string;
   last_assistant_message?: string;
   lastAssistantMessage?: string;
   [key: string]: unknown;
@@ -75,13 +78,45 @@ function stripEnvQuotes(value: string): string {
 }
 
 function buildMessage(payload: CodexNotifyPayload): string {
-  const title = payload.type ? `Codex: ${payload.type}` : "Codex notification";
-  const body =
+  const lines = [payload.type ? `Codex ${payload.type}` : "Codex notification"];
+  const input = readInputMessage(payload["input-messages"]);
+  const answer =
+    payload["last-assistant-message"] ??
     payload.last_assistant_message ??
-    payload.lastAssistantMessage ??
-    JSON.stringify(payload, null, 2);
+    payload.lastAssistantMessage;
 
-  return `${title}\n${body}`;
+  if (payload.cwd) {
+    lines.push(`cwd: ${formatHomePath(payload.cwd)}`);
+  }
+  if (input) {
+    lines.push(`user: ${input}`);
+  }
+  if (answer) {
+    lines.push("", answer);
+  }
+  if (!input && !answer) {
+    lines.push("", JSON.stringify(payload, null, 2));
+  }
+
+  return lines.join("\n");
+}
+
+function readInputMessage(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string").join("\n");
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function formatHomePath(path: string): string {
+  const home = process.env.HOME;
+  if (!home) {
+    return path;
+  }
+  if (path === home) {
+    return "~";
+  }
+  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 
 async function postFeishu(url: string, body: FeishuTextBody): Promise<void> {
