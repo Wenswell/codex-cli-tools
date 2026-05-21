@@ -46,6 +46,7 @@ cxx
 cxxs
 senv
 codex-rename
+codex-notice
 ```
 
 ## cx / cxx / cxxs
@@ -87,6 +88,28 @@ codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
 ```
 
 Use `cxx` and `cxxs` only in directories and tasks you trust.
+
+## codex-notice
+
+`codex-notice` receives Codex native `notify` payloads and forwards them to a Feishu custom bot.
+
+Create `.env` in this package directory:
+
+```dotenv
+FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+```
+
+Add this to `~/.codex/config.toml`:
+
+```toml
+notify = ["codex-notice"]
+```
+
+Local test:
+
+```bash
+codex-notice '{"type":"agent-turn-complete","last_assistant_message":"done"}'
+```
 
 ## ccs
 
