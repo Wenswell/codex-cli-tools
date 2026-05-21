@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+const maxLogEntries = 10;
+const maxInlineUserChars = 240;
+const maxAnswerPreviewChars = 360;
 const rawPayload = process.argv.length > 2 ? process.argv.at(-1) : "";
 if (!rawPayload) {
     throw new Error("Codex notify JSON payload is required as the last argument");
@@ -48,67 +51,142 @@ function stripEnvQuotes(value) {
 }
 function buildCard(payload) {
     const title = payload.type ? `Codex ${payload.type}` : "Codex notification";
-    const input = readInputMessage(payload["input-messages"]);
+    const input = readInputMessages(payload["input-messages"]);
     const answer = payload["last-assistant-message"] ??
         payload.last_assistant_message ??
         payload.lastAssistantMessage;
+    const answerText = answer ?? `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+    const answerParts = splitPreview(answerText, maxAnswerPreviewChars);
     const metaLines = [];
     if (payload.cwd) {
         metaLines.push(`**cwd:** ${formatHomePath(payload.cwd)}`);
     }
-    if (input) {
-        metaLines.push(`**user:** ${input}`);
+    if (input.latest) {
+        metaLines.push(`**user:** ${truncate(input.latest, maxInlineUserChars)}`);
     }
     return {
-        config: {
-            wide_screen_mode: true,
-        },
+        schema: "2.0",
         header: {
+            template: getHeaderTemplate(payload),
             title: {
                 tag: "plain_text",
                 content: title,
             },
-            template: "blue",
         },
-        elements: [
-            ...(metaLines.length > 0
-                ? [{
-                        tag: "div",
-                        text: {
-                            tag: "lark_md",
+        body: {
+            elements: [
+                ...(metaLines.length > 0
+                    ? [{
+                            tag: "markdown",
                             content: metaLines.join("\n"),
-                        },
-                    }]
-                : []),
-            ...(answer
-                ? [
-                    { tag: "hr" },
-                    {
-                        tag: "div",
-                        text: {
-                            tag: "lark_md",
-                            content: answer,
-                        },
-                    },
-                ]
-                : [
-                    { tag: "hr" },
-                    {
-                        tag: "div",
-                        text: {
-                            tag: "lark_md",
-                            content: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``,
-                        },
-                    },
-                ]),
+                        }]
+                    : []),
+                buildSeparator(),
+                {
+                    tag: "markdown",
+                    content: answerParts.preview,
+                },
+                ...(answerParts.rest ? [buildCollapsibleReply(answerParts.rest)] : []),
+            ],
+        },
+    };
+}
+function getHeaderTemplate(payload) {
+    const type = payload.type?.toLowerCase() ?? "";
+    return type.includes("error") || type.includes("fail") ? "red" : "blue";
+}
+function buildSeparator() {
+    return {
+        tag: "markdown",
+        content: "---",
+    };
+}
+function buildCollapsibleReply(content) {
+    return buildCollapsiblePanel("剩余回复（点击展开）", content);
+}
+function buildCollapsiblePanel(title, content) {
+    return {
+        tag: "collapsible_panel",
+        expanded: false,
+        header: {
+            title: {
+                tag: "markdown",
+                content: `**${title}**`,
+            },
+            vertical_align: "center",
+            icon: {
+                tag: "standard_icon",
+                token: "down-small-ccm_outlined",
+                color: "",
+                size: "16px 16px",
+            },
+            icon_position: "right",
+            icon_expanded_angle: -180,
+        },
+        border: {
+            color: "grey",
+            corner_radius: "5px",
+        },
+        vertical_spacing: "8px",
+        padding: "8px 8px 8px 8px",
+        elements: [
+            {
+                tag: "markdown",
+                content,
+            },
         ],
     };
 }
-function readInputMessage(value) {
+function readInputMessages(value) {
     if (Array.isArray(value)) {
-        return value.filter((item) => typeof item === "string").join("\n");
+        const all = value.filter((item) => typeof item === "string" && item.trim().length > 0);
+        return {
+            latest: all.at(-1) ?? "",
+            all,
+        };
     }
-    return typeof value === "string" ? value : "";
+    if (typeof value === "string" && value.trim()) {
+        return {
+            latest: value,
+            all: [value],
+        };
+    }
+    return {
+        latest: "",
+        all: [],
+    };
+}
+function truncate(value, maxChars) {
+    return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+function splitPreview(value, maxChars) {
+    if (value.length <= maxChars) {
+        return {
+            preview: value,
+            rest: "",
+        };
+    }
+    const splitAt = findPreviewSplitIndex(value, maxChars);
+    return {
+        preview: `${value.slice(0, splitAt).trimEnd()}...`,
+        rest: value.slice(splitAt).trimStart(),
+    };
+}
+function findPreviewSplitIndex(value, maxChars) {
+    const window = value.slice(0, maxChars);
+    const paragraphBreak = window.lastIndexOf("\n\n");
+    if (paragraphBreak >= Math.floor(maxChars * 0.45)) {
+        return paragraphBreak;
+    }
+    const lineBreak = window.lastIndexOf("\n");
+    if (lineBreak >= Math.floor(maxChars * 0.65)) {
+        return lineBreak;
+    }
+    const space = window.lastIndexOf(" ");
+    if (space >= Math.floor(maxChars * 0.75)) {
+        return space;
+    }
+    return maxChars;
 }
 function formatHomePath(path) {
     const home = process.env.HOME;
@@ -129,11 +207,55 @@ async function postFeishu(url, body) {
         body: JSON.stringify(body),
     });
     const text = await response.text();
+    const result = parseJson(text);
+    await tryWriteSendLog(body, {
+        status: response.status,
+        responseText: text,
+        responseJson: result,
+    });
     if (!response.ok) {
         throw new Error(`Feishu webhook failed: ${response.status} ${text}`);
     }
-    const result = JSON.parse(text);
-    if (result.code !== 0) {
+    const responseJson = result;
+    if (responseJson.code !== 0 && responseJson.StatusCode !== 0) {
         throw new Error(`Feishu webhook rejected message: ${text}`);
     }
+}
+async function tryWriteSendLog(request, result) {
+    try {
+        await writeSendLog(request, result);
+    }
+    catch {
+        // Notify hooks should not fail only because local debug logging failed.
+    }
+}
+function parseJson(text) {
+    try {
+        return JSON.parse(text);
+    }
+    catch {
+        return null;
+    }
+}
+async function writeSendLog(request, result) {
+    const path = new URL("../../codex-notice.log.jsonl", import.meta.url);
+    let existing = "";
+    try {
+        existing = await readFile(path, "utf8");
+    }
+    catch (error) {
+        if (error.code !== "ENOENT") {
+            throw error;
+        }
+    }
+    const entries = existing
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .slice(-(maxLogEntries - 1));
+    entries.push(JSON.stringify({
+        at: new Date().toISOString(),
+        request,
+        response: result,
+    }));
+    await writeFile(path, `${entries.join("\n")}\n`, { mode: 0o600 });
 }
