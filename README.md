@@ -93,7 +93,7 @@ Use `cxx` and `cxxs` only in directories and tasks you trust.
 
 `codex-notice` receives Codex native `notify` payloads and forwards them to a Feishu custom bot.
 
-Create `.env` in this package directory:
+Set `FEISHU_BOT_WEBHOOK` in the environment, or create `.env` in this package directory:
 
 ```dotenv
 FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
@@ -105,10 +105,22 @@ Add this to `~/.codex/config.toml`:
 notify = ["codex-notice"]
 ```
 
+`ccs init` and `ccs sync` include this `notify` line in the default Codex config template.
+
 Local test:
 
 ```bash
-codex-notice '{"type":"agent-turn-complete","last_assistant_message":"done"}'
+codex-notice '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
+```
+
+Message format:
+
+```text
+Codex agent-turn-complete
+cwd: ~/project
+user: do it
+
+done
 ```
 
 ## ccs
