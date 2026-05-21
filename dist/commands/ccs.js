@@ -24,7 +24,13 @@ async function readProfiles() {
     if (!text) {
         return {};
     }
-    return parseJsonObject(text);
+    try {
+        return parseJsonObject(text);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`invalid profiles.json: ${message}`);
+    }
 }
 async function writeProfiles(profiles) {
     await writeTextFile(profilesPath(), stringifyJson(profiles), 0o600);
@@ -192,6 +198,23 @@ function hasPreviewFlag(argv) {
 }
 function hasYesFlag(argv) {
     return hasFlag(argv, "-y") || hasFlag(argv, "--yes");
+}
+function assertOnlyFlags(argv, command, allowed) {
+    for (const arg of argv) {
+        if (!allowed.includes(arg)) {
+            throw new Error(`unknown argument for ccs ${command}: ${arg}`);
+        }
+    }
+}
+function assertMaxArgs(argv, command, count) {
+    if (argv.length > count) {
+        throw new Error(`usage: ccs ${command}`);
+    }
+}
+function assertExactArgs(argv, command, count) {
+    if (argv.length !== count) {
+        throw new Error(`usage: ccs ${command}`);
+    }
 }
 function formatList(values) {
     return values.length > 0 ? values.join(", ") : "(none)";
@@ -736,6 +759,10 @@ function printUsageHelp() {
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
     const args = argv.slice(1);
+    if (command === "help" || command === "--help" || command === "-h") {
+        printHelp();
+        return;
+    }
     const profiles = await readProfiles();
     if (!command) {
         const profile = await printStatus();
@@ -743,11 +770,8 @@ export async function runCcs(argv) {
         printUsageHelp();
         return;
     }
-    if (command === "help" || command === "--help" || command === "-h") {
-        printHelp();
-        return;
-    }
     if (command === "init") {
+        assertOnlyFlags(args, "init", ["-n", "--dry-run", "-y", "--yes"]);
         if (hasPreviewFlag(args) || !hasYesFlag(args)) {
             await printInitDryRun();
             return;
@@ -769,6 +793,7 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "sync") {
+        assertOnlyFlags(args, "sync", ["-n", "--dry-run", "-y", "--yes"]);
         if (hasPreviewFlag(args) || !hasYesFlag(args)) {
             await printSyncDryRun();
             return;
@@ -797,15 +822,24 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "add") {
+        assertMaxArgs(args, "add [PROFILE]", 1);
+        if (args[0]?.startsWith("-")) {
+            throw new Error(`unknown argument for ccs add: ${args[0]}`);
+        }
         await addProfile(args[0]);
         return;
     }
     if (command === "remove" || command === "rm" || command === "delete") {
+        assertExactArgs(args, `${command} PROFILE`, 1);
         await removeProfile(args[0]);
         return;
     }
     if (command === "toggle") {
+        assertMaxArgs(args, "toggle [PROFILE]", 1);
         if (args[0]) {
+            if (args[0].startsWith("-")) {
+                throw new Error(`unknown argument for ccs toggle: ${args[0]}`);
+            }
             const profile = await switchProfile(args[0]);
             await printUsageLine(profile);
             return;
@@ -821,6 +855,7 @@ export async function runCcs(argv) {
         return;
     }
     if (profiles.profiles?.[command]) {
+        assertExactArgs(args, command, 0);
         printProfile(command, profiles);
         await printUsageLine(assertProfile(profiles.profiles[command], command));
         return;

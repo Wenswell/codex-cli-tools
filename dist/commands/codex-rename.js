@@ -27,7 +27,7 @@ function parseArgs(argv) {
             apply = false;
             continue;
         }
-        if (arg.startsWith("--")) {
+        if (arg.startsWith("-")) {
             throw new Error(`unknown argument: ${arg}`);
         }
         positional.push(arg);

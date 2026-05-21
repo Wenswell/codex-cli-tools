@@ -50,7 +50,7 @@ function parseArgs(argv) {
 }
 function requireValue(argv, index) {
     const value = argv[index + 1];
-    if (!value || value.startsWith("--")) {
+    if (!value || value.startsWith("-")) {
         throw new Error(`${argv[index]} requires a value`);
     }
     return value;
