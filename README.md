@@ -133,11 +133,15 @@ codex-notice test "done"
 Other commands:
 
 ```bash
+codex-notice
 codex-notice status
+codex-notice config 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx'
 codex-notice logs
 codex-notice logs 10
 codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
 ```
+
+`codex-notice` and `codex-notice status` print the active webhook URL, config path, log path, and Codex notify command. `codex-notice config WEBHOOK` writes `~/.config/codex-tools/notice.env` with `0600` permissions.
 
 Message format uses a Feishu interactive card. The title is `Codex user@host`; cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
