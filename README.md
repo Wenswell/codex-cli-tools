@@ -49,6 +49,13 @@ codex-rename
 codex-notice
 ```
 
+## CLI conventions
+
+- No-argument/status commands print active configuration values, not just file paths.
+- Write/apply commands first print the same plan as dry-run, then print the actual result.
+- Secrets live in environment variables or `~/.config/codex-tools`, not package files.
+- Command surfaces stay small; legacy modes are removed when contracts change.
+
 ## cx / cxx / cxxs
 
 `cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
