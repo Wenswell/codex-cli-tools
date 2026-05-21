@@ -107,7 +107,6 @@ async function printStatus() {
     printKeyValue("webhook:", webhook ? textGreen(webhook) : textRed("missing"), 10);
     printKeyValue("config:", colorPath(noticeEnvPath), 10);
     printKeyValue("log:", colorPath(logPath().pathname), 10);
-    printKeyValue("notify:", `${textBlue("codex-notice hook")} ${textDim("JSON_PAYLOAD")}`, 10);
 }
 async function configureWebhook(argv) {
     const apply = argv.includes("-y") || argv.includes("--yes");
