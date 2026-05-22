@@ -723,12 +723,15 @@ function printTable(rows) {
 }
 async function printProfileList(profiles, includeUsage) {
     const entries = Object.entries(profiles.profiles ?? {});
+    const current = profiles.current ?? "";
     const rows = await Promise.all(entries.map(async ([name, profile]) => ({
         name,
         profile,
+        marker: name === current ? textGreen("*") : "",
         usage: includeUsage ? await formatProfileUsage(profile) : "",
     })));
     printTable(rows.map((row) => ([
+        row.marker,
         colorName(row.name),
         colorUrl(row.profile.baseURL),
         row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
