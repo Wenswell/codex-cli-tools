@@ -150,11 +150,12 @@ async function main(): Promise<void> {
 function printHelp(): void {
   console.log([
     "Usage:",
-    "  codex-notice hook JSON_PAYLOAD",
-    "  codex-notice test [MESSAGE]",
-    "  codex-notice logs [N]",
-    "  codex-notice config WEBHOOK [-y|--yes]",
-    "  codex-notice status",
+    "  codex-notice                           # show active webhook, config, log, and commands",
+    "  codex-notice status                    # show active webhook, config, and log",
+    "  codex-notice config WEBHOOK [-y|--yes] # preview or write Feishu webhook config",
+    "  codex-notice test [MESSAGE]            # send a test notification",
+    "  codex-notice logs [N]                  # show recent send logs",
+    "  codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card",
   ].join("\n"));
 }
 

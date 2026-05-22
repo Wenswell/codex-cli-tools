@@ -147,13 +147,12 @@ codex-notice test "done"
 Other commands:
 
 ```bash
-codex-notice
-codex-notice status
-codex-notice config 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx'
-codex-notice config 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' -y
-codex-notice logs
-codex-notice logs 10
-codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input-messages":["do it"],"last-assistant-message":"done"}'
+codex-notice                           # show active webhook, config, log, and commands
+codex-notice status                    # show active webhook, config, and log
+codex-notice config WEBHOOK [-y|--yes] # preview or write Feishu webhook config
+codex-notice test [MESSAGE]            # send a test notification
+codex-notice logs [N]                  # show recent send logs
+codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card
 ```
 
 `codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write; add `-y` or `--yes` to write `~/.config/codex-tools/notice.env` with `0600` permissions.
@@ -423,10 +422,11 @@ Codex stores the directory association in:
 Usage:
 
 ```bash
-codex-rename OLD_PATH NEW_PATH
-codex-rename OLD_PATH NEW_PATH --prefix
-codex-rename OLD_PATH NEW_PATH --sessions-only --prefix
-codex-rename OLD_PATH NEW_PATH --prefix --apply
+codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update
+codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates
+codex-rename OLD_PATH NEW_PATH --apply                 # rename directory and update exact session cwd matches
+codex-rename OLD_PATH NEW_PATH --prefix --apply        # rename directory and update child session cwd matches
+codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed
 ```
 
 Default mode is dry-run. Nothing is modified unless `--apply` is provided.
