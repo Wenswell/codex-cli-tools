@@ -56,8 +56,8 @@ codex-notice
 - No-argument output combines compact status with a compact command/help line when the tool has user-facing commands.
 - `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
-- Commands that modify files default to preview/dry-run and require an explicit apply flag.
-- Write/apply commands first print the same plan as dry-run, then print the actual result.
+- Commands that modify files default to preview and require `-y` or `--yes` to write.
+- Write/apply commands first print the same plan as preview, then print the actual result.
 - Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
 - Logs preserve complete original input, event, and response data. Summaries or previews can be added, but cannot replace the raw facts.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
@@ -202,8 +202,8 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs list | l [-u|--usage]
-ccs init [-n|--dry-run|-y|--yes]
-ccs sync [-n|--dry-run|-y|--yes]
+ccs init [-y|--yes]
+ccs sync [-y|--yes]
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
@@ -270,7 +270,7 @@ Apply changes:
 ccs init -y
 ```
 
-`--yes` is also accepted. Preview output includes `Dry run only. Re-run with -y or --yes to apply changes.`
+`--yes` is also accepted. Preview output includes `preview only. Re-run with -y or --yes to apply changes.`
 
 Before writing, it backs up the current files to:
 
@@ -302,13 +302,6 @@ ccs sync -y
 `--yes` is also accepted.
 
 When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
-
-Explicit dry-run flags are also accepted:
-
-```bash
-ccs init -n
-ccs sync -n
-```
 
 Add or update a profile interactively:
 
@@ -367,8 +360,8 @@ senv --source .env.example --target .env -y
 
 Run `senv` without arguments to print help.
 
-Default mode is dry-run. Nothing is modified unless `-y` or `--yes` is provided.
-Apply mode first prints the same planned summary as dry-run, then prints the updated result after writing.
+Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
+Apply mode first prints the same planned summary as preview, then prints the updated result after writing.
 
 Options:
 
@@ -424,13 +417,13 @@ Usage:
 ```bash
 codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update
 codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates
-codex-rename OLD_PATH NEW_PATH --apply                 # rename directory and update exact session cwd matches
-codex-rename OLD_PATH NEW_PATH --prefix --apply        # rename directory and update child session cwd matches
+codex-rename OLD_PATH NEW_PATH -y                      # rename directory and update exact session cwd matches
+codex-rename OLD_PATH NEW_PATH --prefix -y             # rename directory and update child session cwd matches
 codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed
 ```
 
-Default mode is dry-run. Nothing is modified unless `--apply` is provided.
-Apply mode first prints the same directory, session, and rollout-file plan as dry-run, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
+Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
+Apply mode first prints the same directory, session, and rollout-file plan as preview, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
 Use `--sessions-only` when the directory has already been renamed and only Codex session cwd values need to be updated.
 
 Path behavior:
@@ -446,7 +439,7 @@ Path behavior:
 Example:
 
 ```bash
-codex-rename /home/me/repos/old /home/me/repos/new --prefix --apply
+codex-rename /home/me/repos/old /home/me/repos/new --prefix -y
 ```
 
 This maps:

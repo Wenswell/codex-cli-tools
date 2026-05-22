@@ -24,12 +24,8 @@ function parseArgs(argv) {
             sessionsOnly = true;
             continue;
         }
-        if (arg === "--apply") {
+        if (arg === "-y" || arg === "--yes") {
             apply = true;
-            continue;
-        }
-        if (arg === "--dry-run") {
-            apply = false;
             continue;
         }
         if (arg.startsWith("-")) {
@@ -58,8 +54,8 @@ function printHelp() {
         "Usage:",
         "  codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update",
         "  codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates",
-        "  codex-rename OLD_PATH NEW_PATH --apply                 # rename directory and update exact session cwd matches",
-        "  codex-rename OLD_PATH NEW_PATH --prefix --apply        # rename directory and update child session cwd matches",
+        "  codex-rename OLD_PATH NEW_PATH -y                      # rename directory and update exact session cwd matches",
+        "  codex-rename OLD_PATH NEW_PATH --prefix -y             # rename directory and update child session cwd matches",
         "  codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed",
     ].join("\n"));
 }
@@ -385,7 +381,7 @@ function printPlan(args, directoryPlan, dbPath, rows, dryRun) {
     }
     if (dryRun) {
         console.log("");
-        console.log(textDim("dry-run only. Add --apply to write changes."));
+        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
     }
 }
 export async function runCodexRename(argv) {
@@ -404,7 +400,7 @@ export async function runCodexRename(argv) {
         }
         else if (!args.apply) {
             console.log("");
-            console.log(textDim("dry-run only. Add --apply to write changes."));
+            console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
         }
         return;
     }
