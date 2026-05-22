@@ -930,14 +930,17 @@ function printTable(rows: string[][]): void {
 
 async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): Promise<void> {
   const entries = Object.entries(profiles.profiles ?? {});
+  const current = profiles.current ?? "";
   const rows = await Promise.all(entries.map(async ([name, profile]) => ({
     name,
     profile,
+    marker: name === current ? textGreen("*") : "",
     usage: includeUsage ? await formatProfileUsage(profile) : "",
   })));
 
   printTable(rows.map((row) => (
     [
+      row.marker,
       colorName(row.name),
       colorUrl(row.profile.baseURL),
       row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),

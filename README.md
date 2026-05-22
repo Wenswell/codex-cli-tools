@@ -203,6 +203,8 @@ ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
 
+`ccs list` marks the current profile with `*`.
+
 Initial profile defaults are stored in this repository:
 
 ```text
