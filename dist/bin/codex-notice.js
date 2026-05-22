@@ -98,12 +98,19 @@ function parseHookPayload(args) {
     }
 }
 async function sendPayload(payload) {
+    if (shouldSkipNotification(payload)) {
+        await tryWriteSkippedLog(payload, "non-main conversation");
+        return;
+    }
     const webhook = await readWebhook();
     const card = buildCard(payload);
     await postFeishu(webhook, payload, {
         msg_type: "interactive",
         card,
     });
+}
+function shouldSkipNotification(payload) {
+    return payload.client !== "codex-tui";
 }
 async function readWebhook() {
     const webhook = process.env.FEISHU_BOT_WEBHOOK || await readWebhookFromConfigFile();
@@ -225,11 +232,11 @@ async function printLogs(limit) {
             const message = error instanceof Error ? error.message : String(error);
             throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
         }
-        const title = entry.request?.card?.header?.title?.content ?? "Codex";
+        const title = entry.request?.card?.header?.title?.content ?? entry.skipped?.reason ?? "Codex";
         const type = entry.payload?.type ?? "?";
-        const status = entry.response?.status ?? "?";
-        const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
-        const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
+        const status = entry.skipped ? "skip" : (entry.response?.status ?? "?");
+        const code = entry.skipped ? "-" : (entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?");
+        const msg = entry.skipped?.reason ?? entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
         console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
     }
 }
@@ -512,7 +519,24 @@ async function postFeishu(url, payload, body) {
 }
 async function tryWriteSendLog(payload, request, result) {
     try {
-        await writeSendLog(payload, request, result);
+        await writeLogEntry({
+            at: new Date().toISOString(),
+            payload,
+            request,
+            response: result,
+        });
+    }
+    catch {
+        // Notify hooks should not fail only because local debug logging failed.
+    }
+}
+async function tryWriteSkippedLog(payload, reason) {
+    try {
+        await writeLogEntry({
+            at: new Date().toISOString(),
+            payload,
+            skipped: { reason },
+        });
     }
     catch {
         // Notify hooks should not fail only because local debug logging failed.
@@ -526,7 +550,7 @@ function parseJson(text) {
         return null;
     }
 }
-async function writeSendLog(payload, request, result) {
+async function writeLogEntry(entry) {
     const path = logPath();
     let existing = "";
     try {
@@ -541,12 +565,7 @@ async function writeSendLog(payload, request, result) {
         .split(/\r?\n/)
         .filter(Boolean)
         .slice(-(maxLogEntries - 1));
-    entries.push(JSON.stringify({
-        at: new Date().toISOString(),
-        payload,
-        request,
-        response: result,
-    }));
+    entries.push(JSON.stringify(entry));
     await writeFile(path, `${entries.join("\n")}\n`, { mode: 0o600 });
 }
 function logPath() {
