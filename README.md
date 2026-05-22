@@ -169,7 +169,7 @@ done
 剩余回复（点击展开）
 ```
 
-`codex-notice` keeps the latest 10 full webhook request/response entries in `codex-notice.log.jsonl` for debugging. The log is ignored by Git.
+`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each entry stores the complete original Codex notify payload, the generated Feishu card request, and the Feishu response. The log is ignored by Git.
 
 ## ccs
 

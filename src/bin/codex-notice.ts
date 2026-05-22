@@ -197,7 +197,7 @@ function parseHookPayload(args: string[]): CodexNotifyPayload {
 async function sendPayload(payload: CodexNotifyPayload): Promise<void> {
   const webhook = await readWebhook();
   const card = buildCard(payload);
-  await postFeishu(webhook, {
+  await postFeishu(webhook, payload, {
     msg_type: "interactive",
     card,
   });
@@ -324,6 +324,7 @@ async function printLogs(limit: number): Promise<void> {
   for (const line of lines) {
     let entry: {
       at?: string;
+      payload?: CodexNotifyPayload;
       request?: { card?: { header?: { title?: { content?: string } } } };
       response?: { status?: number; responseJson?: { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string } };
     };
@@ -334,10 +335,11 @@ async function printLogs(limit: number): Promise<void> {
       throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
     }
     const title = entry.request?.card?.header?.title?.content ?? "Codex";
+    const type = entry.payload?.type ?? "?";
     const status = entry.response?.status ?? "?";
     const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
     const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
-    console.log(`${entry.at ?? ""}  ${status}  ${code}  ${title}${msg ? `  ${msg}` : ""}`);
+    console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
   }
 }
 
@@ -551,7 +553,7 @@ function formatHomePath(path: string): string {
   return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
 
-async function postFeishu(url: string, body: FeishuCardBody): Promise<void> {
+async function postFeishu(url: string, payload: CodexNotifyPayload, body: FeishuCardBody): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -562,7 +564,7 @@ async function postFeishu(url: string, body: FeishuCardBody): Promise<void> {
 
   const text = await response.text();
   const result = parseJson(text);
-  await tryWriteSendLog(body, {
+  await tryWriteSendLog(payload, body, {
     status: response.status,
     responseText: text,
     responseJson: result,
@@ -579,9 +581,9 @@ async function postFeishu(url: string, body: FeishuCardBody): Promise<void> {
   }
 }
 
-async function tryWriteSendLog(request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
+async function tryWriteSendLog(payload: CodexNotifyPayload, request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
   try {
-    await writeSendLog(request, result);
+    await writeSendLog(payload, request, result);
   } catch {
     // Notify hooks should not fail only because local debug logging failed.
   }
@@ -595,7 +597,7 @@ function parseJson(text: string): unknown {
   }
 }
 
-async function writeSendLog(request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
+async function writeSendLog(payload: CodexNotifyPayload, request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
   const path = logPath();
   let existing = "";
   try {
@@ -612,6 +614,7 @@ async function writeSendLog(request: FeishuCardBody, result: FeishuPostResult): 
     .slice(-(maxLogEntries - 1));
   entries.push(JSON.stringify({
     at: new Date().toISOString(),
+    payload,
     request,
     response: result,
   }));
