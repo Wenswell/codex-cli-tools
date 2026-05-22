@@ -6,6 +6,7 @@
 - Any command that modifies files must default to preview/dry-run and require an explicit apply flag such as `-y`, `--yes`, or `--apply`.
 - Dry-run output should directly tell the apply flag, such as `-y`, `--yes`, or `--apply`.
 - Keep output compact and aligned with key/value labels where practical.
+- Logs must preserve complete original information. Store raw input/events/responses first; summaries, previews, or rendered/transformed forms may be additional fields, but must not replace the original facts.
 - When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
 - For config under this toolset, use `~/.config/codex-tools` unless there is a strong reason not to.
 - Do not add package-directory secret fallbacks. Secrets belong in environment variables or `~/.config/codex-tools/*`.

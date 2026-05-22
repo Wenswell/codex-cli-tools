@@ -56,6 +56,7 @@ codex-notice
 - Commands that modify files default to preview/dry-run and require an explicit apply flag.
 - Write/apply commands first print the same plan as dry-run, then print the actual result.
 - Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
+- Logs preserve complete original input, event, and response data. Summaries or previews can be added, but cannot replace the raw facts.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
 
