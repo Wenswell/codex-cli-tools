@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { codexToolsConfigDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
@@ -269,8 +270,33 @@ function buildCard(payload) {
     };
 }
 function buildHeaderTitle(answerText, payload) {
-    const summary = compactInline(answerText);
+    const summary = formatHeaderPreview(answerText);
     return summary ? truncate(summary, maxHeaderReplyChars) : (payload.type ?? "codex notice");
+}
+function formatHeaderPreview(value) {
+    return compactInline(normalizeHeaderPunctuation(stripMarkdownDecoration(value)));
+}
+function stripMarkdownDecoration(value) {
+    return value
+        .replace(/```[a-zA-Z0-9_-]*\s*/g, "")
+        .replace(/```/g, "")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+        .replace(/(^|\s)#{1,6}\s+/g, "$1")
+        .replace(/(^|\s)[*_]{1,3}([^*_]+)[*_]{1,3}(\s|$)/g, "$1$2$3")
+        .replace(/(^|\s)>+\s*/g, "$1")
+        .replace(/(^|\s)(?:[-*+]|\d+[.)])\s+/g, "$1");
+}
+function normalizeHeaderPunctuation(value) {
+    return value
+        .replace(/，/g, ",")
+        .replace(/。/g, ".")
+        .replace(/：/g, ":")
+        .replace(/；/g, ";")
+        .replace(/！/g, "!")
+        .replace(/？/g, "?")
+        .replace(/、/g, ",");
 }
 function getHeaderTemplate(payload) {
     const type = payload.type?.toLowerCase() ?? "";
@@ -278,6 +304,24 @@ function getHeaderTemplate(payload) {
 }
 function buildMetaColumns(cwd, latestInput) {
     return [
+        {
+            tag: "column_set",
+            flex_mode: "none",
+            background_style: "grey",
+            columns: [
+                {
+                    tag: "column",
+                    width: "weighted",
+                    weight: 1,
+                    elements: [
+                        {
+                            tag: "markdown",
+                            content: `🕒 ${formatLocalTimestamp(new Date())}  👤 ${formatSystemLabel()}`,
+                        },
+                    ],
+                },
+            ],
+        },
         {
             tag: "column_set",
             flex_mode: "none",
@@ -315,6 +359,27 @@ function buildMetaColumns(cwd, latestInput) {
             ],
         },
     ];
+}
+function formatSystemLabel() {
+    const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
+    const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
+    return `${username}@${host}`;
+}
+function formatLocalTimestamp(date) {
+    const pad = (value) => value.toString().padStart(2, "0");
+    return [
+        date.getFullYear(),
+        "-",
+        pad(date.getMonth() + 1),
+        "-",
+        pad(date.getDate()),
+        " ",
+        pad(date.getHours()),
+        ":",
+        pad(date.getMinutes()),
+        ":",
+        pad(date.getSeconds()),
+    ].join("");
 }
 function buildHr() {
     return {

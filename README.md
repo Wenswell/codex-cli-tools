@@ -155,10 +155,12 @@ codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input
 
 `codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write; add `-y` or `--yes` to write `~/.config/codex-tools/notice.env` with `0600` permissions.
 
-Message format uses a Feishu interactive card. The title is the assistant reply preview with no low-value prefix, so notification lists show the useful content first. cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
+Message format uses a Feishu interactive card. The title is the assistant reply preview with no low-value prefix, so notification lists show the useful content first. Common Markdown decoration is removed from the title only, and common Chinese punctuation is normalized to ASCII punctuation. time/user, cwd, and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
 ```text
 [done]
+🕒 2026-05-22 11:05:27  👤 user@host
+
 📁 ~/project
 
 💬 do it
