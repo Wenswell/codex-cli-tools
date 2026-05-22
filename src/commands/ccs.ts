@@ -768,22 +768,26 @@ function formatCost(value: number): string {
 }
 
 function formatUsage(result: UsageResult): string {
+  return formatUsageColumns(result).join("  ");
+}
+
+function formatUsageColumns(result: UsageResult): string[] {
   return [
     colorCost(formatCost(result.used)),
     `${colorInput(prettifyBigNum(result.inputTokens))}↑`,
     `${colorOutput(prettifyBigNum(result.outputTokens))}↓`,
     `${textDim(prettifyBigNum(result.cacheReadTokens))}↻`,
     `${textDim(prettifyBigNum(result.requests))}⤨`,
-  ].join("  ");
+  ];
 }
 
-async function formatProfileUsage(profile: Profile): Promise<string> {
+async function formatProfileUsageColumns(profile: Profile): Promise<string[]> {
   if (!profile.apiKey || !profile.baseURL.trim()) {
-    return textDim("skipped");
+    return [textDim("skipped"), "", "", "", ""];
   }
 
   const usage = await fetchUsage(profile);
-  return usage ? formatUsage(usage) : textRed("unavailable");
+  return usage ? formatUsageColumns(usage) : [textRed("unavailable"), "", "", "", ""];
 }
 
 async function printUsageLine(profile: Profile | null): Promise<void> {
@@ -914,17 +918,22 @@ async function printStatus(): Promise<Profile | null> {
   return normalized;
 }
 
-function padVisible(value: string, width: number): string {
-  return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
+type TableAlign = "left" | "right";
+
+function alignTableCell(value: string, width: number, align: TableAlign): string {
+  const padding = " ".repeat(Math.max(0, width - visibleLength(value)));
+  return align === "right" ? `${padding}${value}` : `${value}${padding}`;
 }
 
-function printTable(rows: string[][]): void {
+function printTable(rows: string[][], aligns: TableAlign[] = []): void {
   const widths = rows[0]?.map((_, index) => (
     Math.max(...rows.map((row) => visibleLength(row[index] ?? "")))
   )) ?? [];
 
   for (const row of rows) {
-    console.log(row.map((value, index) => padVisible(value, widths[index] ?? 0)).join("  ").trimEnd());
+    console.log(row.map((value, index) => (
+      alignTableCell(value, widths[index] ?? 0, aligns[index] ?? "left")
+    )).join("  ").trimEnd());
   }
 }
 
@@ -935,7 +944,7 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
     name,
     profile,
     marker: name === current ? textGreen("*") : "",
-    usage: includeUsage ? await formatProfileUsage(profile) : "",
+    usage: includeUsage ? await formatProfileUsageColumns(profile) : [],
   })));
 
   printTable(rows.map((row) => (
@@ -944,9 +953,9 @@ async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): 
       colorName(row.name),
       colorUrl(row.profile.baseURL),
       row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-      ...(includeUsage ? [row.usage] : []),
+      ...(includeUsage ? row.usage : []),
     ]
-  )));
+  )), includeUsage ? ["left", "left", "left", "left", "right", "right", "right", "right", "right"] : []);
 }
 
 function usageLines(): string[] {
