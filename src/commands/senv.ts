@@ -73,10 +73,6 @@ function parseArgs(argv: string[]): Args {
       args.apply = true;
       continue;
     }
-    if (arg === "-n" || arg === "--dry-run") {
-      args.apply = false;
-      continue;
-    }
     if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -98,12 +94,11 @@ function requireValue(argv: string[], index: number): string {
 
 function printHelp(): void {
   console.log([
-    "senv",
-    "senv -y",
-    "senv --source .env.example --target .env -y",
-    "senv -b -y",
-    "",
-    "Default mode is dry-run. Use -y or --yes to write changes.",
+    "Usage:",
+    "  senv                                      # preview .env update from .env.example",
+    "  senv -y                                  # update .env from .env.example",
+    "  senv --source FILE --target FILE -y      # update a target env file from a source template",
+    "  senv -b -y                               # back up target before writing",
   ].join("\n"));
 }
 
@@ -225,7 +220,7 @@ function timestamp(): string {
 function printSummary(target: string, summary: Summary, apply: boolean): void {
   printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(target)}`, 16);
   if (!apply) {
-    console.log(textDim("dry-run only. Re-run with -y or --yes to apply changes."));
+    console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
   }
   printKeyValue("added:", colorCount(String(summary.added.length)), 16);
   printKeyValue("filled defaults:", colorCount(String(summary.filledDefaults.length)), 16);

@@ -193,9 +193,6 @@ async function syncProfiles() {
 function hasFlag(argv, flag) {
     return argv.includes(flag);
 }
-function hasPreviewFlag(argv) {
-    return hasFlag(argv, "-n") || hasFlag(argv, "--dry-run");
-}
 function hasYesFlag(argv) {
     return hasFlag(argv, "-y") || hasFlag(argv, "--yes");
 }
@@ -229,7 +226,7 @@ function buildConfigSection(plan) {
 function printPreviewSummary(title, modifiedFiles, backupFiles, warnings, dryRun) {
     console.log(textBold(`Plan: ${title}`));
     if (dryRun) {
-        console.log(textDim("Dry run only. Re-run with -y or --yes to apply changes."));
+        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
     }
     console.log(`Will modify: ${textBlue(formatList(modifiedFiles))}`);
     console.log(`Will back up: ${textBlue(formatList(backupFiles))}`);
@@ -748,8 +745,8 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs list | l [-u|--usage]             # list profiles",
-        "  ccs init [-n|--dry-run|-y|--yes]      # preview or create config",
-        "  ccs sync [-n|--dry-run|-y|--yes]      # preview or sync config",
+        "  ccs init [-y|--yes]                   # preview or create config",
+        "  ccs sync [-y|--yes]                   # preview or sync config",
         "  ccs add [PROFILE]                     # add or update a profile",
         "  ccs remove | rm | delete PROFILE      # remove a profile",
     ];
@@ -778,8 +775,8 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "init") {
-        assertOnlyFlags(args, "init", ["-n", "--dry-run", "-y", "--yes"]);
-        if (hasPreviewFlag(args) || !hasYesFlag(args)) {
+        assertOnlyFlags(args, "init", ["-y", "--yes"]);
+        if (!hasYesFlag(args)) {
             await printInitDryRun();
             return;
         }
@@ -800,8 +797,8 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "sync") {
-        assertOnlyFlags(args, "sync", ["-n", "--dry-run", "-y", "--yes"]);
-        if (hasPreviewFlag(args) || !hasYesFlag(args)) {
+        assertOnlyFlags(args, "sync", ["-y", "--yes"]);
+        if (!hasYesFlag(args)) {
             await printSyncDryRun();
             return;
         }

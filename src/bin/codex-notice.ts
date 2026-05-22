@@ -271,7 +271,7 @@ async function configureWebhook(argv: string[]): Promise<void> {
   printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(noticeEnvPath)}`, 10);
   printKeyValue("webhook:", textGreen(webhook), 10);
   if (!apply) {
-    console.log(textDim("dry-run only. Re-run with -y or --yes to apply changes."));
+    console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
     return;
   }
   await mkdir(dirname(noticeEnvPath), { recursive: true, mode: 0o700 });

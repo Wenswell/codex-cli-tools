@@ -5,9 +5,9 @@
 - No-argument output should combine compact status with a compact command/help line when the tool has user-facing commands.
 - `-h`, `--help`, and `help` are dedicated help output. Print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results. When it appears alongside status or command output, place it at the bottom.
-- Apply/write modes must first print the same plan/details as dry-run, then print the actual write/backup/verification result.
-- Any command that modifies files must default to preview/dry-run and require an explicit apply flag such as `-y`, `--yes`, or `--apply`.
-- Dry-run output should directly tell the apply flag, such as `-y`, `--yes`, or `--apply`.
+- Apply/write modes must first print the same plan/details as preview, then print the actual write/backup/verification result.
+- Any command that modifies files must default to preview and require `-y` or `--yes` to write. Do not add separate dry-run flags.
+- Preview output should directly tell the apply flag: `-y` or `--yes`.
 - Keep output compact and aligned with key/value labels where practical.
 - Logs must preserve complete original information. Store raw input/events/responses first; summaries, previews, or rendered/transformed forms may be additional fields, but must not replace the original facts.
 - When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
