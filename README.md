@@ -174,7 +174,9 @@ done
 剩余回复（点击展开）
 ```
 
-`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each entry stores the complete original Codex notify payload, the generated Feishu card request, and the Feishu response. The log is ignored by Git.
+`codex-notice` only sends Feishu notifications for main Codex TUI conversations (`client: "codex-tui"`). Other notify payloads, such as subagent completions, are skipped for Feishu delivery but still written to the local log with the complete original payload.
+
+`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each sent entry stores the complete original Codex notify payload, the generated Feishu card request, and the Feishu response. Skipped entries store the complete original payload and skip reason. The log is ignored by Git.
 
 ## ccs
 

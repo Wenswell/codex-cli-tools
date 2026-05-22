@@ -14,6 +14,7 @@ const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 
 type CodexNotifyPayload = {
   type?: string;
+  client?: string;
   cwd?: string;
   "input-messages"?: unknown;
   "last-assistant-message"?: string;
@@ -99,6 +100,16 @@ type FeishuPostResult = {
   status: number;
   responseText: string;
   responseJson: unknown;
+};
+
+type SendLogEntry = {
+  at: string;
+  payload: CodexNotifyPayload;
+  request?: FeishuCardBody;
+  response?: FeishuPostResult;
+  skipped?: {
+    reason: string;
+  };
 };
 
 const argv = process.argv.slice(2);
@@ -197,12 +208,20 @@ function parseHookPayload(args: string[]): CodexNotifyPayload {
 }
 
 async function sendPayload(payload: CodexNotifyPayload): Promise<void> {
+  if (shouldSkipNotification(payload)) {
+    await tryWriteSkippedLog(payload, "non-main conversation");
+    return;
+  }
   const webhook = await readWebhook();
   const card = buildCard(payload);
   await postFeishu(webhook, payload, {
     msg_type: "interactive",
     card,
   });
+}
+
+function shouldSkipNotification(payload: CodexNotifyPayload): boolean {
+  return payload.client !== "codex-tui";
 }
 
 async function readWebhook(): Promise<string> {
@@ -329,6 +348,7 @@ async function printLogs(limit: number): Promise<void> {
       payload?: CodexNotifyPayload;
       request?: { card?: { header?: { title?: { content?: string } } } };
       response?: { status?: number; responseJson?: { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string } };
+      skipped?: { reason?: string };
     };
     try {
       entry = JSON.parse(line) as typeof entry;
@@ -336,11 +356,11 @@ async function printLogs(limit: number): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
     }
-    const title = entry.request?.card?.header?.title?.content ?? "Codex";
+    const title = entry.request?.card?.header?.title?.content ?? entry.skipped?.reason ?? "Codex";
     const type = entry.payload?.type ?? "?";
-    const status = entry.response?.status ?? "?";
-    const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
-    const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
+    const status = entry.skipped ? "skip" : (entry.response?.status ?? "?");
+    const code = entry.skipped ? "-" : (entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?");
+    const msg = entry.skipped?.reason ?? entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
     console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
   }
 }
@@ -657,7 +677,24 @@ async function postFeishu(url: string, payload: CodexNotifyPayload, body: Feishu
 
 async function tryWriteSendLog(payload: CodexNotifyPayload, request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
   try {
-    await writeSendLog(payload, request, result);
+    await writeLogEntry({
+      at: new Date().toISOString(),
+      payload,
+      request,
+      response: result,
+    });
+  } catch {
+    // Notify hooks should not fail only because local debug logging failed.
+  }
+}
+
+async function tryWriteSkippedLog(payload: CodexNotifyPayload, reason: string): Promise<void> {
+  try {
+    await writeLogEntry({
+      at: new Date().toISOString(),
+      payload,
+      skipped: { reason },
+    });
   } catch {
     // Notify hooks should not fail only because local debug logging failed.
   }
@@ -671,7 +708,7 @@ function parseJson(text: string): unknown {
   }
 }
 
-async function writeSendLog(payload: CodexNotifyPayload, request: FeishuCardBody, result: FeishuPostResult): Promise<void> {
+async function writeLogEntry(entry: SendLogEntry): Promise<void> {
   const path = logPath();
   let existing = "";
   try {
@@ -686,12 +723,7 @@ async function writeSendLog(payload: CodexNotifyPayload, request: FeishuCardBody
     .split(/\r?\n/)
     .filter(Boolean)
     .slice(-(maxLogEntries - 1));
-  entries.push(JSON.stringify({
-    at: new Date().toISOString(),
-    payload,
-    request,
-    response: result,
-  }));
+  entries.push(JSON.stringify(entry));
 
   await writeFile(path, `${entries.join("\n")}\n`, { mode: 0o600 });
 }
