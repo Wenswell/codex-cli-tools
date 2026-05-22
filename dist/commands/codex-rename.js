@@ -55,13 +55,12 @@ function normalizeInputPath(path) {
 }
 function printHelp() {
     console.log([
-        "codex-rename OLD_PATH NEW_PATH",
-        "codex-rename OLD_PATH NEW_PATH --prefix",
-        "codex-rename OLD_PATH NEW_PATH --sessions-only --prefix",
-        "codex-rename OLD_PATH NEW_PATH --prefix --apply",
-        "",
-        "Default mode is dry-run. Use --apply to rename the directory and update Codex sessions.",
-        "Use --sessions-only when the directory has already been renamed.",
+        "Usage:",
+        "  codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update",
+        "  codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates",
+        "  codex-rename OLD_PATH NEW_PATH --apply                 # rename directory and update exact session cwd matches",
+        "  codex-rename OLD_PATH NEW_PATH --prefix --apply        # rename directory and update child session cwd matches",
+        "  codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed",
     ].join("\n"));
 }
 async function pathExists(path) {
