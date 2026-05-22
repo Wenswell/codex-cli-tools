@@ -7,6 +7,7 @@ import { colorPath, printKeyValue } from "../lib/output.js";
 import { textBlue, textDim, textGreen, textRed } from "../lib/text.js";
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
+const maxHeaderInputChars = 72;
 const maxAnswerPreviewChars = 360;
 const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 const argv = process.argv.slice(2);
@@ -239,8 +240,8 @@ function stripEnvQuotes(value) {
     return value;
 }
 function buildCard(payload) {
-    const title = `Codex ${formatSystemLabel()}`;
     const input = readInputMessages(payload["input-messages"]);
+    const title = buildHeaderTitle(input.latest);
     const answer = payload["last-assistant-message"] ??
         payload.last_assistant_message ??
         payload.lastAssistantMessage;
@@ -267,6 +268,11 @@ function buildCard(payload) {
             ],
         },
     };
+}
+function buildHeaderTitle(input) {
+    const base = `Codex ${formatSystemLabel()}`;
+    const summary = compactInline(input);
+    return summary ? `${base}: ${truncate(summary, maxHeaderInputChars)}` : base;
 }
 function formatSystemLabel() {
     const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
@@ -379,6 +385,9 @@ function readInputMessages(value) {
 }
 function truncate(value, maxChars) {
     return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+function compactInline(value) {
+    return value.replace(/\s+/g, " ").trim();
 }
 function splitPreview(value, maxChars) {
     if (value.length <= maxChars) {

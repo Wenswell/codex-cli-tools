@@ -8,6 +8,7 @@ import { textBlue, textDim, textGreen, textRed } from "../lib/text.js";
 
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
+const maxHeaderInputChars = 72;
 const maxAnswerPreviewChars = 360;
 const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 
@@ -354,8 +355,8 @@ function stripEnvQuotes(value: string): string {
 }
 
 function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
-  const title = `Codex ${formatSystemLabel()}`;
   const input = readInputMessages(payload["input-messages"]);
+  const title = buildHeaderTitle(input.latest);
   const answer =
     payload["last-assistant-message"] ??
     payload.last_assistant_message ??
@@ -383,6 +384,12 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
       ],
     },
   };
+}
+
+function buildHeaderTitle(input: string): string {
+  const base = `Codex ${formatSystemLabel()}`;
+  const summary = compactInline(input);
+  return summary ? `${base}: ${truncate(summary, maxHeaderInputChars)}` : base;
 }
 
 function formatSystemLabel(): string {
@@ -509,6 +516,10 @@ function readInputMessages(value: unknown): InputMessages {
 
 function truncate(value: string, maxChars: number): string {
   return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+
+function compactInline(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function splitPreview(value: string, maxChars: number): { preview: string; rest: string } {

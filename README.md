@@ -155,10 +155,10 @@ codex-notice hook '{"type":"agent-turn-complete","cwd":"/home/me/project","input
 
 `codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write; add `-y` or `--yes` to write `~/.config/codex-tools/notice.env` with `0600` permissions.
 
-Message format uses a Feishu interactive card. The title is `Codex user@host`; cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
+Message format uses a Feishu interactive card. The title is `Codex user@host: user input preview` so notification lists show useful context. cwd and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
 ```text
-[Codex user@host]
+[Codex user@host: do it]
 📁 ~/project
 
 💬 do it
