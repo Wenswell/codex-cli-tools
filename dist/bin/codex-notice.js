@@ -98,7 +98,7 @@ function parseHookPayload(args) {
 async function sendPayload(payload) {
     const webhook = await readWebhook();
     const card = buildCard(payload);
-    await postFeishu(webhook, {
+    await postFeishu(webhook, payload, {
         msg_type: "interactive",
         card,
     });
@@ -224,10 +224,11 @@ async function printLogs(limit) {
             throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
         }
         const title = entry.request?.card?.header?.title?.content ?? "Codex";
+        const type = entry.payload?.type ?? "?";
         const status = entry.response?.status ?? "?";
         const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
         const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
-        console.log(`${entry.at ?? ""}  ${status}  ${code}  ${title}${msg ? `  ${msg}` : ""}`);
+        console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
     }
 }
 function stripEnvQuotes(value) {
@@ -418,7 +419,7 @@ function formatHomePath(path) {
     }
     return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
 }
-async function postFeishu(url, body) {
+async function postFeishu(url, payload, body) {
     const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -428,7 +429,7 @@ async function postFeishu(url, body) {
     });
     const text = await response.text();
     const result = parseJson(text);
-    await tryWriteSendLog(body, {
+    await tryWriteSendLog(payload, body, {
         status: response.status,
         responseText: text,
         responseJson: result,
@@ -441,9 +442,9 @@ async function postFeishu(url, body) {
         throw new Error(`Feishu webhook rejected message: ${text}`);
     }
 }
-async function tryWriteSendLog(request, result) {
+async function tryWriteSendLog(payload, request, result) {
     try {
-        await writeSendLog(request, result);
+        await writeSendLog(payload, request, result);
     }
     catch {
         // Notify hooks should not fail only because local debug logging failed.
@@ -457,7 +458,7 @@ function parseJson(text) {
         return null;
     }
 }
-async function writeSendLog(request, result) {
+async function writeSendLog(payload, request, result) {
     const path = logPath();
     let existing = "";
     try {
@@ -474,6 +475,7 @@ async function writeSendLog(request, result) {
         .slice(-(maxLogEntries - 1));
     entries.push(JSON.stringify({
         at: new Date().toISOString(),
+        payload,
         request,
         response: result,
     }));
