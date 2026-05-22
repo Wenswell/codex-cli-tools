@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { codexToolsConfigDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
@@ -386,8 +387,36 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
 }
 
 function buildHeaderTitle(answerText: string, payload: CodexNotifyPayload): string {
-  const summary = compactInline(answerText);
+  const summary = formatHeaderPreview(answerText);
   return summary ? truncate(summary, maxHeaderReplyChars) : (payload.type ?? "codex notice");
+}
+
+function formatHeaderPreview(value: string): string {
+  return compactInline(normalizeHeaderPunctuation(stripMarkdownDecoration(value)));
+}
+
+function stripMarkdownDecoration(value: string): string {
+  return value
+    .replace(/```[a-zA-Z0-9_-]*\s*/g, "")
+    .replace(/```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    .replace(/(^|\s)#{1,6}\s+/g, "$1")
+    .replace(/(^|\s)[*_]{1,3}([^*_]+)[*_]{1,3}(\s|$)/g, "$1$2$3")
+    .replace(/(^|\s)>+\s*/g, "$1")
+    .replace(/(^|\s)(?:[-*+]|\d+[.)])\s+/g, "$1");
+}
+
+function normalizeHeaderPunctuation(value: string): string {
+  return value
+    .replace(/，/g, ",")
+    .replace(/。/g, ".")
+    .replace(/：/g, ":")
+    .replace(/；/g, ";")
+    .replace(/！/g, "!")
+    .replace(/？/g, "?")
+    .replace(/、/g, ",");
 }
 
 function getHeaderTemplate(payload: CodexNotifyPayload): "blue" | "red" {
@@ -400,6 +429,24 @@ function buildMetaColumns(
   latestInput: string,
 ): Array<FeishuCardBody["card"]["body"]["elements"][number]> {
   return [
+    {
+      tag: "column_set",
+      flex_mode: "none",
+      background_style: "grey",
+      columns: [
+        {
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [
+            {
+              tag: "markdown",
+              content: `🕒 ${formatLocalTimestamp(new Date())}  👤 ${formatSystemLabel()}`,
+            },
+          ],
+        },
+      ],
+    },
     {
       tag: "column_set",
       flex_mode: "none",
@@ -437,6 +484,29 @@ function buildMetaColumns(
       ],
     },
   ];
+}
+
+function formatSystemLabel(): string {
+  const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
+  const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
+  return `${username}@${host}`;
+}
+
+function formatLocalTimestamp(date: Date): string {
+  const pad = (value: number): string => value.toString().padStart(2, "0");
+  return [
+    date.getFullYear(),
+    "-",
+    pad(date.getMonth() + 1),
+    "-",
+    pad(date.getDate()),
+    " ",
+    pad(date.getHours()),
+    ":",
+    pad(date.getMinutes()),
+    ":",
+    pad(date.getSeconds()),
+  ].join("");
 }
 
 function buildHr(): FeishuCardBody["card"]["body"]["elements"][number] {
