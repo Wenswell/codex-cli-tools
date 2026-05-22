@@ -54,7 +54,7 @@ codex-notice
 - No-argument/status commands print active configuration values, not just file paths.
 - New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
 - No-argument output combines compact status with a compact command/help line when the tool has user-facing commands.
-- `-h`, `--help`, and `help` print fuller usage: one command per line, with short comments when useful.
+- `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
 - Commands that modify files default to preview/dry-run and require an explicit apply flag.
 - Write/apply commands first print the same plan as dry-run, then print the actual result.
