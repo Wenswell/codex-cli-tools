@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { codexToolsConfigDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
@@ -8,7 +7,7 @@ import { textBlue, textDim, textGreen, textRed } from "../lib/text.js";
 
 const maxLogEntries = 10;
 const maxInlineUserChars = 240;
-const maxHeaderInputChars = 72;
+const maxHeaderReplyChars = 96;
 const maxAnswerPreviewChars = 360;
 const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 
@@ -356,12 +355,12 @@ function stripEnvQuotes(value: string): string {
 
 function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
   const input = readInputMessages(payload["input-messages"]);
-  const title = buildHeaderTitle(input.latest);
   const answer =
     payload["last-assistant-message"] ??
     payload.last_assistant_message ??
     payload.lastAssistantMessage;
   const answerText = answer ?? `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+  const title = buildHeaderTitle(answerText, payload);
   const answerParts = splitPreview(answerText, maxAnswerPreviewChars);
   return {
     schema: "2.0",
@@ -386,16 +385,9 @@ function buildCard(payload: CodexNotifyPayload): FeishuCardBody["card"] {
   };
 }
 
-function buildHeaderTitle(input: string): string {
-  const base = `Codex ${formatSystemLabel()}`;
-  const summary = compactInline(input);
-  return summary ? `${base}: ${truncate(summary, maxHeaderInputChars)}` : base;
-}
-
-function formatSystemLabel(): string {
-  const username = process.env.USER || process.env.LOGNAME || userInfo().username || "unknown";
-  const host = (process.env.HOSTNAME || hostname() || "unknown").split(".")[0] || "unknown";
-  return `${username}@${host}`;
+function buildHeaderTitle(answerText: string, payload: CodexNotifyPayload): string {
+  const summary = compactInline(answerText);
+  return summary ? truncate(summary, maxHeaderReplyChars) : (payload.type ?? "codex notice");
 }
 
 function getHeaderTemplate(payload: CodexNotifyPayload): "blue" | "red" {
