@@ -47,6 +47,7 @@ type Profile = {
 
 type ProfilesFile = {
   profiles?: Record<string, Profile>;
+  usage?: Record<string, Profile>;
   current?: string;
   toggle?: string[];
 };
@@ -289,6 +290,13 @@ async function syncProfiles(): Promise<ProfilesFile> {
   const next = await planSyncProfiles();
   await writeProfiles(next);
   return next;
+}
+
+function assertNameAvailable(name: string, profiles: ProfilesFile, target: "profiles" | "usage"): void {
+  const other = target === "profiles" ? profiles.usage : profiles.profiles;
+  if (other?.[name]) {
+    throw new Error(`${name} already exists in ${target === "profiles" ? "usage" : "profiles"}`);
+  }
 }
 
 function hasFlag(argv: string[], flag: string): boolean {
@@ -627,6 +635,7 @@ async function addProfile(defaultName?: string): Promise<void> {
 
   try {
     name = await askRequired(input, "name", defaultName);
+    assertNameAvailable(name, data, "profiles");
     const existing = profiles[name];
     const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
     const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
@@ -638,6 +647,28 @@ async function addProfile(defaultName?: string): Promise<void> {
 
   await writeProfiles({ ...data, profiles, current: data.current ?? name });
   console.log(`profile saved: ${textGreen(name)}`);
+}
+
+async function addUsageProfile(defaultName?: string): Promise<void> {
+  const data = await readProfiles();
+  const usage = data.usage ?? {};
+  const input = createPrompt();
+  let name = "";
+
+  try {
+    name = await askRequired(input, "name", defaultName);
+    assertNameAvailable(name, data, "usage");
+    const existing = usage[name];
+    const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
+    const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
+
+    usage[name] = { baseURL, apiKey };
+  } finally {
+    input.close();
+  }
+
+  await writeProfiles({ ...data, usage });
+  console.log(`usage saved: ${textGreen(name)}`);
 }
 
 function printProfile(name: string, profiles: ProfilesFile): void {
@@ -866,6 +897,20 @@ async function removeProfile(name: string): Promise<void> {
   console.log(`profile removed: ${textRed(name)}`);
 }
 
+async function removeUsageProfile(name: string): Promise<void> {
+  if (!name) {
+    throw new Error("usage: ccs usage remove NAME");
+  }
+  const data = await readProfiles();
+  const usage = data.usage ?? {};
+  if (!usage[name]) {
+    throw new Error(`usage profile not found: ${name}`);
+  }
+  delete usage[name];
+  await writeProfiles({ ...data, usage });
+  console.log(`usage removed: ${textRed(name)}`);
+}
+
 async function switchProfile(name: string): Promise<Profile> {
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
@@ -936,22 +981,54 @@ function printTable(rows: string[][], aligns: TableAlign[] = []): void {
 async function printProfileList(profiles: ProfilesFile, includeUsage: boolean): Promise<void> {
   const entries = Object.entries(profiles.profiles ?? {});
   const current = profiles.current ?? "";
-  const rows = await Promise.all(entries.map(async ([name, profile]) => ({
+  const switchRows = await Promise.all(entries.map(async ([name, profile]) => ({
     name,
     profile,
+    type: includeUsage ? textDim("codex") : "",
     marker: name === current ? textGreen("*") : "",
     usage: includeUsage ? await formatProfileUsageColumns(profile) : [],
   })));
+  const usageRows = includeUsage
+    ? await Promise.all(Object.entries(profiles.usage ?? {}).map(async ([name, profile]) => ({
+      name,
+      profile,
+      type: textDim("usage"),
+      marker: "",
+      usage: await formatProfileUsageColumns(profile),
+    })))
+    : [];
+  const rows = [...switchRows, ...usageRows];
 
   printTable(rows.map((row) => (
     [
       row.marker,
+      ...(includeUsage ? [row.type] : []),
       colorName(row.name),
       colorUrl(row.profile.baseURL),
       row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
       ...(includeUsage ? row.usage : []),
     ]
-  )), includeUsage ? ["left", "left", "left", "left", "right", "right", "right", "right", "right"] : []);
+  )), includeUsage ? ["left", "left", "left", "left", "left", "right", "right", "right", "right", "right"] : []);
+}
+
+async function printUsageTargets(profiles: ProfilesFile): Promise<void> {
+  const rows = await Promise.all(Object.entries(profiles.usage ?? {}).map(async ([name, profile]) => ({
+    name,
+    profile,
+    usage: await formatProfileUsageColumns(profile),
+  })));
+
+  if (rows.length === 0) {
+    console.log(textDim("no usage profiles"));
+    return;
+  }
+
+  printTable(rows.map((row) => [
+    colorName(row.name),
+    colorUrl(row.profile.baseURL),
+    row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+    ...row.usage,
+  ]), ["left", "left", "left", "right", "right", "right", "right", "right"]);
 }
 
 function usageLines(): string[] {
@@ -959,7 +1036,10 @@ function usageLines(): string[] {
     "  ccs                                  # show current profile and usage",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs toggle [PROFILE]                 # switch profile",
-    "  ccs list | l [-u|--usage]             # list profiles",
+    "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
+    "  ccs usage                            # list usage-only profiles",
+    "  ccs usage add [PROFILE]               # add or update a usage-only profile",
+    "  ccs usage remove | rm | delete PROFILE # remove a usage-only profile",
     "  ccs init [-y|--yes]                   # preview or create config",
     "  ccs sync [-y|--yes]                   # preview or sync config",
     "  ccs add [PROFILE]                     # add or update a profile",
@@ -975,7 +1055,7 @@ function printHelp(): void {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | list [-u] | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
@@ -1057,6 +1137,33 @@ export async function runCcs(argv: string[]): Promise<void> {
     }
     await addProfile(args[0]);
     return;
+  }
+
+  if (command === "usage") {
+    const subcommand = args[0] ?? "";
+    const subargs = args.slice(1);
+
+    if (!subcommand) {
+      await printUsageTargets(profiles);
+      return;
+    }
+
+    if (subcommand === "add") {
+      assertMaxArgs(subargs, "usage add [PROFILE]", 1);
+      if (subargs[0]?.startsWith("-")) {
+        throw new Error(`unknown argument for ccs usage add: ${subargs[0]}`);
+      }
+      await addUsageProfile(subargs[0]);
+      return;
+    }
+
+    if (subcommand === "remove" || subcommand === "rm" || subcommand === "delete") {
+      assertExactArgs(subargs, `usage ${subcommand} PROFILE`, 1);
+      await removeUsageProfile(subargs[0]);
+      return;
+    }
+
+    throw new Error(`unknown argument for ccs usage: ${subcommand}`);
   }
 
   if (command === "remove" || command === "rm" || command === "delete") {

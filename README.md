@@ -180,7 +180,7 @@ done
 
 ## ccs
 
-`ccs` switches Codex between OpenAI-compatible provider profiles.
+`ccs` switches Codex between OpenAI-compatible provider profiles and can list usage-only keys.
 
 Profile config lives at:
 
@@ -204,13 +204,37 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs list | l [-u|--usage]
+ccs usage
+ccs usage add [PROFILE]
+ccs usage remove | rm | delete PROFILE
 ccs init [-y|--yes]
 ccs sync [-y|--yes]
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
 
-`ccs list` marks the current profile with `*`.
+`ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
+
+Example:
+
+```json
+{
+  "profiles": {
+    "input": {
+      "baseURL": "https://ai.input.im",
+      "apiKey": "codex-key"
+    }
+  },
+  "usage": {
+    "claude": {
+      "baseURL": "https://ai.input.im",
+      "apiKey": "claude-key"
+    }
+  },
+  "current": "input",
+  "toggle": ["input"]
+}
+```
 
 Initial profile defaults are stored in this repository:
 
