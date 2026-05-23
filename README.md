@@ -9,6 +9,7 @@ TTY output uses color for status, paths, warnings, and summaries. Set `NO_COLOR=
 - Node.js 20+
 - pnpm
 - `codex` CLI for `cx`, `cxx`, and `cxxs`
+- `claude` CLI for `ccx` and `ccxs`
 - `sqlite3` CLI for `codex-rename`
 
 ## Install
@@ -41,6 +42,8 @@ pnpm link --global
 
 ```bash
 ccs
+ccx
+ccxs
 cx
 cxx
 cxxs
@@ -102,6 +105,34 @@ codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
 ```
 
 Use `cxx` and `cxxs` only in directories and tasks you trust.
+
+## ccx / ccxs
+
+`ccx` runs Claude Code with permission checks skipped and forwards stdin, stdout, stderr, arguments, and exit code.
+
+```bash
+ccx ARGS...
+```
+
+Equivalent to:
+
+```bash
+claude --dangerously-skip-permissions ARGS...
+```
+
+`ccxs` resumes a Claude Code session with the same `ccx` flags.
+
+```bash
+ccxs ARGS...
+```
+
+Equivalent to:
+
+```bash
+claude --dangerously-skip-permissions --resume ARGS...
+```
+
+Use `ccx` and `ccxs` only in directories and tasks you trust.
 
 ## codex-notice
 
