@@ -13,7 +13,7 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import {
-  bgBlue,
+  bgDarkBlue,
   maskSecret,
   textBlue,
   textBold,
@@ -115,7 +115,7 @@ const usageTopMaxIntervalMs = 300_000;
 const usageTopMaxIntervalIdleLimit = 3;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
-const usageTopStatusWidth = 28;
+const usageTopStatusWidth = 24;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -838,7 +838,7 @@ function formatTopCost(value: number): string {
 
 function formatSignedTopCost(value: number): string {
   const sign = value >= 0 ? "+" : "-";
-  return `${sign}$${Math.abs(value).toFixed(1).padStart(4, " ")}`;
+  return `${sign}$${Math.abs(value).toFixed(1)}`;
 }
 
 function formatUsage(result: UsageResult): string {
@@ -1173,12 +1173,12 @@ function padVisibleRight(value: string, width: number): string {
 }
 
 function formatTopName(name: string): string {
-  return bgBlue(` ${name} `);
+  return bgDarkBlue(` ${name} `);
 }
 
 function formatCountdownSeconds(date: Date, now: Date): string {
   const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
-  return `${seconds.toString().padStart(3, " ")}s`;
+  return `${seconds}s`;
 }
 
 function nextUsageTopInterval(current: number, changed: boolean): number {
