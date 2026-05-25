@@ -12,6 +12,7 @@ import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, 
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
 const usageTopMaxIntervalMs = 300_000;
+const usageTopMaxIntervalIdleLimit = 3;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 const usageTopStatusWidth = 28;
@@ -854,6 +855,8 @@ async function readUsageTopEntry(target, now, nextRefreshAt) {
             stale: false,
             nextRefreshAt: null,
             refreshIntervalMs: usageTopMinIntervalMs,
+            maxIntervalIdleCount: 0,
+            done: true,
             refreshing: false,
         };
     }
@@ -865,6 +868,8 @@ async function readUsageTopEntry(target, now, nextRefreshAt) {
         stale: false,
         nextRefreshAt,
         refreshIntervalMs: usageTopMinIntervalMs,
+        maxIntervalIdleCount: 0,
+        done: false,
         refreshing: false,
     };
 }
@@ -894,6 +899,9 @@ function formatUsageTopEntry(entry, state, now) {
     if (entry.stale) {
         tags.push(textRed("stale"));
     }
+    if (entry.done) {
+        tags.push(textDim("done"));
+    }
     if (entry.nextRefreshAt) {
         tags.push(textDim(`r ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
     }
@@ -915,6 +923,15 @@ function nextUsageTopInterval(current, changed) {
         return usageTopMinIntervalMs;
     }
     return Math.min(usageTopMaxIntervalMs, current + usageTopStepIntervalMs);
+}
+function nextUsageTopMaxIdleCount(entry, changed, nextInterval) {
+    if (changed) {
+        return 0;
+    }
+    if (entry.refreshIntervalMs === usageTopMaxIntervalMs && nextInterval === usageTopMaxIntervalMs) {
+        return entry.maxIntervalIdleCount + 1;
+    }
+    return 0;
 }
 function updateUsageTopState(state, usage, now) {
     if (!usage) {
@@ -990,7 +1007,7 @@ async function printUsageTop(profiles, once) {
             void (async () => {
                 const now = new Date();
                 await Promise.all(entries.map(async (entry, index) => {
-                    if (!entry.nextRefreshAt || entry.refreshing || now < entry.nextRefreshAt) {
+                    if (entry.done || !entry.nextRefreshAt || entry.refreshing || now < entry.nextRefreshAt) {
                         return;
                     }
                     entries[index] = { ...entry, refreshing: true };
@@ -1000,15 +1017,24 @@ async function printUsageTop(profiles, once) {
                     const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
                     states.set(entry.name, state);
                     const interval = nextUsageTopInterval(entry.refreshIntervalMs, changed);
+                    const maxIntervalIdleCount = nextUsageTopMaxIdleCount(entry, changed, interval);
+                    const done = maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
                     entries[index] = {
                         ...nextEntry,
                         usage: nextEntry.usage ?? entry.usage,
                         stale: nextEntry.usage ? false : entry.usage !== null,
                         refreshIntervalMs: interval,
-                        nextRefreshAt: new Date(Date.now() + interval),
+                        maxIntervalIdleCount,
+                        done,
+                        nextRefreshAt: done ? null : new Date(Date.now() + interval),
                     };
                 }));
                 writeLine();
+                if (entries.every((entry) => entry.done || entry.skipped)) {
+                    clearInterval(timer);
+                    process.stdout.write("\n");
+                    resolve();
+                }
             })();
         }, usageTopTickMs);
         process.once("SIGINT", () => {
