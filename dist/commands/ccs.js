@@ -6,7 +6,7 @@ import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
-import { bgBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
+import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
 const usageTopMinIntervalMs = 25_000;
@@ -15,7 +15,7 @@ const usageTopMaxIntervalMs = 300_000;
 const usageTopMaxIntervalIdleLimit = 3;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
-const usageTopStatusWidth = 28;
+const usageTopStatusWidth = 24;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
         throw new Error(`profile ${name} is invalid`);
@@ -636,7 +636,7 @@ function formatTopCost(value) {
 }
 function formatSignedTopCost(value) {
     const sign = value >= 0 ? "+" : "-";
-    return `${sign}$${Math.abs(value).toFixed(1).padStart(4, " ")}`;
+    return `${sign}$${Math.abs(value).toFixed(1)}`;
 }
 function formatUsage(result) {
     return formatUsageColumns(result).join("  ");
@@ -912,11 +912,11 @@ function padVisibleRight(value, width) {
     return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 function formatTopName(name) {
-    return bgBlue(` ${name} `);
+    return bgDarkBlue(` ${name} `);
 }
 function formatCountdownSeconds(date, now) {
     const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
-    return `${seconds.toString().padStart(3, " ")}s`;
+    return `${seconds}s`;
 }
 function nextUsageTopInterval(current, changed) {
     if (changed) {

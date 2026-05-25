@@ -55,6 +55,10 @@ export function bgBlue(value: string): string {
   return withAnsi("30;48;5;153", value);
 }
 
+export function bgDarkBlue(value: string): string {
+  return withAnsi("38;5;231;48;5;24", value);
+}
+
 export function bgGreen(value: string): string {
   return withAnsi("30;48;5;194", value);
 }
