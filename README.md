@@ -234,6 +234,7 @@ Supported commands:
 ccs
 ccs PROFILE
 ccs toggle [PROFILE]
+ccs top [--once]
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -245,6 +246,14 @@ ccs remove | rm | delete PROFILE
 ```
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
+
+`ccs top` prints all `profiles` and `usage` costs in one terminal line and refreshes every 5 seconds:
+
+```text
+14:09:12 input $31.02 +$0.02 18s ago  claude $123.00  gemini $4.20 +$0.10 3m ago
+```
+
+The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. Use `ccs top --once` to print one line and exit.
 
 Example:
 
@@ -396,7 +405,7 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
-- `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
+- `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
 ## senv

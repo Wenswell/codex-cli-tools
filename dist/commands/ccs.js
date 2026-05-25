@@ -9,6 +9,8 @@ import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profiles
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
+const usageTopIntervalMs = 5000;
+const usageTopChangeTtlMs = 60 * 60 * 1000;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
         throw new Error(`profile ${name} is invalid`);
@@ -620,6 +622,10 @@ function formatCost(value) {
         return `$${value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
     return `$${value.toFixed(2)}`;
 }
+function formatSignedCost(value) {
+    const sign = value >= 0 ? "+" : "-";
+    return `${sign}${formatCost(Math.abs(value))}`;
+}
 function formatUsage(result) {
     return formatUsageColumns(result).join("  ");
 }
@@ -651,6 +657,18 @@ async function printUsageLine(profile) {
 function formatClockTime(date) {
     const pad = (value) => value.toString().padStart(2, "0");
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+function formatRelativeTime(date, now) {
+    const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
+    if (seconds < 60)
+        return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60)
+        return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24)
+        return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
 }
 async function askRequired(input, label, current) {
     const value = await askOptional(input, label, current);
@@ -807,11 +825,128 @@ async function printUsageTargets(profiles) {
         ...row.usage,
     ]), ["left", "left", "left", "right", "right", "right", "right", "right"]);
 }
+function collectUsageTopTargets(profiles) {
+    return [
+        ...Object.entries(profiles.profiles ?? {}).map(([name, profile]) => ({ name, profile })),
+        ...Object.entries(profiles.usage ?? {}).map(([name, profile]) => ({ name, profile })),
+    ];
+}
+async function readUsageTopEntries(targets) {
+    return Promise.all(targets.map(async ({ name, profile }) => {
+        if (!profile.apiKey || !profile.baseURL.trim()) {
+            return { name, usage: null, skipped: true };
+        }
+        return { name, usage: await fetchUsage(profile), skipped: false };
+    }));
+}
+function formatUsageTopEntry(name, usage, skipped, state, now) {
+    if (skipped) {
+        return `${colorName(name)} ${textDim("skipped")}`;
+    }
+    if (!usage) {
+        return `${colorName(name)} ${textRed("unavailable")}`;
+    }
+    const delta = state?.delta;
+    const changedAt = state?.changedAt;
+    const shouldShowChange = delta !== undefined
+        && changedAt !== undefined
+        && now.getTime() - changedAt.getTime() < usageTopChangeTtlMs;
+    const change = shouldShowChange
+        ? ` ${delta >= 0 ? textRed(formatSignedCost(delta)) : textGreen(formatSignedCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`
+        : "";
+    return `${colorName(name)} ${colorCost(formatCost(usage.used))}${change}`;
+}
+function updateUsageTopState(state, usage, now) {
+    if (!usage) {
+        return;
+    }
+    if (state.used === undefined) {
+        state.used = usage.used;
+        return;
+    }
+    const delta = usage.used - state.used;
+    if (Math.abs(delta) < 0.0000001) {
+        return;
+    }
+    state.used = usage.used;
+    state.delta = delta;
+    state.changedAt = now;
+}
+function fitSingleTerminalLine(line) {
+    const columns = process.stdout.columns;
+    if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
+        return line;
+    }
+    let visible = 0;
+    let result = "";
+    for (let index = 0; index < line.length && visible < columns - 1;) {
+        const ansi = /^\u001b\[[0-9;]*m/.exec(line.slice(index));
+        if (ansi) {
+            result += ansi[0];
+            index += ansi[0].length;
+            continue;
+        }
+        result += line[index];
+        visible += 1;
+        index += 1;
+    }
+    return `${result}\u001b[0m`;
+}
+async function buildUsageTopLine(targets, states) {
+    const now = new Date();
+    const entries = await readUsageTopEntries(targets);
+    for (const entry of entries) {
+        const state = states.get(entry.name) ?? {};
+        updateUsageTopState(state, entry.usage, now);
+        states.set(entry.name, state);
+    }
+    const parts = entries.map((entry) => (formatUsageTopEntry(entry.name, entry.usage, entry.skipped, states.get(entry.name), now)));
+    return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${parts.join("  ")}`);
+}
+async function printUsageTop(profiles, once) {
+    const targets = collectUsageTopTargets(profiles);
+    if (targets.length === 0) {
+        console.log(textDim("no profiles"));
+        return;
+    }
+    const states = new Map();
+    const printOnce = async () => {
+        const line = await buildUsageTopLine(targets, states);
+        if (once || !process.stdout.isTTY) {
+            console.log(line);
+            return;
+        }
+        process.stdout.write(`\r\u001b[2K${line}`);
+    };
+    await printOnce();
+    if (once) {
+        return;
+    }
+    if (!process.stdout.isTTY) {
+        throw new Error("ccs top requires a terminal unless --once is used");
+    }
+    await new Promise((resolve) => {
+        const timer = setInterval(() => {
+            void printOnce();
+        }, usageTopIntervalMs);
+        process.once("SIGINT", () => {
+            clearInterval(timer);
+            process.stdout.write("\n");
+            resolve();
+        });
+        process.once("SIGTERM", () => {
+            clearInterval(timer);
+            process.stdout.write("\n");
+            resolve();
+        });
+    });
+}
 function usageLines() {
     return [
         "  ccs                                  # show current profile and usage",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
+        "  ccs top [--once]                     # show all usage costs in one refreshing line",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
         "  ccs usage                            # list usage-only profiles",
         "  ccs usage add [PROFILE]               # add or update a usage-only profile",
@@ -829,7 +964,7 @@ function printHelp() {
     ].join("\n"));
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
@@ -894,6 +1029,11 @@ export async function runCcs(argv) {
             throw new Error(`unknown argument for ccs list: ${unknown}`);
         }
         await printProfileList(profiles, args.some((arg) => arg === "--usage" || arg === "-u"));
+        return;
+    }
+    if (command === "top") {
+        assertOnlyFlags(args, "top", ["--once"]);
+        await printUsageTop(profiles, args.includes("--once"));
         return;
     }
     if (command === "add") {
