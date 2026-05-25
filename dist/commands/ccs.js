@@ -9,7 +9,7 @@ import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profiles
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
-const usageTopIntervalMs = 5000;
+const usageTopIntervalMs = 25_000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {

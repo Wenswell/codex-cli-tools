@@ -247,7 +247,7 @@ ccs remove | rm | delete PROFILE
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
 
-`ccs top` prints all `profiles` and `usage` costs in one terminal line and refreshes every 5 seconds:
+`ccs top` prints all `profiles` and `usage` costs in one terminal line and refreshes every 25 seconds:
 
 ```text
 14:09:12 input $31.02 +$0.02 18s ago  claude $123.00  gemini $4.20 +$0.10 3m ago
