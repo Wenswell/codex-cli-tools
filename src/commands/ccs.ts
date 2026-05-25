@@ -13,6 +13,7 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import {
+  bgBlue,
   maskSecret,
   textBlue,
   textBold,
@@ -111,7 +112,7 @@ const usageTopStepIntervalMs = 30_000;
 const usageTopMaxIntervalMs = 300_000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
-const usageTopStatusWidth = 40;
+const usageTopStatusWidth = 28;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -834,7 +835,7 @@ function formatTopCost(value: number): string {
 
 function formatSignedTopCost(value: number): string {
   const sign = value >= 0 ? "+" : "-";
-  return `${sign}${formatTopCost(Math.abs(value))}`;
+  return `${sign}$${Math.abs(value).toFixed(1).padStart(4, " ")}`;
 }
 
 function formatUsage(result: UsageResult): string {
@@ -1131,7 +1132,7 @@ function formatUsageTopEntry(
 ): string {
   const { name, usage, skipped } = entry;
   if (skipped) {
-    return `${colorName(name)} ${textDim("skipped")}`;
+    return `${formatTopName(name)} ${textDim("skipped")}`;
   }
 
   const delta = state?.delta;
@@ -1145,25 +1146,29 @@ function formatUsageTopEntry(
   }
   const used = usage?.used ?? state?.used;
   if (used === undefined) {
-    return `${colorName(name)} ${textRed("unavailable")}`;
+    return `${formatTopName(name)} ${textRed("unavailable")}`;
   }
   if (entry.stale) {
     tags.push(textRed("stale"));
   }
   if (entry.nextRefreshAt) {
-    tags.push(textDim(`refresh ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
+    tags.push(textDim(`r ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
   }
   const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
-  return `${colorName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
+  return `${formatTopName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
 }
 
 function padVisibleRight(value: string, width: number): string {
   return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 
+function formatTopName(name: string): string {
+  return bgBlue(` ${name} `);
+}
+
 function formatCountdownSeconds(date: Date, now: Date): string {
   const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
-  return `${seconds.toString().padStart(3, "0")}s`;
+  return `${seconds.toString().padStart(3, " ")}s`;
 }
 
 function nextUsageTopInterval(current: number, changed: boolean): number {
