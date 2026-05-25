@@ -9,10 +9,12 @@ import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profiles
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
-const usageTopIntervalMs = 25_000;
+const usageTopMinIntervalMs = 25_000;
+const usageTopStepIntervalMs = 30_000;
+const usageTopMaxIntervalMs = 300_000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
-const usageTopStatusWidth = 20;
+const usageTopStatusWidth = 40;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
         throw new Error(`profile ${name} is invalid`);
@@ -841,15 +843,38 @@ function collectUsageTopTargets(profiles) {
         ...Object.entries(profiles.usage ?? {}).map(([name, profile]) => ({ name, profile })),
     ];
 }
-async function readUsageTopEntries(targets) {
-    return Promise.all(targets.map(async ({ name, profile }) => {
-        if (!profile.apiKey || !profile.baseURL.trim()) {
-            return { name, usage: null, skipped: true };
-        }
-        return { name, usage: await fetchUsage(profile), skipped: false };
-    }));
+async function readUsageTopEntry(target, now, nextRefreshAt) {
+    const { name, profile } = target;
+    if (!profile.apiKey || !profile.baseURL.trim()) {
+        return {
+            name,
+            profile,
+            usage: null,
+            skipped: true,
+            stale: false,
+            nextRefreshAt: null,
+            refreshIntervalMs: usageTopMinIntervalMs,
+            refreshing: false,
+        };
+    }
+    return {
+        name,
+        profile,
+        usage: await fetchUsage(profile),
+        skipped: false,
+        stale: false,
+        nextRefreshAt,
+        refreshIntervalMs: usageTopMinIntervalMs,
+        refreshing: false,
+    };
 }
-function formatUsageTopEntry(name, usage, skipped, state, now) {
+async function readInitialUsageTopEntries(targets, once) {
+    const now = new Date();
+    const nextRefreshAt = once ? null : new Date(now.getTime() + usageTopMinIntervalMs);
+    return Promise.all(targets.map((target) => readUsageTopEntry(target, now, nextRefreshAt)));
+}
+function formatUsageTopEntry(entry, state, now) {
+    const { name, usage, skipped } = entry;
     if (skipped) {
         return `${colorName(name)} ${textDim("skipped")}`;
     }
@@ -866,8 +891,11 @@ function formatUsageTopEntry(name, usage, skipped, state, now) {
     if (used === undefined) {
         return `${colorName(name)} ${textRed("unavailable")}`;
     }
-    if (!usage) {
+    if (entry.stale) {
         tags.push(textRed("stale"));
+    }
+    if (entry.nextRefreshAt) {
+        tags.push(textDim(`refresh ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
     }
     const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
     return `${colorName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
@@ -875,21 +903,32 @@ function formatUsageTopEntry(name, usage, skipped, state, now) {
 function padVisibleRight(value, width) {
     return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
+function formatCountdownSeconds(date, now) {
+    const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
+    return `${seconds.toString().padStart(3, "0")}s`;
+}
+function nextUsageTopInterval(current, changed) {
+    if (changed) {
+        return usageTopMinIntervalMs;
+    }
+    return Math.min(usageTopMaxIntervalMs, current + usageTopStepIntervalMs);
+}
 function updateUsageTopState(state, usage, now) {
     if (!usage) {
-        return;
+        return false;
     }
     if (state.used === undefined) {
         state.used = usage.used;
-        return;
+        return false;
     }
     const delta = usage.used - state.used;
     if (Math.abs(delta) < 0.0000001) {
-        return;
+        return false;
     }
     state.used = usage.used;
     state.delta = delta;
     state.changedAt = now;
+    return true;
 }
 function fitSingleTerminalLine(line) {
     const columns = process.stdout.columns;
@@ -911,21 +950,9 @@ function fitSingleTerminalLine(line) {
     }
     return `${result}\u001b[0m`;
 }
-function formatUsageTopPrefix(now, nextRefreshAt) {
-    if (!nextRefreshAt) {
-        return textDim(formatClockTime(now));
-    }
-    const seconds = Math.max(0, Math.ceil((nextRefreshAt.getTime() - now.getTime()) / 1000));
-    return `${textDim(formatClockTime(now))} ${textDim(`refresh ${seconds.toString().padStart(2, "0")}s`)}`;
-}
-function buildUsageTopLine(entries, states, now, nextRefreshAt) {
-    for (const entry of entries) {
-        const state = states.get(entry.name) ?? {};
-        updateUsageTopState(state, entry.usage, now);
-        states.set(entry.name, state);
-    }
-    const parts = entries.map((entry) => (formatUsageTopEntry(entry.name, entry.usage, entry.skipped, states.get(entry.name), now)));
-    return fitSingleTerminalLine(`${formatUsageTopPrefix(now, nextRefreshAt)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
+function buildUsageTopLine(entries, states, now) {
+    const parts = entries.map((entry) => (formatUsageTopEntry(entry, states.get(entry.name), now)));
+    return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 async function printUsageTop(profiles, once) {
     const targets = collectUsageTopTargets(profiles);
@@ -934,11 +961,14 @@ async function printUsageTop(profiles, once) {
         return;
     }
     const states = new Map();
-    let entries = await readUsageTopEntries(targets);
-    let nextRefreshAt = once ? null : new Date(Date.now() + usageTopIntervalMs);
-    let refreshing = false;
+    let entries = await readInitialUsageTopEntries(targets, once);
+    for (const entry of entries) {
+        const state = states.get(entry.name) ?? {};
+        updateUsageTopState(state, entry.usage, new Date());
+        states.set(entry.name, state);
+    }
     const writeLine = () => {
-        const line = buildUsageTopLine(entries, states, new Date(), nextRefreshAt);
+        const line = buildUsageTopLine(entries, states, new Date());
         if (once || !process.stdout.isTTY) {
             console.log(line);
             return;
@@ -956,16 +986,25 @@ async function printUsageTop(profiles, once) {
         const timer = setInterval(() => {
             void (async () => {
                 const now = new Date();
-                if (nextRefreshAt && now >= nextRefreshAt && !refreshing) {
-                    refreshing = true;
-                    try {
-                        entries = await readUsageTopEntries(targets);
-                        nextRefreshAt = new Date(Date.now() + usageTopIntervalMs);
+                await Promise.all(entries.map(async (entry, index) => {
+                    if (!entry.nextRefreshAt || entry.refreshing || now < entry.nextRefreshAt) {
+                        return;
                     }
-                    finally {
-                        refreshing = false;
-                    }
-                }
+                    entries[index] = { ...entry, refreshing: true };
+                    const refreshedAt = new Date();
+                    const nextEntry = await readUsageTopEntry(entry, refreshedAt, null);
+                    const state = states.get(entry.name) ?? {};
+                    const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
+                    states.set(entry.name, state);
+                    const interval = nextUsageTopInterval(entry.refreshIntervalMs, changed);
+                    entries[index] = {
+                        ...nextEntry,
+                        usage: nextEntry.usage ?? entry.usage,
+                        stale: nextEntry.usage ? false : entry.usage !== null,
+                        refreshIntervalMs: interval,
+                        nextRefreshAt: new Date(Date.now() + interval),
+                    };
+                }));
                 writeLine();
             })();
         }, usageTopTickMs);
