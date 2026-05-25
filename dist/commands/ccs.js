@@ -844,18 +844,24 @@ function formatUsageTopEntry(name, usage, skipped, state, now) {
     if (skipped) {
         return `${colorName(name)} ${textDim("skipped")}`;
     }
-    if (!usage) {
-        return `${colorName(name)} ${textRed("unavailable")}`;
-    }
     const delta = state?.delta;
     const changedAt = state?.changedAt;
     const shouldShowChange = delta !== undefined
         && changedAt !== undefined
         && now.getTime() - changedAt.getTime() < usageTopChangeTtlMs;
-    const change = shouldShowChange
-        ? ` ${delta >= 0 ? textRed(formatSignedCost(delta)) : textGreen(formatSignedCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`
-        : "";
-    return `${colorName(name)} ${colorCost(formatCost(usage.used))}${change}`;
+    const tags = [];
+    if (shouldShowChange) {
+        tags.push(`${delta >= 0 ? textRed(formatSignedCost(delta)) : textGreen(formatSignedCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
+    }
+    const used = usage?.used ?? state?.used;
+    if (used === undefined) {
+        return `${colorName(name)} ${textRed("unavailable")}`;
+    }
+    if (!usage) {
+        tags.push(textRed("stale"));
+    }
+    const suffix = tags.length > 0 ? ` ${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
+    return `${colorName(name)} ${colorCost(formatCost(used))}${suffix}`;
 }
 function updateUsageTopState(state, usage, now) {
     if (!usage) {
@@ -907,7 +913,7 @@ function buildUsageTopLine(entries, states, now, nextRefreshAt) {
         states.set(entry.name, state);
     }
     const parts = entries.map((entry) => (formatUsageTopEntry(entry.name, entry.usage, entry.skipped, states.get(entry.name), now)));
-    return fitSingleTerminalLine(`${formatUsageTopPrefix(now, nextRefreshAt)} ${parts.join("  ")}`);
+    return fitSingleTerminalLine(`${formatUsageTopPrefix(now, nextRefreshAt)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 async function printUsageTop(profiles, once) {
     const targets = collectUsageTopTargets(profiles);
@@ -918,6 +924,7 @@ async function printUsageTop(profiles, once) {
     const states = new Map();
     let entries = await readUsageTopEntries(targets);
     let nextRefreshAt = once ? null : new Date(Date.now() + usageTopIntervalMs);
+    let refreshing = false;
     const writeLine = () => {
         const line = buildUsageTopLine(entries, states, new Date(), nextRefreshAt);
         if (once || !process.stdout.isTTY) {
@@ -937,9 +944,15 @@ async function printUsageTop(profiles, once) {
         const timer = setInterval(() => {
             void (async () => {
                 const now = new Date();
-                if (nextRefreshAt && now >= nextRefreshAt) {
-                    entries = await readUsageTopEntries(targets);
-                    nextRefreshAt = new Date(Date.now() + usageTopIntervalMs);
+                if (nextRefreshAt && now >= nextRefreshAt && !refreshing) {
+                    refreshing = true;
+                    try {
+                        entries = await readUsageTopEntries(targets);
+                        nextRefreshAt = new Date(Date.now() + usageTopIntervalMs);
+                    }
+                    finally {
+                        refreshing = false;
+                    }
                 }
                 writeLine();
             })();
