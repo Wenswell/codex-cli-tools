@@ -104,6 +104,7 @@ type UsageTopEntry = {
 const usageTopIntervalMs = 25_000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
+const usageTopStatusWidth = 20;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -820,6 +821,15 @@ function formatSignedCost(value: number): string {
   return `${sign}${formatCost(Math.abs(value))}`;
 }
 
+function formatTopCost(value: number): string {
+  return `$${value.toFixed(1).padStart(5, " ")}`;
+}
+
+function formatSignedTopCost(value: number): string {
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}${formatTopCost(Math.abs(value))}`;
+}
+
 function formatUsage(result: UsageResult): string {
   return formatUsageColumns(result).join("  ");
 }
@@ -861,11 +871,12 @@ function formatClockTime(date: Date): string {
 
 function formatRelativeTime(date: Date, now: Date): string {
   const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
+  const pad = (value: number): string => value.toString().padStart(2, "0");
+  if (seconds < 60) return `${pad(seconds)}s ago`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return `${pad(minutes)}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${pad(hours)}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
 
@@ -1101,7 +1112,7 @@ function formatUsageTopEntry(
     && now.getTime() - changedAt.getTime() < usageTopChangeTtlMs;
   const tags: string[] = [];
   if (shouldShowChange) {
-    tags.push(`${delta >= 0 ? textRed(formatSignedCost(delta)) : textGreen(formatSignedCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
+    tags.push(`${delta >= 0 ? textRed(formatSignedTopCost(delta)) : textGreen(formatSignedTopCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
   }
   const used = usage?.used ?? state?.used;
   if (used === undefined) {
@@ -1110,8 +1121,12 @@ function formatUsageTopEntry(
   if (!usage) {
     tags.push(textRed("stale"));
   }
-  const suffix = tags.length > 0 ? ` ${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
-  return `${colorName(name)} ${colorCost(formatCost(used))}${suffix}`;
+  const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
+  return `${colorName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
+}
+
+function padVisibleRight(value: string, width: number): string {
+  return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 
 function updateUsageTopState(state: UsageTopState, usage: UsageResult | null, now: Date): void {

@@ -12,6 +12,7 @@ import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, 
 const usageTopIntervalMs = 25_000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
+const usageTopStatusWidth = 20;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
         throw new Error(`profile ${name} is invalid`);
@@ -627,6 +628,13 @@ function formatSignedCost(value) {
     const sign = value >= 0 ? "+" : "-";
     return `${sign}${formatCost(Math.abs(value))}`;
 }
+function formatTopCost(value) {
+    return `$${value.toFixed(1).padStart(5, " ")}`;
+}
+function formatSignedTopCost(value) {
+    const sign = value >= 0 ? "+" : "-";
+    return `${sign}${formatTopCost(Math.abs(value))}`;
+}
 function formatUsage(result) {
     return formatUsageColumns(result).join("  ");
 }
@@ -661,14 +669,15 @@ function formatClockTime(date) {
 }
 function formatRelativeTime(date, now) {
     const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
+    const pad = (value) => value.toString().padStart(2, "0");
     if (seconds < 60)
-        return `${seconds}s ago`;
+        return `${pad(seconds)}s ago`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60)
-        return `${minutes}m ago`;
+        return `${pad(minutes)}m ago`;
     const hours = Math.floor(minutes / 60);
     if (hours < 24)
-        return `${hours}h ago`;
+        return `${pad(hours)}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
 }
 async function askRequired(input, label, current) {
@@ -851,7 +860,7 @@ function formatUsageTopEntry(name, usage, skipped, state, now) {
         && now.getTime() - changedAt.getTime() < usageTopChangeTtlMs;
     const tags = [];
     if (shouldShowChange) {
-        tags.push(`${delta >= 0 ? textRed(formatSignedCost(delta)) : textGreen(formatSignedCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
+        tags.push(`${delta >= 0 ? textRed(formatSignedTopCost(delta)) : textGreen(formatSignedTopCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
     }
     const used = usage?.used ?? state?.used;
     if (used === undefined) {
@@ -860,8 +869,11 @@ function formatUsageTopEntry(name, usage, skipped, state, now) {
     if (!usage) {
         tags.push(textRed("stale"));
     }
-    const suffix = tags.length > 0 ? ` ${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
-    return `${colorName(name)} ${colorCost(formatCost(used))}${suffix}`;
+    const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
+    return `${colorName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
+}
+function padVisibleRight(value, width) {
+    return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 function updateUsageTopState(state, usage, now) {
     if (!usage) {
