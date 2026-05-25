@@ -250,10 +250,10 @@ ccs remove | rm | delete PROFILE
 `ccs top` prints all `profiles` and `usage` costs in one terminal line and refreshes every 25 seconds:
 
 ```text
-14:09:12 input $31.02 +$0.02 18s ago  claude $123.00  gemini $4.20 +$0.10 3m ago
+14:09:12 refresh 25s input $31.02 +$0.02 18s ago  claude $123.00  gemini $4.20 +$0.10 3m ago
 ```
 
-The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. Use `ccs top --once` to print one line and exit.
+The countdown is padded as `refresh 09s` to keep the line stable. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. Use `ccs top --once` to print one line and exit.
 
 Example:
 

@@ -10,6 +10,7 @@ import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLen
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
 const usageTopIntervalMs = 25_000;
+const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
@@ -892,16 +893,21 @@ function fitSingleTerminalLine(line) {
     }
     return `${result}\u001b[0m`;
 }
-async function buildUsageTopLine(targets, states) {
-    const now = new Date();
-    const entries = await readUsageTopEntries(targets);
+function formatUsageTopPrefix(now, nextRefreshAt) {
+    if (!nextRefreshAt) {
+        return textDim(formatClockTime(now));
+    }
+    const seconds = Math.max(0, Math.ceil((nextRefreshAt.getTime() - now.getTime()) / 1000));
+    return `${textDim(formatClockTime(now))} ${textDim(`refresh ${seconds.toString().padStart(2, "0")}s`)}`;
+}
+function buildUsageTopLine(entries, states, now, nextRefreshAt) {
     for (const entry of entries) {
         const state = states.get(entry.name) ?? {};
         updateUsageTopState(state, entry.usage, now);
         states.set(entry.name, state);
     }
     const parts = entries.map((entry) => (formatUsageTopEntry(entry.name, entry.usage, entry.skipped, states.get(entry.name), now)));
-    return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${parts.join("  ")}`);
+    return fitSingleTerminalLine(`${formatUsageTopPrefix(now, nextRefreshAt)} ${parts.join("  ")}`);
 }
 async function printUsageTop(profiles, once) {
     const targets = collectUsageTopTargets(profiles);
@@ -910,15 +916,17 @@ async function printUsageTop(profiles, once) {
         return;
     }
     const states = new Map();
-    const printOnce = async () => {
-        const line = await buildUsageTopLine(targets, states);
+    let entries = await readUsageTopEntries(targets);
+    let nextRefreshAt = once ? null : new Date(Date.now() + usageTopIntervalMs);
+    const writeLine = () => {
+        const line = buildUsageTopLine(entries, states, new Date(), nextRefreshAt);
         if (once || !process.stdout.isTTY) {
             console.log(line);
             return;
         }
         process.stdout.write(`\r\u001b[2K${line}`);
     };
-    await printOnce();
+    writeLine();
     if (once) {
         return;
     }
@@ -927,8 +935,15 @@ async function printUsageTop(profiles, once) {
     }
     await new Promise((resolve) => {
         const timer = setInterval(() => {
-            void printOnce();
-        }, usageTopIntervalMs);
+            void (async () => {
+                const now = new Date();
+                if (nextRefreshAt && now >= nextRefreshAt) {
+                    entries = await readUsageTopEntries(targets);
+                    nextRefreshAt = new Date(Date.now() + usageTopIntervalMs);
+                }
+                writeLine();
+            })();
+        }, usageTopTickMs);
         process.once("SIGINT", () => {
             clearInterval(timer);
             process.stdout.write("\n");
