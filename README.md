@@ -250,10 +250,10 @@ ccs remove | rm | delete PROFILE
 `ccs top` prints all `profiles` and `usage` costs in one terminal line. Each profile refreshes independently: it starts at 25 seconds, backs off by 30 seconds when the cost does not change, caps at 300 seconds, and resets to 25 seconds when the cost changes.
 
 ```text
-14:09:12 | input $ 31.0 (+$  0.1 09s ago, refresh 025s) | claude $123.0 (refresh 055s)      | gemini $  4.2 (+$  0.1 03m ago, refresh 025s)
+14:09:12 | input $ 31.0 (+$ 0.1 09s ago, r  25s) | claude $123.0 (r  55s)      | gemini $  4.2 (+$ 0.1 03m ago, r  25s)
 ```
 
-The countdown is padded as `refresh 025s` to keep the line stable. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot, and each cost keeps a fixed-width status slot, so unchanged entries leave space where change or `stale` status would appear. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. Use `ccs top --once` to print one line and exit.
+The countdown is padded with spaces as `r   5s`, `r  25s`, or `r 300s` to keep the line stable without leading zeroes. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change amounts are sized for normal changes up to `9.9`; larger two-digit changes may shift once. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. Use `ccs top --once` to print one line and exit.
 
 Example:
 
