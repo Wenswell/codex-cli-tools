@@ -95,7 +95,7 @@ type UsageTopState = {
   changedAt?: Date;
 };
 
-const usageTopIntervalMs = 5000;
+const usageTopIntervalMs = 25_000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 
 function assertProfile(value: unknown, name: string): Profile {
