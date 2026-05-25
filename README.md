@@ -247,13 +247,13 @@ ccs remove | rm | delete PROFILE
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
 
-`ccs top` prints all `profiles` and `usage` costs in one terminal line and refreshes every 25 seconds:
+`ccs top` prints all `profiles` and `usage` costs in one terminal line. Each profile refreshes independently: it starts at 25 seconds, backs off by 30 seconds when the cost does not change, caps at 300 seconds, and resets to 25 seconds when the cost changes.
 
 ```text
-14:09:12 refresh 25s | input $ 31.0 (+$  0.1 09s ago) | claude $123.0                      | gemini $  4.2 (+$  0.1 03m ago)
+14:09:12 | input $ 31.0 (+$  0.1 09s ago, refresh 025s) | claude $123.0 (refresh 055s)      | gemini $  4.2 (+$  0.1 03m ago, refresh 025s)
 ```
 
-The countdown is padded as `refresh 09s` to keep the line stable. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot, and each cost keeps a fixed-width status slot, so unchanged entries leave space where change or `stale` status would appear. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. Use `ccs top --once` to print one line and exit.
+The countdown is padded as `refresh 025s` to keep the line stable. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot, and each cost keeps a fixed-width status slot, so unchanged entries leave space where change or `stale` status would appear. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. Use `ccs top --once` to print one line and exit.
 
 Example:
 

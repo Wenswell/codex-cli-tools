@@ -97,14 +97,21 @@ type UsageTopState = {
 
 type UsageTopEntry = {
   name: string;
+  profile: Profile;
   usage: UsageResult | null;
   skipped: boolean;
+  stale: boolean;
+  nextRefreshAt: Date | null;
+  refreshIntervalMs: number;
+  refreshing: boolean;
 };
 
-const usageTopIntervalMs = 25_000;
+const usageTopMinIntervalMs = 25_000;
+const usageTopStepIntervalMs = 30_000;
+const usageTopMaxIntervalMs = 300_000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
-const usageTopStatusWidth = 20;
+const usageTopStatusWidth = 40;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -1085,22 +1092,44 @@ function collectUsageTopTargets(profiles: ProfilesFile): UsageTopTarget[] {
   ];
 }
 
-async function readUsageTopEntries(targets: UsageTopTarget[]): Promise<UsageTopEntry[]> {
-  return Promise.all(targets.map(async ({ name, profile }) => {
-    if (!profile.apiKey || !profile.baseURL.trim()) {
-      return { name, usage: null, skipped: true };
-    }
-    return { name, usage: await fetchUsage(profile), skipped: false };
-  }));
+async function readUsageTopEntry(target: UsageTopTarget, now: Date, nextRefreshAt: Date | null): Promise<UsageTopEntry> {
+  const { name, profile } = target;
+  if (!profile.apiKey || !profile.baseURL.trim()) {
+    return {
+      name,
+      profile,
+      usage: null,
+      skipped: true,
+      stale: false,
+      nextRefreshAt: null,
+      refreshIntervalMs: usageTopMinIntervalMs,
+      refreshing: false,
+    };
+  }
+  return {
+    name,
+    profile,
+    usage: await fetchUsage(profile),
+    skipped: false,
+    stale: false,
+    nextRefreshAt,
+    refreshIntervalMs: usageTopMinIntervalMs,
+    refreshing: false,
+  };
+}
+
+async function readInitialUsageTopEntries(targets: UsageTopTarget[], once: boolean): Promise<UsageTopEntry[]> {
+  const now = new Date();
+  const nextRefreshAt = once ? null : new Date(now.getTime() + usageTopMinIntervalMs);
+  return Promise.all(targets.map((target) => readUsageTopEntry(target, now, nextRefreshAt)));
 }
 
 function formatUsageTopEntry(
-  name: string,
-  usage: UsageResult | null,
-  skipped: boolean,
+  entry: UsageTopEntry,
   state: UsageTopState | undefined,
   now: Date,
 ): string {
+  const { name, usage, skipped } = entry;
   if (skipped) {
     return `${colorName(name)} ${textDim("skipped")}`;
   }
@@ -1118,8 +1147,11 @@ function formatUsageTopEntry(
   if (used === undefined) {
     return `${colorName(name)} ${textRed("unavailable")}`;
   }
-  if (!usage) {
+  if (entry.stale) {
     tags.push(textRed("stale"));
+  }
+  if (entry.nextRefreshAt) {
+    tags.push(textDim(`refresh ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
   }
   const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
   return `${colorName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
@@ -1129,23 +1161,36 @@ function padVisibleRight(value: string, width: number): string {
   return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 
-function updateUsageTopState(state: UsageTopState, usage: UsageResult | null, now: Date): void {
+function formatCountdownSeconds(date: Date, now: Date): string {
+  const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
+  return `${seconds.toString().padStart(3, "0")}s`;
+}
+
+function nextUsageTopInterval(current: number, changed: boolean): number {
+  if (changed) {
+    return usageTopMinIntervalMs;
+  }
+  return Math.min(usageTopMaxIntervalMs, current + usageTopStepIntervalMs);
+}
+
+function updateUsageTopState(state: UsageTopState, usage: UsageResult | null, now: Date): boolean {
   if (!usage) {
-    return;
+    return false;
   }
   if (state.used === undefined) {
     state.used = usage.used;
-    return;
+    return false;
   }
 
   const delta = usage.used - state.used;
   if (Math.abs(delta) < 0.0000001) {
-    return;
+    return false;
   }
 
   state.used = usage.used;
   state.delta = delta;
   state.changedAt = now;
+  return true;
 }
 
 function fitSingleTerminalLine(line: string): string {
@@ -1171,29 +1216,15 @@ function fitSingleTerminalLine(line: string): string {
   return `${result}\u001b[0m`;
 }
 
-function formatUsageTopPrefix(now: Date, nextRefreshAt: Date | null): string {
-  if (!nextRefreshAt) {
-    return textDim(formatClockTime(now));
-  }
-  const seconds = Math.max(0, Math.ceil((nextRefreshAt.getTime() - now.getTime()) / 1000));
-  return `${textDim(formatClockTime(now))} ${textDim(`refresh ${seconds.toString().padStart(2, "0")}s`)}`;
-}
-
 function buildUsageTopLine(
   entries: UsageTopEntry[],
   states: Map<string, UsageTopState>,
   now: Date,
-  nextRefreshAt: Date | null,
 ): string {
-  for (const entry of entries) {
-    const state = states.get(entry.name) ?? {};
-    updateUsageTopState(state, entry.usage, now);
-    states.set(entry.name, state);
-  }
   const parts = entries.map((entry) => (
-    formatUsageTopEntry(entry.name, entry.usage, entry.skipped, states.get(entry.name), now)
+    formatUsageTopEntry(entry, states.get(entry.name), now)
   ));
-  return fitSingleTerminalLine(`${formatUsageTopPrefix(now, nextRefreshAt)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
+  return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 
 async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<void> {
@@ -1204,12 +1235,15 @@ async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<voi
   }
 
   const states = new Map<string, UsageTopState>();
-  let entries = await readUsageTopEntries(targets);
-  let nextRefreshAt = once ? null : new Date(Date.now() + usageTopIntervalMs);
-  let refreshing = false;
+  let entries = await readInitialUsageTopEntries(targets, once);
+  for (const entry of entries) {
+    const state = states.get(entry.name) ?? {};
+    updateUsageTopState(state, entry.usage, new Date());
+    states.set(entry.name, state);
+  }
 
   const writeLine = (): void => {
-    const line = buildUsageTopLine(entries, states, new Date(), nextRefreshAt);
+    const line = buildUsageTopLine(entries, states, new Date());
     if (once || !process.stdout.isTTY) {
       console.log(line);
       return;
@@ -1230,15 +1264,26 @@ async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<voi
     const timer = setInterval(() => {
       void (async () => {
         const now = new Date();
-        if (nextRefreshAt && now >= nextRefreshAt && !refreshing) {
-          refreshing = true;
-          try {
-            entries = await readUsageTopEntries(targets);
-            nextRefreshAt = new Date(Date.now() + usageTopIntervalMs);
-          } finally {
-            refreshing = false;
+        await Promise.all(entries.map(async (entry, index) => {
+          if (!entry.nextRefreshAt || entry.refreshing || now < entry.nextRefreshAt) {
+            return;
           }
-        }
+
+          entries[index] = { ...entry, refreshing: true };
+          const refreshedAt = new Date();
+          const nextEntry = await readUsageTopEntry(entry, refreshedAt, null);
+          const state = states.get(entry.name) ?? {};
+          const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
+          states.set(entry.name, state);
+          const interval = nextUsageTopInterval(entry.refreshIntervalMs, changed);
+          entries[index] = {
+            ...nextEntry,
+            usage: nextEntry.usage ?? entry.usage,
+            stale: nextEntry.usage ? false : entry.usage !== null,
+            refreshIntervalMs: interval,
+            nextRefreshAt: new Date(Date.now() + interval),
+          };
+        }));
         writeLine();
       })();
     }, usageTopTickMs);
