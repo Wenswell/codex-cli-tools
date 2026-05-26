@@ -238,6 +238,9 @@ function parseDurationMs(value) {
     const multiplier = unit === "h" ? 60 * 60 * 1000 : unit === "m" ? 60 * 1000 : 1000;
     return amount * multiplier;
 }
+function nextAlignedTimeMs(now, interval) {
+    return Math.ceil((now + 1) / interval) * interval;
+}
 function formatList(values) {
     return values.length > 0 ? values.join(", ") : "(none)";
 }
@@ -1085,6 +1088,7 @@ async function printUsageTop(profiles, options) {
         states.set(entry.name, state);
     }
     let lastMarkAt = Date.now();
+    let nextMarkAt = nextAlignedTimeMs(lastMarkAt, options.markIntervalMs);
     let lastMarkCosts = readUsageTopCosts(entries);
     const writeLine = () => {
         const line = buildUsageTopLine(entries, states, new Date());
@@ -1098,6 +1102,7 @@ async function printUsageTop(profiles, options) {
         const now = new Date();
         const line = formatUsageTopMarkLine(entries, lastMarkCosts, now);
         lastMarkAt = now.getTime();
+        nextMarkAt = nextAlignedTimeMs(lastMarkAt, options.markIntervalMs);
         lastMarkCosts = readUsageTopCosts(entries);
         if (process.stdout.isTTY) {
             process.stdout.write(`\r\u001b[2K${line}\n`);
@@ -1125,7 +1130,7 @@ async function printUsageTop(profiles, options) {
                 for (const [refreshedIndex, { index }] of due.entries()) {
                     entries[index] = refreshed[refreshedIndex];
                 }
-                if (now.getTime() - lastMarkAt >= options.markIntervalMs) {
+                if (now.getTime() >= nextMarkAt) {
                     printMarkLine();
                 }
                 writeLine();
