@@ -1198,6 +1198,41 @@ function nextUsageTopMaxIdleCount(entry: UsageTopEntry, changed: boolean, nextIn
   return 0;
 }
 
+async function refreshUsageTopEntries(
+  entries: UsageTopEntry[],
+  states: Map<string, UsageTopState>,
+  resetInterval: boolean,
+): Promise<UsageTopEntry[]> {
+  return Promise.all(entries.map(async (entry) => {
+    if (entry.skipped) {
+      return entry;
+    }
+
+    const refreshedAt = new Date();
+    const nextEntry = await readUsageTopEntry(entry, refreshedAt, null);
+    const state = states.get(entry.name) ?? {};
+    const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
+    states.set(entry.name, state);
+    const interval = resetInterval
+      ? usageTopMinIntervalMs
+      : nextUsageTopInterval(entry.refreshIntervalMs, changed);
+    const maxIntervalIdleCount = resetInterval
+      ? 0
+      : nextUsageTopMaxIdleCount(entry, changed, interval);
+    const done = !resetInterval && maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
+
+    return {
+      ...nextEntry,
+      usage: nextEntry.usage ?? entry.usage,
+      stale: nextEntry.usage ? false : entry.usage !== null,
+      refreshIntervalMs: interval,
+      maxIntervalIdleCount,
+      done,
+      nextRefreshAt: done ? null : new Date(Date.now() + interval),
+    };
+  }));
+}
+
 function updateUsageTopState(state: UsageTopState, usage: UsageResult | null, now: Date): boolean {
   if (!usage) {
     return false;
@@ -1289,49 +1324,56 @@ async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<voi
     const timer = setInterval(() => {
       void (async () => {
         const now = new Date();
-        await Promise.all(entries.map(async (entry, index) => {
-          if (entry.done || !entry.nextRefreshAt || entry.refreshing || now < entry.nextRefreshAt) {
-            return;
-          }
-
-          entries[index] = { ...entry, refreshing: true };
-          const refreshedAt = new Date();
-          const nextEntry = await readUsageTopEntry(entry, refreshedAt, null);
-          const state = states.get(entry.name) ?? {};
-          const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
-          states.set(entry.name, state);
-          const interval = nextUsageTopInterval(entry.refreshIntervalMs, changed);
-          const maxIntervalIdleCount = nextUsageTopMaxIdleCount(entry, changed, interval);
-          const done = maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
-          entries[index] = {
-            ...nextEntry,
-            usage: nextEntry.usage ?? entry.usage,
-            stale: nextEntry.usage ? false : entry.usage !== null,
-            refreshIntervalMs: interval,
-            maxIntervalIdleCount,
-            done,
-            nextRefreshAt: done ? null : new Date(Date.now() + interval),
-          };
-        }));
-        writeLine();
-        if (entries.every((entry) => entry.done || entry.skipped)) {
-          clearInterval(timer);
-          process.stdout.write("\n");
-          resolve();
+        const due = entries.map((entry, index) => ({ entry, index }))
+          .filter(({ entry }) => (
+            !entry.done && entry.nextRefreshAt && !entry.refreshing && now >= entry.nextRefreshAt
+          ));
+        for (const { index } of due) {
+          entries[index] = { ...entries[index], refreshing: true };
         }
+        const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), states, false);
+        for (const [refreshedIndex, { index }] of due.entries()) {
+          entries[index] = refreshed[refreshedIndex];
+        }
+        writeLine();
       })();
     }, usageTopTickMs);
 
-    process.once("SIGINT", () => {
+    const refreshAll = async (): Promise<void> => {
+      entries = await refreshUsageTopEntries(entries, states, true);
+      writeLine();
+    };
+
+    const cleanup = (): void => {
       clearInterval(timer);
+      process.stdin.off("data", onData);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
       process.stdout.write("\n");
       resolve();
-    });
-    process.once("SIGTERM", () => {
-      clearInterval(timer);
-      process.stdout.write("\n");
-      resolve();
-    });
+    };
+
+    const onData = (chunk: Buffer): void => {
+      const value = chunk.toString("utf8");
+      if (value === "r") {
+        void refreshAll();
+        return;
+      }
+      if (value === "q" || value === "\u0003") {
+        cleanup();
+      }
+    };
+
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", onData);
+    }
+
+    process.once("SIGINT", cleanup);
+    process.once("SIGTERM", cleanup);
   });
 }
 

@@ -253,7 +253,7 @@ ccs remove | rm | delete PROFILE
 14:09:12 | input $ 31.0 (+$9.9 09s ago, r25s) | claude $123.0 (r55s)      | gemini $  4.2 (+$0.1 03m ago, r25s)
 ```
 
-Countdowns use compact labels such as `r5s`, `r25s`, or `r296s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change amounts are sized for normal changes up to `9.9`; larger two-digit changes may shift once. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and exits. Use `ccs top --once` to print one line and exit.
+Countdowns use compact labels such as `r5s`, `r25s`, or `r296s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change amounts are sized for normal changes up to `9.9`; larger two-digit changes may shift once. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
 
 Example:
 
