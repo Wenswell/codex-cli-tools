@@ -115,6 +115,7 @@ const usageTopMaxIntervalMs = 300_000;
 const usageTopMaxIntervalIdleLimit = 3;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
+const usageTopChangeColorTtlMs = 60 * 1000;
 const usageTopStatusWidth = 24;
 
 function assertProfile(value: unknown, name: string): Profile {
@@ -882,7 +883,7 @@ function formatClockTime(date: Date): string {
 
 function formatRelativeTime(date: Date, now: Date): string {
   const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
-  const pad = (value: number): string => value.toString().padStart(2, "0");
+  const pad = (value: number): string => value.toString().padStart(2, " ");
   if (seconds < 60) return `${pad(seconds)}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${pad(minutes)}m ago`;
@@ -1149,7 +1150,12 @@ function formatUsageTopEntry(
     && now.getTime() - changedAt.getTime() < usageTopChangeTtlMs;
   const tags: string[] = [];
   if (shouldShowChange) {
-    tags.push(`${delta >= 0 ? textRed(formatSignedTopCost(delta)) : textGreen(formatSignedTopCost(delta))} ${textDim(formatRelativeTime(changedAt, now))}`);
+    const age = now.getTime() - changedAt.getTime();
+    const formattedDelta = formatSignedTopCost(delta);
+    const coloredDelta = age < usageTopChangeColorTtlMs
+      ? (delta >= 0 ? textRed(formattedDelta) : textGreen(formattedDelta))
+      : textDim(formattedDelta);
+    tags.push(`${coloredDelta} ${textDim(formatRelativeTime(changedAt, now))}`);
   }
   const used = usage?.used ?? state?.used;
   if (used === undefined) {
@@ -1162,7 +1168,7 @@ function formatUsageTopEntry(
     tags.push(textDim("done"));
   }
   if (entry.nextRefreshAt) {
-    tags.push(textDim(`r ${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
+    tags.push(textDim(`r${formatCountdownSeconds(entry.nextRefreshAt, now)}`));
   }
   const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
   return `${formatTopName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
@@ -1178,7 +1184,7 @@ function formatTopName(name: string): string {
 
 function formatCountdownSeconds(date: Date, now: Date): string {
   const seconds = Math.max(0, Math.ceil((date.getTime() - now.getTime()) / 1000));
-  return `${seconds}s`;
+  return `${seconds.toString().padStart(3, " ")}s`;
 }
 
 function nextUsageTopInterval(current: number, changed: boolean): number {
