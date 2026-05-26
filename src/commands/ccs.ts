@@ -109,10 +109,16 @@ type UsageTopEntry = {
   refreshing: boolean;
 };
 
+type UsageTopOptions = {
+  once: boolean;
+  markIntervalMs: number;
+};
+
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
 const usageTopMaxIntervalMs = 300_000;
 const usageTopMaxIntervalIdleLimit = 3;
+const usageTopDefaultMarkIntervalMs = 5 * 60 * 1000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 const usageTopChangeColorTtlMs = 60 * 1000;
@@ -359,6 +365,17 @@ function assertExactArgs(argv: string[], command: string, count: number): void {
   if (argv.length !== count) {
     throw new Error(`usage: ccs ${command}`);
   }
+}
+
+function parseDurationMs(value: string): number {
+  const match = /^(\d+)(s|m|h)?$/.exec(value.trim());
+  if (!match) {
+    throw new Error(`invalid duration: ${value}`);
+  }
+  const amount = Number(match[1]);
+  const unit = match[2] ?? "s";
+  const multiplier = unit === "h" ? 60 * 60 * 1000 : unit === "m" ? 60 * 1000 : 1000;
+  return amount * multiplier;
 }
 
 function formatList(values: string[]): string {
@@ -1293,7 +1310,65 @@ function buildUsageTopLine(
   return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 
-async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<void> {
+function readUsageTopCosts(entries: UsageTopEntry[]): Map<string, number> {
+  const costs = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.usage) {
+      costs.set(entry.name, entry.usage.used);
+    }
+  }
+  return costs;
+}
+
+function formatTopMarkDelta(value: number): string {
+  if (Math.abs(value) < 0.05) {
+    return textDim("-");
+  }
+  const formatted = `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(1)}`;
+  return value >= 0 ? textRed(formatted) : textGreen(formatted);
+}
+
+function formatUsageTopMarkLine(entries: UsageTopEntry[], previousCosts: Map<string, number>, now: Date): string {
+  const parts = entries.map((entry) => {
+    const used = entry.usage?.used;
+    if (used === undefined) {
+      return `${entry.name} ${entry.skipped ? "skipped" : "unavailable"}`;
+    }
+    const previous = previousCosts.get(entry.name);
+    const delta = previous === undefined ? textDim("-") : formatTopMarkDelta(used - previous);
+    return `${entry.name} ${formatTopCost(used)} ${delta}`;
+  });
+  return `${formatClockTime(now)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`;
+}
+
+function parseUsageTopOptions(args: string[]): UsageTopOptions {
+  const options: UsageTopOptions = {
+    once: false,
+    markIntervalMs: usageTopDefaultMarkIntervalMs,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--once") {
+      options.once = true;
+      continue;
+    }
+    if (arg === "--mark") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("usage: ccs top [--once] [--mark DURATION]");
+      }
+      options.markIntervalMs = parseDurationMs(value);
+      index += 1;
+      continue;
+    }
+    throw new Error(`unknown argument for ccs top: ${arg}`);
+  }
+
+  return options;
+}
+
+async function printUsageTop(profiles: ProfilesFile, options: UsageTopOptions): Promise<void> {
   const targets = collectUsageTopTargets(profiles);
   if (targets.length === 0) {
     console.log(textDim("no profiles"));
@@ -1301,24 +1376,38 @@ async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<voi
   }
 
   const states = new Map<string, UsageTopState>();
-  let entries = await readInitialUsageTopEntries(targets, once);
+  let entries = await readInitialUsageTopEntries(targets, options.once);
   for (const entry of entries) {
     const state = states.get(entry.name) ?? {};
     updateUsageTopState(state, entry.usage, new Date());
     states.set(entry.name, state);
   }
+  let lastMarkAt = Date.now();
+  let lastMarkCosts = readUsageTopCosts(entries);
 
   const writeLine = (): void => {
     const line = buildUsageTopLine(entries, states, new Date());
-    if (once || !process.stdout.isTTY) {
+    if (options.once || !process.stdout.isTTY) {
       console.log(line);
       return;
     }
     process.stdout.write(`\r\u001b[2K${line}`);
   };
 
+  const printMarkLine = (): void => {
+    const now = new Date();
+    const line = formatUsageTopMarkLine(entries, lastMarkCosts, now);
+    lastMarkAt = now.getTime();
+    lastMarkCosts = readUsageTopCosts(entries);
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r\u001b[2K${line}\n`);
+      return;
+    }
+    console.log(line);
+  };
+
   writeLine();
-  if (once) {
+  if (options.once) {
     return;
   }
 
@@ -1340,6 +1429,9 @@ async function printUsageTop(profiles: ProfilesFile, once: boolean): Promise<voi
         const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), states, false);
         for (const [refreshedIndex, { index }] of due.entries()) {
           entries[index] = refreshed[refreshedIndex];
+        }
+        if (now.getTime() - lastMarkAt >= options.markIntervalMs) {
+          printMarkLine();
         }
         writeLine();
       })();
@@ -1388,7 +1480,7 @@ function usageLines(): string[] {
     "  ccs                                  # show current profile and usage",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs toggle [PROFILE]                 # switch profile",
-    "  ccs top [--once]                     # show all usage costs in one refreshing line",
+    "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
     "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
     "  ccs usage                            # list usage-only profiles",
     "  ccs usage add [PROFILE]               # add or update a usage-only profile",
@@ -1484,8 +1576,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "top") {
-    assertOnlyFlags(args, "top", ["--once"]);
-    await printUsageTop(profiles, args.includes("--once"));
+    await printUsageTop(profiles, parseUsageTopOptions(args));
     return;
   }
 

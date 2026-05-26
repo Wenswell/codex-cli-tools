@@ -234,7 +234,7 @@ Supported commands:
 ccs
 ccs PROFILE
 ccs toggle [PROFILE]
-ccs top [--once]
+ccs top [--once] [--mark DURATION]
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -252,6 +252,14 @@ ccs remove | rm | delete PROFILE
 ```text
 14:09:12 | input $ 31.0 (+$9.9  9s ago, r 25s) | claude $123.0 (r 55s)      | gemini $  4.2 (+$0.1  3m ago, r 25s)
 ```
+
+By default, `ccs top` prints a checkpoint line every 5 minutes, then continues refreshing the live line below it:
+
+```text
+14:15:00 | input $ 32.3 +$1.3 | claude $123.0 - | gemini $  4.3 +$0.1
+```
+
+Use `--mark 15m` to change the checkpoint interval. Supported duration suffixes are `s`, `m`, and `h`.
 
 Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change amounts are sized for normal changes up to `9.9`; larger two-digit changes may shift once. Recent changes are red or green for 1 minute, then dimmed while the timestamp remains visible. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
 
