@@ -1,3 +1,4 @@
+import { rename } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -5,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
+import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
@@ -21,6 +22,7 @@ const usageTopMaxDisplayDelta = 10;
 const usageTopStatusWidth = 24;
 const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
+const usageTopSnapshotActiveTtlMs = 5_000;
 const weztermStatusBegin = "-- ccs wezterm status begin";
 const weztermStatusEnd = "-- ccs wezterm status end";
 function assertProfile(value, name) {
@@ -517,7 +519,7 @@ function buildWeztermStatusBlock(command) {
         weztermStatusBegin,
         "config.enable_tab_bar = true",
         "config.hide_tab_bar_if_only_one_tab = false",
-        "config.status_update_interval = 25000",
+        "config.status_update_interval = 1000",
         "",
         "local function ccs_status()",
         `\tlocal command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or ${JSON.stringify(command)}`,
@@ -1209,29 +1211,141 @@ function formatUsageTopMarkLine(entries, previousCosts, now) {
 function formatStatusLineCost(value) {
     return value.toFixed(1).replace(/\.0$/, "");
 }
+function formatStatusLineDelta(value, changedAt, now) {
+    if (value === undefined || Math.abs(value) < 0.05 || !changedAt) {
+        return "";
+    }
+    const changed = new Date(changedAt);
+    if (Number.isNaN(changed.getTime()) || now.getTime() - changed.getTime() >= usageTopChangeColorTtlMs) {
+        return "";
+    }
+    return formatSignedTopCost(value).replace("$", "");
+}
 function formatStatusLineClock(date) {
     const pad = (value) => value.toString().padStart(2, "0");
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
-function renderUsageTopStatusLine(entries, now) {
-    const parts = entries.map((entry) => {
+function formatStatusLineRefresh(entries, now) {
+    const dueAt = entries
+        .map((entry) => entry.nextRefreshAt ? new Date(entry.nextRefreshAt).getTime() : Number.POSITIVE_INFINITY)
+        .filter((value) => Number.isFinite(value));
+    if (dueAt.length === 0) {
+        return entries.length > 0 && entries.every((entry) => entry.done) ? "done" : "";
+    }
+    const seconds = Math.max(0, Math.ceil((Math.min(...dueAt) - now.getTime()) / 1000));
+    return `r${seconds}s`;
+}
+function renderUsageTopStatusLine(snapshot, now) {
+    const parts = snapshot.entries.map((entry) => {
         if (entry.skipped) {
             return `${entry.name} -`;
         }
-        if (!entry.usage) {
+        if (entry.used === undefined) {
             return `${entry.name} ?`;
         }
-        return `${entry.name} ${formatStatusLineCost(entry.usage.used)}`;
+        const delta = formatStatusLineDelta(entry.delta, entry.changedAt, now);
+        const tags = [
+            delta,
+            entry.stale ? "stale" : "",
+            entry.done ? "done" : "",
+        ].filter(Boolean);
+        return `${entry.name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
     });
-    return `${formatStatusLineClock(now)} | ${parts.join(" | ")}`;
+    const refresh = formatStatusLineRefresh(snapshot.entries, now);
+    return `${formatStatusLineClock(now)}${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
 }
-async function printUsageTopStatusLine(profiles) {
-    const targets = collectUsageTopTargets(profiles);
-    if (targets.length === 0) {
-        console.log("no profiles");
+function usageTopSnapshotPath() {
+    return join(codexToolsCacheDir(), "ccs-top-state.json");
+}
+function toUsageTopSnapshotEntry(entry, state) {
+    const used = entry.usage?.used ?? state?.used;
+    return {
+        name: entry.name,
+        used,
+        delta: state?.delta,
+        changedAt: state?.changedAt?.toISOString(),
+        skipped: entry.skipped || undefined,
+        unavailable: !entry.skipped && used === undefined ? true : undefined,
+        stale: entry.stale || undefined,
+        done: entry.done || undefined,
+        nextRefreshAt: entry.nextRefreshAt?.toISOString(),
+    };
+}
+async function writeUsageTopSnapshot(entries, states, now, active) {
+    const path = usageTopSnapshotPath();
+    const tmpPath = `${path}.${process.pid}.tmp`;
+    const snapshot = {
+        version: 1,
+        active,
+        pid: process.pid,
+        updatedAt: now.toISOString(),
+        entries: entries.map((entry) => toUsageTopSnapshotEntry(entry, states.get(entry.name))),
+    };
+    await writeTextFile(tmpPath, stringifyJson(snapshot));
+    await rename(tmpPath, path);
+}
+function parseUsageTopSnapshot(text) {
+    if (!text) {
+        return null;
+    }
+    try {
+        const value = JSON.parse(text);
+        const entries = Array.isArray(value.entries)
+            ? value.entries.flatMap((entry) => {
+                if (!entry || typeof entry !== "object" || typeof entry.name !== "string") {
+                    return [];
+                }
+                const raw = entry;
+                return [{
+                        name: raw.name,
+                        used: typeof raw.used === "number" && Number.isFinite(raw.used) ? raw.used : undefined,
+                        delta: typeof raw.delta === "number" && Number.isFinite(raw.delta) ? raw.delta : undefined,
+                        changedAt: typeof raw.changedAt === "string" ? raw.changedAt : undefined,
+                        skipped: raw.skipped === true ? true : undefined,
+                        unavailable: raw.unavailable === true ? true : undefined,
+                        stale: raw.stale === true ? true : undefined,
+                        done: raw.done === true ? true : undefined,
+                        nextRefreshAt: typeof raw.nextRefreshAt === "string" ? raw.nextRefreshAt : undefined,
+                    }];
+            })
+            : null;
+        if (value.version === 1
+            && typeof value.active === "boolean"
+            && typeof value.pid === "number"
+            && typeof value.updatedAt === "string"
+            && entries) {
+            return {
+                version: 1,
+                active: value.active,
+                pid: value.pid,
+                updatedAt: value.updatedAt,
+                entries,
+            };
+        }
+    }
+    catch {
+        return null;
+    }
+    return null;
+}
+async function readUsageTopSnapshot() {
+    return parseUsageTopSnapshot(await readTextIfExists(usageTopSnapshotPath()));
+}
+function isUsageTopSnapshotActive(snapshot, now) {
+    if (!snapshot.active) {
+        return false;
+    }
+    const updatedAt = new Date(snapshot.updatedAt);
+    return !Number.isNaN(updatedAt.getTime()) && now.getTime() - updatedAt.getTime() < usageTopSnapshotActiveTtlMs;
+}
+async function printUsageTopStatusLine() {
+    const now = new Date();
+    const snapshot = await readUsageTopSnapshot();
+    if (!snapshot || !isUsageTopSnapshotActive(snapshot, now)) {
+        console.log(`${formatStatusLineClock(now)} | ccs top inactive`);
         return;
     }
-    console.log(renderUsageTopStatusLine(await readInitialUsageTopEntries(targets, true), new Date()));
+    console.log(renderUsageTopStatusLine(snapshot, now));
 }
 function parseUsageTopOptions(args) {
     const options = {
@@ -1267,7 +1381,7 @@ function parseUsageTopOptions(args) {
 }
 async function printUsageTop(profiles, options) {
     if (options.statusLine) {
-        await printUsageTopStatusLine(profiles);
+        await printUsageTopStatusLine();
         return;
     }
     const targets = collectUsageTopTargets(profiles);
@@ -1285,13 +1399,15 @@ async function printUsageTop(profiles, options) {
     let lastMarkAt = Date.now();
     let nextMarkAt = nextAlignedTimeMs(lastMarkAt, options.markIntervalMs);
     let lastMarkCosts = readUsageTopCosts(entries);
-    const writeLine = () => {
-        const line = buildUsageTopLine(entries, states, new Date());
+    const writeLine = async () => {
+        const now = new Date();
+        const line = buildUsageTopLine(entries, states, now);
         if (options.once || !process.stdout.isTTY) {
             console.log(line);
             return;
         }
         process.stdout.write(`\r\u001b[2K${line}`);
+        await writeUsageTopSnapshot(entries, states, now, true);
     };
     const printMarkLine = () => {
         const now = new Date();
@@ -1305,7 +1421,7 @@ async function printUsageTop(profiles, options) {
         }
         console.log(line);
     };
-    writeLine();
+    await writeLine();
     if (options.once) {
         return;
     }
@@ -1328,20 +1444,26 @@ async function printUsageTop(profiles, options) {
                 if (now.getTime() >= nextMarkAt) {
                     printMarkLine();
                 }
-                writeLine();
+                await writeLine();
             })();
         }, usageTopTickMs);
         const refreshAll = async () => {
             entries = await refreshUsageTopEntries(entries, states, true);
-            writeLine();
+            await writeLine();
         };
-        const cleanup = () => {
+        let cleanedUp = false;
+        const cleanup = async () => {
+            if (cleanedUp) {
+                return;
+            }
+            cleanedUp = true;
             clearInterval(timer);
             process.stdin.off("data", onData);
             if (process.stdin.isTTY) {
                 process.stdin.setRawMode(false);
             }
             process.stdin.pause();
+            await writeUsageTopSnapshot(entries, states, new Date(), false);
             process.stdout.write("\n");
             resolve();
         };
@@ -1352,7 +1474,7 @@ async function printUsageTop(profiles, options) {
                 return;
             }
             if (value === "q" || value === "\u0003") {
-                cleanup();
+                void cleanup();
             }
         };
         if (process.stdin.isTTY) {
@@ -1360,8 +1482,8 @@ async function printUsageTop(profiles, options) {
             process.stdin.resume();
             process.stdin.on("data", onData);
         }
-        process.once("SIGINT", cleanup);
-        process.once("SIGTERM", cleanup);
+        process.once("SIGINT", () => void cleanup());
+        process.once("SIGTERM", () => void cleanup());
     });
 }
 function usageLines() {
