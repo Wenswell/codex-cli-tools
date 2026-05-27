@@ -267,13 +267,13 @@ Use `--mark 15m` to change the checkpoint interval; checkpoints align to that wa
 
 Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change display is bounded to one digit: when a movement reaches `9.9`, that event is shown as `+$9.9` or `-$9.9`, and subsequent changes are measured again from the current cost. Recent changes are red or green for 1 minute, then dimmed while the timestamp remains visible. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
 
-Use `ccs top --status-line` from terminal status bars such as WezTerm. It prints a compact cached line and exits:
+Use `ccs top --status-line` from terminal status bars such as WezTerm. It reuses the same one-shot usage read as `ccs top --once`, prints a compact line, and exits:
 
 ```text
-14:09 r18s | input 6.6 | ciii 22.6 +0.3 | input-cc 0
+14:09:12 | input 6.6 | ciii 22.6 | input-cc 0
 ```
 
-The cache lives under `~/.cache/codex-tools`. The command returns cached data immediately and starts one background refresh when the cache is older than 25 seconds, so a status bar may call it once per second without polling external usage APIs every second. The left side shows the last refresh time and cache countdown. Per-profile deltas compare the latest refresh with the previous cached refresh and are hidden when effectively zero. Use `ccs top --status-line --refresh` to refresh the cache immediately.
+The WezTerm installer sets `status_update_interval` to 25 seconds, matching the normal `ccs top` initial refresh interval.
 
 Install the WezTerm status bar integration with the project command:
 
