@@ -41,11 +41,6 @@ type Summary = {
 };
 
 function parseArgs(argv: string[]): Args {
-  if (argv.length === 0) {
-    printHelp();
-    process.exit(0);
-  }
-
   const args: Args = {
     source: ".env.example",
     target: ".env",
@@ -73,7 +68,7 @@ function parseArgs(argv: string[]): Args {
       args.apply = true;
       continue;
     }
-    if (arg === "--help" || arg === "-h") {
+    if (arg === "help" || arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
     }
@@ -99,6 +94,7 @@ function printHelp(): void {
     "  senv -y                                  # update .env from .env.example",
     "  senv --source FILE --target FILE -y      # update a target env file from a source template",
     "  senv -b -y                               # back up target before writing",
+    "  senv help                                # show this help",
   ].join("\n"));
 }
 
