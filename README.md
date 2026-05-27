@@ -237,6 +237,7 @@ ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs top --status-line
+ccs top --server HOST:PORT
 ccs wezterm [-y|--yes]
 ccs wezterm remove [-y|--yes]
 ccs list | l [-u|--usage]
@@ -274,6 +275,20 @@ Use `ccs top --status-line` from terminal status bars such as WezTerm. It reads 
 ```
 
 Run `ccs top` locally to produce the snapshot. The status line does not request usage APIs directly; it renders the latest active `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running `ccs top` process. Deltas such as `+0.3` stay visible for 1 minute after the running `ccs top` observes the change. If no active local `ccs top` snapshot exists, the status line prints `ccs top inactive`.
+
+Use `ccs top --server HOST:PORT` to run the same collector without an interactive terminal and expose the current snapshot over HTTP:
+
+```bash
+ccs top --server 0.0.0.0:8765
+```
+
+The server writes the same local snapshot and serves it at `/ccs/top/state`; `/health` returns a compact health JSON. Point status-line clients at a LAN server with `CCS_TOP_STATE_URL`, for example:
+
+```bash
+CCS_TOP_STATE_URL=http://10.126.126.1:8765/ccs/top/state ccs top --status-line
+```
+
+If the server is unavailable, `ccs top --status-line` reads the local snapshot instead.
 
 Install the WezTerm status bar integration with the project command:
 
