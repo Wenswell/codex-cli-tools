@@ -1,9 +1,12 @@
-import { rename } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rename, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { hostname, userInfo } from "node:os";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
@@ -11,6 +14,7 @@ import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCa
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
+const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
 const usageTopMaxIntervalMs = 300_000;
@@ -24,6 +28,11 @@ const usageTopStatusWidth = 24;
 const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
 const usageTopSnapshotActiveTtlMs = 5_000;
+const configSyncUser = "ravvss";
+const configSyncHost = "10.126.126.1";
+const configSyncPort = "32753";
+const configSyncRemotePath = "/home/ravvss/.config/codex-tools/profiles.json";
+const configSyncRemoteDisplay = `${configSyncUser}@${configSyncHost}:${configSyncRemotePath}`;
 const weztermStatusBegin = "-- ccs wezterm status begin";
 const weztermStatusEnd = "-- ccs wezterm status end";
 function assertProfile(value, name) {
@@ -222,6 +231,210 @@ async function syncProfiles() {
     await writeProfiles(next);
     return next;
 }
+function configFileHash(text) {
+    return createHash("sha256").update(text).digest("hex");
+}
+function formatConfigSummary(summary) {
+    if (!summary.exists) {
+        return textDim("missing");
+    }
+    const size = summary.size === undefined ? "?" : `${summary.size}b`;
+    const hash = summary.sha256 ? summary.sha256.slice(0, 12) : "?";
+    const mtime = summary.mtime ? formatClockTime(summary.mtime) : "?";
+    return `${size} ${hash} ${textDim(mtime)}`;
+}
+async function readLocalConfigText() {
+    const text = await readTextIfExists(profilesPath());
+    if (text === null) {
+        throw new Error(`local profiles.json not found: ${profilesPath()}`);
+    }
+    try {
+        parseJsonObject(text);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`invalid local profiles.json: ${message}`);
+    }
+    return text;
+}
+async function localConfigSummary() {
+    const text = await readTextIfExists(profilesPath());
+    if (text === null) {
+        return { exists: false };
+    }
+    const file = await stat(profilesPath());
+    return {
+        exists: true,
+        size: file.size,
+        sha256: configFileHash(text),
+        mtime: file.mtime,
+    };
+}
+async function execConfigSyncFile(command, args) {
+    try {
+        return await execFile(command, args, { maxBuffer: 10 * 1024 * 1024 });
+    }
+    catch (error) {
+        const stderr = typeof error.stderr === "string"
+            ? error.stderr.trim()
+            : "";
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(stderr || message);
+    }
+}
+async function configSyncSsh(script) {
+    const { stdout } = await execConfigSyncFile("ssh", [
+        "-p",
+        configSyncPort,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        `${configSyncUser}@${configSyncHost}`,
+        script,
+    ]);
+    return stdout;
+}
+async function configSyncScp(source, target) {
+    await execConfigSyncFile("scp", [
+        "-P",
+        configSyncPort,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        source,
+        target,
+    ]);
+}
+async function remoteConfigSummary() {
+    const script = [
+        `p=${JSON.stringify(configSyncRemotePath)}`,
+        'if [ -f "$p" ]; then',
+        '  size=$(wc -c < "$p" | tr -d " ")',
+        '  hash=$(sha256sum "$p" | awk \'{print $1}\')',
+        '  mtime=$(stat -c %Y "$p")',
+        '  printf "exists\\t%s\\t%s\\t%s\\n" "$size" "$hash" "$mtime"',
+        "else",
+        '  printf "missing\\n"',
+        "fi",
+    ].join("\n");
+    const output = (await configSyncSsh(script)).trim();
+    if (output === "missing") {
+        return { exists: false };
+    }
+    const [status, size, sha256, mtime] = output.split("\t");
+    if (status !== "exists") {
+        throw new Error(`unexpected remote status: ${output}`);
+    }
+    return {
+        exists: true,
+        size: Number(size),
+        sha256,
+        mtime: new Date(Number(mtime) * 1000),
+    };
+}
+function printConfigSyncPlan(action, local, remote, apply) {
+    console.log(textBold(`ccs config ${action}`));
+    printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
+    printKeyValue("remote:", `${colorPath(configSyncRemoteDisplay)}  ${formatConfigSummary(remote)}`, 9);
+    if (local.exists && remote.exists) {
+        printKeyValue("same:", local.sha256 === remote.sha256 ? textGreen("yes") : textRed("no"), 9);
+    }
+    if (action === "push") {
+        printKeyValue("action:", "upload local profiles.json to LAN server", 9);
+    }
+    else if (action === "pull") {
+        printKeyValue("action:", "download LAN server profiles.json to local", 9);
+    }
+    else {
+        printKeyValue("action:", "status only", 9);
+    }
+    if (!apply && action !== "status") {
+        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+    }
+}
+async function pushConfigToServer(local, remote) {
+    await readLocalConfigText();
+    if (remote.exists && local.sha256 === remote.sha256) {
+        console.log(textDim("already synced"));
+        return;
+    }
+    const tmpRemotePath = `${configSyncRemotePath}.${process.pid}.${Date.now()}.tmp`;
+    const backupRemotePath = `${configSyncRemotePath}.backup-${formatTimestamp(new Date())}`;
+    await configSyncSsh([
+        `dir=$(dirname ${JSON.stringify(configSyncRemotePath)})`,
+        'mkdir -p "$dir"',
+    ].join("\n"));
+    await configSyncScp(profilesPath(), `${configSyncUser}@${configSyncHost}:${tmpRemotePath}`);
+    await configSyncSsh([
+        `p=${JSON.stringify(configSyncRemotePath)}`,
+        `tmp=${JSON.stringify(tmpRemotePath)}`,
+        `backup=${JSON.stringify(backupRemotePath)}`,
+        'if [ -f "$p" ]; then cp -p "$p" "$backup"; fi',
+        'chmod 600 "$tmp"',
+        'mv "$tmp" "$p"',
+        'printf "%s\\n" "$backup"',
+    ].join("\n"));
+    console.log(`uploaded: ${textGreen(configSyncRemoteDisplay)}`);
+    if (remote.exists) {
+        console.log(`remote backup: ${textBlue(`${configSyncUser}@${configSyncHost}:${backupRemotePath}`)}`);
+    }
+}
+async function pullConfigFromServer(local, remote) {
+    if (!remote.exists) {
+        throw new Error(`remote profiles.json not found: ${configSyncRemoteDisplay}`);
+    }
+    if (local.exists && local.sha256 === remote.sha256) {
+        console.log(textDim("already synced"));
+        return;
+    }
+    const tempDir = await mkdtemp(join(tmpdir(), "ccs-config-"));
+    const tempPath = join(tempDir, "profiles.json");
+    try {
+        await configSyncScp(`${configSyncUser}@${configSyncHost}:${configSyncRemotePath}`, tempPath);
+        const nextText = await readFile(tempPath, "utf8");
+        try {
+            parseJsonObject(nextText);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`invalid remote profiles.json: ${message}`);
+        }
+        const backupDir = await backupCcsFiles([{ source: profilesPath(), target: "profiles.json" }]);
+        await writeTextFile(profilesPath(), nextText, 0o600);
+        if (backupDir) {
+            console.log(`backup: ${textBlue(backupDir)}`);
+        }
+        console.log(`downloaded: ${textGreen(profilesPath())}`);
+    }
+    finally {
+        await rm(tempDir, { recursive: true, force: true });
+    }
+}
+async function runConfigSync(args) {
+    if (isHelpArgument(args[0])) {
+        assertExactArgs(args.slice(1), "config help", 0);
+        printHelp();
+        return;
+    }
+    const options = parseConfigSyncArgs(args);
+    const local = await localConfigSummary();
+    const remote = await remoteConfigSummary();
+    printConfigSyncPlan(options.action, local, remote, options.yes);
+    if (!options.yes || options.action === "status") {
+        return;
+    }
+    if (options.action === "push") {
+        await pushConfigToServer(local, remote);
+        return;
+    }
+    await pullConfigFromServer(local, remote);
+}
 function assertNameAvailable(name, profiles, target) {
     const other = target === "profiles" ? profiles.usage : profiles.profiles;
     if (other?.[name]) {
@@ -250,6 +463,15 @@ function assertExactArgs(argv, command, count) {
     if (argv.length !== count) {
         throw new Error(`usage: ccs ${command}`);
     }
+}
+function parseConfigSyncArgs(args) {
+    const action = (args[0] ?? "status");
+    if (action !== "status" && action !== "push" && action !== "pull") {
+        throw new Error(`unknown argument for ccs config: ${action}`);
+    }
+    const flags = args.slice(args[0] ? 1 : 0);
+    assertOnlyFlags(flags, `config ${action}`, ["-y", "--yes"]);
+    return { action, yes: hasYesFlag(flags) };
 }
 function parseDurationMs(value) {
     const match = /^(\d+)(s|m|h)?$/.exec(value.trim());
@@ -1732,6 +1954,7 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
+        "  ccs config [push|pull] [-y|--yes]     # preview or sync profiles.json with LAN server",
         "  ccs s [line]                         # print compact status from configured top state",
         "  ccs s agent                          # write local status text for WezTerm",
         "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
@@ -1774,13 +1997,17 @@ function parseWeztermArgs(args) {
     return { yes, remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
+    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
     const args = argv.slice(1);
     if (isHelpArgument(command)) {
         printHelp();
+        return;
+    }
+    if (command === "config") {
+        await runConfigSync(args);
         return;
     }
     const profiles = await readProfiles();

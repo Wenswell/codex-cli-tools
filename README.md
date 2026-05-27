@@ -230,7 +230,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]
+commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]
 ```
 
 Supported commands:
@@ -240,6 +240,7 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
+ccs config [push|pull] [-y|--yes]
 ccs s [line]
 ccs s agent
 ccs s server [PORT]
@@ -432,6 +433,16 @@ ccs sync -y
 `--yes` is also accepted.
 
 When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
+
+`ccs config` compares the local `~/.config/codex-tools/profiles.json` with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
+
+```bash
+ccs config
+ccs config push
+ccs config pull
+```
+
+`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; they compare file hashes first, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 
