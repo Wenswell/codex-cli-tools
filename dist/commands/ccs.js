@@ -598,7 +598,7 @@ async function buildWeztermPreviewPlan() {
     ]);
     const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
     return {
-        title: "ccs wezterm",
+        title: "ccs s wezterm",
         previewFiles,
         backupFiles,
         warnings: [],
@@ -617,7 +617,7 @@ async function buildWeztermRemovePreviewPlan() {
     ]);
     const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
     return {
-        title: "ccs wezterm remove",
+        title: "ccs s wezterm remove",
         previewFiles,
         backupFiles,
         warnings: [],
@@ -1382,21 +1382,17 @@ async function fetchUsageTopSnapshot(url) {
         clearTimeout(timeout);
     }
 }
-async function readUsageTopStateUrl(profiles) {
-    const envUrl = process.env.CCS_TOP_STATE_URL?.trim();
-    if (envUrl) {
-        return envUrl;
-    }
-    const profileUrl = profiles.top?.stateUrl?.trim();
-    if (profileUrl) {
-        return profileUrl;
-    }
-    const configUrl = (await readTextIfExists(usageTopStateUrlPath()))?.trim();
-    return configUrl || null;
+async function readUsageTopStateUrls(profiles) {
+    const urls = [
+        process.env.CCS_TOP_STATE_URL?.trim(),
+        ...(profiles.top?.stateUrls ?? []).map((url) => url.trim()),
+        profiles.top?.stateUrl?.trim(),
+        (await readTextIfExists(usageTopStateUrlPath()))?.trim(),
+    ].filter((url) => !!url);
+    return [...new Set(urls)];
 }
 async function readUsageTopStatusSnapshot(profiles) {
-    const url = await readUsageTopStateUrl(profiles);
-    if (url) {
+    for (const url of await readUsageTopStateUrls(profiles)) {
         const remote = await fetchUsageTopSnapshot(url);
         if (remote) {
             return { snapshot: remote, remote: true };
@@ -1469,17 +1465,12 @@ async function runUsageTopStatusAgent(profiles) {
         process.once("SIGTERM", () => void cleanup());
     });
 }
-function parseUsageTopServerAddress(value) {
-    const separator = value.lastIndexOf(":");
-    if (separator <= 0 || separator === value.length - 1) {
-        throw new Error(`invalid server address: ${value}`);
+function parseUsageTopServerPort(value) {
+    const port = Number(value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`invalid server port: ${value}`);
     }
-    const host = value.slice(0, separator);
-    const port = Number(value.slice(separator + 1));
-    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error(`invalid server address: ${value}`);
-    }
-    return { host, port };
+    return port;
 }
 function sendUsageTopJson(response, status, body) {
     response.writeHead(status, {
@@ -1488,15 +1479,17 @@ function sendUsageTopJson(response, status, body) {
     });
     response.end(`${JSON.stringify(body)}\n`);
 }
-async function serveUsageTop(profiles, address) {
-    const { host, port } = parseUsageTopServerAddress(address);
+async function serveUsageTop(profiles, portValue) {
+    const host = "0.0.0.0";
+    const port = parseUsageTopServerPort(portValue);
     const targets = collectUsageTopTargets(profiles);
     if (targets.length === 0) {
-        throw new Error("ccs top --server requires profiles");
+        throw new Error("ccs s server requires profiles");
     }
     const runtime = await createUsageTopRuntime(targets, false);
     let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
     await writeUsageTopSnapshot(snapshot);
+    await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
     const server = createServer((request, response) => {
         if (request.method !== "GET") {
             sendUsageTopJson(response, 405, { error: "method not allowed" });
@@ -1526,6 +1519,7 @@ async function serveUsageTop(profiles, address) {
                 await refreshDueUsageTopRuntime(runtime, new Date());
                 snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
                 await writeUsageTopSnapshot(snapshot);
+                await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
             })();
         }, usageTopTickMs);
         let cleanedUp = false;
@@ -1537,6 +1531,7 @@ async function serveUsageTop(profiles, address) {
             clearInterval(timer);
             snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), false);
             await writeUsageTopSnapshot(snapshot);
+            await writeUsageTopStatusText(" | ccs top inactive");
             server.close(() => resolve());
         };
         process.once("SIGINT", () => void cleanup());
@@ -1546,9 +1541,6 @@ async function serveUsageTop(profiles, address) {
 function parseUsageTopOptions(args) {
     const options = {
         once: false,
-        statusLine: false,
-        statusAgent: false,
-        server: null,
         markIntervalMs: usageTopDefaultMarkIntervalMs,
     };
     for (let index = 0; index < args.length; index += 1) {
@@ -1557,27 +1549,10 @@ function parseUsageTopOptions(args) {
             options.once = true;
             continue;
         }
-        if (arg === "--status-line") {
-            options.statusLine = true;
-            continue;
-        }
-        if (arg === "--status-agent") {
-            options.statusAgent = true;
-            continue;
-        }
-        if (arg === "--server") {
-            const value = args[index + 1];
-            if (!value) {
-                throw new Error("usage: ccs top --server HOST:PORT");
-            }
-            options.server = value;
-            index += 1;
-            continue;
-        }
         if (arg === "--mark") {
             const value = args[index + 1];
             if (!value) {
-                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line] [--status-agent] [--server HOST:PORT]");
+                throw new Error("usage: ccs top [--once] [--mark DURATION]");
             }
             options.markIntervalMs = parseDurationMs(value);
             index += 1;
@@ -1585,33 +1560,9 @@ function parseUsageTopOptions(args) {
         }
         throw new Error(`unknown argument for ccs top: ${arg}`);
     }
-    if (options.statusLine && options.once) {
-        throw new Error("usage: ccs top --status-line");
-    }
-    if (options.statusAgent && options.once) {
-        throw new Error("usage: ccs top --status-agent");
-    }
-    if (options.server && (options.statusLine || options.statusAgent || options.once)) {
-        throw new Error("usage: ccs top --server HOST:PORT");
-    }
-    if (options.statusLine && options.statusAgent) {
-        throw new Error("usage: ccs top --status-line");
-    }
     return options;
 }
 async function printUsageTop(profiles, options) {
-    if (options.statusLine) {
-        await printUsageTopStatusLine(profiles);
-        return;
-    }
-    if (options.statusAgent) {
-        await runUsageTopStatusAgent(profiles);
-        return;
-    }
-    if (options.server) {
-        await serveUsageTop(profiles, options.server);
-        return;
-    }
     const targets = collectUsageTopTargets(profiles);
     if (targets.length === 0) {
         console.log(textDim("no profiles"));
@@ -1700,17 +1651,58 @@ async function printUsageTop(profiles, options) {
         process.once("SIGTERM", () => void cleanup());
     });
 }
+async function runCcsStatus(profiles, args) {
+    const subcommand = args[0] ?? "";
+    const subargs = args.slice(1);
+    if (!subcommand || subcommand === "line") {
+        assertExactArgs(subargs, "s line", 0);
+        await printUsageTopStatusLine(profiles);
+        return;
+    }
+    if (subcommand === "agent") {
+        assertExactArgs(subargs, "s agent", 0);
+        await runUsageTopStatusAgent(profiles);
+        return;
+    }
+    if (subcommand === "server") {
+        assertMaxArgs(subargs, "s server [PORT]", 1);
+        await serveUsageTop(profiles, subargs[0] ?? "8765");
+        return;
+    }
+    if (subcommand === "wezterm") {
+        const options = parseWeztermArgs(subargs);
+        const previewPlan = options.remove
+            ? await buildWeztermRemovePreviewPlan()
+            : await buildWeztermPreviewPlan();
+        if (!options.yes) {
+            printPreviewPlan(previewPlan, true);
+            return;
+        }
+        printPreviewPlan(previewPlan, false);
+        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
+        const nextConfigText = previewPlan.previewFiles[0]?.next;
+        if (nextConfigText !== undefined) {
+            await writeTextFile(weztermConfigPath(), nextConfigText);
+        }
+        if (backupDir) {
+            console.log(`backup: ${textBlue(backupDir)}`);
+        }
+        console.log(`wezterm config ${options.remove ? "updated" : "written"}: ${textGreen(weztermConfigPath())}`);
+        return;
+    }
+    throw new Error(`unknown argument for ccs s: ${subcommand}`);
+}
 function usageLines() {
     return [
         "  ccs                                  # show current profile and usage",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
-        "  ccs top --server HOST:PORT           # serve top state for LAN status bars",
-        "  ccs top --status-line                # print compact usage costs for terminal status bars",
-        "  ccs top --status-agent               # write local status text for WezTerm",
-        "  ccs wezterm [-y|--yes]               # preview or install WezTerm status bar integration",
-        "  ccs wezterm remove [-y|--yes]        # preview or remove WezTerm status bar integration",
+        "  ccs s [line]                         # print compact status from configured top state",
+        "  ccs s agent                          # write local status text for WezTerm",
+        "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
+        "  ccs s wezterm [-y|--yes]             # preview or install WezTerm status integration",
+        "  ccs s wezterm remove [-y|--yes]      # preview or remove WezTerm status integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
         "  ccs usage                            # list usage-only profiles",
         "  ccs usage add [PROFILE]               # add or update a usage-only profile",
@@ -1740,12 +1732,12 @@ function parseWeztermArgs(args) {
             yes = true;
             continue;
         }
-        throw new Error(`unknown argument for ccs wezterm: ${arg}`);
+        throw new Error(`unknown argument for ccs s wezterm: ${arg}`);
     }
     return { yes, remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | top --server HOST:PORT | top --status-agent | wezterm [-y] | wezterm remove [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
@@ -1808,27 +1800,6 @@ export async function runCcs(argv) {
         }
         return;
     }
-    if (command === "wezterm") {
-        const options = parseWeztermArgs(args);
-        const previewPlan = options.remove
-            ? await buildWeztermRemovePreviewPlan()
-            : await buildWeztermPreviewPlan();
-        if (!options.yes) {
-            printPreviewPlan(previewPlan, true);
-            return;
-        }
-        printPreviewPlan(previewPlan, false);
-        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
-        const nextConfigText = previewPlan.previewFiles[0]?.next;
-        if (nextConfigText !== undefined) {
-            await writeTextFile(weztermConfigPath(), nextConfigText);
-        }
-        if (backupDir) {
-            console.log(`backup: ${textBlue(backupDir)}`);
-        }
-        console.log(`wezterm config ${options.remove ? "updated" : "written"}: ${textGreen(weztermConfigPath())}`);
-        return;
-    }
     if (command === "list" || command === "l") {
         const unknown = args.find((arg) => arg !== "--usage" && arg !== "-u");
         if (unknown) {
@@ -1839,6 +1810,10 @@ export async function runCcs(argv) {
     }
     if (command === "top") {
         await printUsageTop(profiles, parseUsageTopOptions(args));
+        return;
+    }
+    if (command === "s") {
+        await runCcsStatus(profiles, args);
         return;
     }
     if (command === "add") {
