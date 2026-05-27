@@ -230,7 +230,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]
+commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|wezterm] | list [-u] | usage | init [-y] | sync [-y]
 ```
 
 Supported commands:
@@ -244,6 +244,8 @@ ccs config [push|pull] [-y|--yes]
 ccs s [line]
 ccs s agent
 ccs s server [PORT]
+ccs s pause
+ccs s resume
 ccs s wezterm [-y|--yes]
 ccs s wezterm remove [-y|--yes]
 ccs list | l [-u|--usage]
@@ -289,7 +291,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server uses the same per-provider backoff, but it is unattended: providers never become `done`, and unchanged providers keep refreshing every 300 seconds after reaching the maximum interval. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, and `/health` returns a compact health JSON. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
+The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20m`, `30m`, then `60m`. Providers never become `done`; unchanged providers keep refreshing every 60 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Use `ccs s pause` and `ccs s resume` to call those control endpoints through configured state URLs. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {
@@ -492,16 +494,14 @@ Behavior:
 Default:
 
 ```bash
-senv -y
+senv
 ```
 
-Equivalent to:
+Preview mode is equivalent to:
 
 ```bash
-senv --source .env.example --target .env -y
+senv --source .env.example --target .env
 ```
-
-Run `senv` without arguments to print help.
 
 Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
 Apply mode first prints the same planned summary as preview, then prints the updated result after writing.

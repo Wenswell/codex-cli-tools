@@ -18,6 +18,16 @@ const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
 const usageTopMaxIntervalMs = 300_000;
+const usageTopServerIntervalsMs = [
+    25_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_200_000,
+    1_800_000,
+    3_600_000,
+];
 const usageTopMaxIntervalIdleLimit = 3;
 const usageTopDefaultMarkIntervalMs = 5 * 60 * 1000;
 const usageTopTickMs = 1000;
@@ -1368,6 +1378,18 @@ function nextUsageTopInterval(current, changed) {
     }
     return Math.min(usageTopMaxIntervalMs, current + usageTopStepIntervalMs);
 }
+function nextUsageTopServerInterval(current, changed) {
+    if (changed) {
+        return usageTopMinIntervalMs;
+    }
+    return usageTopServerIntervalsMs.find((interval) => interval > current)
+        ?? usageTopServerIntervalsMs[usageTopServerIntervalsMs.length - 1];
+}
+function nextUsageTopRefreshInterval(current, changed, mode) {
+    return mode === "server"
+        ? nextUsageTopServerInterval(current, changed)
+        : nextUsageTopInterval(current, changed);
+}
 function nextUsageTopMaxIdleCount(entry, changed, nextInterval) {
     if (changed) {
         return 0;
@@ -1389,7 +1411,7 @@ async function refreshUsageTopEntries(entries, states, options) {
         states.set(entry.name, state);
         const interval = options.resetInterval
             ? usageTopMinIntervalMs
-            : nextUsageTopInterval(entry.refreshIntervalMs, changed);
+            : nextUsageTopRefreshInterval(entry.refreshIntervalMs, changed, options.intervalMode);
         const maxIntervalIdleCount = options.resetInterval || !options.stopAtMaxIdle
             ? 0
             : nextUsageTopMaxIdleCount(entry, changed, interval);
@@ -1424,7 +1446,7 @@ function updateUsageTopState(state, usage, now) {
     state.changedAt = now;
     return true;
 }
-async function refreshDueUsageTopRuntime(runtime, now, stopAtMaxIdle) {
+async function refreshDueUsageTopRuntime(runtime, now, stopAtMaxIdle, intervalMode) {
     const due = runtime.entries.map((entry, index) => ({ entry, index }))
         .filter(({ entry }) => (!entry.done && entry.nextRefreshAt && !entry.refreshing && now >= entry.nextRefreshAt));
     for (const { index } of due) {
@@ -1433,15 +1455,17 @@ async function refreshDueUsageTopRuntime(runtime, now, stopAtMaxIdle) {
     const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), runtime.states, {
         resetInterval: false,
         stopAtMaxIdle,
+        intervalMode,
     });
     for (const [refreshedIndex, { index }] of due.entries()) {
         runtime.entries[index] = refreshed[refreshedIndex];
     }
 }
-async function refreshAllUsageTopRuntime(runtime) {
+async function refreshAllUsageTopRuntime(runtime, stopAtMaxIdle, intervalMode) {
     runtime.entries = await refreshUsageTopEntries(runtime.entries, runtime.states, {
         resetInterval: true,
-        stopAtMaxIdle: true,
+        stopAtMaxIdle,
+        intervalMode,
     });
 }
 function nextUsageTopRuntimeDelayMs(runtime, now) {
@@ -1525,7 +1549,11 @@ function formatStatusLineClock(date) {
     const pad = (value) => value.toString().padStart(2, "0");
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
-function formatStatusLineRefresh(entries, now) {
+function formatStatusLineRefresh(snapshot, now) {
+    if (snapshot.paused) {
+        return "paused";
+    }
+    const { entries } = snapshot;
     const dueAt = entries
         .map((entry) => entry.nextRefreshAt ? new Date(entry.nextRefreshAt).getTime() : Number.POSITIVE_INFINITY)
         .filter((value) => Number.isFinite(value));
@@ -1551,7 +1579,7 @@ function renderUsageTopStatusSuffix(snapshot, stateNow) {
         ].filter(Boolean);
         return `${entry.name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
     });
-    const refresh = formatStatusLineRefresh(snapshot.entries, stateNow);
+    const refresh = formatStatusLineRefresh(snapshot, stateNow);
     return `${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
 }
 function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
@@ -1577,12 +1605,13 @@ function toUsageTopSnapshotEntry(entry, state) {
         nextRefreshAt: entry.nextRefreshAt?.toISOString(),
     };
 }
-function buildUsageTopSnapshot(entries, states, now, active) {
+function buildUsageTopSnapshot(entries, states, now, active, paused = false) {
     return {
         version: 1,
         active,
         pid: process.pid,
         updatedAt: now.toISOString(),
+        paused: paused || undefined,
         entries: entries.map((entry) => toUsageTopSnapshotEntry(entry, states.get(entry.name))),
     };
 }
@@ -1627,6 +1656,7 @@ function parseUsageTopSnapshot(text) {
                 active: value.active,
                 pid: value.pid,
                 updatedAt: value.updatedAt,
+                paused: value.paused === true ? true : undefined,
                 entries,
             };
         }
@@ -1660,11 +1690,52 @@ async function fetchUsageTopSnapshot(url) {
         clearTimeout(timeout);
     }
 }
+function usageTopControlUrl(stateUrl, action) {
+    const url = new URL(stateUrl);
+    url.pathname = url.pathname.endsWith("/ccs/top/state")
+        ? url.pathname.replace(/\/ccs\/top\/state$/, `/ccs/top/${action}`)
+        : `/ccs/top/${action}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+}
+async function postUsageTopControl(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+        });
+        return response.ok;
+    }
+    catch {
+        return false;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
 async function readUsageTopStateUrls(profiles) {
     const urls = (profiles.top?.stateUrls ?? [])
         .map((url) => url.trim())
         .filter((url) => !!url);
     return [...new Set(urls)];
+}
+async function controlUsageTopServer(profiles, action) {
+    const urls = await readUsageTopStateUrls(profiles);
+    if (urls.length === 0) {
+        throw new Error("ccs s pause/resume requires top.stateUrls");
+    }
+    for (const url of urls) {
+        const controlUrl = usageTopControlUrl(url, action);
+        if (await postUsageTopControl(controlUrl)) {
+            console.log(`server ${action}d: ${textGreen(controlUrl)}`);
+            return;
+        }
+    }
+    throw new Error(`no configured ccs top server accepted ${action}`);
 }
 async function readUsageTopStatusSnapshot(profiles) {
     for (const url of await readUsageTopStateUrls(profiles)) {
@@ -1762,21 +1833,73 @@ async function serveUsageTop(profiles, portValue) {
         throw new Error("ccs s server requires profiles");
     }
     const runtime = await createUsageTopRuntime(targets, false);
-    let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
+    let paused = false;
+    let timer = null;
+    let cleanedUp = false;
+    const clearTimer = () => {
+        if (timer) {
+            clearTimeout(timer);
+            timer = null;
+        }
+    };
+    const publish = async (active = true) => {
+        snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), active, paused);
+        await writeUsageTopSnapshot(snapshot);
+        await writeUsageTopStatusText(active ? renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)) : " | ccs top inactive");
+    };
+    const schedule = () => {
+        if (cleanedUp || paused) {
+            return;
+        }
+        clearTimer();
+        const delay = nextUsageTopRuntimeDelayMs(runtime, new Date());
+        if (delay === null) {
+            return;
+        }
+        timer = setTimeout(() => {
+            timer = null;
+            void (async () => {
+                await refreshDueUsageTopRuntime(runtime, new Date(), false, "server");
+                await publish();
+                schedule();
+            })();
+        }, delay);
+    };
+    let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
     await writeUsageTopSnapshot(snapshot);
     await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
     const server = createServer((request, response) => {
-        if (request.method !== "GET") {
-            sendUsageTopJson(response, 405, { error: "method not allowed" });
-            return;
-        }
-        if (request.url === "/health") {
+        if (request.method === "GET" && request.url === "/health") {
             sendUsageTopJson(response, 200, { ok: true });
             return;
         }
-        if (request.url === "/ccs/top/state") {
-            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
+        if (request.method === "GET" && request.url === "/ccs/top/state") {
+            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
             sendUsageTopJson(response, 200, snapshot);
+            return;
+        }
+        if (request.method === "POST" && request.url === "/ccs/top/pause") {
+            void (async () => {
+                paused = true;
+                clearTimer();
+                await publish();
+                sendUsageTopJson(response, 200, { ok: true, paused });
+            })();
+            return;
+        }
+        if (request.method === "POST" && request.url === "/ccs/top/resume") {
+            void (async () => {
+                paused = false;
+                clearTimer();
+                await refreshAllUsageTopRuntime(runtime, false, "server");
+                await publish();
+                schedule();
+                sendUsageTopJson(response, 200, { ok: true, paused });
+            })();
+            return;
+        }
+        if (request.method !== "GET" && request.method !== "POST") {
+            sendUsageTopJson(response, 405, { error: "method not allowed" });
             return;
         }
         sendUsageTopJson(response, 404, { error: "not found" });
@@ -1790,41 +1913,14 @@ async function serveUsageTop(profiles, portValue) {
     });
     console.log(`ccs top server: http://${host}:${port}/ccs/top/state`);
     await new Promise((resolve) => {
-        let timer = null;
-        let cleanedUp = false;
-        const publish = async () => {
-            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
-            await writeUsageTopSnapshot(snapshot);
-            await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
-        };
-        const schedule = () => {
-            if (cleanedUp) {
-                return;
-            }
-            const delay = nextUsageTopRuntimeDelayMs(runtime, new Date());
-            if (delay === null) {
-                return;
-            }
-            timer = setTimeout(() => {
-                void (async () => {
-                    await refreshDueUsageTopRuntime(runtime, new Date(), false);
-                    await publish();
-                    schedule();
-                })();
-            }, delay);
-        };
         schedule();
         const cleanup = async () => {
             if (cleanedUp) {
                 return;
             }
             cleanedUp = true;
-            if (timer) {
-                clearTimeout(timer);
-            }
-            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), false);
-            await writeUsageTopSnapshot(snapshot);
-            await writeUsageTopStatusText(" | ccs top inactive");
+            clearTimer();
+            await publish(false);
             server.close(() => resolve());
         };
         process.once("SIGINT", () => void cleanup());
@@ -1898,7 +1994,7 @@ async function printUsageTop(profiles, options) {
         const timer = setInterval(() => {
             void (async () => {
                 const now = new Date();
-                await refreshDueUsageTopRuntime(runtime, now, true);
+                await refreshDueUsageTopRuntime(runtime, now, true, "top");
                 if (now.getTime() >= nextMarkAt) {
                     printMarkLine();
                 }
@@ -1906,7 +2002,7 @@ async function printUsageTop(profiles, options) {
             })();
         }, usageTopTickMs);
         const refreshAll = async () => {
-            await refreshAllUsageTopRuntime(runtime);
+            await refreshAllUsageTopRuntime(runtime, true, "top");
             await writeLine();
         };
         let cleanedUp = false;
@@ -1967,6 +2063,11 @@ async function runCcsStatus(profiles, args) {
         await serveUsageTop(profiles, subargs[0] ?? "8765");
         return;
     }
+    if (subcommand === "pause" || subcommand === "resume") {
+        assertExactArgs(subargs, `s ${subcommand}`, 0);
+        await controlUsageTopServer(profiles, subcommand);
+        return;
+    }
     if (subcommand === "wezterm") {
         const options = parseWeztermArgs(subargs);
         const previewPlan = options.remove
@@ -2000,6 +2101,8 @@ function usageLines() {
         "  ccs s [line]                         # print compact status from configured top state",
         "  ccs s agent                          # write local status text for WezTerm",
         "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
+        "  ccs s pause                          # pause configured top state server polling",
+        "  ccs s resume                         # resume configured top state server polling",
         "  ccs s wezterm [-y|--yes]             # preview or install WezTerm status integration",
         "  ccs s wezterm remove [-y|--yes]      # preview or remove WezTerm status integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
@@ -2039,7 +2142,7 @@ function parseWeztermArgs(args) {
     return { yes, remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
+    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
