@@ -12,6 +12,9 @@ export function codexToolsCacheDir() {
 export function profilesPath() {
     return join(codexToolsConfigDir(), "profiles.json");
 }
+export function weztermConfigPath() {
+    return join(homeDir(), ".wezterm.lua");
+}
 export function codexDir() {
     return join(homeDir(), ".codex");
 }

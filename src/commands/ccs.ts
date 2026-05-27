@@ -15,6 +15,7 @@ import {
   codexToolsCacheDir,
   codexToolsConfigDir,
   profilesPath,
+  weztermConfigPath,
 } from "../lib/paths.js";
 import {
   bgDarkBlue,
@@ -134,6 +135,8 @@ const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
 const usageTopStatusLineCacheMs = 25_000;
 const usageTopStatusLineLockMs = 30_000;
+const weztermStatusBegin = "-- ccs wezterm status begin";
+const weztermStatusEnd = "-- ccs wezterm status end";
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -701,6 +704,94 @@ async function buildSyncPreviewPlan(): Promise<PreviewPlan> {
     previewFiles,
     backupFiles,
     warnings: configSection.warnings,
+  };
+}
+
+function buildWeztermStatusBlock(command: string): string {
+  return [
+    weztermStatusBegin,
+    "config.enable_tab_bar = true",
+    "config.hide_tab_bar_if_only_one_tab = false",
+    "config.status_update_interval = 1000",
+    "",
+    "local function ccs_status()",
+    `\tlocal command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or ${JSON.stringify(command)}`,
+    "\tlocal handle = io.popen(command .. \" 2>/dev/null\")",
+    "\tif not handle then",
+    "\t\treturn \"\"",
+    "\tend",
+    "",
+    "\tlocal value = handle:read(\"*a\") or \"\"",
+    "\thandle:close()",
+    "\treturn value:gsub(\"%s+$\", \"\")",
+    "end",
+    "",
+    "wezterm.on(\"update-right-status\", function(window)",
+    "\tlocal status = ccs_status()",
+    "\tif status == \"\" then",
+    "\t\twindow:set_right_status(\"\")",
+    "\t\treturn",
+    "\tend",
+    "",
+    "\twindow:set_right_status(wezterm.format({",
+    "\t\t{ Foreground = { Color = \"#89b4fa\" } },",
+    "\t\t{ Text = \" \" .. status .. \" \" },",
+    "\t}))",
+    "end)",
+    weztermStatusEnd,
+    "",
+  ].join("\n");
+}
+
+function stripWeztermStatusBlock(content: string): string {
+  const begin = content.indexOf(weztermStatusBegin);
+  if (begin === -1) {
+    return content;
+  }
+  const end = content.indexOf(weztermStatusEnd, begin);
+  if (end === -1) {
+    throw new Error(`found ${weztermStatusBegin} without ${weztermStatusEnd}`);
+  }
+  const afterEnd = end + weztermStatusEnd.length;
+  const afterNewline = content.slice(afterEnd).match(/^\r?\n/);
+  const before = content.slice(0, begin).trimEnd();
+  const after = content.slice(afterEnd + (afterNewline?.[0].length ?? 0)).trimStart();
+  return after ? `${before}\n${after}` : `${before}\n`;
+}
+
+function insertWeztermStatusBlock(content: string, block: string): string {
+  const stripped = stripWeztermStatusBlock(content).trimEnd();
+  if (/\breturn\s+config\s*$/m.test(stripped)) {
+    return `${stripped.replace(/\breturn\s+config\s*$/m, `${block}\nreturn config`)}\n`;
+  }
+  if (stripped.length === 0) {
+    return `local wezterm = require("wezterm")\nlocal config = wezterm.config_builder()\n\n${block}\nreturn config\n`;
+  }
+  return `${stripped}\n\n${block}`;
+}
+
+function planWeztermStatusConfig(current: string, command: string): string {
+  return insertWeztermStatusBlock(current, buildWeztermStatusBlock(command));
+}
+
+async function buildWeztermPreviewPlan(command: string): Promise<PreviewPlan> {
+  const currentConfigText = (await readTextIfExists(weztermConfigPath())) ?? "";
+  const nextConfigText = planWeztermStatusConfig(currentConfigText, command);
+  const previewFiles = collectChangedPreviewFiles([
+    {
+      label: ".wezterm.lua",
+      path: weztermConfigPath(),
+      current: currentConfigText,
+      next: nextConfigText,
+    },
+  ]);
+  const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
+
+  return {
+    title: "ccs wezterm",
+    previewFiles,
+    backupFiles,
+    warnings: [],
   };
 }
 
@@ -1690,6 +1781,7 @@ function usageLines(): string[] {
     "  ccs toggle [PROFILE]                 # switch profile",
     "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
     "  ccs top --status-line                # print cached usage costs for terminal status bars",
+    "  ccs wezterm [-y|--yes]               # preview or install WezTerm status bar integration",
     "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
     "  ccs usage                            # list usage-only profiles",
     "  ccs usage add [PROFILE]               # add or update a usage-only profile",
@@ -1708,8 +1800,31 @@ function printHelp(): void {
   ].join("\n"));
 }
 
+function parseWeztermArgs(args: string[]): { yes: boolean; command: string } {
+  let yes = false;
+  let command = "ccs top --status-line";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "-y" || arg === "--yes") {
+      yes = true;
+      continue;
+    }
+    if (arg === "--command") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error("usage: ccs wezterm [--command COMMAND] [-y|--yes]");
+      }
+      command = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`unknown argument for ccs wezterm: ${arg}`);
+  }
+  return { yes, command };
+}
+
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | wezterm [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
@@ -1776,6 +1891,27 @@ export async function runCcs(argv: string[]): Promise<void> {
     for (const name of Object.keys(synced.profiles ?? {})) {
       console.log(`  ${textBlue(name)}`);
     }
+    return;
+  }
+
+  if (command === "wezterm") {
+    const options = parseWeztermArgs(args);
+    const previewPlan = await buildWeztermPreviewPlan(options.command);
+    if (!options.yes) {
+      printPreviewPlan(previewPlan, true);
+      return;
+    }
+
+    printPreviewPlan(previewPlan, false);
+    const backupDir = await backupCcsFiles(previewPlan.backupFiles);
+    const nextConfigText = previewPlan.previewFiles[0]?.next;
+    if (nextConfigText !== undefined) {
+      await writeTextFile(weztermConfigPath(), nextConfigText);
+    }
+    if (backupDir) {
+      console.log(`backup: ${textBlue(backupDir)}`);
+    }
+    console.log(`wezterm config written: ${textGreen(weztermConfigPath())}`);
     return;
   }
 
