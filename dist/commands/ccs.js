@@ -1,5 +1,3 @@
-import { spawn } from "node:child_process";
-import { open, rename, rm, stat, unlink } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -7,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
+import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
@@ -23,8 +21,6 @@ const usageTopMaxDisplayDelta = 10;
 const usageTopStatusWidth = 24;
 const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
-const usageTopStatusLineCacheMs = 25_000;
-const usageTopStatusLineLockMs = 30_000;
 const weztermStatusBegin = "-- ccs wezterm status begin";
 const weztermStatusEnd = "-- ccs wezterm status end";
 function assertProfile(value, name) {
@@ -521,7 +517,7 @@ function buildWeztermStatusBlock(command) {
         weztermStatusBegin,
         "config.enable_tab_bar = true",
         "config.hide_tab_bar_if_only_one_tab = false",
-        "config.status_update_interval = 1000",
+        "config.status_update_interval = 25000",
         "",
         "local function ccs_status()",
         `\tlocal command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or ${JSON.stringify(command)}`,
@@ -1210,221 +1206,37 @@ function formatUsageTopMarkLine(entries, previousCosts, now) {
     });
     return `${formatClockTime(now)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`;
 }
-function usageTopStatusLineCachePath() {
-    return join(codexToolsCacheDir(), "ccs-top-status-line.txt");
-}
-function usageTopStatusLineLockPath() {
-    return join(codexToolsCacheDir(), "ccs-top-status-line.lock");
-}
 function formatStatusLineCost(value) {
     return value.toFixed(1).replace(/\.0$/, "");
 }
-function formatStatusLineDelta(value) {
-    if (value === null || Math.abs(value) < 0.05) {
-        return "";
-    }
-    return formatSignedTopCost(value).replace("$", "");
-}
-function buildUsageTopStatusLineCacheEntry(entry, previousCosts) {
-    if (entry.skipped) {
-        return { name: entry.name, status: "skipped" };
-    }
-    if (!entry.usage) {
-        return { name: entry.name, status: "unavailable" };
-    }
-    const previous = previousCosts.get(entry.name);
-    return {
-        name: entry.name,
-        used: entry.usage.used,
-        delta: previous === undefined ? undefined : entry.usage.used - previous,
-    };
-}
 function formatStatusLineClock(date) {
     const pad = (value) => value.toString().padStart(2, "0");
-    return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
-function formatStatusLineCountdown(cache, now) {
-    const refreshedAt = new Date(cache.refreshedAt);
-    if (Number.isNaN(refreshedAt.getTime())) {
-        return "r--";
-    }
-    const nextRefreshAt = refreshedAt.getTime() + usageTopStatusLineCacheMs;
-    const seconds = Math.max(0, Math.ceil((nextRefreshAt - now.getTime()) / 1000));
-    return `r${seconds}s`;
-}
-function renderUsageTopStatusLineCache(cache, now) {
-    const parts = cache.entries.map((entry) => {
-        if (entry.status) {
-            return `${entry.name} ${entry.status === "skipped" ? "-" : "?"}`;
+function renderUsageTopStatusLine(entries, now) {
+    const parts = entries.map((entry) => {
+        if (entry.skipped) {
+            return `${entry.name} -`;
         }
-        if (entry.used === undefined) {
-            return `${entry.name} unavailable`;
+        if (!entry.usage) {
+            return `${entry.name} ?`;
         }
-        const delta = formatStatusLineDelta(entry.delta ?? null);
-        return delta ? `${entry.name} ${formatStatusLineCost(entry.used)} ${delta}` : `${entry.name} ${formatStatusLineCost(entry.used)}`;
+        return `${entry.name} ${formatStatusLineCost(entry.usage.used)}`;
     });
-    return `${formatStatusLineClock(now)} ${formatStatusLineCountdown(cache, now)} | ${parts.join(" | ")}`;
+    return `${formatStatusLineClock(now)} | ${parts.join(" | ")}`;
 }
-function parseUsageTopStatusLineCache(text) {
-    if (!text) {
-        return null;
-    }
-    try {
-        const value = JSON.parse(text);
-        if (typeof value.refreshedAt === "string"
-            && value.costs
-            && typeof value.costs === "object"
-            && Array.isArray(value.entries)) {
-            return {
-                refreshedAt: value.refreshedAt,
-                costs: value.costs,
-                entries: value.entries,
-            };
-        }
-    }
-    catch {
-        return null;
-    }
-    return null;
-}
-function statusLineCacheCosts(cache) {
-    const costs = new Map();
-    if (!cache) {
-        return costs;
-    }
-    for (const [name, cost] of Object.entries(cache.costs)) {
-        if (Number.isFinite(cost)) {
-            costs.set(name, cost);
-        }
-    }
-    return costs;
-}
-async function buildUsageTopStatusLineCache(profiles, previous) {
+async function printUsageTopStatusLine(profiles) {
     const targets = collectUsageTopTargets(profiles);
-    const now = new Date();
     if (targets.length === 0) {
-        return {
-            refreshedAt: now.toISOString(),
-            costs: {},
-            entries: [],
-        };
-    }
-    const entries = await readInitialUsageTopEntries(targets, true);
-    const previousCosts = statusLineCacheCosts(previous);
-    const costs = Object.fromEntries(readUsageTopCosts(entries));
-    return {
-        refreshedAt: now.toISOString(),
-        costs,
-        entries: entries.map((entry) => buildUsageTopStatusLineCacheEntry(entry, previousCosts)),
-    };
-}
-async function readUsageTopStatusLineCache(maxAgeMs) {
-    const path = usageTopStatusLineCachePath();
-    const text = await readTextIfExists(path);
-    const cache = parseUsageTopStatusLineCache(text);
-    if (!cache) {
-        return null;
-    }
-    if (maxAgeMs !== null) {
-        const stats = await stat(path);
-        if (Date.now() - stats.mtimeMs > maxAgeMs) {
-            return null;
-        }
-    }
-    return renderUsageTopStatusLineCache(cache, new Date());
-}
-async function readUsageTopStatusLineCacheData() {
-    return parseUsageTopStatusLineCache(await readTextIfExists(usageTopStatusLineCachePath()));
-}
-async function readAnyUsageTopStatusLineCache() {
-    const cache = await readUsageTopStatusLineCacheData();
-    return cache ? renderUsageTopStatusLineCache(cache, new Date()) : null;
-}
-async function writeUsageTopStatusLineCache(cache) {
-    const path = usageTopStatusLineCachePath();
-    const tmpPath = `${path}.tmp`;
-    await writeTextFile(tmpPath, stringifyJson(cache));
-    await rename(tmpPath, path);
-}
-async function removeUsageTopStatusLineCache() {
-    await unlink(usageTopStatusLineCachePath()).catch((error) => {
-        if (error.code !== "ENOENT") {
-            throw error;
-        }
-    });
-}
-async function acquireUsageTopStatusLineLock() {
-    await ensureDir(codexToolsCacheDir());
-    const path = usageTopStatusLineLockPath();
-    try {
-        return await open(path, "wx");
-    }
-    catch (error) {
-        if (error.code !== "EEXIST") {
-            throw error;
-        }
-    }
-    const stats = await stat(path).catch(() => null);
-    if (!stats || Date.now() - stats.mtimeMs <= usageTopStatusLineLockMs) {
-        return null;
-    }
-    await rm(path, { force: true });
-    try {
-        return await open(path, "wx");
-    }
-    catch (error) {
-        if (error.code === "EEXIST") {
-            return null;
-        }
-        throw error;
-    }
-}
-async function releaseUsageTopStatusLineLock(lock) {
-    await lock.close();
-    await rm(usageTopStatusLineLockPath(), { force: true });
-}
-function spawnUsageTopStatusLineRefresh() {
-    const binPath = process.argv[1];
-    if (!binPath) {
+        console.log("no profiles");
         return;
     }
-    const child = spawn(process.execPath, [binPath, "top", "--status-line", "--refresh"], {
-        detached: true,
-        env: { ...process.env, NO_COLOR: "1" },
-        stdio: "ignore",
-    });
-    child.unref();
-}
-async function printUsageTopStatusLine(profiles, refresh) {
-    if (!refresh) {
-        const fresh = await readUsageTopStatusLineCache(usageTopStatusLineCacheMs);
-        if (fresh) {
-            console.log(fresh);
-            return;
-        }
-        spawnUsageTopStatusLineRefresh();
-        console.log(await readAnyUsageTopStatusLineCache() ?? "ccs loading");
-        return;
-    }
-    const lock = await acquireUsageTopStatusLineLock();
-    if (!lock) {
-        console.log(await readAnyUsageTopStatusLineCache() ?? "ccs loading");
-        return;
-    }
-    try {
-        const cache = await buildUsageTopStatusLineCache(profiles, await readUsageTopStatusLineCacheData());
-        await writeUsageTopStatusLineCache(cache);
-        console.log(renderUsageTopStatusLineCache(cache, new Date()));
-    }
-    finally {
-        await releaseUsageTopStatusLineLock(lock);
-    }
+    console.log(renderUsageTopStatusLine(await readInitialUsageTopEntries(targets, true), new Date()));
 }
 function parseUsageTopOptions(args) {
     const options = {
         once: false,
         statusLine: false,
-        refreshStatusLine: false,
         markIntervalMs: usageTopDefaultMarkIntervalMs,
     };
     for (let index = 0; index < args.length; index += 1) {
@@ -1437,14 +1249,10 @@ function parseUsageTopOptions(args) {
             options.statusLine = true;
             continue;
         }
-        if (arg === "--refresh") {
-            options.refreshStatusLine = true;
-            continue;
-        }
         if (arg === "--mark") {
             const value = args[index + 1];
             if (!value) {
-                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line [--refresh]]");
+                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line]");
             }
             options.markIntervalMs = parseDurationMs(value);
             index += 1;
@@ -1452,17 +1260,14 @@ function parseUsageTopOptions(args) {
         }
         throw new Error(`unknown argument for ccs top: ${arg}`);
     }
-    if (options.refreshStatusLine && !options.statusLine) {
-        throw new Error("usage: ccs top --status-line [--refresh]");
-    }
     if (options.statusLine && options.once) {
-        throw new Error("usage: ccs top --status-line [--refresh]");
+        throw new Error("usage: ccs top --status-line");
     }
     return options;
 }
 async function printUsageTop(profiles, options) {
     if (options.statusLine) {
-        await printUsageTopStatusLine(profiles, options.refreshStatusLine);
+        await printUsageTopStatusLine(profiles);
         return;
     }
     const targets = collectUsageTopTargets(profiles);
@@ -1565,7 +1370,7 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
-        "  ccs top --status-line                # print cached usage costs for terminal status bars",
+        "  ccs top --status-line                # print compact usage costs for terminal status bars",
         "  ccs wezterm [-y|--yes]               # preview or install WezTerm status bar integration",
         "  ccs wezterm remove [-y|--yes]        # preview or remove WezTerm status bar integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
@@ -1692,9 +1497,6 @@ export async function runCcs(argv) {
         const nextConfigText = previewPlan.previewFiles[0]?.next;
         if (nextConfigText !== undefined) {
             await writeTextFile(weztermConfigPath(), nextConfigText);
-        }
-        if (options.remove) {
-            await removeUsageTopStatusLineCache();
         }
         if (backupDir) {
             console.log(`backup: ${textBlue(backupDir)}`);
