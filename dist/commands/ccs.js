@@ -1,4 +1,5 @@
 import { rename } from "node:fs/promises";
+import { createServer } from "node:http";
 import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -1045,6 +1046,16 @@ async function readInitialUsageTopEntries(targets, once) {
     const nextRefreshAt = once ? null : new Date(now.getTime() + usageTopMinIntervalMs);
     return Promise.all(targets.map((target) => readUsageTopEntry(target, now, nextRefreshAt)));
 }
+async function createUsageTopRuntime(targets, once) {
+    const entries = await readInitialUsageTopEntries(targets, once);
+    const states = new Map();
+    for (const entry of entries) {
+        const state = states.get(entry.name) ?? {};
+        updateUsageTopState(state, entry.usage, new Date());
+        states.set(entry.name, state);
+    }
+    return { entries, states };
+}
 function formatUsageTopEntry(entry, state, now) {
     const { name, usage, skipped } = entry;
     if (skipped) {
@@ -1152,6 +1163,20 @@ function updateUsageTopState(state, usage, now) {
     state.delta = delta;
     state.changedAt = now;
     return true;
+}
+async function refreshDueUsageTopRuntime(runtime, now) {
+    const due = runtime.entries.map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => (!entry.done && entry.nextRefreshAt && !entry.refreshing && now >= entry.nextRefreshAt));
+    for (const { index } of due) {
+        runtime.entries[index] = { ...runtime.entries[index], refreshing: true };
+    }
+    const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), runtime.states, false);
+    for (const [refreshedIndex, { index }] of due.entries()) {
+        runtime.entries[index] = refreshed[refreshedIndex];
+    }
+}
+async function refreshAllUsageTopRuntime(runtime) {
+    runtime.entries = await refreshUsageTopEntries(runtime.entries, runtime.states, true);
 }
 function fitSingleTerminalLine(line) {
     const columns = process.stdout.columns;
@@ -1271,16 +1296,18 @@ function toUsageTopSnapshotEntry(entry, state) {
         nextRefreshAt: entry.nextRefreshAt?.toISOString(),
     };
 }
-async function writeUsageTopSnapshot(entries, states, now, active) {
-    const path = usageTopSnapshotPath();
-    const tmpPath = `${path}.${process.pid}.tmp`;
-    const snapshot = {
+function buildUsageTopSnapshot(entries, states, now, active) {
+    return {
         version: 1,
         active,
         pid: process.pid,
         updatedAt: now.toISOString(),
         entries: entries.map((entry) => toUsageTopSnapshotEntry(entry, states.get(entry.name))),
     };
+}
+async function writeUsageTopSnapshot(snapshot) {
+    const path = usageTopSnapshotPath();
+    const tmpPath = `${path}.${process.pid}.tmp`;
     await writeTextFile(tmpPath, stringifyJson(snapshot));
     await rename(tmpPath, path);
 }
@@ -1331,6 +1358,37 @@ function parseUsageTopSnapshot(text) {
 async function readUsageTopSnapshot() {
     return parseUsageTopSnapshot(await readTextIfExists(usageTopSnapshotPath()));
 }
+async function fetchUsageTopSnapshot(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    try {
+        const response = await fetch(url, {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            return null;
+        }
+        return parseUsageTopSnapshot(await response.text());
+    }
+    catch {
+        return null;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+async function readUsageTopStatusSnapshot() {
+    const url = process.env.CCS_TOP_STATE_URL;
+    if (url) {
+        const remote = await fetchUsageTopSnapshot(url);
+        if (remote) {
+            return remote;
+        }
+    }
+    return readUsageTopSnapshot();
+}
 function isUsageTopSnapshotActive(snapshot, now) {
     if (!snapshot.active) {
         return false;
@@ -1340,17 +1398,92 @@ function isUsageTopSnapshotActive(snapshot, now) {
 }
 async function printUsageTopStatusLine() {
     const now = new Date();
-    const snapshot = await readUsageTopSnapshot();
+    const snapshot = await readUsageTopStatusSnapshot();
     if (!snapshot || !isUsageTopSnapshotActive(snapshot, now)) {
         console.log(`${formatStatusLineClock(now)} | ccs top inactive`);
         return;
     }
     console.log(renderUsageTopStatusLine(snapshot, now));
 }
+function parseUsageTopServerAddress(value) {
+    const separator = value.lastIndexOf(":");
+    if (separator <= 0 || separator === value.length - 1) {
+        throw new Error(`invalid server address: ${value}`);
+    }
+    const host = value.slice(0, separator);
+    const port = Number(value.slice(separator + 1));
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`invalid server address: ${value}`);
+    }
+    return { host, port };
+}
+function sendUsageTopJson(response, status, body) {
+    response.writeHead(status, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+    });
+    response.end(`${JSON.stringify(body)}\n`);
+}
+async function serveUsageTop(profiles, address) {
+    const { host, port } = parseUsageTopServerAddress(address);
+    const targets = collectUsageTopTargets(profiles);
+    if (targets.length === 0) {
+        throw new Error("ccs top --server requires profiles");
+    }
+    const runtime = await createUsageTopRuntime(targets, false);
+    let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
+    await writeUsageTopSnapshot(snapshot);
+    const server = createServer((request, response) => {
+        if (request.method !== "GET") {
+            sendUsageTopJson(response, 405, { error: "method not allowed" });
+            return;
+        }
+        if (request.url === "/health") {
+            sendUsageTopJson(response, 200, { ok: true });
+            return;
+        }
+        if (request.url === "/ccs/top/state") {
+            sendUsageTopJson(response, 200, snapshot);
+            return;
+        }
+        sendUsageTopJson(response, 404, { error: "not found" });
+    });
+    await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+            server.off("error", reject);
+            resolve();
+        });
+    });
+    console.log(`ccs top server: http://${host}:${port}/ccs/top/state`);
+    await new Promise((resolve) => {
+        const timer = setInterval(() => {
+            void (async () => {
+                await refreshDueUsageTopRuntime(runtime, new Date());
+                snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
+                await writeUsageTopSnapshot(snapshot);
+            })();
+        }, usageTopTickMs);
+        let cleanedUp = false;
+        const cleanup = async () => {
+            if (cleanedUp) {
+                return;
+            }
+            cleanedUp = true;
+            clearInterval(timer);
+            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), false);
+            await writeUsageTopSnapshot(snapshot);
+            server.close(() => resolve());
+        };
+        process.once("SIGINT", () => void cleanup());
+        process.once("SIGTERM", () => void cleanup());
+    });
+}
 function parseUsageTopOptions(args) {
     const options = {
         once: false,
         statusLine: false,
+        server: null,
         markIntervalMs: usageTopDefaultMarkIntervalMs,
     };
     for (let index = 0; index < args.length; index += 1) {
@@ -1363,10 +1496,19 @@ function parseUsageTopOptions(args) {
             options.statusLine = true;
             continue;
         }
+        if (arg === "--server") {
+            const value = args[index + 1];
+            if (!value) {
+                throw new Error("usage: ccs top --server HOST:PORT");
+            }
+            options.server = value;
+            index += 1;
+            continue;
+        }
         if (arg === "--mark") {
             const value = args[index + 1];
             if (!value) {
-                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line]");
+                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line] [--server HOST:PORT]");
             }
             options.markIntervalMs = parseDurationMs(value);
             index += 1;
@@ -1377,6 +1519,9 @@ function parseUsageTopOptions(args) {
     if (options.statusLine && options.once) {
         throw new Error("usage: ccs top --status-line");
     }
+    if (options.server && (options.statusLine || options.once)) {
+        throw new Error("usage: ccs top --server HOST:PORT");
+    }
     return options;
 }
 async function printUsageTop(profiles, options) {
@@ -1384,37 +1529,35 @@ async function printUsageTop(profiles, options) {
         await printUsageTopStatusLine();
         return;
     }
+    if (options.server) {
+        await serveUsageTop(profiles, options.server);
+        return;
+    }
     const targets = collectUsageTopTargets(profiles);
     if (targets.length === 0) {
         console.log(textDim("no profiles"));
         return;
     }
-    const states = new Map();
-    let entries = await readInitialUsageTopEntries(targets, options.once);
-    for (const entry of entries) {
-        const state = states.get(entry.name) ?? {};
-        updateUsageTopState(state, entry.usage, new Date());
-        states.set(entry.name, state);
-    }
+    const runtime = await createUsageTopRuntime(targets, options.once);
     let lastMarkAt = Date.now();
     let nextMarkAt = nextAlignedTimeMs(lastMarkAt, options.markIntervalMs);
-    let lastMarkCosts = readUsageTopCosts(entries);
+    let lastMarkCosts = readUsageTopCosts(runtime.entries);
     const writeLine = async () => {
         const now = new Date();
-        const line = buildUsageTopLine(entries, states, now);
+        const line = buildUsageTopLine(runtime.entries, runtime.states, now);
         if (options.once || !process.stdout.isTTY) {
             console.log(line);
             return;
         }
         process.stdout.write(`\r\u001b[2K${line}`);
-        await writeUsageTopSnapshot(entries, states, now, true);
+        await writeUsageTopSnapshot(buildUsageTopSnapshot(runtime.entries, runtime.states, now, true));
     };
     const printMarkLine = () => {
         const now = new Date();
-        const line = formatUsageTopMarkLine(entries, lastMarkCosts, now);
+        const line = formatUsageTopMarkLine(runtime.entries, lastMarkCosts, now);
         lastMarkAt = now.getTime();
         nextMarkAt = nextAlignedTimeMs(lastMarkAt, options.markIntervalMs);
-        lastMarkCosts = readUsageTopCosts(entries);
+        lastMarkCosts = readUsageTopCosts(runtime.entries);
         if (process.stdout.isTTY) {
             process.stdout.write(`\r\u001b[2K${line}\n`);
             return;
@@ -1432,15 +1575,7 @@ async function printUsageTop(profiles, options) {
         const timer = setInterval(() => {
             void (async () => {
                 const now = new Date();
-                const due = entries.map((entry, index) => ({ entry, index }))
-                    .filter(({ entry }) => (!entry.done && entry.nextRefreshAt && !entry.refreshing && now >= entry.nextRefreshAt));
-                for (const { index } of due) {
-                    entries[index] = { ...entries[index], refreshing: true };
-                }
-                const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), states, false);
-                for (const [refreshedIndex, { index }] of due.entries()) {
-                    entries[index] = refreshed[refreshedIndex];
-                }
+                await refreshDueUsageTopRuntime(runtime, now);
                 if (now.getTime() >= nextMarkAt) {
                     printMarkLine();
                 }
@@ -1448,7 +1583,7 @@ async function printUsageTop(profiles, options) {
             })();
         }, usageTopTickMs);
         const refreshAll = async () => {
-            entries = await refreshUsageTopEntries(entries, states, true);
+            await refreshAllUsageTopRuntime(runtime);
             await writeLine();
         };
         let cleanedUp = false;
@@ -1463,7 +1598,7 @@ async function printUsageTop(profiles, options) {
                 process.stdin.setRawMode(false);
             }
             process.stdin.pause();
-            await writeUsageTopSnapshot(entries, states, new Date(), false);
+            await writeUsageTopSnapshot(buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), false));
             process.stdout.write("\n");
             resolve();
         };
@@ -1492,6 +1627,7 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
+        "  ccs top --server HOST:PORT           # serve top state for LAN status bars",
         "  ccs top --status-line                # print compact usage costs for terminal status bars",
         "  ccs wezterm [-y|--yes]               # preview or install WezTerm status bar integration",
         "  ccs wezterm remove [-y|--yes]        # preview or remove WezTerm status bar integration",
@@ -1542,7 +1678,7 @@ function parseWeztermArgs(args) {
     return { yes, remove, command };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | wezterm [-y] | wezterm remove [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | top --server HOST:PORT | wezterm [-y] | wezterm remove [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
