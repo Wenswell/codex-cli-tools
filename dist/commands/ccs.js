@@ -515,7 +515,7 @@ async function buildSyncPreviewPlan() {
         warnings: configSection.warnings,
     };
 }
-function buildWeztermStatusBlock(command) {
+function buildWeztermStatusBlock() {
     return [
         weztermStatusBegin,
         "config.enable_tab_bar = true",
@@ -523,15 +523,19 @@ function buildWeztermStatusBlock(command) {
         "config.status_update_interval = 1000",
         "",
         "local function ccs_status()",
-        `\tlocal command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or ${JSON.stringify(command)}`,
-        "\tlocal handle = io.popen(command .. \" 2>/dev/null\")",
+        `\tlocal path = os.getenv("CCS_WEZTERM_STATUS_FILE") or ${JSON.stringify(usageTopStatusTextPath())}`,
+        "\tlocal handle = io.open(path, \"r\")",
         "\tif not handle then",
-        "\t\treturn \"\"",
+        "\t\treturn os.date(\"%H:%M:%S\") .. \" | ccs status inactive\"",
         "\tend",
         "",
         "\tlocal value = handle:read(\"*a\") or \"\"",
         "\thandle:close()",
-        "\treturn value:gsub(\"%s+$\", \"\")",
+        "\tvalue = value:gsub(\"%s+$\", \"\")",
+        "\tif value == \"\" then",
+        "\t\tvalue = \" | ccs status inactive\"",
+        "\tend",
+        "\treturn os.date(\"%H:%M:%S\") .. value",
         "end",
         "",
         "wezterm.on(\"update-right-status\", function(window)",
@@ -549,16 +553,6 @@ function buildWeztermStatusBlock(command) {
         weztermStatusEnd,
         "",
     ].join("\n");
-}
-function shellQuote(value) {
-    return `'${value.replace(/'/g, "'\\''")}'`;
-}
-function defaultWeztermStatusCommand() {
-    const binPath = process.argv[1];
-    if (!binPath) {
-        return "ccs top --status-line";
-    }
-    return `${shellQuote(process.execPath)} ${shellQuote(binPath)} top --status-line`;
 }
 function stripWeztermStatusBlock(content) {
     const begin = content.indexOf(weztermStatusBegin);
@@ -585,15 +579,15 @@ function insertWeztermStatusBlock(content, block) {
     }
     return `${stripped}\n\n${block}`;
 }
-function planWeztermStatusConfig(current, command) {
-    return insertWeztermStatusBlock(current, buildWeztermStatusBlock(command));
+function planWeztermStatusConfig(current) {
+    return insertWeztermStatusBlock(current, buildWeztermStatusBlock());
 }
 function planWeztermStatusRemove(current) {
     return stripWeztermStatusBlock(current);
 }
-async function buildWeztermPreviewPlan(command) {
+async function buildWeztermPreviewPlan() {
     const currentConfigText = (await readTextIfExists(weztermConfigPath())) ?? "";
-    const nextConfigText = planWeztermStatusConfig(currentConfigText, command);
+    const nextConfigText = planWeztermStatusConfig(currentConfigText);
     const previewFiles = collectChangedPreviewFiles([
         {
             label: ".wezterm.lua",
@@ -1260,7 +1254,7 @@ function formatStatusLineRefresh(entries, now) {
     const seconds = Math.max(0, Math.ceil((Math.min(...dueAt) - now.getTime()) / 1000));
     return `r${seconds}s`;
 }
-function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
+function renderUsageTopStatusSuffix(snapshot, stateNow) {
     const parts = snapshot.entries.map((entry) => {
         if (entry.skipped) {
             return `${entry.name} -`;
@@ -1277,10 +1271,19 @@ function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
         return `${entry.name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
     });
     const refresh = formatStatusLineRefresh(snapshot.entries, stateNow);
-    return `${formatStatusLineClock(displayNow)}${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
+    return `${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
+}
+function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
+    return `${formatStatusLineClock(displayNow)}${renderUsageTopStatusSuffix(snapshot, stateNow)}`;
 }
 function usageTopSnapshotPath() {
     return join(codexToolsCacheDir(), "ccs-top-state.json");
+}
+function usageTopStatusTextPath() {
+    return join(codexToolsCacheDir(), "ccs-top-status.txt");
+}
+function usageTopStateUrlPath() {
+    return join(codexToolsConfigDir(), "top-state-url");
 }
 function toUsageTopSnapshotEntry(entry, state) {
     const used = entry.usage?.used ?? state?.used;
@@ -1379,8 +1382,20 @@ async function fetchUsageTopSnapshot(url) {
         clearTimeout(timeout);
     }
 }
-async function readUsageTopStatusSnapshot() {
-    const url = process.env.CCS_TOP_STATE_URL;
+async function readUsageTopStateUrl(profiles) {
+    const envUrl = process.env.CCS_TOP_STATE_URL?.trim();
+    if (envUrl) {
+        return envUrl;
+    }
+    const profileUrl = profiles.top?.stateUrl?.trim();
+    if (profileUrl) {
+        return profileUrl;
+    }
+    const configUrl = (await readTextIfExists(usageTopStateUrlPath()))?.trim();
+    return configUrl || null;
+}
+async function readUsageTopStatusSnapshot(profiles) {
+    const url = await readUsageTopStateUrl(profiles);
     if (url) {
         const remote = await fetchUsageTopSnapshot(url);
         if (remote) {
@@ -1397,16 +1412,62 @@ function isUsageTopSnapshotActive(snapshot, now) {
     const updatedAt = new Date(snapshot.updatedAt);
     return !Number.isNaN(updatedAt.getTime()) && now.getTime() - updatedAt.getTime() < usageTopSnapshotActiveTtlMs;
 }
-async function printUsageTopStatusLine() {
-    const now = new Date();
-    const source = await readUsageTopStatusSnapshot();
+async function readActiveUsageTopStatusSource(profiles, now) {
+    const source = await readUsageTopStatusSnapshot(profiles);
     if (!source || (!source.remote && !isUsageTopSnapshotActive(source.snapshot, now)) || !source.snapshot.active) {
-        console.log(`${formatStatusLineClock(now)} | ccs top inactive`);
-        return;
+        return null;
     }
     const remoteUpdatedAt = new Date(source.snapshot.updatedAt);
     const stateNow = source.remote && !Number.isNaN(remoteUpdatedAt.getTime()) ? remoteUpdatedAt : now;
-    console.log(renderUsageTopStatusLine(source.snapshot, now, stateNow));
+    return { snapshot: source.snapshot, stateNow };
+}
+async function renderCurrentUsageTopStatusSuffix(profiles, now) {
+    const source = await readActiveUsageTopStatusSource(profiles, now);
+    return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : " | ccs top inactive";
+}
+async function printUsageTopStatusLine(profiles) {
+    const now = new Date();
+    console.log(`${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now)}`);
+}
+async function writeUsageTopStatusText(value) {
+    const path = usageTopStatusTextPath();
+    const tmpPath = `${path}.${process.pid}.tmp`;
+    await writeTextFile(tmpPath, value);
+    await rename(tmpPath, path);
+}
+async function runUsageTopStatusAgent(profiles) {
+    const writeStatus = async () => {
+        const now = new Date();
+        const suffix = await renderCurrentUsageTopStatusSuffix(profiles, now);
+        await writeUsageTopStatusText(suffix);
+        const line = `${formatStatusLineClock(now)}${suffix}`;
+        if (process.stdout.isTTY) {
+            process.stdout.write(`\r\u001b[2K${line}`);
+            return;
+        }
+        console.log(line);
+    };
+    await writeStatus();
+    await new Promise((resolve) => {
+        const timer = setInterval(() => {
+            void writeStatus();
+        }, usageTopTickMs);
+        let cleanedUp = false;
+        const cleanup = async () => {
+            if (cleanedUp) {
+                return;
+            }
+            cleanedUp = true;
+            clearInterval(timer);
+            await writeUsageTopStatusText(" | ccs top inactive");
+            if (process.stdout.isTTY) {
+                process.stdout.write("\n");
+            }
+            resolve();
+        };
+        process.once("SIGINT", () => void cleanup());
+        process.once("SIGTERM", () => void cleanup());
+    });
 }
 function parseUsageTopServerAddress(value) {
     const separator = value.lastIndexOf(":");
@@ -1486,6 +1547,7 @@ function parseUsageTopOptions(args) {
     const options = {
         once: false,
         statusLine: false,
+        statusAgent: false,
         server: null,
         markIntervalMs: usageTopDefaultMarkIntervalMs,
     };
@@ -1497,6 +1559,10 @@ function parseUsageTopOptions(args) {
         }
         if (arg === "--status-line") {
             options.statusLine = true;
+            continue;
+        }
+        if (arg === "--status-agent") {
+            options.statusAgent = true;
             continue;
         }
         if (arg === "--server") {
@@ -1511,7 +1577,7 @@ function parseUsageTopOptions(args) {
         if (arg === "--mark") {
             const value = args[index + 1];
             if (!value) {
-                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line] [--server HOST:PORT]");
+                throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line] [--status-agent] [--server HOST:PORT]");
             }
             options.markIntervalMs = parseDurationMs(value);
             index += 1;
@@ -1522,14 +1588,24 @@ function parseUsageTopOptions(args) {
     if (options.statusLine && options.once) {
         throw new Error("usage: ccs top --status-line");
     }
-    if (options.server && (options.statusLine || options.once)) {
+    if (options.statusAgent && options.once) {
+        throw new Error("usage: ccs top --status-agent");
+    }
+    if (options.server && (options.statusLine || options.statusAgent || options.once)) {
         throw new Error("usage: ccs top --server HOST:PORT");
+    }
+    if (options.statusLine && options.statusAgent) {
+        throw new Error("usage: ccs top --status-line");
     }
     return options;
 }
 async function printUsageTop(profiles, options) {
     if (options.statusLine) {
-        await printUsageTopStatusLine();
+        await printUsageTopStatusLine(profiles);
+        return;
+    }
+    if (options.statusAgent) {
+        await runUsageTopStatusAgent(profiles);
         return;
     }
     if (options.server) {
@@ -1632,6 +1708,7 @@ function usageLines() {
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
         "  ccs top --server HOST:PORT           # serve top state for LAN status bars",
         "  ccs top --status-line                # print compact usage costs for terminal status bars",
+        "  ccs top --status-agent               # write local status text for WezTerm",
         "  ccs wezterm [-y|--yes]               # preview or install WezTerm status bar integration",
         "  ccs wezterm remove [-y|--yes]        # preview or remove WezTerm status bar integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
@@ -1653,7 +1730,6 @@ function printHelp() {
 function parseWeztermArgs(args) {
     let yes = false;
     let remove = false;
-    let command = defaultWeztermStatusCommand();
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
         if (arg === "remove") {
@@ -1664,24 +1740,12 @@ function parseWeztermArgs(args) {
             yes = true;
             continue;
         }
-        if (arg === "--command") {
-            if (remove) {
-                throw new Error("usage: ccs wezterm remove [-y|--yes]");
-            }
-            const value = args[index + 1];
-            if (!value) {
-                throw new Error("usage: ccs wezterm [--command COMMAND] [-y|--yes]");
-            }
-            command = value;
-            index += 1;
-            continue;
-        }
         throw new Error(`unknown argument for ccs wezterm: ${arg}`);
     }
-    return { yes, remove, command };
+    return { yes, remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | top --server HOST:PORT | wezterm [-y] | wezterm remove [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+    console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | top --server HOST:PORT | top --status-agent | wezterm [-y] | wezterm remove [-y] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
@@ -1748,7 +1812,7 @@ export async function runCcs(argv) {
         const options = parseWeztermArgs(args);
         const previewPlan = options.remove
             ? await buildWeztermRemovePreviewPlan()
-            : await buildWeztermPreviewPlan(options.command);
+            : await buildWeztermPreviewPlan();
         if (!options.yes) {
             printPreviewPlan(previewPlan, true);
             return;

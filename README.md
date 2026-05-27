@@ -237,6 +237,7 @@ ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs top --status-line
+ccs top --status-agent
 ccs top --server HOST:PORT
 ccs wezterm [-y|--yes]
 ccs wezterm remove [-y|--yes]
@@ -282,13 +283,19 @@ Use `ccs top --server HOST:PORT` to run the same collector without an interactiv
 ccs top --server 0.0.0.0:8765
 ```
 
-The server writes the same local snapshot and serves it at `/ccs/top/state`; `/health` returns a compact health JSON. Point status-line clients at a LAN server with `CCS_TOP_STATE_URL`, for example:
+The server writes the same local snapshot and serves it at `/ccs/top/state`; `/health` returns a compact health JSON. Point status-line clients at a LAN server with `top.stateUrl` in `~/.config/codex-tools/profiles.json` or `CCS_TOP_STATE_URL`, for example:
 
-```bash
-CCS_TOP_STATE_URL=http://10.126.126.1:8765/ccs/top/state ccs top --status-line
+```json
+{
+  "top": {
+    "stateUrl": "http://10.126.126.1:8765/ccs/top/state"
+  }
+}
 ```
 
 If the server is unavailable, `ccs top --status-line` reads the local snapshot instead.
+
+For WezTerm, keep `ccs top --status-agent` running in one terminal. It writes a tiny text cache to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly and adds the local clock, so it does not spawn `node` or request HTTP from the GUI status callback.
 
 Install the WezTerm status bar integration with the project command:
 
