@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { open, rename, rm, stat } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -10,6 +12,7 @@ import {
   codexAuthPath,
   codexConfigPath,
   codexDir,
+  codexToolsCacheDir,
   codexToolsConfigDir,
   profilesPath,
 } from "../lib/paths.js";
@@ -112,6 +115,8 @@ type UsageTopEntry = {
 
 type UsageTopOptions = {
   once: boolean;
+  statusLine: boolean;
+  refreshStatusLine: boolean;
   markIntervalMs: number;
 };
 
@@ -127,6 +132,8 @@ const usageTopMaxDisplayDelta = 10;
 const usageTopStatusWidth = 24;
 const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
+const usageTopStatusLineCacheMs = 25_000;
+const usageTopStatusLineLockMs = 30_000;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -1390,9 +1397,139 @@ function formatUsageTopMarkLine(entries: UsageTopEntry[], previousCosts: Map<str
   return `${formatClockTime(now)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`;
 }
 
+function usageTopStatusLineCachePath(): string {
+  return join(codexToolsCacheDir(), "ccs-top-status-line.txt");
+}
+
+function usageTopStatusLineLockPath(): string {
+  return join(codexToolsCacheDir(), "ccs-top-status-line.lock");
+}
+
+function formatStatusLineCost(value: number): string {
+  return `$${value.toFixed(1)}`;
+}
+
+function formatUsageTopStatusLineEntry(entry: UsageTopEntry): string {
+  if (entry.skipped) {
+    return `${entry.name} skipped`;
+  }
+  if (!entry.usage) {
+    return `${entry.name} unavailable`;
+  }
+  return `${entry.name} ${formatStatusLineCost(entry.usage.used)}`;
+}
+
+async function buildUsageTopStatusLine(profiles: ProfilesFile): Promise<string> {
+  const targets = collectUsageTopTargets(profiles);
+  if (targets.length === 0) {
+    return "no profiles";
+  }
+
+  const entries = await readInitialUsageTopEntries(targets, true);
+  return entries.map(formatUsageTopStatusLineEntry).join(" | ");
+}
+
+async function readUsageTopStatusLineCache(maxAgeMs: number | null): Promise<string | null> {
+  const path = usageTopStatusLineCachePath();
+  const text = await readTextIfExists(path);
+  if (!text) {
+    return null;
+  }
+  if (maxAgeMs !== null) {
+    const stats = await stat(path);
+    if (Date.now() - stats.mtimeMs > maxAgeMs) {
+      return null;
+    }
+  }
+  return text.trimEnd();
+}
+
+async function writeUsageTopStatusLineCache(line: string): Promise<void> {
+  const path = usageTopStatusLineCachePath();
+  const tmpPath = `${path}.tmp`;
+  await writeTextFile(tmpPath, `${line}\n`);
+  await rename(tmpPath, path);
+}
+
+async function acquireUsageTopStatusLineLock(): Promise<Awaited<ReturnType<typeof open>> | null> {
+  await ensureDir(codexToolsCacheDir());
+  const path = usageTopStatusLineLockPath();
+  try {
+    return await open(path, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+
+  const stats = await stat(path).catch(() => null);
+  if (!stats || Date.now() - stats.mtimeMs <= usageTopStatusLineLockMs) {
+    return null;
+  }
+
+  await rm(path, { force: true });
+  try {
+    return await open(path, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function releaseUsageTopStatusLineLock(lock: Awaited<ReturnType<typeof open>>): Promise<void> {
+  await lock.close();
+  await rm(usageTopStatusLineLockPath(), { force: true });
+}
+
+function spawnUsageTopStatusLineRefresh(): void {
+  const binPath = process.argv[1];
+  if (!binPath) {
+    return;
+  }
+
+  const child = spawn(process.execPath, [binPath, "top", "--status-line", "--refresh"], {
+    detached: true,
+    env: { ...process.env, NO_COLOR: "1" },
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+async function printUsageTopStatusLine(profiles: ProfilesFile, refresh: boolean): Promise<void> {
+  if (!refresh) {
+    const fresh = await readUsageTopStatusLineCache(usageTopStatusLineCacheMs);
+    if (fresh) {
+      console.log(fresh);
+      return;
+    }
+
+    spawnUsageTopStatusLineRefresh();
+    console.log(await readUsageTopStatusLineCache(null) ?? "ccs loading");
+    return;
+  }
+
+  const lock = await acquireUsageTopStatusLineLock();
+  if (!lock) {
+    console.log(await readUsageTopStatusLineCache(null) ?? "ccs loading");
+    return;
+  }
+
+  try {
+    const line = await buildUsageTopStatusLine(profiles);
+    await writeUsageTopStatusLineCache(line);
+    console.log(line);
+  } finally {
+    await releaseUsageTopStatusLineLock(lock);
+  }
+}
+
 function parseUsageTopOptions(args: string[]): UsageTopOptions {
   const options: UsageTopOptions = {
     once: false,
+    statusLine: false,
+    refreshStatusLine: false,
     markIntervalMs: usageTopDefaultMarkIntervalMs,
   };
 
@@ -1402,10 +1539,18 @@ function parseUsageTopOptions(args: string[]): UsageTopOptions {
       options.once = true;
       continue;
     }
+    if (arg === "--status-line") {
+      options.statusLine = true;
+      continue;
+    }
+    if (arg === "--refresh") {
+      options.refreshStatusLine = true;
+      continue;
+    }
     if (arg === "--mark") {
       const value = args[index + 1];
       if (!value) {
-        throw new Error("usage: ccs top [--once] [--mark DURATION]");
+        throw new Error("usage: ccs top [--once] [--mark DURATION] [--status-line [--refresh]]");
       }
       options.markIntervalMs = parseDurationMs(value);
       index += 1;
@@ -1414,10 +1559,22 @@ function parseUsageTopOptions(args: string[]): UsageTopOptions {
     throw new Error(`unknown argument for ccs top: ${arg}`);
   }
 
+  if (options.refreshStatusLine && !options.statusLine) {
+    throw new Error("usage: ccs top --status-line [--refresh]");
+  }
+  if (options.statusLine && options.once) {
+    throw new Error("usage: ccs top --status-line [--refresh]");
+  }
+
   return options;
 }
 
 async function printUsageTop(profiles: ProfilesFile, options: UsageTopOptions): Promise<void> {
+  if (options.statusLine) {
+    await printUsageTopStatusLine(profiles, options.refreshStatusLine);
+    return;
+  }
+
   const targets = collectUsageTopTargets(profiles);
   if (targets.length === 0) {
     console.log(textDim("no profiles"));
@@ -1532,6 +1689,7 @@ function usageLines(): string[] {
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs toggle [PROFILE]                 # switch profile",
     "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
+    "  ccs top --status-line                # print cached usage costs for terminal status bars",
     "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
     "  ccs usage                            # list usage-only profiles",
     "  ccs usage add [PROFILE]               # add or update a usage-only profile",

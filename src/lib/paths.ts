@@ -9,6 +9,10 @@ export function codexToolsConfigDir(): string {
   return join(homeDir(), ".config", "codex-tools");
 }
 
+export function codexToolsCacheDir(): string {
+  return join(process.env.XDG_CACHE_HOME || join(homeDir(), ".cache"), "codex-tools");
+}
+
 export function profilesPath(): string {
   return join(codexToolsConfigDir(), "profiles.json");
 }

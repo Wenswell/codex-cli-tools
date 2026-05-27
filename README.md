@@ -236,6 +236,7 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
+ccs top --status-line
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -263,6 +264,50 @@ By default, `ccs top` prints a checkpoint line on 5-minute wall-clock boundaries
 Use `--mark 15m` to change the checkpoint interval; checkpoints align to that wall-clock interval. Supported duration suffixes are `s`, `m`, and `h`.
 
 Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change display is bounded to one digit: when a movement reaches `9.9`, that event is shown as `+$9.9` or `-$9.9`, and subsequent changes are measured again from the current cost. Recent changes are red or green for 1 minute, then dimmed while the timestamp remains visible. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
+
+Use `ccs top --status-line` from terminal status bars such as WezTerm. It prints a compact cached line and exits:
+
+```text
+input $6.6 | ciii $22.6 | input-cc $0.0
+```
+
+The cache lives under `~/.cache/codex-tools`. The command returns cached data immediately and starts one background refresh when the cache is older than 25 seconds, so a status bar may call it once per second without polling external usage APIs every second. Use `ccs top --status-line --refresh` to refresh the cache immediately.
+
+Minimal WezTerm wiring:
+
+```lua
+local wezterm = require("wezterm")
+
+-- inside your existing wezterm config
+config.enable_tab_bar = true
+config.hide_tab_bar_if_only_one_tab = false
+config.status_update_interval = 1000
+
+local function ccs_status()
+  local command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or "ccs top --status-line"
+  local handle = io.popen(command .. " 2>/dev/null")
+  if not handle then
+    return ""
+  end
+
+  local value = handle:read("*a") or ""
+  handle:close()
+  return value:gsub("%s+$", "")
+end
+
+wezterm.on("update-right-status", function(window)
+  local status = ccs_status()
+  if status == "" then
+    window:set_right_status("")
+    return
+  end
+
+  window:set_right_status(wezterm.format({
+    { Foreground = { Color = "#89b4fa" } },
+    { Text = " " .. status .. " " },
+  }))
+end)
+```
 
 Example:
 
