@@ -10,5 +10,11 @@
     }
   },
   "current": "input",
-  "toggle": ["input", "ciii"]
+  "toggle": ["input", "ciii"],
+  "top": {
+    "stateUrls": [
+      "http://10.126.126.1:8765/ccs/top/state",
+      "http://127.0.0.1:8765/ccs/top/state"
+    ]
+  }
 }

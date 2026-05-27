@@ -368,7 +368,13 @@ config/ccs-profiles.json
     }
   },
   "current": "input",
-  "toggle": ["input", "ciii"]
+  "toggle": ["input", "ciii"],
+  "top": {
+    "stateUrls": [
+      "http://10.126.126.1:8765/ccs/top/state",
+      "http://127.0.0.1:8765/ccs/top/state"
+    ]
+  }
 }
 ```
 
@@ -441,7 +447,7 @@ ccs sync -y
 
 `--yes` is also accepted.
 
-When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
+When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, seeds `top.stateUrls` with the cloud-first/local-fallback defaults when `top` is missing, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
 `ccs config` compares the local `~/.config/codex-tools/profiles.json` with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
 

@@ -398,6 +398,7 @@ async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
     profiles,
     current: shouldCaptureCurrent ? "current" : (existing.current ?? defaults.current),
     toggle: existing.toggle ?? defaults.toggle,
+    top: existing.top ?? defaults.top,
   };
   return next;
 }
@@ -428,6 +429,7 @@ async function planSyncProfiles(): Promise<ProfilesFile> {
     profiles: nextProfiles,
     current: existing.current ?? defaults.current,
     toggle: existing.toggle ?? defaults.toggle,
+    top: existing.top ?? defaults.top,
   };
   return next;
 }
