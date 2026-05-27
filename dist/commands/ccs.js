@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createTwoFilesPatch } from "diff";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
+import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
@@ -63,6 +63,14 @@ async function readDefaultCodexConfig() {
     }
     return text;
 }
+async function readDefaultCodexAgents() {
+    const path = fileURLToPath(new URL("../../config/codex-agents.md", import.meta.url));
+    const text = await readTextIfExists(path);
+    if (!text) {
+        throw new Error(`default Codex AGENTS template not found: ${path}`);
+    }
+    return text;
+}
 async function readCurrentCodexProfile() {
     const configText = (await readTextIfExists(codexConfigPath())) ?? "";
     const authText = (await readTextIfExists(codexAuthPath())) ?? "";
@@ -76,6 +84,7 @@ async function readCurrentCodexProfile() {
 function getCcsBackupFiles() {
     return [
         { source: codexConfigPath(), target: "config.toml" },
+        { source: codexAgentsPath(), target: "AGENTS.md" },
         { source: codexAuthPath(), target: "auth.json" },
         { source: profilesPath(), target: "profiles.json" },
     ];
@@ -139,6 +148,12 @@ async function syncCodexConfigFromTemplate() {
     const plan = await planCodexConfigSync();
     await writeTextFile(codexConfigPath(), plan.nextContent);
     return plan;
+}
+async function syncCodexAgentsFromTemplate() {
+    await ensureDir(codexDir());
+    const next = await readDefaultCodexAgents();
+    await writeTextFile(codexAgentsPath(), next);
+    return next;
 }
 async function planInitProfilesFromCurrent() {
     const defaults = await readDefaultProfiles();
@@ -412,7 +427,9 @@ async function buildInitPreviewPlan() {
     const configPlan = await planCodexConfigSync();
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
     const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
+    const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
     const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
+    const nextAgentsText = await readDefaultCodexAgents();
     const configSection = buildConfigSection(configPlan);
     const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
     const nextAuthText = nextCurrentProfile?.apiKey
@@ -437,6 +454,12 @@ async function buildInitPreviewPlan() {
             next: configPlan.nextContent,
         },
         {
+            label: "AGENTS.md",
+            path: codexAgentsPath(),
+            current: currentAgentsText,
+            next: nextAgentsText,
+        },
+        {
             label: "auth.json",
             path: codexAuthPath(),
             current: currentAuthText,
@@ -456,6 +479,8 @@ async function buildSyncPreviewPlan() {
     const configPlan = await planCodexConfigSync();
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
     const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
+    const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
+    const nextAgentsText = await readDefaultCodexAgents();
     const configSection = buildConfigSection(configPlan);
     const previewFiles = collectChangedPreviewFiles([
         {
@@ -469,6 +494,12 @@ async function buildSyncPreviewPlan() {
             path: codexConfigPath(),
             current: currentConfigText,
             next: configPlan.nextContent,
+        },
+        {
+            label: "AGENTS.md",
+            path: codexAgentsPath(),
+            current: currentAgentsText,
+            next: nextAgentsText,
         },
     ]);
     const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
@@ -1228,6 +1259,7 @@ export async function runCcs(argv) {
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const initialized = await initProfilesFromCurrent();
         await syncCodexConfigFromTemplate();
+        await syncCodexAgentsFromTemplate();
         const profile = initialized.profiles?.[initialized.current ?? ""];
         if (profile?.apiKey) {
             await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: profile.apiKey }), 0o600);
@@ -1237,6 +1269,7 @@ export async function runCcs(argv) {
         }
         console.log(`profiles written: ${textGreen(profilesPath())}`);
         console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
+        console.log(`codex agents synced: ${textGreen(codexAgentsPath())}`);
         return;
     }
     if (command === "sync") {
@@ -1250,11 +1283,13 @@ export async function runCcs(argv) {
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const synced = await syncProfiles();
         await syncCodexConfigFromTemplate();
+        await syncCodexAgentsFromTemplate();
         if (backupDir) {
             console.log(`backup: ${textBlue(backupDir)}`);
         }
         console.log(`profiles synced: ${textGreen(profilesPath())}`);
         console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
+        console.log(`codex agents synced: ${textGreen(codexAgentsPath())}`);
         for (const name of Object.keys(synced.profiles ?? {})) {
             console.log(`  ${textBlue(name)}`);
         }

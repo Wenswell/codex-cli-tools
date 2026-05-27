@@ -223,6 +223,7 @@ Profile config lives at:
 
 ```text
 ~/.codex/config.toml
+~/.codex/AGENTS.md
 ~/.codex/auth.json
 ```
 
@@ -316,6 +317,7 @@ Fill in the API keys manually. The file is written with `0600` permissions.
 ```text
 ~/.codex/config.toml
 ~/.codex/auth.json
+~/.codex/AGENTS.md
 ```
 
 It stores the current `base_url` and `OPENAI_API_KEY` as a profile named `current`, then makes `current` the active profile.
@@ -324,12 +326,14 @@ It stores the current `base_url` and `OPENAI_API_KEY` as a profile named `curren
 
 ```text
 ~/.codex/config.toml
+~/.codex/AGENTS.md
 ```
 
 from:
 
 ```text
 config/codex-config.toml
+config/codex-agents.md
 ```
 
 Preview first:
@@ -352,7 +356,7 @@ Before writing, it backs up the current files to:
 ~/.config/codex-tools/backups/ccs-YYYYMMDD-HHMMSS/
 ```
 
-`ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, and restores the current provider's `base_url` after syncing the template. Later profile switches only change that API URL and `~/.codex/auth.json`.
+`ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, restores the current provider's `base_url` after syncing the template, and syncs the default global Codex guidelines to `~/.codex/AGENTS.md`. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
 `ccs init` without `-y` shows:
 
@@ -375,7 +379,7 @@ ccs sync -y
 
 `--yes` is also accepted.
 
-When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, and syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections.
+When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
 Add or update a profile interactively:
 
