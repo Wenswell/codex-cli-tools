@@ -122,7 +122,10 @@ const usageTopDefaultMarkIntervalMs = 5 * 60 * 1000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 const usageTopChangeColorTtlMs = 60 * 1000;
+const usageTopMaxDisplayDelta = 10;
 const usageTopStatusWidth = 24;
+const usageTopMarkNameWidth = 8;
+const usageTopMarkDeltaWidth = 5;
 
 function assertProfile(value: unknown, name: string): Profile {
   if (!value || typeof value !== "object") {
@@ -860,7 +863,7 @@ function formatTopCost(value: number): string {
 
 function formatSignedTopCost(value: number): string {
   const sign = value >= 0 ? "+" : "-";
-  return `${sign}$${Math.abs(value).toFixed(1)}`;
+  return `${sign}$${Math.min(Math.abs(value), usageTopMaxDisplayDelta - 0.1).toFixed(1)}`;
 }
 
 function formatUsage(result: UsageResult): string {
@@ -1199,6 +1202,10 @@ function padVisibleRight(value: string, width: number): string {
   return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
 
+function padVisibleLeft(value: string, width: number): string {
+  return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
+}
+
 function formatTopName(name: string): string {
   return bgDarkBlue(` ${name} `);
 }
@@ -1326,21 +1333,25 @@ function readUsageTopCosts(entries: UsageTopEntry[]): Map<string, number> {
 
 function formatTopMarkDelta(value: number): string {
   if (Math.abs(value) < 0.05) {
-    return textDim("-");
+    return padVisibleLeft(textDim("-"), usageTopMarkDeltaWidth);
   }
-  const formatted = `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(1)}`;
-  return value >= 0 ? textRed(formatted) : textGreen(formatted);
+  const formatted = formatSignedTopCost(value);
+  return padVisibleLeft(value >= 0 ? textRed(formatted) : textGreen(formatted), usageTopMarkDeltaWidth);
+}
+
+function formatTopMarkName(name: string): string {
+  return padVisibleRight(name, usageTopMarkNameWidth);
 }
 
 function formatUsageTopMarkLine(entries: UsageTopEntry[], previousCosts: Map<string, number>, now: Date): string {
   const parts = entries.map((entry) => {
     const used = entry.usage?.used;
     if (used === undefined) {
-      return `${entry.name} ${entry.skipped ? "skipped" : "unavailable"}`;
+      return `${formatTopMarkName(entry.name)} ${padVisibleRight(entry.skipped ? "skipped" : "unavailable", visibleLength(formatTopCost(0)) + 1 + usageTopMarkDeltaWidth)}`;
     }
     const previous = previousCosts.get(entry.name);
-    const delta = previous === undefined ? textDim("-") : formatTopMarkDelta(used - previous);
-    return `${entry.name} ${formatTopCost(used)} ${delta}`;
+    const delta = previous === undefined ? padVisibleLeft(textDim("-"), usageTopMarkDeltaWidth) : formatTopMarkDelta(used - previous);
+    return `${formatTopMarkName(entry.name)} ${formatTopCost(used)} ${delta}`;
   });
   return `${formatClockTime(now)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`;
 }
