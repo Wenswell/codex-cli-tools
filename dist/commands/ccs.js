@@ -1260,7 +1260,7 @@ function formatStatusLineRefresh(entries, now) {
     const seconds = Math.max(0, Math.ceil((Math.min(...dueAt) - now.getTime()) / 1000));
     return `r${seconds}s`;
 }
-function renderUsageTopStatusLine(snapshot, now) {
+function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
     const parts = snapshot.entries.map((entry) => {
         if (entry.skipped) {
             return `${entry.name} -`;
@@ -1268,7 +1268,7 @@ function renderUsageTopStatusLine(snapshot, now) {
         if (entry.used === undefined) {
             return `${entry.name} ?`;
         }
-        const delta = formatStatusLineDelta(entry.delta, entry.changedAt, now);
+        const delta = formatStatusLineDelta(entry.delta, entry.changedAt, stateNow);
         const tags = [
             delta,
             entry.stale ? "stale" : "",
@@ -1276,8 +1276,8 @@ function renderUsageTopStatusLine(snapshot, now) {
         ].filter(Boolean);
         return `${entry.name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
     });
-    const refresh = formatStatusLineRefresh(snapshot.entries, now);
-    return `${formatStatusLineClock(now)}${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
+    const refresh = formatStatusLineRefresh(snapshot.entries, stateNow);
+    return `${formatStatusLineClock(displayNow)}${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
 }
 function usageTopSnapshotPath() {
     return join(codexToolsCacheDir(), "ccs-top-state.json");
@@ -1384,10 +1384,11 @@ async function readUsageTopStatusSnapshot() {
     if (url) {
         const remote = await fetchUsageTopSnapshot(url);
         if (remote) {
-            return remote;
+            return { snapshot: remote, remote: true };
         }
     }
-    return readUsageTopSnapshot();
+    const local = await readUsageTopSnapshot();
+    return local ? { snapshot: local, remote: false } : null;
 }
 function isUsageTopSnapshotActive(snapshot, now) {
     if (!snapshot.active) {
@@ -1398,12 +1399,14 @@ function isUsageTopSnapshotActive(snapshot, now) {
 }
 async function printUsageTopStatusLine() {
     const now = new Date();
-    const snapshot = await readUsageTopStatusSnapshot();
-    if (!snapshot || !isUsageTopSnapshotActive(snapshot, now)) {
+    const source = await readUsageTopStatusSnapshot();
+    if (!source || (!source.remote && !isUsageTopSnapshotActive(source.snapshot, now)) || !source.snapshot.active) {
         console.log(`${formatStatusLineClock(now)} | ccs top inactive`);
         return;
     }
-    console.log(renderUsageTopStatusLine(snapshot, now));
+    const remoteUpdatedAt = new Date(source.snapshot.updatedAt);
+    const stateNow = source.remote && !Number.isNaN(remoteUpdatedAt.getTime()) ? remoteUpdatedAt : now;
+    console.log(renderUsageTopStatusLine(source.snapshot, now, stateNow));
 }
 function parseUsageTopServerAddress(value) {
     const separator = value.lastIndexOf(":");
