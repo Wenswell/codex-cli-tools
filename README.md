@@ -504,7 +504,7 @@ senv --source .env.example --target .env
 ```
 
 Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
-Apply mode first prints the same planned summary as preview, then prints the updated result after writing.
+Preview prints a unified diff; common sensitive env keys such as `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASS`, `AUTH`, and `CREDENTIAL` are masked in that diff. Apply mode first prints the same planned summary and diff as preview, then prints the updated result after writing.
 
 Options:
 
