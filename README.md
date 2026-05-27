@@ -227,7 +227,11 @@ Profile config lives at:
 ~/.codex/auth.json
 ```
 
-Run `ccs` without arguments to print the current profile, `user@host`, usage, and one usage line.
+Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
+
+```text
+commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]
+```
 
 Supported commands:
 

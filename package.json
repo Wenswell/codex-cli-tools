@@ -1,18 +1,18 @@
 {
   "name": "codex-tools",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Personal Codex CLI helpers",
   "type": "module",
   "bin": {
-    "ccs": "./dist/bin/ccs.js",
-    "ccx": "./dist/bin/ccx.js",
-    "ccxs": "./dist/bin/ccxs.js",
-    "cx": "./dist/bin/cx.js",
-    "cxx": "./dist/bin/cxx.js",
-    "cxxs": "./dist/bin/cxxs.js",
-    "senv": "./dist/bin/senv.js",
-    "codex-rename": "./dist/bin/codex-rename.js",
-    "codex-notice": "./dist/bin/codex-notice.js"
+    "ccs": "dist/bin/ccs.js",
+    "ccx": "dist/bin/ccx.js",
+    "ccxs": "dist/bin/ccxs.js",
+    "cx": "dist/bin/cx.js",
+    "cxx": "dist/bin/cxx.js",
+    "cxxs": "dist/bin/cxxs.js",
+    "senv": "dist/bin/senv.js",
+    "codex-rename": "dist/bin/codex-rename.js",
+    "codex-notice": "dist/bin/codex-notice.js"
   },
   "files": [
     "dist",

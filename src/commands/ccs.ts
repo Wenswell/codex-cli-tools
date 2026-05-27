@@ -2165,7 +2165,7 @@ function parseWeztermArgs(args: string[]): WeztermOptions {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | PROFILE | toggle [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y] | add [PROFILE] | rm PROFILE"));
+  console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | s [line|agent|server|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
