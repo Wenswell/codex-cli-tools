@@ -442,7 +442,9 @@ ccs config push
 ccs config pull
 ```
 
-`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; they compare file hashes first, replace the whole file instead of merging, and create a backup before overwriting an existing target.
+Run `ccs config` without arguments to print the local/remote file summary and a compact command line.
+
+`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; they print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 
