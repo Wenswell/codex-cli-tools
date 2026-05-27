@@ -281,7 +281,7 @@ ccs wezterm
 ccs wezterm -y
 ```
 
-`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. The installed block calls `ccs top --status-line` by default. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
+`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. The installed block calls this `ccs` installation through an absolute Node command, so it does not depend on the WezTerm GUI process `PATH`. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
 
 Example:
 
