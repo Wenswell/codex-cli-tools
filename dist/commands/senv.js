@@ -1,9 +1,10 @@
 import { copyFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
+import { createTwoFilesPatch } from "diff";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { colorCount, colorPath, printKeyValue } from "../lib/output.js";
-import { textBlue, textBold, textDim, textGreen } from "../lib/text.js";
+import { maskSecret, textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 function parseArgs(argv) {
     const args = {
@@ -171,8 +172,9 @@ function printSummary(target, summary, apply) {
     printKeys("filled defaults keys", summary.filledDefaults);
     printKeys("extra keys", summary.extra);
 }
-function printPlan(target, summary) {
+function printPlan(target, current, next, summary) {
     printSummary(target, summary, false);
+    printDiff(target, current, next);
 }
 function printResult(target, summary) {
     console.log("");
@@ -185,6 +187,53 @@ function printKeys(label, keys) {
     console.log(textBold(`${label}:`));
     for (const key of keys) {
         console.log(`  ${textBlue(key)}`);
+    }
+}
+function shouldMaskEnvKey(key) {
+    return /(?:KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)/i.test(key);
+}
+function redactEnvDiffContent(content) {
+    return splitLines(content).map((line) => {
+        const match = /^(export\s+)?([A-Za-z_][A-Za-z0-9_]*=)(.*)$/.exec(line);
+        if (!match) {
+            return line;
+        }
+        const key = match[2].slice(0, -1);
+        const value = match[3];
+        if (!value || !shouldMaskEnvKey(key)) {
+            return line;
+        }
+        return `${match[1] ?? ""}${match[2]}${maskSecret(value)}`;
+    }).join("\n");
+}
+function printDiff(target, current, next) {
+    if (current === next) {
+        return;
+    }
+    const patch = createTwoFilesPatch(`current/${target}`, `next/${target}`, redactEnvDiffContent(current), redactEnvDiffContent(next), "", "", { context: 3 });
+    console.log("");
+    console.log(`${textBold("File:")} ${textBlue(target)}`);
+    for (const line of patch.split("\n")) {
+        if (line.startsWith("===")) {
+            continue;
+        }
+        if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+            console.log(textDim(`  ${line}`));
+            continue;
+        }
+        if (line.startsWith("@@")) {
+            console.log(textBlue(`  ${line}`));
+            continue;
+        }
+        if (line.startsWith("+")) {
+            console.log(textGreen(`  ${line}`));
+            continue;
+        }
+        if (line.startsWith("-")) {
+            console.log(textRed(`  ${line}`));
+            continue;
+        }
+        console.log(textDim(`  ${line}`));
     }
 }
 async function createBackup(target) {
@@ -212,15 +261,16 @@ export async function runEnvsync(argv) {
     const existingTargetText = await readTextIfExists(args.target);
     const existingText = existingTargetText ?? "";
     const result = buildEnv(exampleText, existingText);
+    const targetLabel = basename(args.target);
     if (!args.apply) {
-        printPlan(basename(args.target), result.summary);
+        printPlan(targetLabel, existingText, result.text, result.summary);
         return;
     }
-    printPlan(basename(args.target), result.summary);
+    printPlan(targetLabel, existingText, result.text, result.summary);
     if (args.backup && existingTargetText !== null) {
         const backupPath = await createBackup(args.target);
         console.log(`backup: ${textBlue(backupPath)}`);
     }
     await writeTextFile(args.target, result.text);
-    printResult(basename(args.target), result.summary);
+    printResult(targetLabel, result.summary);
 }
