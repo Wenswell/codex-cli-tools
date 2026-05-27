@@ -442,9 +442,9 @@ ccs config push
 ccs config pull
 ```
 
-Run `ccs config` without arguments to print the local/remote file summary and a compact command line.
+Run `ccs config` without arguments to print the local file summary, fixed LAN target, and a compact command line without connecting to the server.
 
-`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; they print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
+`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 

@@ -387,6 +387,13 @@ function printConfigSyncDiff(action, localText, remoteText) {
     }
     printDiffBlock(file);
 }
+function printConfigSyncStatus(local) {
+    console.log(textBold("ccs config"));
+    printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
+    printKeyValue("remote:", colorPath(configSyncRemoteDisplay), 9);
+    printKeyValue("action:", "status only", 9);
+    console.log(textDim("commands: ccs config | ccs config push [-y] | ccs config pull [-y]"));
+}
 async function pushConfigToServer(local, remote) {
     await readLocalConfigText();
     if (remote.exists && local.sha256 === remote.sha256) {
@@ -453,14 +460,15 @@ async function runConfigSync(args) {
     }
     const options = parseConfigSyncArgs(args);
     const local = await localConfigSummary();
+    if (options.action === "status") {
+        printConfigSyncStatus(local);
+        return;
+    }
     const remote = await remoteConfigSummary();
     const localText = await readTextIfExists(profilesPath());
     const remoteText = await readRemoteConfigTextIfExists(remote);
     printConfigSyncPlan(options.action, local, remote, localText, remoteText, options.yes);
-    if (args.length === 0) {
-        console.log(textDim("commands: ccs config | ccs config push [-y] | ccs config pull [-y]"));
-    }
-    if (!options.yes || options.action === "status") {
+    if (!options.yes) {
         return;
     }
     if (options.action === "push") {
