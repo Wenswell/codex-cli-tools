@@ -435,9 +435,8 @@ function formatConfigSummary(summary: ConfigFileSummary): string {
     return textDim("missing");
   }
   const size = summary.size === undefined ? "?" : `${summary.size}b`;
-  const hash = summary.sha256 ? summary.sha256.slice(0, 12) : "?";
   const mtime = summary.mtime ? formatClockTime(summary.mtime) : "?";
-  return `${size} ${hash} ${textDim(mtime)}`;
+  return `${size} ${textDim(mtime)}`;
 }
 
 async function readLocalConfigText(): Promise<string> {
@@ -539,13 +538,26 @@ async function remoteConfigSummary(): Promise<ConfigFileSummary> {
   };
 }
 
-function printConfigSyncPlan(action: ConfigSyncAction, local: ConfigFileSummary, remote: ConfigFileSummary, apply: boolean): void {
+async function readRemoteConfigTextIfExists(remote: ConfigFileSummary): Promise<string | null> {
+  if (!remote.exists) {
+    return null;
+  }
+  return configSyncSsh(`cat ${JSON.stringify(configSyncRemotePath)}`);
+}
+
+function printConfigSyncPlan(
+  action: ConfigSyncAction,
+  local: ConfigFileSummary,
+  remote: ConfigFileSummary,
+  localText: string | null,
+  remoteText: string | null,
+  apply: boolean,
+): void {
   console.log(textBold(`ccs config ${action}`));
   printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
   printKeyValue("remote:", `${colorPath(configSyncRemoteDisplay)}  ${formatConfigSummary(remote)}`, 9);
-  if (local.exists && remote.exists) {
-    printKeyValue("same:", local.sha256 === remote.sha256 ? textGreen("yes") : textRed("no"), 9);
-  }
+  const same = local.exists && remote.exists && local.sha256 === remote.sha256;
+  printKeyValue("same:", same ? textGreen("yes") : textRed("no"), 9);
   if (action === "push") {
     printKeyValue("action:", "upload local profiles.json to LAN server", 9);
   } else if (action === "pull") {
@@ -556,6 +568,32 @@ function printConfigSyncPlan(action: ConfigSyncAction, local: ConfigFileSummary,
   if (!apply && action !== "status") {
     console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
   }
+  printConfigSyncDiff(action, localText, remoteText);
+}
+
+function printConfigSyncDiff(action: ConfigSyncAction, localText: string | null, remoteText: string | null): void {
+  if (localText === null && remoteText === null) {
+    printKeyValue("diff:", textDim("none"), 9);
+    return;
+  }
+  const file = action === "push"
+    ? {
+      label: "profiles.json",
+      path: configSyncRemoteDisplay,
+      current: remoteText ?? "",
+      next: localText ?? "",
+    }
+    : {
+      label: "profiles.json",
+      path: action === "pull" ? profilesPath() : `${profilesPath()} <-> ${configSyncRemoteDisplay}`,
+      current: localText ?? "",
+      next: remoteText ?? "",
+    };
+  if (normalizePreviewContent(file.label, file.current) === normalizePreviewContent(file.label, file.next)) {
+    printKeyValue("diff:", textDim("none"), 9);
+    return;
+  }
+  printDiffBlock(file);
 }
 
 async function pushConfigToServer(local: ConfigFileSummary, remote: ConfigFileSummary): Promise<void> {
@@ -628,7 +666,13 @@ async function runConfigSync(args: string[]): Promise<void> {
   const options = parseConfigSyncArgs(args);
   const local = await localConfigSummary();
   const remote = await remoteConfigSummary();
-  printConfigSyncPlan(options.action, local, remote, options.yes);
+  const localText = await readTextIfExists(profilesPath());
+  const remoteText = await readRemoteConfigTextIfExists(remote);
+  printConfigSyncPlan(options.action, local, remote, localText, remoteText, options.yes);
+
+  if (args.length === 0) {
+    console.log(textDim("commands: ccs config | ccs config push [-y] | ccs config pull [-y]"));
+  }
 
   if (!options.yes || options.action === "status") {
     return;
