@@ -291,7 +291,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20m`, `30m`, then `60m`. Providers never become `done`; unchanged providers keep refreshing every 60 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Use `ccs s pause` and `ccs s resume` to call those control endpoints through configured state URLs. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
+The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20m`, `30m`, then `60m`. Providers never become `done`; unchanged providers keep refreshing every 60 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Run `ccs s pause` or `ccs s resume` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {
