@@ -17,7 +17,10 @@ const usageTopDefaultMarkIntervalMs = 5 * 60 * 1000;
 const usageTopTickMs = 1000;
 const usageTopChangeTtlMs = 60 * 60 * 1000;
 const usageTopChangeColorTtlMs = 60 * 1000;
+const usageTopMaxDisplayDelta = 10;
 const usageTopStatusWidth = 24;
+const usageTopMarkNameWidth = 8;
+const usageTopMarkDeltaWidth = 5;
 function assertProfile(value, name) {
     if (!value || typeof value !== "object") {
         throw new Error(`profile ${name} is invalid`);
@@ -651,7 +654,7 @@ function formatTopCost(value) {
 }
 function formatSignedTopCost(value) {
     const sign = value >= 0 ? "+" : "-";
-    return `${sign}$${Math.abs(value).toFixed(1)}`;
+    return `${sign}$${Math.min(Math.abs(value), usageTopMaxDisplayDelta - 0.1).toFixed(1)}`;
 }
 function formatUsage(result) {
     return formatUsageColumns(result).join("  ");
@@ -931,6 +934,9 @@ function formatUsageTopEntry(entry, state, now) {
 function padVisibleRight(value, width) {
     return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
 }
+function padVisibleLeft(value, width) {
+    return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
+}
 function formatTopName(name) {
     return bgDarkBlue(` ${name} `);
 }
@@ -1033,20 +1039,23 @@ function readUsageTopCosts(entries) {
 }
 function formatTopMarkDelta(value) {
     if (Math.abs(value) < 0.05) {
-        return textDim("-");
+        return padVisibleLeft(textDim("-"), usageTopMarkDeltaWidth);
     }
-    const formatted = `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(1)}`;
-    return value >= 0 ? textRed(formatted) : textGreen(formatted);
+    const formatted = formatSignedTopCost(value);
+    return padVisibleLeft(value >= 0 ? textRed(formatted) : textGreen(formatted), usageTopMarkDeltaWidth);
+}
+function formatTopMarkName(name) {
+    return padVisibleRight(name, usageTopMarkNameWidth);
 }
 function formatUsageTopMarkLine(entries, previousCosts, now) {
     const parts = entries.map((entry) => {
         const used = entry.usage?.used;
         if (used === undefined) {
-            return `${entry.name} ${entry.skipped ? "skipped" : "unavailable"}`;
+            return `${formatTopMarkName(entry.name)} ${padVisibleRight(entry.skipped ? "skipped" : "unavailable", visibleLength(formatTopCost(0)) + 1 + usageTopMarkDeltaWidth)}`;
         }
         const previous = previousCosts.get(entry.name);
-        const delta = previous === undefined ? textDim("-") : formatTopMarkDelta(used - previous);
-        return `${entry.name} ${formatTopCost(used)} ${delta}`;
+        const delta = previous === undefined ? padVisibleLeft(textDim("-"), usageTopMarkDeltaWidth) : formatTopMarkDelta(used - previous);
+        return `${formatTopMarkName(entry.name)} ${formatTopCost(used)} ${delta}`;
     });
     return `${formatClockTime(now)} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`;
 }
