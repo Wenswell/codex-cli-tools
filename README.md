@@ -238,6 +238,7 @@ ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs top --status-line
 ccs wezterm [-y|--yes]
+ccs wezterm remove [-y|--yes]
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -269,19 +270,21 @@ Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider
 Use `ccs top --status-line` from terminal status bars such as WezTerm. It prints a compact cached line and exits:
 
 ```text
-input $6.6 | ciii $22.6 | input-cc $0.0
+14:09 r18s | input 6.6 | ciii 22.6 +0.3 | input-cc 0
 ```
 
-The cache lives under `~/.cache/codex-tools`. The command returns cached data immediately and starts one background refresh when the cache is older than 25 seconds, so a status bar may call it once per second without polling external usage APIs every second. Use `ccs top --status-line --refresh` to refresh the cache immediately.
+The cache lives under `~/.cache/codex-tools`. The command returns cached data immediately and starts one background refresh when the cache is older than 25 seconds, so a status bar may call it once per second without polling external usage APIs every second. The left side shows the last refresh time and cache countdown. Per-profile deltas compare the latest refresh with the previous cached refresh and are hidden when effectively zero. Use `ccs top --status-line --refresh` to refresh the cache immediately.
 
 Install the WezTerm status bar integration with the project command:
 
 ```bash
 ccs wezterm
 ccs wezterm -y
+ccs wezterm remove
+ccs wezterm remove -y
 ```
 
-`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. The installed block calls this `ccs` installation through an absolute Node command, so it does not depend on the WezTerm GUI process `PATH`. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
+`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. `ccs wezterm remove` previews removing that managed block; `ccs wezterm remove -y` removes it. The installed block calls this `ccs` installation through an absolute Node command, so it does not depend on the WezTerm GUI process `PATH`. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
 
 Example:
 
