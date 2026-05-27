@@ -6,6 +6,9 @@ export function homeDir() {
 export function codexToolsConfigDir() {
     return join(homeDir(), ".config", "codex-tools");
 }
+export function codexToolsCacheDir() {
+    return join(process.env.XDG_CACHE_HOME || join(homeDir(), ".cache"), "codex-tools");
+}
 export function profilesPath() {
     return join(codexToolsConfigDir(), "profiles.json");
 }
