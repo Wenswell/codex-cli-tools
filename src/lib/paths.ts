@@ -21,6 +21,10 @@ export function codexConfigPath(): string {
   return join(codexDir(), "config.toml");
 }
 
+export function codexAgentsPath(): string {
+  return join(codexDir(), "AGENTS.md");
+}
+
 export function codexAuthPath(): string {
   return join(codexDir(), "auth.json");
 }
