@@ -237,6 +237,7 @@ ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs top --status-line
+ccs wezterm [-y|--yes]
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -273,41 +274,14 @@ input $6.6 | ciii $22.6 | input-cc $0.0
 
 The cache lives under `~/.cache/codex-tools`. The command returns cached data immediately and starts one background refresh when the cache is older than 25 seconds, so a status bar may call it once per second without polling external usage APIs every second. Use `ccs top --status-line --refresh` to refresh the cache immediately.
 
-Minimal WezTerm wiring:
+Install the WezTerm status bar integration with the project command:
 
-```lua
-local wezterm = require("wezterm")
-
--- inside your existing wezterm config
-config.enable_tab_bar = true
-config.hide_tab_bar_if_only_one_tab = false
-config.status_update_interval = 1000
-
-local function ccs_status()
-  local command = os.getenv("CCS_WEZTERM_STATUS_COMMAND") or "ccs top --status-line"
-  local handle = io.popen(command .. " 2>/dev/null")
-  if not handle then
-    return ""
-  end
-
-  local value = handle:read("*a") or ""
-  handle:close()
-  return value:gsub("%s+$", "")
-end
-
-wezterm.on("update-right-status", function(window)
-  local status = ccs_status()
-  if status == "" then
-    window:set_right_status("")
-    return
-  end
-
-  window:set_right_status(wezterm.format({
-    { Foreground = { Color = "#89b4fa" } },
-    { Text = " " .. status .. " " },
-  }))
-end)
+```bash
+ccs wezterm
+ccs wezterm -y
 ```
+
+`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. The installed block calls `ccs top --status-line` by default. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
 
 Example:
 
