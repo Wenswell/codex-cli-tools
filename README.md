@@ -236,11 +236,11 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
-ccs top --status-line
-ccs top --status-agent
-ccs top --server HOST:PORT
-ccs wezterm [-y|--yes]
-ccs wezterm remove [-y|--yes]
+ccs s [line]
+ccs s agent
+ccs s server [PORT]
+ccs s wezterm [-y|--yes]
+ccs s wezterm remove [-y|--yes]
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
@@ -269,18 +269,19 @@ Use `--mark 15m` to change the checkpoint interval; checkpoints align to that wa
 
 Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change display is bounded to one digit: when a movement reaches `9.9`, that event is shown as `+$9.9` or `-$9.9`, and subsequent changes are measured again from the current cost. Recent changes are red or green for 1 minute, then dimmed while the timestamp remains visible. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
 
-Use `ccs top --status-line` from terminal status bars such as WezTerm. It reads the local `ccs top` snapshot, prints a compact line, and exits:
+Use `ccs s line` from terminal status bars or shell prompts. It reads configured top state, prints a compact line, and exits:
 
 ```text
 14:09:12 r18s | input 6.6 | ciii 22.6 +0.3 | input-cc 0
 ```
 
-Run `ccs top` locally to produce the snapshot. The status line does not request usage APIs directly; it renders the latest active `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running `ccs top` process. Deltas such as `+0.3` stay visible for 1 minute after the running `ccs top` observes the change. If no active local `ccs top` snapshot exists, the status line prints `ccs top inactive`.
+Run `ccs top` locally to produce a local snapshot. The status line does not request usage APIs directly; it renders configured state URLs first, then falls back to the latest active local `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running collector. Deltas such as `+0.3` stay visible for 1 minute after the collector observes the change. If no active state exists, the status line prints `ccs top inactive`.
 
-Use `ccs top --server HOST:PORT` to run the same collector without an interactive terminal and expose the current snapshot over HTTP:
+Use `ccs s server [PORT]` to run the same collector without an interactive terminal and expose the current snapshot over HTTP. It listens on `0.0.0.0` and defaults to port `8765`:
 
 ```bash
-ccs top --server 0.0.0.0:8765
+ccs s server
+ccs s server 8765
 ```
 
 The server writes the same local snapshot and serves it at `/ccs/top/state`; `/health` returns a compact health JSON. Point status-line clients at a LAN server with `top.stateUrl` in `~/.config/codex-tools/profiles.json` or `CCS_TOP_STATE_URL`, for example:
@@ -288,25 +289,28 @@ The server writes the same local snapshot and serves it at `/ccs/top/state`; `/h
 ```json
 {
   "top": {
-    "stateUrl": "http://10.126.126.1:8765/ccs/top/state"
+    "stateUrls": [
+      "http://10.126.126.1:8765/ccs/top/state",
+      "http://127.0.0.1:8765/ccs/top/state"
+    ]
   }
 }
 ```
 
-If the server is unavailable, `ccs top --status-line` reads the local snapshot instead.
+If the server is unavailable, `ccs s line` reads the local snapshot instead.
 
-For WezTerm, keep `ccs top --status-agent` running in one terminal. It writes a tiny text cache to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly and adds the local clock, so it does not spawn `node` or request HTTP from the GUI status callback.
+For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny text cache to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly and adds the local clock, so it does not spawn `node` or request HTTP from the GUI status callback.
 
 Install the WezTerm status bar integration with the project command:
 
 ```bash
-ccs wezterm
-ccs wezterm -y
-ccs wezterm remove
-ccs wezterm remove -y
+ccs s wezterm
+ccs s wezterm -y
+ccs s wezterm remove
+ccs s wezterm remove -y
 ```
 
-`ccs wezterm` previews the `~/.wezterm.lua` change. `ccs wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. `ccs wezterm remove` previews removing that managed block; `ccs wezterm remove -y` removes it. The installed block calls this `ccs` installation through an absolute Node command, so it does not depend on the WezTerm GUI process `PATH`. Override it without editing the config by setting `CCS_WEZTERM_STATUS_COMMAND`, for example to read a shared server later.
+`ccs s wezterm` previews the `~/.wezterm.lua` change. `ccs s wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block; `ccs s wezterm remove -y` removes it. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`; override the file path with `CCS_WEZTERM_STATUS_FILE`.
 
 Example:
 
