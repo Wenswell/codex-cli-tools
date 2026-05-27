@@ -288,7 +288,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server writes the same local snapshot and serves it at `/ccs/top/state`; `/health` returns a compact health JSON. Point status-line clients at a LAN server with `top.stateUrl` in `~/.config/codex-tools/profiles.json` or `CCS_TOP_STATE_URL`, for example:
+The server uses the same per-provider backoff, but it is unattended: providers never become `done`, and unchanged providers keep refreshing every 300 seconds after reaching the maximum interval. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, and `/health` returns a compact health JSON. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {
@@ -301,7 +301,7 @@ The server writes the same local snapshot and serves it at `/ccs/top/state`; `/h
 }
 ```
 
-If the server is unavailable, `ccs s line` reads the local snapshot instead.
+If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
 For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny text cache to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly and adds the local clock, so it does not spawn `node` or request HTTP from the GUI status callback.
 
