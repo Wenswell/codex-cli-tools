@@ -743,6 +743,18 @@ function buildWeztermStatusBlock(command: string): string {
   ].join("\n");
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function defaultWeztermStatusCommand(): string {
+  const binPath = process.argv[1];
+  if (!binPath) {
+    return "ccs top --status-line";
+  }
+  return `${shellQuote(process.execPath)} ${shellQuote(binPath)} top --status-line`;
+}
+
 function stripWeztermStatusBlock(content: string): string {
   const begin = content.indexOf(weztermStatusBegin);
   if (begin === -1) {
@@ -1802,7 +1814,7 @@ function printHelp(): void {
 
 function parseWeztermArgs(args: string[]): { yes: boolean; command: string } {
   let yes = false;
-  let command = "ccs top --status-line";
+  let command = defaultWeztermStatusCommand();
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "-y" || arg === "--yes") {

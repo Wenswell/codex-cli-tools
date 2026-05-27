@@ -551,6 +551,16 @@ function buildWeztermStatusBlock(command) {
         "",
     ].join("\n");
 }
+function shellQuote(value) {
+    return `'${value.replace(/'/g, "'\\''")}'`;
+}
+function defaultWeztermStatusCommand() {
+    const binPath = process.argv[1];
+    if (!binPath) {
+        return "ccs top --status-line";
+    }
+    return `${shellQuote(process.execPath)} ${shellQuote(binPath)} top --status-line`;
+}
 function stripWeztermStatusBlock(content) {
     const begin = content.indexOf(weztermStatusBegin);
     if (begin === -1) {
@@ -1456,7 +1466,7 @@ function printHelp() {
 }
 function parseWeztermArgs(args) {
     let yes = false;
-    let command = "ccs top --status-line";
+    let command = defaultWeztermStatusCommand();
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
         if (arg === "-y" || arg === "--yes") {
