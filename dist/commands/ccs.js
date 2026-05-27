@@ -1113,7 +1113,7 @@ function nextUsageTopMaxIdleCount(entry, changed, nextInterval) {
     }
     return 0;
 }
-async function refreshUsageTopEntries(entries, states, resetInterval) {
+async function refreshUsageTopEntries(entries, states, options) {
     return Promise.all(entries.map(async (entry) => {
         if (entry.skipped) {
             return entry;
@@ -1123,13 +1123,15 @@ async function refreshUsageTopEntries(entries, states, resetInterval) {
         const state = states.get(entry.name) ?? {};
         const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
         states.set(entry.name, state);
-        const interval = resetInterval
+        const interval = options.resetInterval
             ? usageTopMinIntervalMs
             : nextUsageTopInterval(entry.refreshIntervalMs, changed);
-        const maxIntervalIdleCount = resetInterval
+        const maxIntervalIdleCount = options.resetInterval || !options.stopAtMaxIdle
             ? 0
             : nextUsageTopMaxIdleCount(entry, changed, interval);
-        const done = !resetInterval && maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
+        const done = options.stopAtMaxIdle
+            && !options.resetInterval
+            && maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
         return {
             ...nextEntry,
             usage: nextEntry.usage ?? entry.usage,
@@ -1158,19 +1160,34 @@ function updateUsageTopState(state, usage, now) {
     state.changedAt = now;
     return true;
 }
-async function refreshDueUsageTopRuntime(runtime, now) {
+async function refreshDueUsageTopRuntime(runtime, now, stopAtMaxIdle) {
     const due = runtime.entries.map((entry, index) => ({ entry, index }))
         .filter(({ entry }) => (!entry.done && entry.nextRefreshAt && !entry.refreshing && now >= entry.nextRefreshAt));
     for (const { index } of due) {
         runtime.entries[index] = { ...runtime.entries[index], refreshing: true };
     }
-    const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), runtime.states, false);
+    const refreshed = await refreshUsageTopEntries(due.map(({ entry }) => entry), runtime.states, {
+        resetInterval: false,
+        stopAtMaxIdle,
+    });
     for (const [refreshedIndex, { index }] of due.entries()) {
         runtime.entries[index] = refreshed[refreshedIndex];
     }
 }
 async function refreshAllUsageTopRuntime(runtime) {
-    runtime.entries = await refreshUsageTopEntries(runtime.entries, runtime.states, true);
+    runtime.entries = await refreshUsageTopEntries(runtime.entries, runtime.states, {
+        resetInterval: true,
+        stopAtMaxIdle: true,
+    });
+}
+function nextUsageTopRuntimeDelayMs(runtime, now) {
+    const dueAt = runtime.entries
+        .filter((entry) => !entry.done && entry.nextRefreshAt && !entry.refreshing)
+        .map((entry) => entry.nextRefreshAt?.getTime() ?? Number.POSITIVE_INFINITY);
+    if (dueAt.length === 0) {
+        return null;
+    }
+    return Math.max(0, Math.min(...dueAt) - now.getTime());
 }
 function fitSingleTerminalLine(line) {
     const columns = process.stdout.columns;
@@ -1282,9 +1299,6 @@ function usageTopSnapshotPath() {
 function usageTopStatusTextPath() {
     return join(codexToolsCacheDir(), "ccs-top-status.txt");
 }
-function usageTopStateUrlPath() {
-    return join(codexToolsConfigDir(), "top-state-url");
-}
 function toUsageTopSnapshotEntry(entry, state) {
     const used = entry.usage?.used ?? state?.used;
     return {
@@ -1383,12 +1397,9 @@ async function fetchUsageTopSnapshot(url) {
     }
 }
 async function readUsageTopStateUrls(profiles) {
-    const urls = [
-        process.env.CCS_TOP_STATE_URL?.trim(),
-        ...(profiles.top?.stateUrls ?? []).map((url) => url.trim()),
-        profiles.top?.stateUrl?.trim(),
-        (await readTextIfExists(usageTopStateUrlPath()))?.trim(),
-    ].filter((url) => !!url);
+    const urls = (profiles.top?.stateUrls ?? [])
+        .map((url) => url.trim())
+        .filter((url) => !!url);
     return [...new Set(urls)];
 }
 async function readUsageTopStatusSnapshot(profiles) {
@@ -1500,6 +1511,7 @@ async function serveUsageTop(profiles, portValue) {
             return;
         }
         if (request.url === "/ccs/top/state") {
+            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
             sendUsageTopJson(response, 200, snapshot);
             return;
         }
@@ -1514,21 +1526,38 @@ async function serveUsageTop(profiles, portValue) {
     });
     console.log(`ccs top server: http://${host}:${port}/ccs/top/state`);
     await new Promise((resolve) => {
-        const timer = setInterval(() => {
-            void (async () => {
-                await refreshDueUsageTopRuntime(runtime, new Date());
-                snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
-                await writeUsageTopSnapshot(snapshot);
-                await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
-            })();
-        }, usageTopTickMs);
+        let timer = null;
         let cleanedUp = false;
+        const publish = async () => {
+            snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true);
+            await writeUsageTopSnapshot(snapshot);
+            await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
+        };
+        const schedule = () => {
+            if (cleanedUp) {
+                return;
+            }
+            const delay = nextUsageTopRuntimeDelayMs(runtime, new Date());
+            if (delay === null) {
+                return;
+            }
+            timer = setTimeout(() => {
+                void (async () => {
+                    await refreshDueUsageTopRuntime(runtime, new Date(), false);
+                    await publish();
+                    schedule();
+                })();
+            }, delay);
+        };
+        schedule();
         const cleanup = async () => {
             if (cleanedUp) {
                 return;
             }
             cleanedUp = true;
-            clearInterval(timer);
+            if (timer) {
+                clearTimeout(timer);
+            }
             snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), false);
             await writeUsageTopSnapshot(snapshot);
             await writeUsageTopStatusText(" | ccs top inactive");
@@ -1605,7 +1634,7 @@ async function printUsageTop(profiles, options) {
         const timer = setInterval(() => {
             void (async () => {
                 const now = new Date();
-                await refreshDueUsageTopRuntime(runtime, now);
+                await refreshDueUsageTopRuntime(runtime, now, true);
                 if (now.getTime() >= nextMarkAt) {
                     printMarkLine();
                 }
@@ -1654,6 +1683,11 @@ async function printUsageTop(profiles, options) {
 async function runCcsStatus(profiles, args) {
     const subcommand = args[0] ?? "";
     const subargs = args.slice(1);
+    if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+        assertExactArgs(subargs, "s help", 0);
+        printHelp();
+        return;
+    }
     if (!subcommand || subcommand === "line") {
         assertExactArgs(subargs, "s line", 0);
         await printUsageTopStatusLine(profiles);
@@ -1719,6 +1753,9 @@ function printHelp() {
         ...usageLines(),
     ].join("\n"));
 }
+function isHelpArgument(value) {
+    return value === "help" || value === "--help" || value === "-h";
+}
 function parseWeztermArgs(args) {
     let yes = false;
     let remove = false;
@@ -1742,7 +1779,7 @@ function printUsageHelp() {
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
     const args = argv.slice(1);
-    if (command === "help" || command === "--help" || command === "-h") {
+    if (isHelpArgument(command)) {
         printHelp();
         return;
     }
@@ -1809,6 +1846,11 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "top") {
+        if (isHelpArgument(args[0])) {
+            assertExactArgs(args.slice(1), "top help", 0);
+            printHelp();
+            return;
+        }
         await printUsageTop(profiles, parseUsageTopOptions(args));
         return;
     }
