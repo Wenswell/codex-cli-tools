@@ -2524,7 +2524,14 @@ async function runCcsStatus(profiles: ProfilesFile, args: string[]): Promise<voi
     return;
   }
 
-  if (!subcommand || subcommand === "line") {
+  if (!subcommand) {
+    assertExactArgs(subargs, "s", 0);
+    await printUsageTopStatusLine(profiles);
+    printStatusUsageHelp();
+    return;
+  }
+
+  if (subcommand === "line") {
     assertExactArgs(subargs, "s line", 0);
     await printUsageTopStatusLine(profiles);
     return;
@@ -2630,6 +2637,10 @@ function parseWeztermArgs(args: string[]): WeztermOptions {
 
 function printUsageHelp(): void {
   console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
+}
+
+function printStatusUsageHelp(): void {
+  console.log(textDim("commands: ccs s [line|agent|server|pause|resume|wezterm]"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
