@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rename, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -964,6 +964,47 @@ function printProfile(name, profiles) {
 }
 function printProfileDetails(name, profile) {
     printProfileSummary("profile", name, profile);
+}
+async function runCodexWithProfile(profiles, name, codexArgs) {
+    if (!name || name.startsWith("-")) {
+        throw new Error("usage: ccs run PROFILE [CODEX_ARGS...]");
+    }
+    const profile = profiles.profiles?.[name];
+    if (!profile) {
+        throw new Error(`profile not found: ${name}`);
+    }
+    const normalized = assertProfile(profile, name);
+    if (!normalized.apiKey) {
+        throw new Error(`profile ${name} is missing apiKey`);
+    }
+    const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
+    const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
+    const args = [
+        "-c",
+        `model_providers.${provider}.base_url=${JSON.stringify(normalized.baseURL)}`,
+        ...codexArgs,
+    ];
+    printProfileSummary("run", name, normalized);
+    printKeyValue("mode:", "temporary codex launch; no files changed", 5);
+    await new Promise((resolve, reject) => {
+        const child = spawn("codex", args, {
+            stdio: "inherit",
+            env: {
+                ...process.env,
+                OPENAI_API_KEY: normalized.apiKey,
+            },
+        });
+        child.once("error", reject);
+        child.once("exit", (code, signal) => {
+            if (signal) {
+                process.exitCode = 1;
+                resolve();
+                return;
+            }
+            process.exitCode = code ?? 1;
+            resolve();
+        });
+    });
 }
 function formatApiKey(apiKey) {
     return apiKey ? textDim(maskSecret(apiKey)) : textDim("(empty)");
@@ -3122,6 +3163,7 @@ function usageLines() {
     return [
         "  ccs                                  # show current profile and usage",
         "  ccs PROFILE                          # show profile details and usage",
+        "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
         "  ccs config [push|pull]                # preview, confirm, and sync profiles.json with LAN server",
@@ -3167,7 +3209,7 @@ function parseWeztermArgs(args) {
     return { remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+    console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
@@ -3256,6 +3298,15 @@ export async function runCcs(argv) {
     }
     if (command === "s") {
         await runCcsStatus(profiles, args);
+        return;
+    }
+    if (command === "run") {
+        if (isHelpArgument(args[0])) {
+            assertExactArgs(args.slice(1), "run help", 0);
+            printHelp();
+            return;
+        }
+        await runCodexWithProfile(profiles, args[0], args.slice(1));
         return;
     }
     if (command === "add") {
