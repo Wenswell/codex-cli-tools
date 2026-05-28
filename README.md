@@ -230,7 +230,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|wezterm] | list [-u] | usage | init [-y] | sync [-y]
+commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init [-y] | sync [-y]
 ```
 
 Supported commands:
@@ -246,6 +246,7 @@ ccs s agent
 ccs s server [PORT]
 ccs s pause
 ccs s resume
+ccs s reset
 ccs s wezterm [-y|--yes]
 ccs s wezterm remove [-y|--yes]
 ccs list | l [-u|--usage]
@@ -280,7 +281,7 @@ Run `ccs s` to print the same compact status plus one compact command line:
 
 ```text
 22:52:22 r7s | input 181.9 | ciii 161.3 | oops ? | input-cc 0
-commands: ccs s [line|agent|server|pause|resume|wezterm]
+commands: ccs s [line|agent|server|pause|resume|reset|wezterm]
 ```
 
 Use `ccs s line` from terminal status bars or shell prompts. It reads configured top state, prints one compact line, and exits:
@@ -298,7 +299,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20m`, `30m`, then `60m`. Providers never become `done`; unchanged providers keep refreshing every 60 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Run `ccs s pause` or `ccs s resume` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
+The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20m`, `30m`, then `60m`. Providers never become `done`; unchanged providers keep refreshing every 60 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. `POST /ccs/top/reset` refreshes immediately and resets polling to `25s`. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {
@@ -313,7 +314,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny text cache to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly and adds the local clock, so it does not spawn `node` or request HTTP from the GUI status callback.
+For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny complete status line to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly, so it does not spawn `node` or request HTTP from the GUI status callback. If the agent stops, the whole status line stops changing instead of showing a fresh clock with stale usage values.
 
 Install the WezTerm status bar integration with the project command:
 
