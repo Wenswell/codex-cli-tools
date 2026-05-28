@@ -328,9 +328,9 @@ Example output:
 ccs usage history  today  bucket 30m
 source: http://10.126.126.1:8765/ccs/top/history?since=...&bucketMinutes=30
 
-total trend                                                        summary
-    $25  ┼                                                         provider    now  5h delta         last
-    $20  ┤                          ╭────────────────────────      input     $22.4    +$10.0  14:32 +$0.2
+total trend                                                          summary
+    $25  ┼                                                           provider    now  5h delta   last  change
+    $20  ┤                          ╭────────────────────────        input     $22.4    +$10.0  14:32   +$0.2
     $15  ┤                          │
     $10  ┤             ╭────────────╯
      $5  ┤             │
