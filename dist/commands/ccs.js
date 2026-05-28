@@ -44,6 +44,8 @@ const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBuck
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
+const usageTopHistoryChartMinWidth = 72;
+const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 let usageTopStatusWriteSequence = 0;
@@ -2273,12 +2275,16 @@ function toUsageTopHistoryTrendPoint(point) {
         value: point.value,
     };
 }
-function formatHistoryLastChange(summary) {
-    if (summary.lastChangeAt && summary.lastChangeDelta !== undefined) {
-        return `${formatHistoryTime(summary.lastChangeAt)} ${formatHistorySignedCost(summary.lastChangeDelta)}`;
+function formatHistoryLastChangeTime(summary) {
+    const at = summary.lastChangeAt ?? summary.lastResetAt;
+    return at ? formatHistoryTime(at) : textDim("-");
+}
+function formatHistoryLastChangeDelta(summary) {
+    if (summary.lastChangeDelta !== undefined) {
+        return formatHistorySignedCost(summary.lastChangeDelta);
     }
     if (summary.lastResetAt) {
-        return `${formatHistoryTime(summary.lastResetAt)} reset`;
+        return textDim("reset");
     }
     return textDim("-");
 }
@@ -2286,16 +2292,17 @@ function printUsageTopHistorySummary(summaries) {
     console.log();
     console.log(textBold("summary"));
     printTable([
-        ["provider", "first", "now", "delta", "changes", "last change"],
+        ["provider", "first", "now", "delta", "changes", "last", "change"],
         ...summaries.map((summary) => [
             colorName(summary.name),
             formatHistoryValue(summary.first),
             formatHistoryValue(summary.latest),
             formatHistoryDeltaCell(summary.delta, summary.reset),
             summary.changes.toString(),
-            formatHistoryLastChange(summary),
+            formatHistoryLastChangeTime(summary),
+            formatHistoryLastChangeDelta(summary),
         ]),
-    ], ["left", "right", "right", "right", "right", "right"]);
+    ], ["left", "right", "right", "right", "right", "right", "right"]);
 }
 function isUsageTopHistoryBucketEmpty(bucket) {
     if (bucket.reset || (bucket.total !== undefined && Math.abs(bucket.total) >= usageTopHistoryEpsilon)) {
@@ -2403,6 +2410,31 @@ function buildUsageTopHistoryTrend(pointMap, names, buckets, windowStart) {
         }),
     ];
 }
+function expandUsageTopHistoryChartPoints(points) {
+    if (points.length >= usageTopHistoryChartMinWidth) {
+        return points;
+    }
+    return Array.from({ length: usageTopHistoryChartMinWidth }, (_, index) => {
+        const sourceIndex = Math.round(index * (points.length - 1) / (usageTopHistoryChartMinWidth - 1));
+        return points[sourceIndex];
+    });
+}
+function placeHistoryAxisLabel(chars, label, index) {
+    const start = Math.max(0, Math.min(index, chars.length - label.length));
+    for (let offset = 0; offset < label.length; offset += 1) {
+        chars[start + offset] = label[offset];
+    }
+}
+function formatUsageTopHistoryChartAxis(start, mid, end, width) {
+    const chars = Array.from({ length: width }, () => " ");
+    const startLabel = formatHistoryTime(start);
+    const midLabel = formatHistoryTime(mid);
+    const endLabel = formatHistoryTime(end);
+    placeHistoryAxisLabel(chars, startLabel, 0);
+    placeHistoryAxisLabel(chars, midLabel, Math.floor((width - midLabel.length) / 2));
+    placeHistoryAxisLabel(chars, endLabel, width - endLabel.length);
+    return `${" ".repeat(usageTopHistoryChartAxisPrefix)}${chars.join("")}`;
+}
 function printUsageTopHistoryChart(trend) {
     const points = trend
         .filter((point) => Number.isFinite(point.value) && !Number.isNaN(point.at.getTime()))
@@ -2416,12 +2448,13 @@ function printUsageTopHistoryChart(trend) {
     const start = points[0].at;
     const mid = points[Math.floor(points.length / 2)].at;
     const end = points[points.length - 1].at;
-    const series = points.map((point) => point.value);
+    const chartPoints = expandUsageTopHistoryChartPoints(points);
+    const series = chartPoints.map((point) => point.value);
     console.log(asciichart.plot(series, {
         height: 8,
         format: (value) => `${formatHistoryCost(value).padStart(7)} `,
     }));
-    console.log(textDim(`         ${formatHistoryTime(start)}     ${formatHistoryTime(mid)}     ${formatHistoryTime(end)}`));
+    console.log(textDim(formatUsageTopHistoryChartAxis(start, mid, end, series.length)));
 }
 async function printUsageTopHistoryUnavailable(profiles, request) {
     const urls = await readUsageTopStateUrls(profiles);

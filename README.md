@@ -329,13 +329,13 @@ ccs usage history  today  bucket 30m
 source: http://10.126.126.1:8765/ccs/top/history?since=...&bucketMinutes=30
 
 summary
-provider  first   now  delta  changes  last change
-input     $12.4  $22.4  +$10.0        7  14:32 +$0.2
+provider  first   now  delta  changes   last  change
+input     $12.4  $22.4  +$10.0        7  14:32   +$0.2
 
 total trend
-  $22.4  ┤        ╭
-  $17.4  ┤   ╭────╯
-  $12.4  ┼───╯
+  $22.4  ┤                         ╭
+  $17.4  ┤          ╭──────────────╯
+  $12.4  ┼──────────╯
 
 peak buckets
 time          total  top contributors
