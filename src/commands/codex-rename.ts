@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { access, copyFile, lstat, mkdir, readdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { ensureDir, writeTextFile } from "../lib/fs.js";
 import { codexDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
@@ -11,7 +12,6 @@ type Args = {
   oldPath: string;
   newPath: string;
   prefix: boolean;
-  apply: boolean;
   sessionsOnly: boolean;
 };
 
@@ -56,8 +56,8 @@ function parseArgs(argv: string[]): Args {
 
   const positional: string[] = [];
   let prefix = false;
-  let apply = false;
   let sessionsOnly = false;
+  rejectRemovedYesFlags(argv, "codex-rename");
 
   for (const arg of argv) {
     if (arg === "--prefix") {
@@ -66,10 +66,6 @@ function parseArgs(argv: string[]): Args {
     }
     if (arg === "--sessions-only") {
       sessionsOnly = true;
-      continue;
-    }
-    if (arg === "-y" || arg === "--yes") {
-      apply = true;
       continue;
     }
     if (arg.startsWith("-")) {
@@ -87,7 +83,6 @@ function parseArgs(argv: string[]): Args {
     oldPath: normalizeInputPath(positional[0]),
     newPath: normalizeInputPath(positional[1]),
     prefix,
-    apply,
     sessionsOnly,
   };
 }
@@ -102,8 +97,6 @@ function printHelp(): void {
     "Usage:",
     "  codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update",
     "  codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates",
-    "  codex-rename OLD_PATH NEW_PATH -y                      # rename directory and update exact session cwd matches",
-    "  codex-rename OLD_PATH NEW_PATH --prefix -y             # rename directory and update child session cwd matches",
     "  codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed",
   ].join("\n"));
 }
@@ -479,7 +472,7 @@ function printPlan(args: Args, directoryPlan: DirectoryPlan, dbPath: string, row
   }
   if (dryRun) {
     console.log("");
-    console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
   }
 }
 
@@ -494,24 +487,23 @@ export async function runCodexRename(argv: string[]): Promise<void> {
     printKeyValue("mode:", textBlue(args.prefix ? "prefix" : "exact"), 18);
     printKeyValue("state:", colorPath(dbPath), 18);
     printKeyValue("matched sessions:", textDim("0"), 18);
-    if (args.apply) {
-      const renamed = await applyDirectoryRename(directoryPlan);
-      printKeyValue("directory changed:", renamed ? textGreen("yes") : textDim("no"), 18);
-    } else if (!args.apply) {
-      console.log("");
-      console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+    console.log("");
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
+    if (!(await confirmApply())) {
+      return;
     }
+    const renamed = await applyDirectoryRename(directoryPlan);
+    printKeyValue("directory changed:", renamed ? textGreen("yes") : textDim("no"), 18);
     return;
   }
 
   await preflightRollouts(rows);
 
-  if (!args.apply) {
-    printPlan(args, directoryPlan, dbPath, rows, true);
+  printPlan(args, directoryPlan, dbPath, rows, true);
+  if (!(await confirmApply())) {
     return;
   }
 
-  printPlan(args, directoryPlan, dbPath, rows, false);
   console.log("");
   const plannedRollouts = await planRolloutWrites(rows);
   const backupDir = await createBackup(dbPath, uniqueRolloutPaths(rows));

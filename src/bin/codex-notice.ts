@@ -2,6 +2,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
+import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { codexToolsConfigDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
 import { textBlue, textDim, textGreen, textRed } from "../lib/text.js";
@@ -163,7 +164,7 @@ function printHelp(): void {
     "Usage:",
     "  codex-notice                           # show active webhook, config, log, and commands",
     "  codex-notice status                    # show active webhook, config, and log",
-    "  codex-notice config WEBHOOK [-y|--yes] # preview or write Feishu webhook config",
+    "  codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config",
     "  codex-notice test [MESSAGE]            # send a test notification",
     "  codex-notice logs [N]                  # show recent send logs",
     "  codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card",
@@ -171,7 +172,7 @@ function printHelp(): void {
 }
 
 function printCommands(): void {
-  printKeyValue("commands:", "codex-notice | status | config WEBHOOK [-y] | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
+  printKeyValue("commands:", "codex-notice | status | config WEBHOOK | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
 }
 
 function requireNoExtraArgs(args: string[], usage: string): void {
@@ -280,37 +281,29 @@ async function printStatus(): Promise<void> {
 }
 
 async function configureWebhook(argv: string[]): Promise<void> {
-  const apply = parseConfigApply(argv);
-  const values = argv.filter((arg) => arg !== "-y" && arg !== "--yes");
+  rejectRemovedYesFlags(argv, "codex-notice config");
+  for (const arg of argv) {
+    if (arg.startsWith("-")) {
+      throw new Error(`unknown argument for codex-notice config: ${arg}`);
+    }
+  }
+  const values = argv;
   if (values.length !== 1) {
-    throw new Error("usage: codex-notice config WEBHOOK [-y|--yes]");
+    throw new Error("usage: codex-notice config WEBHOOK");
   }
   const webhook = values[0];
   validateWebhook(webhook);
-  printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(noticeEnvPath)}`, 10);
+  printKeyValue("target:", `${textBlue("would update")} ${colorPath(noticeEnvPath)}`, 10);
   printKeyValue("webhook:", textGreen(webhook), 10);
-  if (!apply) {
-    console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+  console.log(textDim("no changes are written unless you type yes at the prompt."));
+  if (!(await confirmApply())) {
     return;
   }
   await mkdir(dirname(noticeEnvPath), { recursive: true, mode: 0o700 });
   await chmod(dirname(noticeEnvPath), 0o700);
   await writeFile(noticeEnvPath, `FEISHU_BOT_WEBHOOK=${webhook}\n`, { mode: 0o600 });
   await chmod(noticeEnvPath, 0o600);
-}
-
-function parseConfigApply(args: string[]): boolean {
-  let apply = false;
-  for (const arg of args) {
-    if (arg === "-y" || arg === "--yes") {
-      apply = true;
-      continue;
-    }
-    if (arg.startsWith("-")) {
-      throw new Error(`unknown argument for codex-notice config: ${arg}`);
-    }
-  }
-  return apply;
+  printKeyValue("target:", `${textGreen("updated")} ${colorPath(noticeEnvPath)}`, 10);
 }
 
 function validateWebhook(value: string): void {

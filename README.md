@@ -59,8 +59,8 @@ codex-notice
 - No-argument output combines compact status with a compact command/help line when the tool has user-facing commands.
 - `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
-- Commands that modify files default to preview and require `-y` or `--yes` to write.
-- Write/apply commands first print the same plan as preview, then print the actual result.
+- Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
+- Write/apply commands first print the same plan as preview, then ask for confirmation and print the actual result.
 - Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
 - Logs preserve complete original input, event, and response data. Summaries or previews can be added, but cannot replace the raw facts.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
@@ -180,13 +180,13 @@ Other commands:
 ```bash
 codex-notice                           # show active webhook, config, log, and commands
 codex-notice status                    # show active webhook, config, and log
-codex-notice config WEBHOOK [-y|--yes] # preview or write Feishu webhook config
+codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config
 codex-notice test [MESSAGE]            # send a test notification
 codex-notice logs [N]                  # show recent send logs
 codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card
 ```
 
-`codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write; add `-y` or `--yes` to write `~/.config/codex-tools/notice.env` with `0600` permissions.
+`codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write, then writes `~/.config/codex-tools/notice.env` with `0600` permissions only after you type exact `yes`.
 
 Message format uses a Feishu interactive card. The title is the assistant reply preview with no low-value prefix, so notification lists show the useful content first. Common Markdown decoration is removed from the title only, and common Chinese punctuation is normalized to ASCII punctuation. time/user, cwd, and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
 
@@ -230,7 +230,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init [-y] | sync [-y]
+commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -240,21 +240,21 @@ ccs
 ccs PROFILE
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
-ccs config [push|pull] [-y|--yes]
+ccs config [push|pull]
 ccs s [line]
 ccs s agent
 ccs s server [PORT]
 ccs s pause
 ccs s resume
 ccs s reset
-ccs s wezterm [-y|--yes]
-ccs s wezterm remove [-y|--yes]
+ccs s wezterm
+ccs s wezterm remove
 ccs list | l [-u|--usage]
 ccs usage
 ccs usage add [PROFILE]
 ccs usage remove | rm | delete PROFILE
-ccs init [-y|--yes]
-ccs sync [-y|--yes]
+ccs init
+ccs sync
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
@@ -320,12 +320,10 @@ Install the WezTerm status bar integration with the project command:
 
 ```bash
 ccs s wezterm
-ccs s wezterm -y
 ccs s wezterm remove
-ccs s wezterm remove -y
 ```
 
-`ccs s wezterm` previews the `~/.wezterm.lua` change. `ccs s wezterm -y` writes the same plan, backs up the existing file under `~/.config/codex-tools/backups/`, and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block; `ccs s wezterm remove -y` removes it. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`; override the file path with `CCS_WEZTERM_STATUS_FILE`.
+`ccs s wezterm` previews the `~/.wezterm.lua` change, then writes after you type exact `yes`; it backs up the existing file under `~/.config/codex-tools/backups/` and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block, then removes it after the same confirmation. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`; override the file path with `CCS_WEZTERM_STATUS_FILE`.
 
 Example:
 
@@ -411,13 +409,7 @@ Preview first:
 ccs init
 ```
 
-Apply changes:
-
-```bash
-ccs init -y
-```
-
-`--yes` is also accepted. Preview output includes `preview only. Re-run with -y or --yes to apply changes.`
+After printing the plan, `ccs init` writes only if you type exact `yes` at the prompt.
 
 Before writing, it backs up the current files to:
 
@@ -427,7 +419,7 @@ Before writing, it backs up the current files to:
 
 `ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, restores the current provider's `base_url` after syncing the template, and syncs the default global Codex guidelines to `~/.codex/AGENTS.md`. Later profile switches only change that API URL and `~/.codex/auth.json`.
 
-`ccs init` without `-y` shows:
+`ccs init` shows:
 
 - a short summary of files to modify and back up
 - unified diff style output for each file that would change
@@ -440,13 +432,7 @@ If `config/ccs-profiles.json` changes later, run:
 ccs sync
 ```
 
-`ccs sync` previews by default. To apply changes:
-
-```bash
-ccs sync -y
-```
-
-`--yes` is also accepted.
+`ccs sync` prints its plan first and writes only if you type exact `yes` at the prompt.
 
 When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, seeds `top.stateUrls` with the cloud-first/local-fallback defaults when `top` is missing, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
@@ -460,7 +446,7 @@ ccs config pull
 
 Run `ccs config` without arguments to print the local file summary, fixed LAN target, and a compact command line without connecting to the server.
 
-`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview by default and apply only with `-y` or `--yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
+`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview first and apply only after you type exact `yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 
@@ -517,15 +503,15 @@ Preview mode is equivalent to:
 senv --source .env.example --target .env
 ```
 
-Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
-Preview prints a unified diff; common sensitive env keys such as `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASS`, `AUTH`, and `CREDENTIAL` are masked in that diff. Apply mode first prints the same planned summary and diff as preview, then prints the updated result after writing.
+Default mode is preview. Nothing is modified unless you type exact `yes` at the prompt.
+Preview prints a unified diff; common sensitive env keys such as `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASS`, `AUTH`, and `CREDENTIAL` are masked in that diff. Apply mode first prints the same planned summary and diff as preview, asks for confirmation, then prints the updated result after writing.
 
 Options:
 
 ```bash
-senv -y
-senv --source .env.example --target .env.local -y
-senv -b -y
+senv
+senv --source .env.example --target .env.local
+senv -b
 ```
 
 `-b` is short for `--backup`.
@@ -574,13 +560,11 @@ Usage:
 ```bash
 codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update
 codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates
-codex-rename OLD_PATH NEW_PATH -y                      # rename directory and update exact session cwd matches
-codex-rename OLD_PATH NEW_PATH --prefix -y             # rename directory and update child session cwd matches
 codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed
 ```
 
-Default mode is preview. Nothing is modified unless `-y` or `--yes` is provided.
-Apply mode first prints the same directory, session, and rollout-file plan as preview, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
+Default mode is preview. Nothing is modified unless you type exact `yes` at the prompt.
+Apply mode first prints the same directory, session, and rollout-file plan as preview, asks for confirmation, then renames the directory, updates Codex state, and prints backup, update, and verification counts.
 Use `--sessions-only` when the directory has already been renamed and only Codex session cwd values need to be updated.
 
 Path behavior:
@@ -596,7 +580,7 @@ Path behavior:
 Example:
 
 ```bash
-codex-rename /home/me/repos/old /home/me/repos/new --prefix -y
+codex-rename /home/me/repos/old /home/me/repos/new --prefix
 ```
 
 This maps:

@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createTwoFilesPatch } from "diff";
+import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
@@ -355,7 +356,7 @@ async function readRemoteConfigTextIfExists(remote) {
     }
     return configSyncSsh(`cat ${JSON.stringify(configSyncRemotePath)}`);
 }
-function printConfigSyncPlan(action, local, remote, localText, remoteText, apply) {
+function printConfigSyncPlan(action, local, remote, localText, remoteText) {
     console.log(textBold(`ccs config ${action}`));
     printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
     printKeyValue("remote:", `${colorPath(configSyncRemoteDisplay)}  ${formatConfigSummary(remote)}`, 9);
@@ -370,8 +371,8 @@ function printConfigSyncPlan(action, local, remote, localText, remoteText, apply
     else {
         printKeyValue("action:", "status only", 9);
     }
-    if (!apply && action !== "status") {
-        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+    if (action !== "status") {
+        console.log(textDim("no changes are written unless you type yes at the prompt."));
     }
     printConfigSyncDiff(action, localText, remoteText);
 }
@@ -404,7 +405,7 @@ function printConfigSyncStatus(local) {
     printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
     printKeyValue("remote:", colorPath(configSyncRemoteDisplay), 9);
     printKeyValue("action:", "status only", 9);
-    console.log(textDim("commands: ccs config | ccs config push [-y] | ccs config pull [-y]"));
+    console.log(textDim("commands: ccs config | ccs config push | ccs config pull"));
 }
 async function pushConfigToServer(local, remote) {
     await readLocalConfigText();
@@ -479,8 +480,8 @@ async function runConfigSync(args) {
     const remote = await remoteConfigSummary();
     const localText = await readTextIfExists(profilesPath());
     const remoteText = await readRemoteConfigTextIfExists(remote);
-    printConfigSyncPlan(options.action, local, remote, localText, remoteText, options.yes);
-    if (!options.yes) {
+    printConfigSyncPlan(options.action, local, remote, localText, remoteText);
+    if (!(await confirmApply())) {
         return;
     }
     if (options.action === "push") {
@@ -494,12 +495,6 @@ function assertNameAvailable(name, profiles, target) {
     if (other?.[name]) {
         throw new Error(`${name} already exists in ${target === "profiles" ? "usage" : "profiles"}`);
     }
-}
-function hasFlag(argv, flag) {
-    return argv.includes(flag);
-}
-function hasYesFlag(argv) {
-    return hasFlag(argv, "-y") || hasFlag(argv, "--yes");
 }
 function assertOnlyFlags(argv, command, allowed) {
     for (const arg of argv) {
@@ -519,13 +514,14 @@ function assertExactArgs(argv, command, count) {
     }
 }
 function parseConfigSyncArgs(args) {
+    rejectRemovedYesFlags(args, "ccs config");
     const action = (args[0] ?? "status");
     if (action !== "status" && action !== "push" && action !== "pull") {
         throw new Error(`unknown argument for ccs config: ${action}`);
     }
     const flags = args.slice(args[0] ? 1 : 0);
-    assertOnlyFlags(flags, `config ${action}`, ["-y", "--yes"]);
-    return { action, yes: hasYesFlag(flags) };
+    assertOnlyFlags(flags, `config ${action}`, []);
+    return { action };
 }
 function parseDurationMs(value) {
     const match = /^(\d+)(s|m|h)?$/.exec(value.trim());
@@ -553,7 +549,7 @@ function buildConfigSection(plan) {
 function printPreviewSummary(title, modifiedFiles, backupFiles, warnings, dryRun) {
     console.log(textBold(`Plan: ${title}`));
     if (dryRun) {
-        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+        console.log(textDim("no changes are written unless you type yes at the prompt."));
     }
     console.log(`Will modify: ${textBlue(formatList(modifiedFiles))}`);
     console.log(`Will back up: ${textBlue(formatList(backupFiles))}`);
@@ -905,12 +901,6 @@ function printPreviewPlan(plan, dryRun) {
         printDiffBlock(file);
     }
     printWarnings(plan.warnings);
-}
-async function printInitDryRun() {
-    printPreviewPlan(await buildInitPreviewPlan(), true);
-}
-async function printSyncDryRun() {
-    printPreviewPlan(await buildSyncPreviewPlan(), true);
 }
 async function addProfile(defaultName) {
     const data = await readProfiles();
@@ -2097,11 +2087,10 @@ async function runCcsStatus(profiles, args) {
         const previewPlan = options.remove
             ? await buildWeztermRemovePreviewPlan()
             : await buildWeztermPreviewPlan();
-        if (!options.yes) {
-            printPreviewPlan(previewPlan, true);
+        printPreviewPlan(previewPlan, true);
+        if (!(await confirmApply())) {
             return;
         }
-        printPreviewPlan(previewPlan, false);
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const nextConfigText = previewPlan.previewFiles[0]?.next;
         if (nextConfigText !== undefined) {
@@ -2121,21 +2110,21 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs toggle [PROFILE]                 # switch profile",
         "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
-        "  ccs config [push|pull] [-y|--yes]     # preview or sync profiles.json with LAN server",
+        "  ccs config [push|pull]                # preview, confirm, and sync profiles.json with LAN server",
         "  ccs s [line]                         # print compact status from configured top state",
         "  ccs s agent                          # write local status text for WezTerm",
         "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
         "  ccs s pause                          # pause first reachable configured top server",
         "  ccs s resume                         # resume first reachable configured top server",
         "  ccs s reset                          # refresh server now and reset polling to 25s",
-        "  ccs s wezterm [-y|--yes]             # preview or install WezTerm status integration",
-        "  ccs s wezterm remove [-y|--yes]      # preview or remove WezTerm status integration",
+        "  ccs s wezterm                        # preview, confirm, and install WezTerm status integration",
+        "  ccs s wezterm remove                 # preview, confirm, and remove WezTerm status integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
         "  ccs usage                            # list usage-only profiles",
         "  ccs usage add [PROFILE]               # add or update a usage-only profile",
         "  ccs usage remove | rm | delete PROFILE # remove a usage-only profile",
-        "  ccs init [-y|--yes]                   # preview or create config",
-        "  ccs sync [-y|--yes]                   # preview or sync config",
+        "  ccs init                             # preview, confirm, and create config",
+        "  ccs sync                             # preview, confirm, and sync config",
         "  ccs add [PROFILE]                     # add or update a profile",
         "  ccs remove | rm | delete PROFILE      # remove a profile",
     ];
@@ -2150,7 +2139,7 @@ function isHelpArgument(value) {
     return value === "help" || value === "--help" || value === "-h";
 }
 function parseWeztermArgs(args) {
-    let yes = false;
+    rejectRemovedYesFlags(args, "ccs s wezterm");
     let remove = false;
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
@@ -2158,16 +2147,12 @@ function parseWeztermArgs(args) {
             remove = true;
             continue;
         }
-        if (arg === "-y" || arg === "--yes") {
-            yes = true;
-            continue;
-        }
         throw new Error(`unknown argument for ccs s wezterm: ${arg}`);
     }
-    return { yes, remove };
+    return { remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
+    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|pause|resume|reset|wezterm]"));
@@ -2191,13 +2176,13 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "init") {
-        assertOnlyFlags(args, "init", ["-y", "--yes"]);
-        if (!hasYesFlag(args)) {
-            await printInitDryRun();
+        rejectRemovedYesFlags(args, "ccs init");
+        assertExactArgs(args, "init", 0);
+        const previewPlan = await buildInitPreviewPlan();
+        printPreviewPlan(previewPlan, true);
+        if (!(await confirmApply())) {
             return;
         }
-        const previewPlan = await buildInitPreviewPlan();
-        printPreviewPlan(previewPlan, false);
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const initialized = await initProfilesFromCurrent();
         await syncCodexConfigFromTemplate();
@@ -2215,13 +2200,13 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "sync") {
-        assertOnlyFlags(args, "sync", ["-y", "--yes"]);
-        if (!hasYesFlag(args)) {
-            await printSyncDryRun();
+        rejectRemovedYesFlags(args, "ccs sync");
+        assertExactArgs(args, "sync", 0);
+        const previewPlan = await buildSyncPreviewPlan();
+        printPreviewPlan(previewPlan, true);
+        if (!(await confirmApply())) {
             return;
         }
-        const previewPlan = await buildSyncPreviewPlan();
-        printPreviewPlan(previewPlan, false);
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
         const synced = await syncProfiles();
         await syncCodexConfigFromTemplate();
