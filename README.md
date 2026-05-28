@@ -230,7 +230,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | PROFILE | run PROFILE [ARGS] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -238,6 +238,7 @@ Supported commands:
 ```bash
 ccs
 ccs PROFILE
+ccs run PROFILE [CODEX_ARGS...]
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs config [push|pull]
@@ -508,10 +509,18 @@ Show a profile without switching:
 ccs PROFILE
 ```
 
+Launch a new Codex CLI once with a profile without switching the stored current profile:
+
+```bash
+ccs run input
+ccs run ciii exec "check this repo"
+```
+
 Behavior:
 
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
+- `ccs run PROFILE [CODEX_ARGS...]` sets `OPENAI_API_KEY` only for the launched `codex` process and passes a temporary `-c model_providers.<current>.base_url=...` override, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
