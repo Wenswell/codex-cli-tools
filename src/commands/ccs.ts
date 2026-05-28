@@ -298,7 +298,7 @@ const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBuck
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistorySummaryDeltaMs = 5 * 60 * 60 * 1000;
 const usageTopHistoryEpsilon = 0.05;
-const usageTopHistoryChartMinWidth = 72;
+const usageTopHistoryChartMinWidth = 56;
 const usageTopHistoryChartHeight = 5;
 const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHttpTimeoutMs = 1_500;
@@ -1647,15 +1647,21 @@ function alignTableCell(value: string, width: number, align: TableAlign): string
   return align === "right" ? `${padding}${value}` : `${value}${padding}`;
 }
 
-function printTable(rows: string[][], aligns: TableAlign[] = []): void {
+function formatTableRows(rows: string[][], aligns: TableAlign[] = []): string[] {
   const widths = rows[0]?.map((_, index) => (
     Math.max(...rows.map((row) => visibleLength(row[index] ?? "")))
   )) ?? [];
 
-  for (const row of rows) {
-    console.log(row.map((value, index) => (
+  return rows.map((row) => (
+    row.map((value, index) => (
       alignTableCell(value, widths[index] ?? 0, aligns[index] ?? "left")
-    )).join("  ").trimEnd());
+    )).join("  ").trimEnd()
+  ));
+}
+
+function printTable(rows: string[][], aligns: TableAlign[] = []): void {
+  for (const row of formatTableRows(rows, aligns)) {
+    console.log(row);
   }
 }
 
@@ -3197,28 +3203,26 @@ function usageTopHistorySummaryDelta(name: string, buckets: UsageTopBucket[], wi
   return Math.abs(total) < usageTopHistoryEpsilon ? 0 : total;
 }
 
-function formatUsageTopHistorySummaryField(label: string, value: string): string {
-  return `  ${textDim(label.padEnd(8))} ${value}`;
-}
-
 function formatUsageTopHistorySummaryLines(
   summaries: UsageTopSummary[],
   buckets: UsageTopBucket[],
   windowEnd: Date,
 ): string[] {
-  const lines = [textBold("summary")];
-  for (const summary of summaries) {
-    lines.push(
-      colorName(summary.name),
-      formatUsageTopHistorySummaryField("now", formatHistoryValue(summary.latest)),
-      formatUsageTopHistorySummaryField("5h delta", formatHistoryDeltaCell(
-        usageTopHistorySummaryDelta(summary.name, buckets, windowEnd),
-        summary.reset,
-      )),
-      formatUsageTopHistorySummaryField("last", `${formatHistoryLastChangeTime(summary)} ${formatHistoryLastChangeDelta(summary)}`),
-    );
-  }
-  return lines;
+  return [
+    textBold("summary"),
+    ...formatTableRows([
+      ["provider", "now", "5h delta", "last"],
+      ...summaries.map((summary) => [
+        colorName(summary.name),
+        formatHistoryValue(summary.latest),
+        formatHistoryDeltaCell(
+          usageTopHistorySummaryDelta(summary.name, buckets, windowEnd),
+          summary.reset,
+        ),
+        `${formatHistoryLastChangeTime(summary)} ${formatHistoryLastChangeDelta(summary)}`,
+      ]),
+    ], ["left", "right", "right", "right"]),
+  ];
 }
 
 function printUsageTopHistoryChartWithSummary(
