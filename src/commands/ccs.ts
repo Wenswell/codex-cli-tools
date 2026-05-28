@@ -164,12 +164,55 @@ type UsageTopSnapshotSource = {
   remote: boolean;
 };
 
+type UsageTopHistoryRequest = {
+  windowStart: Date;
+  windowEnd?: Date;
+  bucketMinutes: number;
+  profileName?: string;
+};
+
+type UsageTopHistorySummaryRecord = {
+  name: string;
+  first?: number;
+  latest?: number;
+  delta?: number;
+  reset: boolean;
+  changes: number;
+  lastChangeAt?: string;
+  lastChangeDelta?: number;
+  lastResetAt?: string;
+};
+
+type UsageTopHistoryBucketDeltaRecord = {
+  name: string;
+  delta?: number;
+  reset: boolean;
+};
+
+type UsageTopHistoryBucketRecord = {
+  start: string;
+  end: string;
+  deltas: UsageTopHistoryBucketDeltaRecord[];
+  total?: number;
+  reset: boolean;
+};
+
+type UsageTopHistoryTrendPoint = {
+  at: string;
+  value: number;
+};
+
 type UsageTopHistory = {
   version: 1;
   updatedAt: string;
-  windowHours: number;
+  windowStart: string;
+  windowEnd: string;
   bucketMinutes: number;
-  records: UsageTopSnapshot[];
+  names: string[];
+  availableNames: string[];
+  summaries: UsageTopHistorySummaryRecord[];
+  trend: UsageTopHistoryTrendPoint[];
+  buckets: UsageTopHistoryBucketRecord[];
 };
 
 type UsageTopHistorySource = {
@@ -252,10 +295,10 @@ const usageTopSnapshotActiveTtlMs = 5_000;
 const usageTopHistoryWindowMs = 24 * 60 * 60 * 1000;
 const usageTopHistoryBucketMs = 60 * 60 * 1000;
 const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBucketMs;
-const usageTopHistoryWindowHours = usageTopHistoryWindowMs / (60 * 60 * 1000);
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
+const usageTopHttpTimeoutMs = 1_500;
 let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
@@ -2213,13 +2256,149 @@ async function recordUsageTopHistorySnapshot(snapshot: UsageTopSnapshot): Promis
   await writeUsageTopHistoryRecords(records);
 }
 
-function buildUsageTopHistory(records: UsageTopSnapshot[], now: Date): UsageTopHistory {
+function buildUsageTopHistory(records: UsageTopSnapshot[], request: UsageTopHistoryRequest): UsageTopHistory {
+  const windowEnd = request.windowEnd ?? new Date();
+  const bucketMs = request.bucketMinutes * 60 * 1000;
+  const filteredRecords = filterUsageTopHistoryRecords(records, windowEnd).filter((record) => {
+    const at = usageTopSnapshotTime(record);
+    return at && at.getTime() >= request.windowStart.getTime() && at.getTime() <= windowEnd.getTime();
+  });
+  const pointMap = buildUsageTopPointMap(filteredRecords);
+  const availableNames = [...pointMap.keys()].sort();
+  const names = request.profileName
+    ? availableNames.filter((name) => name === request.profileName)
+    : availableNames;
+  const summaries = names
+    .map((name) => summarizeUsageTopHistory(name, pointMap.get(name) ?? [], request.windowStart, windowEnd))
+    .sort((left, right) => (right.delta ?? 0) - (left.delta ?? 0));
+  const sortedNames = summaries.map((summary) => summary.name);
+  const buckets = buildUsageTopHistoryBuckets(pointMap, sortedNames, request.windowStart, windowEnd, bucketMs);
+  const trend = buildUsageTopHistoryTrend(pointMap, sortedNames, buckets, request.windowStart);
+
   return {
     version: 1,
-    updatedAt: now.toISOString(),
-    windowHours: usageTopHistoryWindowHours,
-    bucketMinutes: usageTopHistoryBucketMinutes,
-    records: filterUsageTopHistoryRecords(records, now),
+    updatedAt: windowEnd.toISOString(),
+    windowStart: request.windowStart.toISOString(),
+    windowEnd: windowEnd.toISOString(),
+    bucketMinutes: request.bucketMinutes,
+    names: sortedNames,
+    availableNames,
+    summaries: summaries.map(toUsageTopHistorySummaryRecord),
+    trend: trend.map(toUsageTopHistoryTrendPoint),
+    buckets: buckets.map((bucket) => toUsageTopHistoryBucketRecord(bucket, sortedNames)),
+  };
+}
+
+function isUsageTopNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isInvalidOptionalUsageTopNumber(value: unknown): boolean {
+  return value !== undefined && !isUsageTopNumber(value);
+}
+
+function isInvalidOptionalUsageTopString(value: unknown): boolean {
+  return value !== undefined && typeof value !== "string";
+}
+
+function normalizeUsageTopStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeUsageTopHistorySummaryRecord(value: unknown): UsageTopHistorySummaryRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Partial<UsageTopHistorySummaryRecord>;
+  const changes = raw.changes;
+  if (
+    typeof raw.name !== "string"
+    || typeof raw.reset !== "boolean"
+    || changes === undefined
+    || !Number.isInteger(changes)
+    || changes < 0
+    || isInvalidOptionalUsageTopNumber(raw.first)
+    || isInvalidOptionalUsageTopNumber(raw.latest)
+    || isInvalidOptionalUsageTopNumber(raw.delta)
+    || isInvalidOptionalUsageTopNumber(raw.lastChangeDelta)
+    || isInvalidOptionalUsageTopString(raw.lastChangeAt)
+    || isInvalidOptionalUsageTopString(raw.lastResetAt)
+  ) {
+    return null;
+  }
+  return {
+    name: raw.name,
+    first: raw.first,
+    latest: raw.latest,
+    delta: raw.delta,
+    reset: raw.reset,
+    changes,
+    lastChangeAt: raw.lastChangeAt,
+    lastChangeDelta: raw.lastChangeDelta,
+    lastResetAt: raw.lastResetAt,
+  };
+}
+
+function normalizeUsageTopHistoryBucketDeltaRecord(value: unknown): UsageTopHistoryBucketDeltaRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Partial<UsageTopHistoryBucketDeltaRecord>;
+  if (
+    typeof raw.name !== "string"
+    || typeof raw.reset !== "boolean"
+    || isInvalidOptionalUsageTopNumber(raw.delta)
+  ) {
+    return null;
+  }
+  return {
+    name: raw.name,
+    delta: raw.delta,
+    reset: raw.reset,
+  };
+}
+
+function normalizeUsageTopHistoryBucketRecord(value: unknown): UsageTopHistoryBucketRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Partial<UsageTopHistoryBucketRecord>;
+  if (
+    typeof raw.start !== "string"
+    || typeof raw.end !== "string"
+    || typeof raw.reset !== "boolean"
+    || isInvalidOptionalUsageTopNumber(raw.total)
+    || !Array.isArray(raw.deltas)
+  ) {
+    return null;
+  }
+  const deltas = raw.deltas.map(normalizeUsageTopHistoryBucketDeltaRecord);
+  if (deltas.some((delta) => !delta)) {
+    return null;
+  }
+  return {
+    start: raw.start,
+    end: raw.end,
+    deltas: deltas as UsageTopHistoryBucketDeltaRecord[],
+    total: raw.total,
+    reset: raw.reset,
+  };
+}
+
+function normalizeUsageTopHistoryTrendPoint(value: unknown): UsageTopHistoryTrendPoint | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Partial<UsageTopHistoryTrendPoint>;
+  if (typeof raw.at !== "string" || !isUsageTopNumber(raw.value)) {
+    return null;
+  }
+  return {
+    at: raw.at,
+    value: raw.value,
   };
 }
 
@@ -2228,24 +2407,43 @@ function normalizeUsageTopHistory(value: unknown): UsageTopHistory | null {
     return null;
   }
   const raw = value as Partial<UsageTopHistory>;
+  const names = normalizeUsageTopStringArray(raw.names);
+  const availableNames = normalizeUsageTopStringArray(raw.availableNames);
   if (
     raw.version !== 1
     || typeof raw.updatedAt !== "string"
-    || typeof raw.windowHours !== "number"
-    || typeof raw.bucketMinutes !== "number"
-    || !Array.isArray(raw.records)
+    || typeof raw.windowStart !== "string"
+    || typeof raw.windowEnd !== "string"
+    || !isUsageTopNumber(raw.bucketMinutes)
+    || !names
+    || !availableNames
+    || !Array.isArray(raw.summaries)
+    || !Array.isArray(raw.trend)
+    || !Array.isArray(raw.buckets)
+  ) {
+    return null;
+  }
+  const summaries = raw.summaries.map(normalizeUsageTopHistorySummaryRecord);
+  const trend = raw.trend.map(normalizeUsageTopHistoryTrendPoint);
+  const buckets = raw.buckets.map(normalizeUsageTopHistoryBucketRecord);
+  if (
+    summaries.some((summary) => !summary)
+    || trend.some((point) => !point)
+    || buckets.some((bucket) => !bucket)
   ) {
     return null;
   }
   return {
     version: 1,
     updatedAt: raw.updatedAt,
-    windowHours: raw.windowHours,
+    windowStart: raw.windowStart,
+    windowEnd: raw.windowEnd,
     bucketMinutes: raw.bucketMinutes,
-    records: raw.records.flatMap((record) => {
-      const snapshot = normalizeUsageTopSnapshot(record);
-      return snapshot ? [snapshot] : [];
-    }),
+    names,
+    availableNames,
+    summaries: summaries as UsageTopHistorySummaryRecord[],
+    trend: trend as UsageTopHistoryTrendPoint[],
+    buckets: buckets as UsageTopHistoryBucketRecord[],
   };
 }
 
@@ -2262,7 +2460,7 @@ function parseUsageTopHistory(text: string | null): UsageTopHistory | null {
 
 async function fetchUsageTopSnapshot(url: string): Promise<UsageTopSnapshot | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+  const timeout = setTimeout(() => controller.abort(), usageTopHttpTimeoutMs);
   try {
     const response = await fetch(url, {
       method: "GET",
@@ -2282,7 +2480,7 @@ async function fetchUsageTopSnapshot(url: string): Promise<UsageTopSnapshot | nu
 
 async function fetchUsageTopHistory(url: string): Promise<UsageTopHistory | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+  const timeout = setTimeout(() => controller.abort(), usageTopHttpTimeoutMs);
   try {
     const response = await fetch(url, {
       method: "GET",
@@ -2300,13 +2498,31 @@ async function fetchUsageTopHistory(url: string): Promise<UsageTopHistory | null
   }
 }
 
-function usageTopHistoryUrl(stateUrl: string): string {
+function buildUsageTopHistoryRequest(profileName?: string): UsageTopHistoryRequest {
+  return {
+    windowStart: startOfHistoryDay(new Date()),
+    bucketMinutes: usageTopHistoryBucketMinutes,
+    profileName,
+  };
+}
+
+function usageTopHistoryUrl(stateUrl: string, request?: UsageTopHistoryRequest): string {
   const url = new URL(stateUrl);
   url.pathname = url.pathname.endsWith("/ccs/top/state")
     ? url.pathname.replace(/\/ccs\/top\/state$/, "/ccs/top/history")
     : "/ccs/top/history";
   url.search = "";
   url.hash = "";
+  if (request) {
+    url.searchParams.set("since", request.windowStart.toISOString());
+    url.searchParams.set("bucketMinutes", request.bucketMinutes.toString());
+    if (request.windowEnd) {
+      url.searchParams.set("until", request.windowEnd.toISOString());
+    }
+    if (request.profileName) {
+      url.searchParams.set("profile", request.profileName);
+    }
+  }
   return url.toString();
 }
 
@@ -2322,7 +2538,7 @@ function usageTopControlUrl(stateUrl: string, action: UsageTopControlAction): st
 
 async function postUsageTopControl(url: string): Promise<boolean> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1500);
+  const timeout = setTimeout(() => controller.abort(), usageTopHttpTimeoutMs);
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -2380,18 +2596,21 @@ async function readUsageTopStatusSnapshot(profiles: ProfilesFile): Promise<Usage
   return local ? { snapshot: local, remote: false } : null;
 }
 
-async function readUsageTopHistorySource(profiles: ProfilesFile): Promise<UsageTopHistorySource | null> {
+async function readUsageTopHistorySource(
+  profiles: ProfilesFile,
+  request: UsageTopHistoryRequest,
+): Promise<UsageTopHistorySource | null> {
   for (const url of await readUsageTopStateUrls(profiles)) {
-    const historyUrl = usageTopHistoryUrl(url);
+    const historyUrl = usageTopHistoryUrl(url, request);
     const remote = await fetchUsageTopHistory(historyUrl);
     if (remote) {
       return { history: remote, source: historyUrl, remote: true };
     }
   }
 
-  const now = new Date();
-  const local = buildUsageTopHistory(await readUsageTopHistoryRecords(now), now);
-  return local.records.length > 0
+  const windowEnd = request.windowEnd ?? new Date();
+  const local = buildUsageTopHistory(await readUsageTopHistoryRecords(windowEnd), { ...request, windowEnd });
+  return local.availableNames.length > 0
     ? { history: local, source: usageTopHistoryPath(), remote: false }
     : null;
 }
@@ -2570,14 +2789,15 @@ function buildUsageTopHistoryBuckets(
   names: string[],
   windowStart: Date,
   now: Date,
+  bucketMs = usageTopHistoryBucketMs,
 ): UsageTopBucket[] {
   const nowMs = now.getTime();
   const windowStartMs = windowStart.getTime();
-  const firstBucketStart = Math.floor(windowStartMs / usageTopHistoryBucketMs) * usageTopHistoryBucketMs;
+  const firstBucketStart = Math.floor(windowStartMs / bucketMs) * bucketMs;
   const buckets: UsageTopBucket[] = [];
 
-  for (let startMs = firstBucketStart; startMs < nowMs; startMs += usageTopHistoryBucketMs) {
-    const endMs = Math.min(startMs + usageTopHistoryBucketMs, nowMs);
+  for (let startMs = firstBucketStart; startMs < nowMs; startMs += bucketMs) {
+    const endMs = Math.min(startMs + bucketMs, nowMs);
     const deltas = new Map<string, UsageTopBucketDelta>();
     let total = 0;
     let hasTotal = false;
@@ -2611,6 +2831,44 @@ function buildUsageTopHistoryBuckets(
   }
 
   return buckets;
+}
+
+function toUsageTopHistorySummaryRecord(summary: UsageTopSummary): UsageTopHistorySummaryRecord {
+  return {
+    name: summary.name,
+    first: summary.first,
+    latest: summary.latest,
+    delta: summary.delta,
+    reset: summary.reset,
+    changes: summary.changes,
+    lastChangeAt: summary.lastChangeAt?.toISOString(),
+    lastChangeDelta: summary.lastChangeDelta,
+    lastResetAt: summary.lastResetAt?.toISOString(),
+  };
+}
+
+function toUsageTopHistoryBucketRecord(bucket: UsageTopBucket, names: string[]): UsageTopHistoryBucketRecord {
+  return {
+    start: bucket.start.toISOString(),
+    end: bucket.end.toISOString(),
+    total: bucket.total,
+    reset: bucket.reset,
+    deltas: names.map((name) => {
+      const delta = bucket.deltas.get(name);
+      return {
+        name,
+        delta: delta?.delta,
+        reset: delta?.reset ?? false,
+      };
+    }),
+  };
+}
+
+function toUsageTopHistoryTrendPoint(point: UsageTopPoint): UsageTopHistoryTrendPoint {
+  return {
+    at: point.at.toISOString(),
+    value: point.value,
+  };
 }
 
 function formatHistoryLastChange(summary: UsageTopSummary): string {
@@ -2722,80 +2980,55 @@ function readUsageTopHistoryTotalAt(
   return count > 0 ? total : null;
 }
 
-function buildUsageTopHistoryRawTotals(
-  pointMap: Map<string, UsageTopPoint[]>,
-  names: string[],
-  windowStart: Date,
-): UsageTopPoint[] {
-  const times = [...new Set(names.flatMap((name) => (
-    (pointMap.get(name) ?? []).map((point) => point.at.getTime())
-  )))].filter((time) => time >= windowStart.getTime()).sort((left, right) => left - right);
-  return [windowStart.getTime(), ...times].flatMap((time) => {
-    const total = readUsageTopHistoryTotalAt(pointMap, names, time, windowStart);
-    return total === null ? [] : [{ at: new Date(time), value: total }];
-  });
-}
-
-function printUsageTopHistoryChart(
+function buildUsageTopHistoryTrend(
   pointMap: Map<string, UsageTopPoint[]>,
   names: string[],
   buckets: UsageTopBucket[],
   windowStart: Date,
-  now: Date,
-): void {
-  const values = buckets.map((bucket) => readUsageTopHistoryTotalAt(pointMap, names, bucket.end.getTime(), windowStart));
-  const firstValueIndex = values.findIndex((value) => value !== null);
+): UsageTopPoint[] {
+  if (names.length === 0) {
+    return [];
+  }
+  return [
+    { at: windowStart, value: 0 },
+    ...buckets.flatMap((bucket) => {
+      const total = readUsageTopHistoryTotalAt(pointMap, names, bucket.end.getTime(), windowStart);
+      return total === null ? [] : [{ at: bucket.end, value: total }];
+    }),
+  ];
+}
+
+function printUsageTopHistoryChart(trend: UsageTopPoint[]): void {
+  const points = trend
+    .filter((point) => Number.isFinite(point.value) && !Number.isNaN(point.at.getTime()))
+    .sort((left, right) => left.at.getTime() - right.at.getTime());
   console.log();
   console.log(textBold("total trend"));
-  const rawTotals = buildUsageTopHistoryRawTotals(pointMap, names, windowStart)
-    .filter((point) => point.at.getTime() >= windowStart.getTime() && point.at.getTime() <= now.getTime());
-  if ((firstValueIndex < 0 || values.length - firstValueIndex < 2) && rawTotals.length < 2) {
+  if (points.length < 2) {
     console.log(textDim("not enough history yet"));
     return;
   }
 
-  const useRawTotals = firstValueIndex < 0 || values.length - firstValueIndex < 2;
-  let start: Date | undefined;
-  let mid: Date | undefined;
-  let end = now;
-  const series = useRawTotals
-    ? rawTotals.map((point, index) => {
-      if (index === 0) {
-        start = point.at;
-      }
-      if (index === Math.floor(rawTotals.length / 2)) {
-        mid = point.at;
-      }
-      end = point.at;
-      return point.value;
-    })
-    : (() => {
-      let previous = values[firstValueIndex] ?? 0;
-      start = buckets[firstValueIndex]?.start;
-      mid = buckets[Math.floor((firstValueIndex + buckets.length - 1) / 2)]?.start;
-      return values.slice(firstValueIndex).map((value) => {
-        if (value !== null) {
-          previous = value;
-        }
-        return previous;
-      });
-    })();
+  const start = points[0].at;
+  const mid = points[Math.floor(points.length / 2)].at;
+  const end = points[points.length - 1].at;
+  const series = points.map((point) => point.value);
   console.log(asciichart.plot(series, {
     height: 8,
     format: (value) => `${formatHistoryCost(value).padStart(7)} `,
   }));
-  console.log(textDim(`         ${start ? formatHistoryTime(start) : ""}     ${mid ? formatHistoryTime(mid) : ""}     ${formatHistoryTime(end)}`));
+  console.log(textDim(`         ${formatHistoryTime(start)}     ${formatHistoryTime(mid)}     ${formatHistoryTime(end)}`));
 }
 
-async function printUsageTopHistoryUnavailable(profiles: ProfilesFile): Promise<void> {
+async function printUsageTopHistoryUnavailable(profiles: ProfilesFile, request: UsageTopHistoryRequest): Promise<void> {
   const urls = await readUsageTopStateUrls(profiles);
   if (urls.length > 0) {
     console.log(textDim("ccs top history unavailable"));
-    printKeyValue("source:", colorUrl(usageTopHistoryUrl(urls[0])), 7);
+    printKeyValue("source:", colorUrl(usageTopHistoryUrl(urls[0], request)), 7);
     if (urls.length > 1) {
-      printKeyValue("also:", urls.slice(1).map((url) => colorUrl(usageTopHistoryUrl(url))).join("  "), 7);
+      printKeyValue("also:", urls.slice(1).map((url) => colorUrl(usageTopHistoryUrl(url, request))).join("  "), 7);
     }
-    printKeyValue("note:", "restart ccs s server with a version that serves /ccs/top/history", 5);
+    printKeyValue("note:", "restart ccs s server with a version that serves compact /ccs/top/history", 5);
     return;
   }
 
@@ -2819,36 +3052,71 @@ function printUsageTopHistoryEmpty(source: UsageTopHistorySource, profileName: s
   printKeyValue("note:", "wait for ccs s server to write the first usage snapshot", 5);
 }
 
+function parseUsageTopHistoryDate(value: string): Date {
+  return new Date(value);
+}
+
+function parseOptionalUsageTopHistoryDate(value: string | undefined): Date | undefined {
+  return value ? parseUsageTopHistoryDate(value) : undefined;
+}
+
+function toUsageTopSummary(record: UsageTopHistorySummaryRecord): UsageTopSummary {
+  return {
+    name: record.name,
+    first: record.first,
+    latest: record.latest,
+    delta: record.delta,
+    reset: record.reset,
+    changes: record.changes,
+    lastChangeAt: parseOptionalUsageTopHistoryDate(record.lastChangeAt),
+    lastChangeDelta: record.lastChangeDelta,
+    lastResetAt: parseOptionalUsageTopHistoryDate(record.lastResetAt),
+  };
+}
+
+function toUsageTopBucket(record: UsageTopHistoryBucketRecord): UsageTopBucket {
+  return {
+    start: parseUsageTopHistoryDate(record.start),
+    end: parseUsageTopHistoryDate(record.end),
+    deltas: new Map(record.deltas.map((delta) => [
+      delta.name,
+      { delta: delta.delta, reset: delta.reset },
+    ])),
+    total: record.total,
+    reset: record.reset,
+  };
+}
+
+function toUsageTopTrendPoint(record: UsageTopHistoryTrendPoint): UsageTopPoint {
+  return {
+    at: parseUsageTopHistoryDate(record.at),
+    value: record.value,
+  };
+}
+
 async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string): Promise<void> {
-  const source = await readUsageTopHistorySource(profiles);
+  const request = buildUsageTopHistoryRequest(profileName);
+  const source = await readUsageTopHistorySource(profiles, request);
   if (!source) {
-    await printUsageTopHistoryUnavailable(profiles);
+    await printUsageTopHistoryUnavailable(profiles, request);
     return;
   }
 
-  const updatedAt = new Date(source.history.updatedAt);
-  const now = Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt;
-  const windowStart = startOfHistoryDay(now);
-  const records = filterUsageTopHistoryRecords(source.history.records, now);
-  const pointMap = buildUsageTopPointMap(records);
-  const availableNames = [...pointMap.keys()].sort();
-  const names = profileName ? availableNames.filter((name) => name === profileName) : availableNames;
+  const names = source.history.names;
   if (names.length === 0) {
-    printUsageTopHistoryEmpty(source, profileName, availableNames);
+    printUsageTopHistoryEmpty(source, profileName, source.history.availableNames);
     return;
   }
 
-  const summaries = names
-    .map((name) => summarizeUsageTopHistory(name, pointMap.get(name) ?? [], windowStart, now))
-    .sort((left, right) => (right.delta ?? 0) - (left.delta ?? 0));
-  const sortedNames = summaries.map((summary) => summary.name);
-  const buckets = buildUsageTopHistoryBuckets(pointMap, sortedNames, windowStart, now);
-  console.log(`ccs usage history  today  bucket ${formatHistoryBucketWindow(usageTopHistoryBucketMinutes)}`);
+  const summaries = source.history.summaries.map(toUsageTopSummary);
+  const buckets = source.history.buckets.map(toUsageTopBucket);
+  const trend = source.history.trend.map(toUsageTopTrendPoint);
+  console.log(`ccs usage history  today  bucket ${formatHistoryBucketWindow(source.history.bucketMinutes)}`);
   printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
   printUsageTopHistorySummary(summaries);
-  printUsageTopHistoryChart(pointMap, sortedNames, buckets, windowStart, now);
-  printUsageTopHistoryPeakBuckets(buckets, sortedNames);
-  printUsageTopHistoryBuckets(buckets, sortedNames);
+  printUsageTopHistoryChart(trend);
+  printUsageTopHistoryPeakBuckets(buckets, names);
+  printUsageTopHistoryBuckets(buckets, names);
 }
 
 async function writeUsageTopStatusText(value: string): Promise<void> {
@@ -2862,6 +3130,44 @@ async function writeUsageTopStatusText(value: string): Promise<void> {
     await rm(tmpPath, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+function parseUsageTopHistoryDateParam(params: URLSearchParams, name: string): Date | undefined {
+  const value = params.get(name);
+  if (value === null) {
+    return undefined;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`invalid ${name}: ${value}`);
+  }
+  return date;
+}
+
+function parseUsageTopHistoryBucketMinutes(params: URLSearchParams): number {
+  const value = params.get("bucketMinutes");
+  if (value === null) {
+    return usageTopHistoryBucketMinutes;
+  }
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) {
+    throw new Error(`invalid bucketMinutes: ${value}`);
+  }
+  return minutes;
+}
+
+function parseUsageTopHistoryRequestFromUrl(url: URL, now = new Date()): UsageTopHistoryRequest {
+  const windowStart = parseUsageTopHistoryDateParam(url.searchParams, "since") ?? startOfHistoryDay(now);
+  const windowEnd = parseUsageTopHistoryDateParam(url.searchParams, "until") ?? now;
+  if (windowStart.getTime() > windowEnd.getTime()) {
+    throw new Error("since must be before until");
+  }
+  return {
+    windowStart,
+    windowEnd,
+    bucketMinutes: parseUsageTopHistoryBucketMinutes(url.searchParams),
+    profileName: url.searchParams.get("profile")?.trim() || undefined,
+  };
 }
 
 async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
@@ -2994,20 +3300,32 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   await recordUsageTopHistorySnapshot(snapshot);
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    if (request.method === "GET" && request.url === "/health") {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    if (request.method === "GET" && url.pathname === "/health") {
       sendUsageTopJson(response, 200, { ok: true });
       return;
     }
-    if (request.method === "GET" && request.url === "/ccs/top/state") {
+    if (request.method === "GET" && url.pathname === "/ccs/top/state") {
       snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
       sendUsageTopJson(response, 200, snapshot);
       return;
     }
-    if (request.method === "GET" && request.url === "/ccs/top/history") {
+    if (request.method === "GET" && url.pathname === "/ccs/top/history") {
+      let historyRequest: UsageTopHistoryRequest;
+      try {
+        historyRequest = parseUsageTopHistoryRequestFromUrl(url);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sendUsageTopJson(response, 400, { error: message });
+        return;
+      }
       void (async () => {
         try {
-          const now = new Date();
-          sendUsageTopJson(response, 200, buildUsageTopHistory(await readUsageTopHistoryRecords(now), now));
+          const windowEnd = historyRequest.windowEnd ?? new Date();
+          sendUsageTopJson(response, 200, buildUsageTopHistory(
+            await readUsageTopHistoryRecords(windowEnd),
+            { ...historyRequest, windowEnd },
+          ));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           sendUsageTopJson(response, 500, { error: message });
@@ -3015,7 +3333,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       })();
       return;
     }
-    if (request.method === "POST" && request.url === "/ccs/top/pause") {
+    if (request.method === "POST" && url.pathname === "/ccs/top/pause") {
       void (async () => {
         paused = true;
         clearTimer();
@@ -3024,7 +3342,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       })();
       return;
     }
-    if (request.method === "POST" && request.url === "/ccs/top/resume") {
+    if (request.method === "POST" && url.pathname === "/ccs/top/resume") {
       void (async () => {
         paused = false;
         await resetPolling();
@@ -3032,7 +3350,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       })();
       return;
     }
-    if (request.method === "POST" && request.url === "/ccs/top/reset") {
+    if (request.method === "POST" && url.pathname === "/ccs/top/reset") {
       void (async () => {
         await resetPolling();
         sendUsageTopJson(response, 200, { ok: true, paused });
