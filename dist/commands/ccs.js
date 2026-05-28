@@ -45,6 +45,7 @@ const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
 const usageTopHistoryChartMinWidth = 72;
+const usageTopHistoryChartHeight = 5;
 const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
@@ -2093,6 +2094,10 @@ function formatHistoryBucketWindow(minutes) {
 function startOfHistoryDay(date) {
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
+function endOfHistoryDay(date) {
+    const start = startOfHistoryDay(date);
+    return new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+}
 function formatHistoryCost(value) {
     return `$${value.toFixed(1)}`;
 }
@@ -2410,12 +2415,12 @@ function buildUsageTopHistoryTrend(pointMap, names, buckets, windowStart) {
         }),
     ];
 }
-function expandUsageTopHistoryChartPoints(points) {
-    if (points.length >= usageTopHistoryChartMinWidth) {
+function expandUsageTopHistoryChartPoints(points, width) {
+    if (points.length >= width) {
         return points;
     }
-    return Array.from({ length: usageTopHistoryChartMinWidth }, (_, index) => {
-        const sourceIndex = Math.round(index * (points.length - 1) / (usageTopHistoryChartMinWidth - 1));
+    return Array.from({ length: width }, (_, index) => {
+        const sourceIndex = Math.round(index * (points.length - 1) / (width - 1));
         return points[sourceIndex];
     });
 }
@@ -2425,15 +2430,126 @@ function placeHistoryAxisLabel(chars, label, index) {
         chars[start + offset] = label[offset];
     }
 }
-function formatUsageTopHistoryChartAxis(start, mid, end, width) {
+function usageTopHistoryChartTickIntervalMs(axisStart, axisEnd) {
+    const rangeMs = axisEnd.getTime() - axisStart.getTime();
+    if (rangeMs > 12 * 60 * 60 * 1000) {
+        return 6 * 60 * 60 * 1000;
+    }
+    if (rangeMs > 6 * 60 * 60 * 1000) {
+        return 3 * 60 * 60 * 1000;
+    }
+    if (rangeMs > 2 * 60 * 60 * 1000) {
+        return 60 * 60 * 1000;
+    }
+    if (rangeMs > 60 * 60 * 1000) {
+        return 30 * 60 * 1000;
+    }
+    return 15 * 60 * 1000;
+}
+function ceilHistoryTimeToInterval(axisStart, intervalMs) {
+    const dayStartMs = startOfHistoryDay(axisStart).getTime();
+    return dayStartMs + Math.ceil((axisStart.getTime() - dayStartMs) / intervalMs) * intervalMs;
+}
+function formatUsageTopHistoryChartTickLabel(tickMs, axisEnd) {
+    if (tickMs === axisEnd.getTime()) {
+        return "24:00";
+    }
+    return formatHistoryTime(new Date(tickMs));
+}
+function buildUsageTopHistoryChartTicks(axisStart, axisEnd, width) {
+    const axisStartMs = axisStart.getTime();
+    const axisEndMs = axisEnd.getTime();
+    if (axisEndMs <= axisStartMs || width <= 1) {
+        return [{ index: 0, label: formatHistoryTime(axisStart) }];
+    }
+    const intervalMs = usageTopHistoryChartTickIntervalMs(axisStart, axisEnd);
+    const ticks = [];
+    for (let tickMs = ceilHistoryTimeToInterval(axisStart, intervalMs); tickMs <= axisEndMs; tickMs += intervalMs) {
+        ticks.push({
+            index: Math.round((tickMs - axisStartMs) / (axisEndMs - axisStartMs) * (width - 1)),
+            label: formatUsageTopHistoryChartTickLabel(tickMs, axisEnd),
+        });
+    }
+    return ticks;
+}
+function formatUsageTopHistoryChartZeroAxis(line, ticks, width) {
+    const chars = Array.from(line);
+    const endColumn = usageTopHistoryChartAxisPrefix + width - 1;
+    while (chars.length <= endColumn) {
+        chars.push(" ");
+    }
+    for (let column = usageTopHistoryChartAxisPrefix + 1; column <= endColumn; column += 1) {
+        if (chars[column] === " ") {
+            chars[column] = "─";
+        }
+    }
+    for (const tick of ticks) {
+        const column = usageTopHistoryChartAxisPrefix + tick.index;
+        if (column === usageTopHistoryChartAxisPrefix) {
+            chars[column] = "┼";
+        }
+        else if (chars[column] === " " || chars[column] === "─") {
+            chars[column] = "┬";
+        }
+    }
+    return chars.join("").trimEnd();
+}
+function formatUsageTopHistoryChartAxis(ticks, width) {
     const chars = Array.from({ length: width }, () => " ");
-    const startLabel = formatHistoryTime(start);
-    const midLabel = formatHistoryTime(mid);
-    const endLabel = formatHistoryTime(end);
-    placeHistoryAxisLabel(chars, startLabel, 0);
-    placeHistoryAxisLabel(chars, midLabel, Math.floor((width - midLabel.length) / 2));
-    placeHistoryAxisLabel(chars, endLabel, width - endLabel.length);
+    for (const tick of ticks) {
+        placeHistoryAxisLabel(chars, tick.label, tick.index - Math.floor(tick.label.length / 2));
+    }
     return `${" ".repeat(usageTopHistoryChartAxisPrefix)}${chars.join("")}`;
+}
+function niceUsageTopHistoryChartStep(value) {
+    if (value <= 0) {
+        return 1;
+    }
+    const magnitude = 10 ** Math.floor(Math.log10(value));
+    const scaled = value / magnitude;
+    if (scaled <= 1) {
+        return magnitude;
+    }
+    if (scaled <= 2) {
+        return 2 * magnitude;
+    }
+    if (scaled <= 5) {
+        return 5 * magnitude;
+    }
+    return 10 * magnitude;
+}
+function usageTopHistoryChartMax(series) {
+    const max = Math.max(0, ...series);
+    return niceUsageTopHistoryChartStep(max / usageTopHistoryChartHeight) * usageTopHistoryChartHeight;
+}
+function formatHistoryChartCost(value) {
+    const rounded = Math.round(value);
+    return Math.abs(value - rounded) < usageTopHistoryEpsilon ? `$${rounded}` : formatHistoryCost(value);
+}
+function colorUsageTopHistoryChartLine(line) {
+    return Array.from(line)
+        .map((char) => "┼┤┬─╭╯╰╮│╶╴".includes(char) ? colorCost(char) : char)
+        .join("");
+}
+function usageTopHistoryChartDataWidth(start, end, axisStart, axisEnd) {
+    const axisStartMs = axisStart.getTime();
+    const axisEndMs = axisEnd.getTime();
+    const endMs = Math.max(axisStartMs, Math.min(end.getTime(), axisEndMs));
+    if (axisEndMs <= axisStartMs) {
+        return usageTopHistoryChartMinWidth;
+    }
+    const ratio = (endMs - axisStartMs) / (axisEndMs - axisStartMs);
+    return Math.max(2, Math.round((usageTopHistoryChartMinWidth - 1) * ratio) + 1);
+}
+function formatUsageTopHistoryChartPlot(series, ticks) {
+    const lines = asciichart.plot(series, {
+        min: 0,
+        max: usageTopHistoryChartMax(series),
+        height: usageTopHistoryChartHeight,
+        format: (value) => `${formatHistoryChartCost(value).padStart(7)} `,
+    }).split("\n");
+    lines[lines.length - 1] = formatUsageTopHistoryChartZeroAxis(lines[lines.length - 1], ticks, usageTopHistoryChartMinWidth);
+    return lines.map(colorUsageTopHistoryChartLine).join("\n");
 }
 function printUsageTopHistoryChart(trend) {
     const points = trend
@@ -2446,15 +2562,13 @@ function printUsageTopHistoryChart(trend) {
         return;
     }
     const start = points[0].at;
-    const mid = points[Math.floor(points.length / 2)].at;
     const end = points[points.length - 1].at;
-    const chartPoints = expandUsageTopHistoryChartPoints(points);
+    const axisEnd = endOfHistoryDay(start);
+    const chartPoints = expandUsageTopHistoryChartPoints(points, usageTopHistoryChartDataWidth(start, end, start, axisEnd));
     const series = chartPoints.map((point) => point.value);
-    console.log(asciichart.plot(series, {
-        height: 8,
-        format: (value) => `${formatHistoryCost(value).padStart(7)} `,
-    }));
-    console.log(textDim(formatUsageTopHistoryChartAxis(start, mid, end, series.length)));
+    const ticks = buildUsageTopHistoryChartTicks(start, axisEnd, usageTopHistoryChartMinWidth);
+    console.log(formatUsageTopHistoryChartPlot(series, ticks));
+    console.log(textDim(formatUsageTopHistoryChartAxis(ticks, usageTopHistoryChartMinWidth)));
 }
 async function printUsageTopHistoryUnavailable(profiles, request) {
     const urls = await readUsageTopStateUrls(profiles);
