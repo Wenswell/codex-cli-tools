@@ -8,10 +8,16 @@ importers:
 
   .:
     dependencies:
+      asciichart:
+        specifier: ^1.5.25
+        version: 1.5.25
       diff:
         specifier: ^9.0.0
         version: 9.0.0
     devDependencies:
+      '@types/asciichart':
+        specifier: ^1.5.8
+        version: 1.5.8
       '@types/node':
         specifier: ^20.19.1
         version: 20.19.41
@@ -21,8 +27,14 @@ importers:
 
 packages:
 
+  '@types/asciichart@1.5.8':
+    resolution: {integrity: sha512-8yzgCUybv8/yUfj4WeTh7G+V+AxU7AzwsF2CrkTtARKHdrxE/EiByF2efUMj6qdm87tENucNu6pLs22RWU0H7g==}
+
   '@types/node@20.19.41':
     resolution: {integrity: sha512-ECymXOukMnOoVkC2bb1Vc/w/836DXncOg5m8Xj1RH7xSHZJWNYY6Zh7EH477vcnD5egKNNfy2RpNOmuChhFPgQ==}
+
+  asciichart@1.5.25:
+    resolution: {integrity: sha512-PNxzXIPPOtWq8T7bgzBtk9cI2lgS4SJZthUHEiQ1aoIc3lNzGfUvIvo9LiAnq26TACo9t1/4qP6KTGAUbzX9Xg==}
 
   diff@9.0.0:
     resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
@@ -38,9 +50,13 @@ packages:
 
 snapshots:
 
+  '@types/asciichart@1.5.8': {}
+
   '@types/node@20.19.41':
     dependencies:
       undici-types: 6.21.0
+
+  asciichart@1.5.25: {}
 
   diff@9.0.0: {}
 
