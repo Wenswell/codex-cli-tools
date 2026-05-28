@@ -45,6 +45,7 @@ const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
 const usageTopHttpTimeoutMs = 1_500;
+const usageTopHistoryHttpTimeoutMs = 3_000;
 let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
@@ -1931,7 +1932,7 @@ async function fetchUsageTopSnapshot(url) {
 }
 async function fetchUsageTopHistory(url) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), usageTopHttpTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), usageTopHistoryHttpTimeoutMs);
     try {
         const response = await fetch(url, {
             method: "GET",
