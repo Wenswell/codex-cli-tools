@@ -2443,6 +2443,10 @@ function formatHistoryBucketWindow(minutes: number): string {
   return minutes >= 60 && minutes % 60 === 0 ? `${minutes / 60}h` : `${minutes}m`;
 }
 
+function startOfHistoryDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
 function formatHistoryCost(value: number): string {
   return `$${value.toFixed(1)}`;
 }
@@ -2495,9 +2499,8 @@ function buildUsageTopPointMap(records: UsageTopSnapshot[]): Map<string, UsageTo
 
 function summarizeUsageTopHistory(name: string, points: UsageTopPoint[], windowStart: Date, now: Date): UsageTopSummary {
   const windowStartMs = windowStart.getTime();
-  const baseline = findUsageTopPointAtOrBefore(points, windowStartMs);
   const windowPoints = [
-    ...(baseline ? [baseline] : []),
+    { at: windowStart, value: 0 },
     ...points.filter((point) => (
       point.at.getTime() > windowStartMs && point.at.getTime() <= now.getTime()
     )),
@@ -2553,9 +2556,25 @@ function findUsageTopPointAtOrBefore(points: UsageTopPoint[], atMs: number): Usa
   return found;
 }
 
-function buildUsageTopHistoryBuckets(pointMap: Map<string, UsageTopPoint[]>, names: string[], now: Date): UsageTopBucket[] {
+function findUsageTopDayPointAtOrBefore(points: UsageTopPoint[], atMs: number, windowStart: Date): UsageTopPoint | undefined {
+  const found = findUsageTopPointAtOrBefore(points, atMs);
+  if (found && found.at.getTime() >= windowStart.getTime()) {
+    return found;
+  }
+  if (atMs >= windowStart.getTime()) {
+    return { at: windowStart, value: 0 };
+  }
+  return found;
+}
+
+function buildUsageTopHistoryBuckets(
+  pointMap: Map<string, UsageTopPoint[]>,
+  names: string[],
+  windowStart: Date,
+  now: Date,
+): UsageTopBucket[] {
   const nowMs = now.getTime();
-  const windowStartMs = nowMs - usageTopHistoryWindowMs;
+  const windowStartMs = windowStart.getTime();
   const firstBucketStart = Math.floor(windowStartMs / usageTopHistoryBucketMs) * usageTopHistoryBucketMs;
   const buckets: UsageTopBucket[] = [];
 
@@ -2567,8 +2586,8 @@ function buildUsageTopHistoryBuckets(pointMap: Map<string, UsageTopPoint[]>, nam
     let reset = false;
     for (const name of names) {
       const points = pointMap.get(name) ?? [];
-      const startPoint = findUsageTopPointAtOrBefore(points, startMs);
-      const endPoint = findUsageTopPointAtOrBefore(points, endMs);
+      const startPoint = findUsageTopDayPointAtOrBefore(points, startMs, windowStart);
+      const endPoint = findUsageTopDayPointAtOrBefore(points, endMs, windowStart);
       if (!startPoint || !endPoint) {
         deltas.set(name, { reset: false });
         continue;
@@ -2623,11 +2642,11 @@ function printUsageTopHistorySummary(summaries: UsageTopSummary[]): void {
 }
 
 function isUsageTopHistoryBucketEmpty(bucket: UsageTopBucket): boolean {
-  if (bucket.reset || bucket.total !== undefined) {
+  if (bucket.reset || (bucket.total !== undefined && Math.abs(bucket.total) >= usageTopHistoryEpsilon)) {
     return false;
   }
   for (const delta of bucket.deltas.values()) {
-    if (delta.reset || delta.delta !== undefined) {
+    if (delta.reset || (delta.delta !== undefined && Math.abs(delta.delta) >= usageTopHistoryEpsilon)) {
       return false;
     }
   }
@@ -2639,7 +2658,7 @@ function printUsageTopHistoryBuckets(buckets: UsageTopBucket[], names: string[])
   console.log(textBold("bucket changes"));
   const firstVisibleBucketIndex = buckets.findIndex((bucket) => !isUsageTopHistoryBucketEmpty(bucket));
   if (firstVisibleBucketIndex < 0) {
-    console.log(textDim("not enough boundary history yet"));
+    console.log(textDim("no bucket changes yet"));
     return;
   }
   const visibleBuckets = buckets.slice(firstVisibleBucketIndex);
@@ -2686,11 +2705,16 @@ function printUsageTopHistoryPeakBuckets(buckets: UsageTopBucket[], names: strin
   ], ["left", "right", "left"]);
 }
 
-function readUsageTopHistoryTotalAt(pointMap: Map<string, UsageTopPoint[]>, names: string[], atMs: number): number | null {
+function readUsageTopHistoryTotalAt(
+  pointMap: Map<string, UsageTopPoint[]>,
+  names: string[],
+  atMs: number,
+  windowStart: Date,
+): number | null {
   let total = 0;
   let count = 0;
   for (const name of names) {
-    const point = findUsageTopPointAtOrBefore(pointMap.get(name) ?? [], atMs);
+    const point = findUsageTopDayPointAtOrBefore(pointMap.get(name) ?? [], atMs, windowStart);
     if (!point) {
       continue;
     }
@@ -2700,22 +2724,33 @@ function readUsageTopHistoryTotalAt(pointMap: Map<string, UsageTopPoint[]>, name
   return count > 0 ? total : null;
 }
 
-function buildUsageTopHistoryRawTotals(pointMap: Map<string, UsageTopPoint[]>, names: string[]): UsageTopPoint[] {
+function buildUsageTopHistoryRawTotals(
+  pointMap: Map<string, UsageTopPoint[]>,
+  names: string[],
+  windowStart: Date,
+): UsageTopPoint[] {
   const times = [...new Set(names.flatMap((name) => (
     (pointMap.get(name) ?? []).map((point) => point.at.getTime())
-  )))].sort((left, right) => left - right);
-  return times.flatMap((time) => {
-    const total = readUsageTopHistoryTotalAt(pointMap, names, time);
+  )))].filter((time) => time >= windowStart.getTime()).sort((left, right) => left - right);
+  return [windowStart.getTime(), ...times].flatMap((time) => {
+    const total = readUsageTopHistoryTotalAt(pointMap, names, time, windowStart);
     return total === null ? [] : [{ at: new Date(time), value: total }];
   });
 }
 
-function printUsageTopHistoryChart(pointMap: Map<string, UsageTopPoint[]>, names: string[], buckets: UsageTopBucket[], now: Date): void {
-  const values = buckets.map((bucket) => readUsageTopHistoryTotalAt(pointMap, names, bucket.end.getTime()));
+function printUsageTopHistoryChart(
+  pointMap: Map<string, UsageTopPoint[]>,
+  names: string[],
+  buckets: UsageTopBucket[],
+  windowStart: Date,
+  now: Date,
+): void {
+  const values = buckets.map((bucket) => readUsageTopHistoryTotalAt(pointMap, names, bucket.end.getTime(), windowStart));
   const firstValueIndex = values.findIndex((value) => value !== null);
   console.log();
   console.log(textBold("total trend"));
-  const rawTotals = buildUsageTopHistoryRawTotals(pointMap, names);
+  const rawTotals = buildUsageTopHistoryRawTotals(pointMap, names, windowStart)
+    .filter((point) => point.at.getTime() >= windowStart.getTime() && point.at.getTime() <= now.getTime());
   if ((firstValueIndex < 0 || values.length - firstValueIndex < 2) && rawTotals.length < 2) {
     console.log(textDim("not enough history yet"));
     return;
@@ -2795,7 +2830,7 @@ async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string
 
   const updatedAt = new Date(source.history.updatedAt);
   const now = Number.isNaN(updatedAt.getTime()) ? new Date() : updatedAt;
-  const windowStart = new Date(now.getTime() - usageTopHistoryWindowMs);
+  const windowStart = startOfHistoryDay(now);
   const records = filterUsageTopHistoryRecords(source.history.records, now);
   const pointMap = buildUsageTopPointMap(records);
   const availableNames = [...pointMap.keys()].sort();
@@ -2809,11 +2844,11 @@ async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string
     .map((name) => summarizeUsageTopHistory(name, pointMap.get(name) ?? [], windowStart, now))
     .sort((left, right) => (right.delta ?? 0) - (left.delta ?? 0));
   const sortedNames = summaries.map((summary) => summary.name);
-  const buckets = buildUsageTopHistoryBuckets(pointMap, sortedNames, now);
-  console.log(`ccs usage history  last ${usageTopHistoryWindowHours}h  bucket ${formatHistoryBucketWindow(usageTopHistoryBucketMinutes)}`);
+  const buckets = buildUsageTopHistoryBuckets(pointMap, sortedNames, windowStart, now);
+  console.log(`ccs usage history  today  bucket ${formatHistoryBucketWindow(usageTopHistoryBucketMinutes)}`);
   printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
   printUsageTopHistorySummary(summaries);
-  printUsageTopHistoryChart(pointMap, sortedNames, buckets, now);
+  printUsageTopHistoryChart(pointMap, sortedNames, buckets, windowStart, now);
   printUsageTopHistoryPeakBuckets(buckets, sortedNames);
   printUsageTopHistoryBuckets(buckets, sortedNames);
 }
@@ -3250,7 +3285,7 @@ function usageLines(): string[] {
     "  ccs s [line]                         # print compact status from configured top state",
     "  ccs s agent                          # write local status text for WezTerm",
     "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
-    "  ccs s history [PROFILE]              # show 24h usage history with hourly buckets",
+    "  ccs s history [PROFILE]              # show today's usage history with hourly buckets",
     "  ccs s pause                          # pause first reachable configured top server",
     "  ccs s resume                         # resume first reachable configured top server",
     "  ccs s reset                          # refresh server now and reset polling to 25s",

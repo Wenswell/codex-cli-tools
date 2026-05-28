@@ -315,7 +315,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-Run `ccs s history` to render the latest 24 hours from the first reachable configured top server. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups the records into hourly buckets, and prints summary, total trend, peak buckets, and bucket changes. Use `ccs s history PROFILE` to focus the same report on one provider:
+Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups today's records into hourly buckets, and prints summary, total trend, peak buckets, and bucket changes. Use `ccs s history PROFILE` to focus the same report on one provider:
 
 ```bash
 ccs s history
@@ -325,7 +325,7 @@ ccs s history input
 Example output:
 
 ```text
-ccs usage history  last 24h  bucket 1h
+ccs usage history  today  bucket 1h
 source: http://10.126.126.1:8765/ccs/top/history
 
 summary
