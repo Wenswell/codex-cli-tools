@@ -26,9 +26,7 @@ const usageTopServerIntervalsMs = [
     120_000,
     300_000,
     600_000,
-    1_200_000,
-    1_800_000,
-    3_600_000,
+    900_000,
 ];
 const usageTopMaxIntervalIdleLimit = 3;
 const usageTopDefaultMarkIntervalMs = 5 * 60 * 1000;
