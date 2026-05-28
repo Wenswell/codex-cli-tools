@@ -520,7 +520,7 @@ Behavior:
 
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
-- `ccs run PROFILE [CODEX_ARGS...]` sets `OPENAI_API_KEY` only for the launched `codex` process and passes a temporary `-c model_providers.<current>.base_url=...` override, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
+- `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
