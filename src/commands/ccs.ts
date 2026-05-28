@@ -3161,9 +3161,20 @@ function formatHistoryChartCost(value: number): string {
   return Math.abs(value - rounded) < usageTopHistoryEpsilon ? `$${rounded}` : formatHistoryCost(value);
 }
 
-function colorUsageTopHistoryChartLine(line: string): string {
+function colorUsageTopHistoryChartLine(line: string, rowIndex: number, zeroRowIndex: number, dataWidth: number): string {
   return Array.from(line)
-    .map((char) => "┼┤┬─╭╯╰╮│╶╴".includes(char) ? colorCost(char) : char)
+    .map((char, index) => {
+      if (!"┼┬─╭╯╰╮│╶╴".includes(char) || index <= usageTopHistoryChartAxisPrefix) {
+        return char;
+      }
+      if (char === "┬" || index - usageTopHistoryChartAxisPrefix >= dataWidth) {
+        return textDim(char);
+      }
+      if (rowIndex === zeroRowIndex && char === "─") {
+        return char;
+      }
+      return colorCost(char);
+    })
     .join("");
 }
 
@@ -3190,7 +3201,10 @@ function formatUsageTopHistoryChartPlot(series: number[], ticks: UsageTopHistory
     ticks,
     usageTopHistoryChartMinWidth,
   );
-  return lines.map(colorUsageTopHistoryChartLine).join("\n");
+  const zeroRowIndex = lines.length - 1;
+  return lines
+    .map((line, index) => colorUsageTopHistoryChartLine(line, index, zeroRowIndex, series.length))
+    .join("\n");
 }
 
 function printUsageTopHistoryChart(trend: UsageTopPoint[]): void {
