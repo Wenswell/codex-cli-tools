@@ -39,7 +39,7 @@ const usageTopMarkNameWidth = 8;
 const usageTopMarkDeltaWidth = 5;
 const usageTopSnapshotActiveTtlMs = 5_000;
 const usageTopHistoryWindowMs = 24 * 60 * 60 * 1000;
-const usageTopHistoryBucketMs = 60 * 60 * 1000;
+const usageTopHistoryBucketMs = 30 * 60 * 1000;
 const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBucketMs;
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
@@ -2928,7 +2928,7 @@ function usageLines() {
         "  ccs s [line]                         # print compact status from configured top state",
         "  ccs s agent                          # write local status text for WezTerm",
         "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
-        "  ccs s history [PROFILE]              # show today's usage history with hourly buckets",
+        "  ccs s history [PROFILE]              # show today's usage history with 30-minute buckets",
         "  ccs s pause                          # pause first reachable configured top server",
         "  ccs s resume                         # resume first reachable configured top server",
         "  ccs s reset                          # refresh server now and reset polling to 25s",
