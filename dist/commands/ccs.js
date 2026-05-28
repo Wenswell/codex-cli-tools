@@ -45,8 +45,11 @@ const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistorySummaryDeltaMs = 5 * 60 * 60 * 1000;
 const usageTopHistoryEpsilon = 0.05;
 const usageTopHistoryChartMinWidth = 56;
-const usageTopHistoryChartHeight = 5;
+const usageTopHistoryChartMinIntervals = 3;
+const usageTopHistoryChartMaxIntervals = 6;
+const usageTopHistoryChartTargetIntervals = 5;
 const usageTopHistoryChartAxisPrefix = 9;
+const usageTopHistoryChartSummaryGap = 4;
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 let usageTopStatusWriteSequence = 0;
@@ -2460,26 +2463,43 @@ function formatUsageTopHistoryChartAxis(ticks, width) {
     }
     return `${" ".repeat(usageTopHistoryChartAxisPrefix)}${chars.join("")}`;
 }
-function niceUsageTopHistoryChartStep(value) {
-    if (value <= 0) {
-        return 1;
+function usageTopHistoryChartStepCandidates(max) {
+    if (max <= 0) {
+        return [1];
     }
-    const magnitude = 10 ** Math.floor(Math.log10(value));
-    const scaled = value / magnitude;
-    if (scaled <= 1) {
-        return magnitude;
+    const baseExponent = Math.floor(Math.log10(max));
+    const steps = [];
+    for (let exponent = baseExponent - 2; exponent <= baseExponent + 1; exponent += 1) {
+        const magnitude = 10 ** exponent;
+        steps.push(magnitude, 2 * magnitude, 5 * magnitude);
     }
-    if (scaled <= 2) {
-        return 2 * magnitude;
-    }
-    if (scaled <= 5) {
-        return 5 * magnitude;
-    }
-    return 10 * magnitude;
+    return [...new Set(steps)].filter((step) => step > 0).sort((left, right) => left - right);
 }
-function usageTopHistoryChartMax(series) {
+function usageTopHistoryChartScale(series) {
     const max = Math.max(0, ...series);
-    return niceUsageTopHistoryChartStep(max / usageTopHistoryChartHeight) * usageTopHistoryChartHeight;
+    if (max <= 0) {
+        return {
+            max: usageTopHistoryChartTargetIntervals,
+            height: usageTopHistoryChartTargetIntervals,
+        };
+    }
+    const candidates = usageTopHistoryChartStepCandidates(max)
+        .map((step) => {
+        const height = Math.ceil(max / step);
+        return {
+            max: step * height,
+            height,
+        };
+    })
+        .filter((scale) => (scale.height >= usageTopHistoryChartMinIntervals
+        && scale.height <= usageTopHistoryChartMaxIntervals))
+        .sort((left, right) => (left.max - right.max
+        || Math.abs(left.height - usageTopHistoryChartTargetIntervals)
+            - Math.abs(right.height - usageTopHistoryChartTargetIntervals)));
+    return candidates[0] ?? {
+        max,
+        height: usageTopHistoryChartTargetIntervals,
+    };
 }
 function formatHistoryChartCost(value) {
     const rounded = Math.round(value);
@@ -2512,10 +2532,11 @@ function usageTopHistoryChartDataWidth(start, end, axisStart, axisEnd) {
     return Math.max(2, Math.round((usageTopHistoryChartMinWidth - 1) * ratio) + 1);
 }
 function formatUsageTopHistoryChartPlot(series, ticks) {
+    const scale = usageTopHistoryChartScale(series);
     const lines = asciichart.plot(series, {
         min: 0,
-        max: usageTopHistoryChartMax(series),
-        height: usageTopHistoryChartHeight,
+        max: scale.max,
+        height: scale.height,
         format: (value) => `${formatHistoryChartCost(value).padStart(7)} `,
     }).split("\n");
     lines[lines.length - 1] = formatUsageTopHistoryChartZeroAxis(lines[lines.length - 1], ticks, usageTopHistoryChartMinWidth);
@@ -2559,14 +2580,15 @@ function formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd) {
     return [
         textBold("summary"),
         ...formatTableRows([
-            ["provider", "now", "5h delta", "last"],
+            ["provider", "now", "5h delta", "last", "change"],
             ...summaries.map((summary) => [
                 colorName(summary.name),
                 formatHistoryValue(summary.latest),
                 formatHistoryDeltaCell(usageTopHistorySummaryDelta(summary.name, buckets, windowEnd), summary.reset),
-                `${formatHistoryLastChangeTime(summary)} ${formatHistoryLastChangeDelta(summary)}`,
+                formatHistoryLastChangeTime(summary),
+                formatHistoryLastChangeDelta(summary),
             ]),
-        ], ["left", "right", "right", "right"]),
+        ], ["left", "right", "right", "right", "right"]),
     ];
 }
 function printUsageTopHistoryChartWithSummary(trend, summaries, buckets, windowEnd) {
@@ -2578,7 +2600,7 @@ function printUsageTopHistoryChartWithSummary(trend, summaries, buckets, windowE
     for (let index = 0; index < lineCount; index += 1) {
         const chartLine = chartLines[index] ?? "";
         const summaryLine = summaryLines[index] ?? "";
-        console.log(`${padVisibleRight(chartLine, chartWidth)}  ${summaryLine}`.trimEnd());
+        console.log(`${padVisibleRight(chartLine, chartWidth)}${" ".repeat(usageTopHistoryChartSummaryGap)}${summaryLine}`.trimEnd());
     }
 }
 async function printUsageTopHistoryUnavailable(profiles, request) {
