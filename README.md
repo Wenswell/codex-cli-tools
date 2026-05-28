@@ -315,7 +315,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, the
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves the compact `/ccs/top/history` API. The server keeps raw snapshot records in `~/.cache/codex-tools/ccs-top-history.jsonl`, but HTTP clients request only display data for the needed window: summary, total trend, peak buckets, and 30-minute bucket changes. Bucket changes print two consecutive buckets per row. The endpoint accepts `since`, `until`, `bucketMinutes`, and `profile` query parameters. Use `ccs s history PROFILE` to focus the same report on one provider:
+Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves the compact `/ccs/top/history` API. The server keeps raw snapshot records in `~/.cache/codex-tools/ccs-top-history.jsonl`, but HTTP clients request only display data for the needed window: total trend with summary, and 30-minute bucket changes. Bucket changes print two consecutive buckets per row. The endpoint accepts `since`, `until`, `bucketMinutes`, and `profile` query parameters. Use `ccs s history PROFILE` to focus the same report on one provider:
 
 ```bash
 ccs s history
@@ -328,22 +328,14 @@ Example output:
 ccs usage history  today  bucket 30m
 source: http://10.126.126.1:8765/ccs/top/history?since=...&bucketMinutes=30
 
-summary
-provider  first   now  delta  changes   last  change
-input     $12.4  $22.4  +$10.0        7  14:32   +$0.2
-
-total trend
-    $25  ┼
-    $20  ┤                                  ╭─────────────────────────────
-    $15  ┤                                  │
-    $10  ┤                ╭─────────────────╯
+total trend                                                                        summary
+    $25  ┼                                                                         input
+    $20  ┤                                  ╭─────────────────────────────          now      $22.4
+    $15  ┤                                  │                                         5h delta +$10.0
+    $10  ┤                ╭─────────────────╯                                         last     14:32 +$0.2
      $5  ┤                │
      $0  ┼────────────────╯┬─────────────────┬────────────────┬─────────────────┬
          00:00           06:00             12:00            18:00           24:00
-
-peak buckets
-time          total  top contributors
-19:00-19:30  +$4.1  input +$4.1
 
 bucket changes
 time          total  input  |  time          total  input
