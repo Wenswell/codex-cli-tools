@@ -2910,6 +2910,17 @@ function isUsageTopHistoryBucketEmpty(bucket: UsageTopBucket): boolean {
   return true;
 }
 
+function formatUsageTopHistoryBucketRow(bucket: UsageTopBucket, names: string[]): string[] {
+  return [
+    `${formatHistoryTime(bucket.start)}-${formatHistoryTime(bucket.end)}`,
+    formatHistoryDeltaCell(bucket.total, bucket.reset),
+    ...names.map((name) => {
+      const delta = bucket.deltas.get(name);
+      return formatHistoryDeltaCell(delta?.delta, delta?.reset);
+    }),
+  ];
+}
+
 function printUsageTopHistoryBuckets(buckets: UsageTopBucket[], names: string[]): void {
   console.log();
   console.log(textBold("bucket changes"));
@@ -2919,17 +2930,28 @@ function printUsageTopHistoryBuckets(buckets: UsageTopBucket[], names: string[])
     return;
   }
   const visibleBuckets = buckets.slice(firstVisibleBucketIndex);
+  const columns = ["time", "total", ...names];
+  const emptyColumns = columns.map(() => "");
+  const rows: string[][] = [];
+  for (let index = 0; index < visibleBuckets.length; index += 2) {
+    const left = formatUsageTopHistoryBucketRow(visibleBuckets[index], names);
+    const right = visibleBuckets[index + 1]
+      ? formatUsageTopHistoryBucketRow(visibleBuckets[index + 1], names)
+      : emptyColumns;
+    rows.push([...left, "|", ...right]);
+  }
   printTable([
-    ["time", "total", ...names],
-    ...visibleBuckets.map((bucket) => [
-      `${formatHistoryTime(bucket.start)}-${formatHistoryTime(bucket.end)}`,
-      formatHistoryDeltaCell(bucket.total, bucket.reset),
-      ...names.map((name) => {
-        const delta = bucket.deltas.get(name);
-        return formatHistoryDeltaCell(delta?.delta, delta?.reset);
-      }),
-    ]),
-  ], ["left", "right", ...names.map(() => "right" as TableAlign)]);
+    [...columns, "|", ...columns],
+    ...rows,
+  ], [
+    "left",
+    "right",
+    ...names.map(() => "right" as TableAlign),
+    "left",
+    "left",
+    "right",
+    ...names.map(() => "right" as TableAlign),
+  ]);
 }
 
 function printUsageTopHistoryPeakBuckets(buckets: UsageTopBucket[], names: string[]): void {
