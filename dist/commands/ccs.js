@@ -2526,9 +2526,20 @@ function formatHistoryChartCost(value) {
     const rounded = Math.round(value);
     return Math.abs(value - rounded) < usageTopHistoryEpsilon ? `$${rounded}` : formatHistoryCost(value);
 }
-function colorUsageTopHistoryChartLine(line) {
+function colorUsageTopHistoryChartLine(line, rowIndex, zeroRowIndex, dataWidth) {
     return Array.from(line)
-        .map((char) => "┼┤┬─╭╯╰╮│╶╴".includes(char) ? colorCost(char) : char)
+        .map((char, index) => {
+        if (!"┼┬─╭╯╰╮│╶╴".includes(char) || index <= usageTopHistoryChartAxisPrefix) {
+            return char;
+        }
+        if (char === "┬" || index - usageTopHistoryChartAxisPrefix >= dataWidth) {
+            return textDim(char);
+        }
+        if (rowIndex === zeroRowIndex && char === "─") {
+            return char;
+        }
+        return colorCost(char);
+    })
         .join("");
 }
 function usageTopHistoryChartDataWidth(start, end, axisStart, axisEnd) {
@@ -2549,7 +2560,10 @@ function formatUsageTopHistoryChartPlot(series, ticks) {
         format: (value) => `${formatHistoryChartCost(value).padStart(7)} `,
     }).split("\n");
     lines[lines.length - 1] = formatUsageTopHistoryChartZeroAxis(lines[lines.length - 1], ticks, usageTopHistoryChartMinWidth);
-    return lines.map(colorUsageTopHistoryChartLine).join("\n");
+    const zeroRowIndex = lines.length - 1;
+    return lines
+        .map((line, index) => colorUsageTopHistoryChartLine(line, index, zeroRowIndex, series.length))
+        .join("\n");
 }
 function printUsageTopHistoryChart(trend) {
     const points = trend
