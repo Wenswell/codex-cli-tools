@@ -57,7 +57,7 @@ codex-notice
 - No-argument/status commands print active configuration values, not just file paths.
 - New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
 - No-argument output combines compact status with a compact command/help line when the tool has user-facing commands.
-- `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
+- At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
 - Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
 - Write/apply commands first print the same plan as preview, then ask for confirmation and print the actual result.
@@ -466,7 +466,7 @@ ccs sync
 
 When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, seeds `top.stateUrls` with the cloud-first/local-fallback defaults when `top` is missing, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
-`ccs config` compares the local `~/.config/codex-tools/profiles.json` with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
+`ccs config` manages local `~/.config/codex-tools/profiles.json` sync with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
 
 ```bash
 ccs config
@@ -476,7 +476,7 @@ ccs config pull
 
 Run `ccs config` without arguments to print the local file summary, fixed LAN target, and a compact command line without connecting to the server.
 
-`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Both commands preview first and apply only after you type exact `yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
+`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Only `push` and `pull` connect to the server and compare files. Both commands preview first and apply only after you type exact `yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 
@@ -672,8 +672,10 @@ pnpm build
 Run commands locally from `dist` after building:
 
 ```bash
+node dist/bin/ccs.js --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
+node dist/bin/codex-notice.js --help
 ```
 
 Check TypeScript:
@@ -681,3 +683,25 @@ Check TypeScript:
 ```bash
 pnpm check
 ```
+
+Before committing command-surface or documentation changes, verify:
+
+```bash
+pnpm check
+pnpm build
+git diff --check
+node dist/bin/ccs.js --help
+node dist/bin/senv.js --help
+node dist/bin/codex-rename.js --help
+node dist/bin/codex-notice.js --help
+```
+
+Use a temporary `HOME` for manual `ccs init` or `ccs sync` apply-path checks so real `~/.codex` files are not changed during verification.
+
+Release from this repository is GitHub-first:
+
+```bash
+git push origin main
+```
+
+Do not publish to npm unless the registry release path is explicitly requested.
