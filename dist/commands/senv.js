@@ -2,6 +2,7 @@ import { copyFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
 import { createTwoFilesPatch } from "diff";
+import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { colorCount, colorPath, printKeyValue } from "../lib/output.js";
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
@@ -11,8 +12,8 @@ function parseArgs(argv) {
         source: ".env.example",
         target: ".env",
         backup: false,
-        apply: false,
     };
+    rejectRemovedYesFlags(argv, "senv");
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         if (arg === "--source") {
@@ -27,10 +28,6 @@ function parseArgs(argv) {
         }
         if (arg === "-b" || arg === "--backup") {
             args.backup = true;
-            continue;
-        }
-        if (arg === "-y" || arg === "--yes") {
-            args.apply = true;
             continue;
         }
         if (arg === "help" || arg === "--help" || arg === "-h") {
@@ -51,10 +48,9 @@ function requireValue(argv, index) {
 function printHelp() {
     console.log([
         "Usage:",
-        "  senv                                      # preview .env update from .env.example",
-        "  senv -y                                  # update .env from .env.example",
-        "  senv --source FILE --target FILE -y      # update a target env file from a source template",
-        "  senv -b -y                               # back up target before writing",
+        "  senv                                      # preview, confirm, and update .env from .env.example",
+        "  senv --source FILE --target FILE         # preview, confirm, and update a target env file",
+        "  senv -b                                  # back up target before writing after confirmation",
         "  senv help                                # show this help",
     ].join("\n"));
 }
@@ -161,7 +157,7 @@ function timestamp() {
 function printSummary(target, summary, apply) {
     printKeyValue("target:", `${apply ? textGreen("updated") : textBlue("would update")} ${colorPath(target)}`, 16);
     if (!apply) {
-        console.log(textDim("preview only. Re-run with -y or --yes to apply changes."));
+        console.log(textDim("no changes are written unless you type yes at the prompt."));
     }
     printKeyValue("added:", colorCount(String(summary.added.length)), 16);
     printKeyValue("filled defaults:", colorCount(String(summary.filledDefaults.length)), 16);
@@ -262,11 +258,10 @@ export async function runEnvsync(argv) {
     const existingText = existingTargetText ?? "";
     const result = buildEnv(exampleText, existingText);
     const targetLabel = basename(args.target);
-    if (!args.apply) {
-        printPlan(targetLabel, existingText, result.text, result.summary);
+    printPlan(targetLabel, existingText, result.text, result.summary);
+    if (!(await confirmApply())) {
         return;
     }
-    printPlan(targetLabel, existingText, result.text, result.summary);
     if (args.backup && existingTargetText !== null) {
         const backupPath = await createBackup(args.target);
         console.log(`backup: ${textBlue(backupPath)}`);
