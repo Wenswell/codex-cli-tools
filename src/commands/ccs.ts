@@ -1359,9 +1359,12 @@ async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefi
 
   const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
   const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
+  const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
   const args = [
     "-c",
     `model_providers.${provider}.base_url=${JSON.stringify(normalized.baseURL)}`,
+    "-c",
+    `model_providers.${provider}.env_key=${JSON.stringify(apiKeyEnv)}`,
     ...codexArgs,
   ];
 
@@ -1373,7 +1376,7 @@ async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefi
       stdio: "inherit",
       env: {
         ...process.env,
-        OPENAI_API_KEY: normalized.apiKey,
+        [apiKeyEnv]: normalized.apiKey,
       },
     });
 
