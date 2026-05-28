@@ -300,7 +300,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves the latest 24-hour history, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. `POST /ccs/top/reset` refreshes immediately and resets polling to `25s`. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
+The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves compact aggregated history for a requested window, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. `POST /ccs/top/reset` refreshes immediately and resets polling to `25s`. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {
@@ -315,7 +315,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, the
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups today's records into hourly buckets, and prints summary, total trend, peak buckets, and bucket changes. Use `ccs s history PROFILE` to focus the same report on one provider:
+Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves the compact `/ccs/top/history` API. The server keeps raw snapshot records in `~/.cache/codex-tools/ccs-top-history.jsonl`, but HTTP clients request only display data for the needed window: summary, total trend, peak buckets, and hourly bucket changes. The endpoint accepts `since`, `until`, `bucketMinutes`, and `profile` query parameters. Use `ccs s history PROFILE` to focus the same report on one provider:
 
 ```bash
 ccs s history
@@ -326,7 +326,7 @@ Example output:
 
 ```text
 ccs usage history  today  bucket 1h
-source: http://10.126.126.1:8765/ccs/top/history
+source: http://10.126.126.1:8765/ccs/top/history?since=...&bucketMinutes=60
 
 summary
 provider  first   now  delta  changes  last change
