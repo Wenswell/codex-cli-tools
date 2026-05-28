@@ -47,6 +47,7 @@ const usageTopHistoryWindowHours = usageTopHistoryWindowMs / (60 * 60 * 1000);
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
+let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
 const configSyncPort = "32753";
@@ -1918,9 +1919,9 @@ async function readActiveUsageTopStatusSource(profiles, now) {
     const stateNow = source.remote && !Number.isNaN(remoteUpdatedAt.getTime()) ? remoteUpdatedAt : now;
     return { snapshot: source.snapshot, stateNow };
 }
-async function renderCurrentUsageTopStatusSuffix(profiles, now) {
+async function renderCurrentUsageTopStatusSuffix(profiles, now, inactiveLabel = "ccs top inactive") {
     const source = await readActiveUsageTopStatusSource(profiles, now);
-    return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : " | ccs top inactive";
+    return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : ` | ${inactiveLabel}`;
 }
 async function printUsageTopStatusLine(profiles) {
     const now = new Date();
@@ -2202,15 +2203,33 @@ async function printUsageTopHistory(profiles, profileName) {
 }
 async function writeUsageTopStatusText(value) {
     const path = usageTopStatusTextPath();
-    const tmpPath = `${path}.${process.pid}.tmp`;
-    await writeTextFile(tmpPath, value);
-    await rename(tmpPath, path);
+    usageTopStatusWriteSequence += 1;
+    const tmpPath = `${path}.${process.pid}.${usageTopStatusWriteSequence}.tmp`;
+    try {
+        await writeTextFile(tmpPath, value);
+        await rename(tmpPath, path);
+    }
+    catch (error) {
+        await rm(tmpPath, { force: true }).catch(() => undefined);
+        throw error;
+    }
 }
 async function runUsageTopStatusAgent(profiles) {
+    let stopped = false;
     const writeStatus = async () => {
         const now = new Date();
-        const line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now)}`;
-        await writeUsageTopStatusText(line);
+        let line = `${formatStatusLineClock(now)} | ccs top unavailable`;
+        try {
+            line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now, "ccs top unavailable")}`;
+            if (!stopped) {
+                await writeUsageTopStatusText(line);
+            }
+        }
+        catch {
+            if (!stopped) {
+                await writeUsageTopStatusText(line).catch(() => undefined);
+            }
+        }
         if (process.stdout.isTTY) {
             process.stdout.write(`\r\u001b[2K${line}`);
             return;
@@ -2219,22 +2238,36 @@ async function runUsageTopStatusAgent(profiles) {
     };
     await writeStatus();
     await new Promise((resolve) => {
-        const timer = setInterval(() => {
-            void writeStatus();
-        }, usageTopTickMs);
+        let timer = null;
         let cleanedUp = false;
+        const schedule = () => {
+            if (cleanedUp) {
+                return;
+            }
+            timer = setTimeout(() => {
+                timer = null;
+                void (async () => {
+                    await writeStatus();
+                    schedule();
+                })();
+            }, usageTopTickMs);
+        };
         const cleanup = async () => {
             if (cleanedUp) {
                 return;
             }
             cleanedUp = true;
-            clearInterval(timer);
-            await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`);
+            stopped = true;
+            if (timer) {
+                clearTimeout(timer);
+            }
+            await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`).catch(() => undefined);
             if (process.stdout.isTTY) {
                 process.stdout.write("\n");
             }
             resolve();
         };
+        schedule();
         process.once("SIGINT", () => void cleanup());
         process.once("SIGTERM", () => void cleanup());
     });

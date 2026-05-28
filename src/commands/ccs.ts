@@ -258,6 +258,7 @@ const usageTopHistoryWindowHours = usageTopHistoryWindowMs / (60 * 60 * 1000);
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistoryPeakLimit = 5;
 const usageTopHistoryEpsilon = 0.05;
+let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
 const configSyncPort = "32753";
@@ -2419,9 +2420,13 @@ async function readActiveUsageTopStatusSource(
   return { snapshot: source.snapshot, stateNow };
 }
 
-async function renderCurrentUsageTopStatusSuffix(profiles: ProfilesFile, now: Date): Promise<string> {
+async function renderCurrentUsageTopStatusSuffix(
+  profiles: ProfilesFile,
+  now: Date,
+  inactiveLabel = "ccs top inactive",
+): Promise<string> {
   const source = await readActiveUsageTopStatusSource(profiles, now);
-  return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : " | ccs top inactive";
+  return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : ` | ${inactiveLabel}`;
 }
 
 async function printUsageTopStatusLine(profiles: ProfilesFile): Promise<void> {
@@ -2732,16 +2737,33 @@ async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string
 
 async function writeUsageTopStatusText(value: string): Promise<void> {
   const path = usageTopStatusTextPath();
-  const tmpPath = `${path}.${process.pid}.tmp`;
-  await writeTextFile(tmpPath, value);
-  await rename(tmpPath, path);
+  usageTopStatusWriteSequence += 1;
+  const tmpPath = `${path}.${process.pid}.${usageTopStatusWriteSequence}.tmp`;
+  try {
+    await writeTextFile(tmpPath, value);
+    await rename(tmpPath, path);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
+  let stopped = false;
+
   const writeStatus = async (): Promise<void> => {
     const now = new Date();
-    const line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now)}`;
-    await writeUsageTopStatusText(line);
+    let line = `${formatStatusLineClock(now)} | ccs top unavailable`;
+    try {
+      line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now, "ccs top unavailable")}`;
+      if (!stopped) {
+        await writeUsageTopStatusText(line);
+      }
+    } catch {
+      if (!stopped) {
+        await writeUsageTopStatusText(line).catch(() => undefined);
+      }
+    }
     if (process.stdout.isTTY) {
       process.stdout.write(`\r\u001b[2K${line}`);
       return;
@@ -2751,24 +2773,37 @@ async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
 
   await writeStatus();
   await new Promise<void>((resolve) => {
-    const timer = setInterval(() => {
-      void writeStatus();
-    }, usageTopTickMs);
-
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let cleanedUp = false;
+    const schedule = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void (async () => {
+          await writeStatus();
+          schedule();
+        })();
+      }, usageTopTickMs);
+    };
     const cleanup = async (): Promise<void> => {
       if (cleanedUp) {
         return;
       }
       cleanedUp = true;
-      clearInterval(timer);
-      await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`);
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`).catch(() => undefined);
       if (process.stdout.isTTY) {
         process.stdout.write("\n");
       }
       resolve();
     };
 
+    schedule();
     process.once("SIGINT", () => void cleanup());
     process.once("SIGTERM", () => void cleanup());
   });
