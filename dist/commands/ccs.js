@@ -809,9 +809,9 @@ function buildWeztermStatusBlock() {
         "\thandle:close()",
         "\tvalue = value:gsub(\"%s+$\", \"\")",
         "\tif value == \"\" then",
-        "\t\tvalue = \" | ccs status inactive\"",
+        "\t\treturn os.date(\"%H:%M:%S\") .. \" | ccs status inactive\"",
         "\tend",
-        "\treturn os.date(\"%H:%M:%S\") .. value",
+        "\treturn value",
         "end",
         "",
         "wezterm.on(\"update-right-status\", function(window)",
@@ -1725,15 +1725,24 @@ async function readUsageTopStateUrls(profiles) {
         .filter((url) => !!url);
     return [...new Set(urls)];
 }
+function formatUsageTopControlAction(action) {
+    if (action === "pause") {
+        return "paused";
+    }
+    if (action === "resume") {
+        return "resumed";
+    }
+    return "reset";
+}
 async function controlUsageTopServer(profiles, action) {
     const urls = await readUsageTopStateUrls(profiles);
     if (urls.length === 0) {
-        throw new Error("ccs s pause/resume requires top.stateUrls");
+        throw new Error("ccs s pause/resume/reset requires top.stateUrls");
     }
     for (const url of urls) {
         const controlUrl = usageTopControlUrl(url, action);
         if (await postUsageTopControl(controlUrl)) {
-            console.log(`server ${action}d: ${textGreen(controlUrl)}`);
+            console.log(`server ${formatUsageTopControlAction(action)}: ${textGreen(controlUrl)}`);
             return;
         }
     }
@@ -1782,9 +1791,8 @@ async function writeUsageTopStatusText(value) {
 async function runUsageTopStatusAgent(profiles) {
     const writeStatus = async () => {
         const now = new Date();
-        const suffix = await renderCurrentUsageTopStatusSuffix(profiles, now);
-        await writeUsageTopStatusText(suffix);
-        const line = `${formatStatusLineClock(now)}${suffix}`;
+        const line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now)}`;
+        await writeUsageTopStatusText(line);
         if (process.stdout.isTTY) {
             process.stdout.write(`\r\u001b[2K${line}`);
             return;
@@ -1803,7 +1811,7 @@ async function runUsageTopStatusAgent(profiles) {
             }
             cleanedUp = true;
             clearInterval(timer);
-            await writeUsageTopStatusText(" | ccs top inactive");
+            await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`);
             if (process.stdout.isTTY) {
                 process.stdout.write("\n");
             }
@@ -1847,7 +1855,12 @@ async function serveUsageTop(profiles, portValue) {
     const publish = async (active = true) => {
         snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), active, paused);
         await writeUsageTopSnapshot(snapshot);
-        await writeUsageTopStatusText(active ? renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)) : " | ccs top inactive");
+    };
+    const resetPolling = async () => {
+        clearTimer();
+        await refreshAllUsageTopRuntime(runtime, false, "server");
+        await publish();
+        schedule();
     };
     const schedule = () => {
         if (cleanedUp || paused) {
@@ -1869,7 +1882,6 @@ async function serveUsageTop(profiles, portValue) {
     };
     let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
     await writeUsageTopSnapshot(snapshot);
-    await writeUsageTopStatusText(renderUsageTopStatusSuffix(snapshot, new Date(snapshot.updatedAt)));
     const server = createServer((request, response) => {
         if (request.method === "GET" && request.url === "/health") {
             sendUsageTopJson(response, 200, { ok: true });
@@ -1892,10 +1904,14 @@ async function serveUsageTop(profiles, portValue) {
         if (request.method === "POST" && request.url === "/ccs/top/resume") {
             void (async () => {
                 paused = false;
-                clearTimer();
-                await refreshAllUsageTopRuntime(runtime, false, "server");
-                await publish();
-                schedule();
+                await resetPolling();
+                sendUsageTopJson(response, 200, { ok: true, paused });
+            })();
+            return;
+        }
+        if (request.method === "POST" && request.url === "/ccs/top/reset") {
+            void (async () => {
+                await resetPolling();
                 sendUsageTopJson(response, 200, { ok: true, paused });
             })();
             return;
@@ -2071,7 +2087,7 @@ async function runCcsStatus(profiles, args) {
         await serveUsageTop(profiles, subargs[0] ?? "8765");
         return;
     }
-    if (subcommand === "pause" || subcommand === "resume") {
+    if (subcommand === "pause" || subcommand === "resume" || subcommand === "reset") {
         assertExactArgs(subargs, `s ${subcommand}`, 0);
         await controlUsageTopServer(profiles, subcommand);
         return;
@@ -2111,6 +2127,7 @@ function usageLines() {
         "  ccs s server [PORT]                  # serve top state on 0.0.0.0",
         "  ccs s pause                          # pause first reachable configured top server",
         "  ccs s resume                         # resume first reachable configured top server",
+        "  ccs s reset                          # refresh server now and reset polling to 25s",
         "  ccs s wezterm [-y|--yes]             # preview or install WezTerm status integration",
         "  ccs s wezterm remove [-y|--yes]      # preview or remove WezTerm status integration",
         "  ccs list | l [-u|--usage]             # list profiles; -u also shows usage profiles",
@@ -2150,10 +2167,10 @@ function parseWeztermArgs(args) {
     return { yes, remove };
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
+    console.log(textDim("commands: ccs | PROFILE | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|pause|resume|reset|wezterm] | list [-u] | usage | init [-y] | sync [-y]"));
 }
 function printStatusUsageHelp() {
-    console.log(textDim("commands: ccs s [line|agent|server|pause|resume|wezterm]"));
+    console.log(textDim("commands: ccs s [line|agent|server|pause|resume|reset|wezterm]"));
 }
 export async function runCcs(argv) {
     const command = argv[0] ?? "";
