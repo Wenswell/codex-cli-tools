@@ -315,7 +315,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-Run `ccs s history` to render the latest 24 hours from the first reachable configured top server. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups the records into 30-minute buckets, and prints summary, bucket changes, peak buckets, and a total trend chart. Use `ccs s history PROFILE` to focus the same report on one provider:
+Run `ccs s history` to render the latest 24 hours from the first reachable configured top server. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups the records into hourly buckets, and prints summary, total trend, peak buckets, and bucket changes. Use `ccs s history PROFILE` to focus the same report on one provider:
 
 ```bash
 ccs s history
@@ -325,22 +325,27 @@ ccs s history input
 Example output:
 
 ```text
-ccs usage history  last 24h  bucket 30m
+ccs usage history  last 24h  bucket 1h
 source: http://10.126.126.1:8765/ccs/top/history
 
 summary
 provider  first   now  delta  changes  last change
 input     $12.4  $22.4  +$10.0        7  14:32 +$0.2
 
-bucket changes
-time          total  input
-12:00-12:30  +$3.4  +$3.4
-13:00-13:30  +$6.4  +$6.4
-14:00-14:30  +$0.2  +$0.2
+total trend
+  $22.4  ┤        ╭
+  $17.4  ┤   ╭────╯
+  $12.4  ┼───╯
 
 peak buckets
 time          total  top contributors
-13:00-13:30  +$6.4  input +$6.4
+13:00-14:00  +$6.4  input +$6.4
+
+bucket changes
+time         total  input
+12:00-13:00  +$3.4  +$3.4
+13:00-14:00  +$6.4  +$6.4
+14:00-15:00  +$0.2  +$0.2
 ```
 
 For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny complete status line to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly, so it does not spawn `node` or request HTTP from the GUI status callback. If the configured state source is unavailable, the agent writes `ccs top unavailable`; if the agent stops, the whole status line stops changing instead of showing a fresh clock with stale usage values.
