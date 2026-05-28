@@ -296,7 +296,7 @@ const usageTopHistoryWindowMs = 24 * 60 * 60 * 1000;
 const usageTopHistoryBucketMs = 30 * 60 * 1000;
 const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBucketMs;
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
-const usageTopHistoryPeakLimit = 5;
+const usageTopHistorySummaryDeltaMs = 5 * 60 * 60 * 1000;
 const usageTopHistoryEpsilon = 0.05;
 const usageTopHistoryChartMinWidth = 72;
 const usageTopHistoryChartHeight = 5;
@@ -2895,23 +2895,6 @@ function formatHistoryLastChangeDelta(summary: UsageTopSummary): string {
   return textDim("-");
 }
 
-function printUsageTopHistorySummary(summaries: UsageTopSummary[]): void {
-  console.log();
-  console.log(textBold("summary"));
-  printTable([
-    ["provider", "first", "now", "delta", "changes", "last", "change"],
-    ...summaries.map((summary) => [
-      colorName(summary.name),
-      formatHistoryValue(summary.first),
-      formatHistoryValue(summary.latest),
-      formatHistoryDeltaCell(summary.delta, summary.reset),
-      summary.changes.toString(),
-      formatHistoryLastChangeTime(summary),
-      formatHistoryLastChangeDelta(summary),
-    ]),
-  ], ["left", "right", "right", "right", "right", "right", "right"]);
-}
-
 function isUsageTopHistoryBucketEmpty(bucket: UsageTopBucket): boolean {
   if (bucket.reset || (bucket.total !== undefined && Math.abs(bucket.total) >= usageTopHistoryEpsilon)) {
     return false;
@@ -2966,36 +2949,6 @@ function printUsageTopHistoryBuckets(buckets: UsageTopBucket[], names: string[])
     "right",
     ...names.map(() => "right" as TableAlign),
   ]);
-}
-
-function printUsageTopHistoryPeakBuckets(buckets: UsageTopBucket[], names: string[]): void {
-  const peaks = buckets
-    .filter((bucket) => bucket.total !== undefined && bucket.total > usageTopHistoryEpsilon)
-    .sort((left, right) => (right.total ?? 0) - (left.total ?? 0))
-    .slice(0, usageTopHistoryPeakLimit);
-  if (peaks.length === 0) {
-    return;
-  }
-
-  console.log();
-  console.log(textBold("peak buckets"));
-  printTable([
-    ["time", "total", "top contributors"],
-    ...peaks.map((bucket) => {
-      const contributors = names
-        .map((name) => ({ name, delta: bucket.deltas.get(name)?.delta ?? 0 }))
-        .filter((entry) => entry.delta > usageTopHistoryEpsilon)
-        .sort((left, right) => right.delta - left.delta)
-        .slice(0, 3)
-        .map((entry) => `${entry.name} ${formatHistorySignedCost(entry.delta)}`)
-        .join(", ");
-      return [
-        `${formatHistoryTime(bucket.start)}-${formatHistoryTime(bucket.end)}`,
-        formatHistoryDeltaCell(bucket.total),
-        contributors || textDim("-"),
-      ];
-    }),
-  ], ["left", "right", "left"]);
 }
 
 function readUsageTopHistoryTotalAt(
@@ -3207,15 +3160,13 @@ function formatUsageTopHistoryChartPlot(series: number[], ticks: UsageTopHistory
     .join("\n");
 }
 
-function printUsageTopHistoryChart(trend: UsageTopPoint[]): void {
+function formatUsageTopHistoryChartLines(trend: UsageTopPoint[]): string[] {
   const points = trend
     .filter((point) => Number.isFinite(point.value) && !Number.isNaN(point.at.getTime()))
     .sort((left, right) => left.at.getTime() - right.at.getTime());
-  console.log();
-  console.log(textBold("total trend"));
+  const lines = [textBold("total trend")];
   if (points.length < 2) {
-    console.log(textDim("not enough history yet"));
-    return;
+    return [...lines, textDim("not enough history yet")];
   }
 
   const start = points[0].at;
@@ -3227,8 +3178,65 @@ function printUsageTopHistoryChart(trend: UsageTopPoint[]): void {
   );
   const series = chartPoints.map((point) => point.value);
   const ticks = buildUsageTopHistoryChartTicks(start, axisEnd, usageTopHistoryChartMinWidth);
-  console.log(formatUsageTopHistoryChartPlot(series, ticks));
-  console.log(textDim(formatUsageTopHistoryChartAxis(ticks, usageTopHistoryChartMinWidth)));
+  return [
+    ...lines,
+    ...formatUsageTopHistoryChartPlot(series, ticks).split("\n"),
+    textDim(formatUsageTopHistoryChartAxis(ticks, usageTopHistoryChartMinWidth)),
+  ];
+}
+
+function usageTopHistorySummaryDelta(name: string, buckets: UsageTopBucket[], windowEnd: Date): number {
+  const sinceMs = windowEnd.getTime() - usageTopHistorySummaryDeltaMs;
+  let total = 0;
+  for (const bucket of buckets) {
+    if (bucket.end.getTime() <= sinceMs || bucket.start.getTime() >= windowEnd.getTime()) {
+      continue;
+    }
+    total += bucket.deltas.get(name)?.delta ?? 0;
+  }
+  return Math.abs(total) < usageTopHistoryEpsilon ? 0 : total;
+}
+
+function formatUsageTopHistorySummaryField(label: string, value: string): string {
+  return `  ${textDim(label.padEnd(8))} ${value}`;
+}
+
+function formatUsageTopHistorySummaryLines(
+  summaries: UsageTopSummary[],
+  buckets: UsageTopBucket[],
+  windowEnd: Date,
+): string[] {
+  const lines = [textBold("summary")];
+  for (const summary of summaries) {
+    lines.push(
+      colorName(summary.name),
+      formatUsageTopHistorySummaryField("now", formatHistoryValue(summary.latest)),
+      formatUsageTopHistorySummaryField("5h delta", formatHistoryDeltaCell(
+        usageTopHistorySummaryDelta(summary.name, buckets, windowEnd),
+        summary.reset,
+      )),
+      formatUsageTopHistorySummaryField("last", `${formatHistoryLastChangeTime(summary)} ${formatHistoryLastChangeDelta(summary)}`),
+    );
+  }
+  return lines;
+}
+
+function printUsageTopHistoryChartWithSummary(
+  trend: UsageTopPoint[],
+  summaries: UsageTopSummary[],
+  buckets: UsageTopBucket[],
+  windowEnd: Date,
+): void {
+  const chartLines = formatUsageTopHistoryChartLines(trend);
+  const summaryLines = formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd);
+  const chartWidth = Math.max(...chartLines.map(visibleLength));
+  const lineCount = Math.max(chartLines.length, summaryLines.length);
+  console.log();
+  for (let index = 0; index < lineCount; index += 1) {
+    const chartLine = chartLines[index] ?? "";
+    const summaryLine = summaryLines[index] ?? "";
+    console.log(`${padVisibleRight(chartLine, chartWidth)}  ${summaryLine}`.trimEnd());
+  }
 }
 
 async function printUsageTopHistoryUnavailable(profiles: ProfilesFile, request: UsageTopHistoryRequest): Promise<void> {
@@ -3322,11 +3330,10 @@ async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string
   const summaries = source.history.summaries.map(toUsageTopSummary);
   const buckets = source.history.buckets.map(toUsageTopBucket);
   const trend = source.history.trend.map(toUsageTopTrendPoint);
+  const windowEnd = parseUsageTopHistoryDate(source.history.windowEnd);
   console.log(`ccs usage history  today  bucket ${formatHistoryBucketWindow(source.history.bucketMinutes)}`);
   printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
-  printUsageTopHistorySummary(summaries);
-  printUsageTopHistoryChart(trend);
-  printUsageTopHistoryPeakBuckets(buckets, names);
+  printUsageTopHistoryChartWithSummary(trend, summaries, buckets, windowEnd);
   printUsageTopHistoryBuckets(buckets, names);
 }
 
