@@ -2172,10 +2172,38 @@ function printUsageTopHistoryChart(pointMap, names, buckets, now) {
     const mid = buckets[Math.floor((firstValueIndex + buckets.length - 1) / 2)]?.start;
     console.log(textDim(`         ${start ? formatHistoryTime(start) : ""}     ${mid ? formatHistoryTime(mid) : ""}     ${formatHistoryTime(now)}`));
 }
+async function printUsageTopHistoryUnavailable(profiles) {
+    const urls = await readUsageTopStateUrls(profiles);
+    if (urls.length > 0) {
+        console.log(textDim("ccs top history unavailable"));
+        printKeyValue("source:", colorUrl(usageTopHistoryUrl(urls[0])), 7);
+        if (urls.length > 1) {
+            printKeyValue("also:", urls.slice(1).map((url) => colorUrl(usageTopHistoryUrl(url))).join("  "), 7);
+        }
+        printKeyValue("note:", "restart ccs s server with a version that serves /ccs/top/history", 5);
+        return;
+    }
+    console.log(textDim("ccs top history inactive"));
+    printKeyValue("source:", colorPath(usageTopHistoryPath()), 7);
+    printKeyValue("note:", "start ccs s server to collect history; ccs s agent does not record history", 5);
+}
+function printUsageTopHistoryEmpty(source, profileName, availableNames) {
+    if (profileName) {
+        console.log(textDim(`no history for ${profileName}`));
+        printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
+        if (availableNames.length > 0) {
+            printKeyValue("profiles:", availableNames.join(", "), 9);
+        }
+        return;
+    }
+    console.log(textDim("ccs top history empty"));
+    printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
+    printKeyValue("note:", "wait for ccs s server to write the first usage snapshot", 5);
+}
 async function printUsageTopHistory(profiles, profileName) {
     const source = await readUsageTopHistorySource(profiles);
     if (!source) {
-        console.log(textDim("ccs top history inactive"));
+        await printUsageTopHistoryUnavailable(profiles);
         return;
     }
     const updatedAt = new Date(source.history.updatedAt);
@@ -2186,7 +2214,7 @@ async function printUsageTopHistory(profiles, profileName) {
     const availableNames = [...pointMap.keys()].sort();
     const names = profileName ? availableNames.filter((name) => name === profileName) : availableNames;
     if (names.length === 0) {
-        console.log(profileName ? textDim(`no history for ${profileName}`) : textDim("ccs top history inactive"));
+        printUsageTopHistoryEmpty(source, profileName, availableNames);
         return;
     }
     const summaries = names

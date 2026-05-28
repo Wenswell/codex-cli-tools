@@ -315,7 +315,7 @@ The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, `20
 
 If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
 
-Run `ccs s history` to render the latest 24 hours from the first reachable configured top server. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups the records into 30-minute buckets, and prints summary, bucket changes, peak buckets, and a total trend chart. Use `ccs s history PROFILE` to focus the same report on one provider:
+Run `ccs s history` to render the latest 24 hours from the first reachable configured top server. History is collected by `ccs s server`, not `ccs s agent`; restart the server after updating so it serves `/ccs/top/history`. The server writes raw snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`; `ccs s history` fetches `/ccs/top/history`, groups the records into 30-minute buckets, and prints summary, bucket changes, peak buckets, and a total trend chart. Use `ccs s history PROFILE` to focus the same report on one provider:
 
 ```bash
 ccs s history
