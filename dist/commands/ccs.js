@@ -2609,29 +2609,40 @@ function formatUsageTopHistoryChartLines(trend) {
         textDim(formatUsageTopHistoryChartAxis(ticks, usageTopHistoryChartMinWidth)),
     ];
 }
-function usageTopHistorySummaryDelta(name, buckets, windowEnd) {
+function usageTopHistoryRecentDelta(name, buckets, windowEnd) {
     const sinceMs = windowEnd.getTime() - usageTopHistorySummaryDeltaMs;
     let total = 0;
+    let reset = false;
     for (const bucket of buckets) {
         if (bucket.end.getTime() <= sinceMs || bucket.start.getTime() >= windowEnd.getTime()) {
             continue;
         }
-        total += bucket.deltas.get(name)?.delta ?? 0;
+        const delta = bucket.deltas.get(name);
+        if (delta?.reset) {
+            reset = true;
+        }
+        total += delta?.delta ?? 0;
     }
-    return Math.abs(total) < usageTopHistoryEpsilon ? 0 : total;
+    return {
+        delta: Math.abs(total) < usageTopHistoryEpsilon ? 0 : total,
+        reset,
+    };
 }
 function formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd) {
     return [
         textBold("summary"),
         ...formatTableRows([
             ["provider", "now", "5h delta", "last", "change"],
-            ...summaries.map((summary) => [
-                colorName(summary.name),
-                formatHistoryValue(summary.latest),
-                formatHistoryDeltaCell(usageTopHistorySummaryDelta(summary.name, buckets, windowEnd), summary.reset),
-                formatHistoryLastChangeTime(summary),
-                formatHistoryLastChangeDelta(summary),
-            ]),
+            ...summaries.map((summary) => {
+                const recentDelta = usageTopHistoryRecentDelta(summary.name, buckets, windowEnd);
+                return [
+                    colorName(summary.name),
+                    formatHistoryValue(summary.latest),
+                    formatHistoryDeltaCell(recentDelta.delta, recentDelta.reset),
+                    formatHistoryLastChangeTime(summary),
+                    formatHistoryLastChangeDelta(summary),
+                ];
+            }),
         ], ["left", "right", "right", "right", "right"]),
     ];
 }
