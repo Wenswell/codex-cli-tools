@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import * as asciichart from "asciichart";
 import { createTwoFilesPatch } from "diff";
+import { DateTime } from "luxon";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import {
   aggregateDaily,
@@ -2216,6 +2217,10 @@ function ccsCostSnapshotDir(): string {
   return join(codexToolsCacheDir(), "ccs-cost");
 }
 
+function ccsCostDerivedPath(): string {
+  return join(codexToolsCacheDir(), "ccs-cost-derived.json");
+}
+
 function toUsageTopSnapshotEntry(entry: UsageTopEntry, state: UsageTopState | undefined): UsageTopSnapshotEntry {
   const used = entry.usage?.used ?? state?.used;
   return {
@@ -3781,7 +3786,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   };
   const runCcsCostRefresh = async (): Promise<void> => {
     try {
-      await warmCentralCcsCostReports();
+      await refreshCentralCcsCostDerivedStore();
     } catch (error) {
       console.error(`ccs cost refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -3799,6 +3804,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
   await writeUsageTopSnapshot(snapshot);
   await recordUsageTopHistorySnapshot(snapshot);
+  await refreshCentralCcsCostDerivedStore();
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://localhost");
@@ -4305,12 +4311,43 @@ type CcsCostSnapshotCache = {
   snapshots: CcsCostSnapshot[];
 };
 
+type CcsCostAggregateRecord = CcsCostTokenUsageRecord & {
+  modelUsage: Record<string, CcsCostTokenUsageRecord>;
+};
+
+type CcsCostDerivedAggregate = {
+  standard: CcsCostAggregateRecord;
+  fast: CcsCostAggregateRecord;
+};
+
+type CcsCostDerivedMachine = {
+  machine: string;
+  generatedAt: string;
+  speed: ResolvedCodexCostSpeed;
+  events: number;
+  aggregate: CcsCostDerivedAggregate;
+};
+
+type CcsCostDerivedStore = {
+  version: 1;
+  snapshotFingerprint: string;
+  timezone: string;
+  generatedAt: string;
+  machines: CcsCostDerivedMachine[];
+  daily: Record<string, CcsCostDerivedAggregate>;
+  projects: Record<string, CcsCostDerivedAggregate>;
+  projectDaily: Record<string, Record<string, CcsCostDerivedAggregate>>;
+  dayBuckets15m: Record<string, Record<string, CcsCostDerivedAggregate>>;
+  dayProjects: Record<string, Record<string, CcsCostDerivedAggregate>>;
+};
+
 type CentralCcsCostReportFetchResult = {
   report: CcsCostReportPayload | null;
   error?: string;
 };
 
 let ccsCostSnapshotCache: CcsCostSnapshotCache | null = null;
+let ccsCostDerivedCache: CcsCostDerivedStore | null = null;
 let ccsCostReportCache = new Map<string, CcsCostReportPayload>();
 
 const ccsCostReports = new Set<string>(["daily", "weekly", "monthly", "projects", "project", "day"]);
@@ -4856,15 +4893,6 @@ function ccsCostEventRecord(event: CodexUsageEvent): CcsCostSnapshotEvent {
   };
 }
 
-function ccsCostEventFromRecord(event: CcsCostSnapshotEvent): CodexUsageEvent {
-  return {
-    timestampMs: event.timestampMs,
-    project: event.project,
-    model: event.model,
-    usage: ccsCostTokenUsageRecord(event.usage),
-  };
-}
-
 function ccsCostMachineName(): string {
   return `${formatSystemLabel().replace(/[^A-Za-z0-9._-]+/g, "_")}`;
 }
@@ -4992,10 +5020,6 @@ function ccsCostSnapshotFingerprint(files: CcsCostSnapshotFile[]): string {
   return files.map((file) => `${file.name}:${file.size}:${file.mtimeMs}`).join("|");
 }
 
-async function readCcsCostSnapshots(): Promise<CcsCostSnapshot[]> {
-  return (await getCcsCostSnapshotCache()).snapshots;
-}
-
 async function getCcsCostSnapshotCache(): Promise<CcsCostSnapshotCache> {
   const files = await readCcsCostSnapshotFiles();
   const fingerprint = ccsCostSnapshotFingerprint(files);
@@ -5109,69 +5133,52 @@ function normalizeCcsCostTokenUsageRecord(value: unknown): CcsCostTokenUsageReco
 }
 
 async function buildCentralCcsCostReport(options: CcsCostOptions): Promise<CcsCostReportPayload> {
-  const snapshotCache = await getCcsCostSnapshotCache();
+  const derived = await readCcsCostDerivedStore();
   const priceCache = await readModelPriceCache();
   const priceFingerprint = await ccsCostPriceFingerprint();
-  const cacheKey = ccsCostReportCacheKey(snapshotCache.fingerprint, priceFingerprint, options);
+  const cacheKey = ccsCostReportCacheKey(derived.snapshotFingerprint, priceFingerprint, options);
   const cached = ccsCostReportCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  const snapshots = snapshotCache.snapshots;
-  let report: CcsCostReportPayload;
-  if (options.speed !== "auto") {
-    report = buildCcsCostReport(
-      options,
-      snapshots.flatMap((snapshot) => snapshot.events.map(ccsCostEventFromRecord)),
-      { priceCache, speed: options.speed },
-      "central",
-    );
-  } else {
-    report = mergeCcsCostReports(
-      snapshots.map((snapshot) => buildCcsCostReport(
-        options,
-        snapshot.events.map(ccsCostEventFromRecord),
-        { priceCache, speed: snapshot.speed },
-        "central",
-      )),
-      options,
-    );
-  }
-
+  const report = buildCcsCostReportFromDerived(derived, options, priceCache);
   ccsCostReportCache.set(cacheKey, report);
   return report;
 }
 
 async function buildCcsCostStatus(): Promise<CcsCostStatus> {
-  const snapshots = await readCcsCostSnapshots();
+  const derived = await readCcsCostDerivedStore();
   const priceCache = await readModelPriceCache();
   return {
     version: 1,
     updatedAt: new Date().toISOString(),
-    snapshotCount: snapshots.length,
-    machines: snapshots.map((snapshot) => {
-      const aggregate = emptyCcsCostAggregateFromSnapshot(snapshot);
+    snapshotCount: derived.machines.length,
+    machines: derived.machines.map((machine) => {
+      const metrics = ccsCostMetricsFromDerivedAggregate(machine.aggregate, priceCache, "auto");
       return {
-        machine: snapshot.machine,
-        generatedAt: snapshot.generatedAt,
-        speed: snapshot.speed,
-        events: snapshot.events.length,
-        inputTokens: aggregate.inputTokens,
-        outputTokens: aggregate.outputTokens,
-        costUSD: roundCostUSD(ccsCostOf(aggregate, { priceCache, speed: snapshot.speed })),
+        machine: machine.machine,
+        generatedAt: machine.generatedAt,
+        speed: machine.speed,
+        events: machine.events,
+        inputTokens: metrics.inputTokens,
+        outputTokens: metrics.outputTokens,
+        costUSD: metrics.costUSD,
       };
     }).sort((left, right) => left.machine.localeCompare(right.machine)),
   };
 }
 
-async function warmCentralCcsCostReports(): Promise<{ fingerprint: string; reports: number }> {
-  const snapshotCache = await getCcsCostSnapshotCache();
+async function refreshCentralCcsCostDerivedStore(): Promise<{ fingerprint: string; reports: number }> {
+  const derived = await buildCcsCostDerivedStore();
+  await writeTextFile(ccsCostDerivedPath(), stringifyJson(derived), 0o600);
+  ccsCostDerivedCache = derived;
+  ccsCostReportCache = new Map();
   const options = ["daily", "weekly", "monthly", "projects"]
     .map((report) => defaultCentralCcsCostOptions(report as CcsCostReport));
   for (const option of options) {
     await buildCentralCcsCostReport(option);
   }
-  return { fingerprint: snapshotCache.fingerprint, reports: options.length };
+  return { fingerprint: derived.snapshotFingerprint, reports: options.length };
 }
 
 function defaultCentralCcsCostOptions(report: CcsCostReport): CcsCostOptions {
@@ -5213,22 +5220,138 @@ function ccsCostReportCacheKey(snapshotFingerprint: string, priceFingerprint: st
   });
 }
 
-function mergeCcsCostReports(reports: CcsCostReportPayload[], options: CcsCostOptions): CcsCostReportPayload {
-  if (options.report === "day") {
-    return {
-      version: 1,
-      report: "day",
-      date: options.day,
-      timezone: options.timezone,
-      bucket: options.bucket,
-      totals: sumCcsCostMetrics(reports.map((report) => report.totals)),
-      timeBuckets: sortCcsCostReportRows("daily", mergeCcsCostReportRows(reports.flatMap((report) => report.timeBuckets ?? []))),
-      projects: sortCcsCostReportRows("projects", mergeCcsCostReportRows(reports.flatMap((report) => report.projects ?? []))),
-      source: "central",
-      generatedAt: new Date().toISOString(),
-    };
+async function readCcsCostDerivedStore(): Promise<CcsCostDerivedStore> {
+  const snapshotFingerprint = ccsCostSnapshotFingerprint(await readCcsCostSnapshotFiles());
+  if (ccsCostDerivedCache?.snapshotFingerprint === snapshotFingerprint) {
+    return ccsCostDerivedCache;
+  }
+  const text = await readTextIfExists(ccsCostDerivedPath());
+  if (text === null) {
+    throw new Error(`central ccs cost derived cache missing: ${ccsCostDerivedPath()}`);
+  }
+  const derived = normalizeCcsCostDerivedStore(JSON.parse(text) as unknown);
+  if (!derived) {
+    throw new Error(`invalid central ccs cost derived cache: ${ccsCostDerivedPath()}`);
+  }
+  if (derived.snapshotFingerprint !== snapshotFingerprint) {
+    throw new Error(`stale central ccs cost derived cache: ${ccsCostDerivedPath()}`);
+  }
+  ccsCostDerivedCache = derived;
+  return derived;
+}
+
+async function buildCcsCostDerivedStore(): Promise<CcsCostDerivedStore> {
+  const snapshotCache = await getCcsCostSnapshotCache();
+  const timezone = ccsCostDerivedTimezone(snapshotCache.snapshots);
+  const derived: CcsCostDerivedStore = {
+    version: 1,
+    snapshotFingerprint: snapshotCache.fingerprint,
+    timezone,
+    generatedAt: new Date().toISOString(),
+    machines: [],
+    daily: {},
+    projects: {},
+    projectDaily: {},
+    dayBuckets15m: {},
+    dayProjects: {},
+  };
+
+  for (const snapshot of snapshotCache.snapshots) {
+    const machineAggregate = emptyCcsCostDerivedAggregate();
+    for (const event of snapshot.events) {
+      addCcsCostDerivedEvent(machineAggregate, snapshot.speed, event);
+      const date = ccsCostLocalDateKey(event.timestampMs, timezone);
+      const bucket = ccsCostTimeBucketKey(event.timestampMs, timezone, 15);
+      addCcsCostDerivedEvent(ensureCcsCostDerivedAggregate(derived.daily, date), snapshot.speed, event);
+      addCcsCostDerivedEvent(ensureCcsCostDerivedAggregate(derived.projects, event.project), snapshot.speed, event);
+      addCcsCostDerivedEvent(ensureCcsCostNestedDerivedAggregate(derived.projectDaily, event.project, date), snapshot.speed, event);
+      addCcsCostDerivedEvent(ensureCcsCostNestedDerivedAggregate(derived.dayBuckets15m, date, bucket), snapshot.speed, event);
+      addCcsCostDerivedEvent(ensureCcsCostNestedDerivedAggregate(derived.dayProjects, date, event.project), snapshot.speed, event);
+    }
+    derived.machines.push({
+      machine: snapshot.machine,
+      generatedAt: snapshot.generatedAt,
+      speed: snapshot.speed,
+      events: snapshot.events.length,
+      aggregate: machineAggregate,
+    });
   }
 
+  derived.machines.sort((left, right) => left.machine.localeCompare(right.machine));
+  return derived;
+}
+
+function ccsCostDerivedTimezone(snapshots: CcsCostSnapshot[]): string {
+  const timezones = [...new Set(snapshots.map((snapshot) => snapshot.timezone).filter((timezone) => !!timezone))];
+  return timezones.length === 1 ? timezones[0] : systemTimezone();
+}
+
+function buildCcsCostReportFromDerived(
+  derived: CcsCostDerivedStore,
+  options: CcsCostOptions,
+  priceCache: ModelPriceCache,
+): CcsCostReportPayload {
+  if (options.timezone !== derived.timezone) {
+    throw new Error(`central ccs cost derived timezone is ${derived.timezone}; requested ${options.timezone}`);
+  }
+  if (options.report === "daily") {
+    return buildCcsCostDerivedRowsReport(options, filteredCcsCostDerivedMap(derived.daily, options), priceCache);
+  }
+  if (options.report === "weekly") {
+    return buildCcsCostDerivedRowsReport(options, groupCcsCostDerivedDates(derived.daily, options, ccsCostWeekKey), priceCache);
+  }
+  if (options.report === "monthly") {
+    return buildCcsCostDerivedRowsReport(options, groupCcsCostDerivedDates(derived.daily, options, (date) => date.slice(0, 7)), priceCache);
+  }
+  if (options.report === "projects") {
+    const projects: Record<string, CcsCostDerivedAggregate> = {};
+    for (const [project, dates] of Object.entries(derived.projectDaily)) {
+      const aggregate = sumCcsCostDerivedAggregates(Object.entries(dates)
+        .filter(([date]) => ccsCostDateInRange(date, options))
+        .map(([, value]) => value));
+      if (!isEmptyCcsCostDerivedAggregate(aggregate)) {
+        projects[project] = aggregate;
+      }
+    }
+    return buildCcsCostDerivedRowsReport(options, projects, priceCache, "cost-desc");
+  }
+  if (options.report === "project") {
+    const project = options.project;
+    if (!project) {
+      throw new Error("usage: ccs cost project PROJECT");
+    }
+    return buildCcsCostDerivedRowsReport(options, filteredCcsCostDerivedMap(derived.projectDaily[project] ?? {}, options), priceCache);
+  }
+
+  const day = options.day;
+  if (!day) {
+    throw new Error("usage: ccs cost day YYYY-MM-DD");
+  }
+  const timeBuckets = groupCcsCostTimeBuckets(derived.dayBuckets15m[day] ?? {}, options.bucketMinutes);
+  const projects = derived.dayProjects[day] ?? {};
+  const timeRows = ccsCostRowsFromDerivedMap(timeBuckets, priceCache, options.speed);
+  const projectRows = ccsCostRowsFromDerivedMap(projects, priceCache, options.speed, "cost-desc");
+  return {
+    version: 1,
+    report: "day",
+    date: day,
+    timezone: options.timezone,
+    bucket: options.bucket,
+    totals: ccsCostMetricsFromDerivedAggregate(sumCcsCostDerivedAggregates(Object.values(projects)), priceCache, options.speed),
+    timeBuckets: timeRows,
+    projects: projectRows,
+    source: "central",
+    generatedAt: derived.generatedAt,
+  };
+}
+
+function buildCcsCostDerivedRowsReport(
+  options: CcsCostOptions,
+  values: Record<string, CcsCostDerivedAggregate>,
+  priceCache: ModelPriceCache,
+  sortMode: "key-asc" | "cost-desc" = "key-asc",
+): CcsCostReportPayload {
+  const rows = ccsCostRowsFromDerivedMap(values, priceCache, options.speed, sortMode);
   return {
     version: 1,
     report: options.report,
@@ -5238,69 +5361,253 @@ function mergeCcsCostReports(reports: CcsCostReportPayload[], options: CcsCostOp
       timezone: options.timezone,
     },
     timezone: options.timezone,
-    rows: sortCcsCostReportRows(options.report, mergeCcsCostReportRows(reports.flatMap((report) => report.rows ?? []))),
-    totals: sumCcsCostMetrics(reports.map((report) => report.totals)),
+    rows,
+    totals: ccsCostMetricsFromDerivedAggregate(sumCcsCostDerivedAggregates(Object.values(values)), priceCache, options.speed),
     source: "central",
     generatedAt: new Date().toISOString(),
   };
 }
 
-function mergeCcsCostReportRows(rows: CcsCostReportRowRecord[]): CcsCostReportRowRecord[] {
-  const byKey = new Map<string, CcsCostMetricsRecord[]>();
-  for (const row of rows) {
-    byKey.set(row.key, [...(byKey.get(row.key) ?? []), row]);
-  }
-  return [...byKey.entries()].map(([key, records]) => ({
+function ccsCostRowsFromDerivedMap(
+  values: Record<string, CcsCostDerivedAggregate>,
+  priceCache: ModelPriceCache,
+  speed: CodexCostSpeed,
+  sortMode: "key-asc" | "cost-desc" = "key-asc",
+): CcsCostReportRowRecord[] {
+  const rows = Object.entries(values).map(([key, aggregate]) => ({
     key,
-    ...sumCcsCostMetrics(records),
+    ...ccsCostMetricsFromDerivedAggregate(aggregate, priceCache, speed),
   }));
+  if (sortMode === "cost-desc") {
+    return rows.sort((left, right) => right.costUSD - left.costUSD || left.key.localeCompare(right.key));
+  }
+  return rows.sort((left, right) => left.key.localeCompare(right.key));
 }
 
-function sumCcsCostMetrics(records: CcsCostMetricsRecord[]): CcsCostMetricsRecord {
+function filteredCcsCostDerivedMap(
+  values: Record<string, CcsCostDerivedAggregate>,
+  options: CcsCostOptions,
+): Record<string, CcsCostDerivedAggregate> {
+  return Object.fromEntries(Object.entries(values).filter(([date]) => ccsCostDateInRange(date, options)));
+}
+
+function groupCcsCostDerivedDates(
+  values: Record<string, CcsCostDerivedAggregate>,
+  options: CcsCostOptions,
+  keyOf: (date: string) => string,
+): Record<string, CcsCostDerivedAggregate> {
+  const grouped: Record<string, CcsCostDerivedAggregate> = {};
+  for (const [date, aggregate] of Object.entries(values)) {
+    if (!ccsCostDateInRange(date, options)) {
+      continue;
+    }
+    mergeCcsCostDerivedAggregate(ensureCcsCostDerivedAggregate(grouped, keyOf(date)), aggregate);
+  }
+  return grouped;
+}
+
+function groupCcsCostTimeBuckets(
+  values: Record<string, CcsCostDerivedAggregate>,
+  bucketMinutes: number,
+): Record<string, CcsCostDerivedAggregate> {
+  const grouped: Record<string, CcsCostDerivedAggregate> = {};
+  for (const [bucket, aggregate] of Object.entries(values)) {
+    mergeCcsCostDerivedAggregate(ensureCcsCostDerivedAggregate(grouped, ccsCostMergedBucketKey(bucket, bucketMinutes)), aggregate);
+  }
+  return grouped;
+}
+
+function ccsCostDateInRange(date: string, options: CcsCostOptions): boolean {
+  return (!options.since || date >= options.since) && (!options.until || date <= options.until);
+}
+
+function ccsCostMetricsFromDerivedAggregate(
+  aggregate: CcsCostDerivedAggregate,
+  priceCache: ModelPriceCache,
+  speed: CodexCostSpeed,
+): CcsCostMetricsRecord {
+  const standard = ccsCostRecordToAggregate(aggregate.standard);
+  const fast = ccsCostRecordToAggregate(aggregate.fast);
+  const total = ccsCostRecordToAggregate(sumCcsCostAggregateRecords([aggregate.standard, aggregate.fast]));
+  let costUSD: number;
+  if (speed === "auto") {
+    assertCcsCostPricing(standard, { priceCache, speed: "standard" });
+    assertCcsCostPricing(fast, { priceCache, speed: "fast" });
+    costUSD = ccsCostOf(standard, { priceCache, speed: "standard" }) + ccsCostOf(fast, { priceCache, speed: "fast" });
+  } else {
+    assertCcsCostPricing(total, { priceCache, speed });
+    costUSD = ccsCostOf(total, { priceCache, speed });
+  }
   return {
-    inputTokens: records.reduce((sum, record) => sum + record.inputTokens, 0),
-    outputTokens: records.reduce((sum, record) => sum + record.outputTokens, 0),
-    costUSD: roundCostUSD(records.reduce((sum, record) => sum + record.costUSD, 0)),
+    inputTokens: total.inputTokens,
+    outputTokens: total.outputTokens,
+    costUSD: roundCostUSD(costUSD),
   };
 }
 
-function sortCcsCostReportRows(report: CcsCostReport, rows: CcsCostReportRowRecord[]): CcsCostReportRowRecord[] {
-  if (report === "projects") {
-    return [...rows].sort((left, right) => right.costUSD - left.costUSD || left.key.localeCompare(right.key));
-  }
-  return [...rows].sort((left, right) => left.key.localeCompare(right.key));
+function ensureCcsCostDerivedAggregate(
+  values: Record<string, CcsCostDerivedAggregate>,
+  key: string,
+): CcsCostDerivedAggregate {
+  values[key] ??= emptyCcsCostDerivedAggregate();
+  return values[key];
 }
 
-function emptyCcsCostAggregateFromSnapshot(snapshot: CcsCostSnapshot): CodexUsageAggregate {
-  const aggregate: CodexUsageAggregate = {
+function ensureCcsCostNestedDerivedAggregate(
+  values: Record<string, Record<string, CcsCostDerivedAggregate>>,
+  first: string,
+  second: string,
+): CcsCostDerivedAggregate {
+  values[first] ??= {};
+  return ensureCcsCostDerivedAggregate(values[first], second);
+}
+
+function emptyCcsCostDerivedAggregate(): CcsCostDerivedAggregate {
+  return {
+    standard: emptyCcsCostAggregateRecord(),
+    fast: emptyCcsCostAggregateRecord(),
+  };
+}
+
+function emptyCcsCostAggregateRecord(): CcsCostAggregateRecord {
+  return {
     inputTokens: 0,
     cachedInputTokens: 0,
     outputTokens: 0,
     reasoningOutputTokens: 0,
     totalTokens: 0,
-    modelUsage: new Map(),
+    modelUsage: {},
   };
-  for (const event of snapshot.events) {
-    aggregate.inputTokens += event.usage.inputTokens;
-    aggregate.cachedInputTokens += event.usage.cachedInputTokens;
-    aggregate.outputTokens += event.usage.outputTokens;
-    aggregate.reasoningOutputTokens += event.usage.reasoningOutputTokens;
-    aggregate.totalTokens += event.usage.totalTokens;
-    const modelUsage = aggregate.modelUsage.get(event.model) ?? {
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-      reasoningOutputTokens: 0,
-      totalTokens: 0,
-    };
-    modelUsage.inputTokens += event.usage.inputTokens;
-    modelUsage.cachedInputTokens += event.usage.cachedInputTokens;
-    modelUsage.outputTokens += event.usage.outputTokens;
-    modelUsage.reasoningOutputTokens += event.usage.reasoningOutputTokens;
-    modelUsage.totalTokens += event.usage.totalTokens;
-    aggregate.modelUsage.set(event.model, modelUsage);
+}
+
+function addCcsCostDerivedEvent(
+  aggregate: CcsCostDerivedAggregate,
+  speed: ResolvedCodexCostSpeed,
+  event: CcsCostSnapshotEvent,
+): void {
+  addCcsCostAggregateRecordUsage(aggregate[speed], event.model, event.usage);
+}
+
+function addCcsCostAggregateRecordUsage(
+  aggregate: CcsCostAggregateRecord,
+  model: string,
+  usage: CcsCostTokenUsageRecord,
+): void {
+  aggregate.inputTokens += usage.inputTokens;
+  aggregate.cachedInputTokens += usage.cachedInputTokens;
+  aggregate.outputTokens += usage.outputTokens;
+  aggregate.reasoningOutputTokens += usage.reasoningOutputTokens;
+  aggregate.totalTokens += usage.totalTokens;
+  const modelUsage = aggregate.modelUsage[model] ?? {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 0,
+  };
+  modelUsage.inputTokens += usage.inputTokens;
+  modelUsage.cachedInputTokens += usage.cachedInputTokens;
+  modelUsage.outputTokens += usage.outputTokens;
+  modelUsage.reasoningOutputTokens += usage.reasoningOutputTokens;
+  modelUsage.totalTokens += usage.totalTokens;
+  aggregate.modelUsage[model] = modelUsage;
+}
+
+function mergeCcsCostDerivedAggregate(target: CcsCostDerivedAggregate, source: CcsCostDerivedAggregate): void {
+  mergeCcsCostAggregateRecord(target.standard, source.standard);
+  mergeCcsCostAggregateRecord(target.fast, source.fast);
+}
+
+function mergeCcsCostAggregateRecord(target: CcsCostAggregateRecord, source: CcsCostAggregateRecord): void {
+  for (const [model, usage] of Object.entries(source.modelUsage)) {
+    addCcsCostAggregateRecordUsage(target, model, usage);
   }
-  return aggregate;
+}
+
+function sumCcsCostDerivedAggregates(values: CcsCostDerivedAggregate[]): CcsCostDerivedAggregate {
+  const total = emptyCcsCostDerivedAggregate();
+  for (const value of values) {
+    mergeCcsCostDerivedAggregate(total, value);
+  }
+  return total;
+}
+
+function sumCcsCostAggregateRecords(values: CcsCostAggregateRecord[]): CcsCostAggregateRecord {
+  const total = emptyCcsCostAggregateRecord();
+  for (const value of values) {
+    mergeCcsCostAggregateRecord(total, value);
+  }
+  return total;
+}
+
+function isEmptyCcsCostDerivedAggregate(value: CcsCostDerivedAggregate): boolean {
+  return value.standard.totalTokens === 0 && value.fast.totalTokens === 0;
+}
+
+function ccsCostRecordToAggregate(record: CcsCostAggregateRecord): CodexUsageAggregate {
+  return {
+    inputTokens: record.inputTokens,
+    cachedInputTokens: record.cachedInputTokens,
+    outputTokens: record.outputTokens,
+    reasoningOutputTokens: record.reasoningOutputTokens,
+    totalTokens: record.totalTokens,
+    modelUsage: new Map(Object.entries(record.modelUsage)),
+  };
+}
+
+function ccsCostLocalDateKey(timestampMs: number, timezone: string): string {
+  return DateTime.fromMillis(timestampMs, { zone: timezone }).toISODate() ?? "";
+}
+
+function ccsCostWeekKey(date: string): string {
+  return DateTime.fromISO(date, { zone: "UTC" }).startOf("week").toISODate() ?? date;
+}
+
+function ccsCostTimeBucketKey(timestampMs: number, timezone: string, bucketMinutes: number): string {
+  const local = DateTime.fromMillis(timestampMs, { zone: timezone });
+  const minuteOfDay = local.hour * 60 + local.minute;
+  const startMinute = Math.floor(minuteOfDay / bucketMinutes) * bucketMinutes;
+  const endMinute = Math.min(24 * 60, startMinute + bucketMinutes);
+  return `${formatCcsCostMinuteOfDay(startMinute)}-${formatCcsCostMinuteOfDay(endMinute)}`;
+}
+
+function ccsCostMergedBucketKey(bucket: string, bucketMinutes: number): string {
+  const match = /^(\d\d):(\d\d)-/.exec(bucket);
+  if (!match) {
+    throw new Error(`invalid ccs cost bucket: ${bucket}`);
+  }
+  const minuteOfDay = Number(match[1]) * 60 + Number(match[2]);
+  const startMinute = Math.floor(minuteOfDay / bucketMinutes) * bucketMinutes;
+  const endMinute = Math.min(24 * 60, startMinute + bucketMinutes);
+  return `${formatCcsCostMinuteOfDay(startMinute)}-${formatCcsCostMinuteOfDay(endMinute)}`;
+}
+
+function formatCcsCostMinuteOfDay(value: number): string {
+  const hour = Math.floor(value / 60);
+  const minute = value % 60;
+  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+}
+
+function normalizeCcsCostDerivedStore(value: unknown): CcsCostDerivedStore | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Partial<CcsCostDerivedStore>;
+  if (
+    raw.version !== 1
+    || typeof raw.snapshotFingerprint !== "string"
+    || typeof raw.timezone !== "string"
+    || typeof raw.generatedAt !== "string"
+    || !Array.isArray(raw.machines)
+    || !raw.daily
+    || !raw.projects
+    || !raw.projectDaily
+    || !raw.dayBuckets15m
+    || !raw.dayProjects
+  ) {
+    return null;
+  }
+  return raw as CcsCostDerivedStore;
 }
 
 function ccsCostStatusUrl(stateUrl: string): string {
