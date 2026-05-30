@@ -4145,16 +4145,16 @@ async function refreshCentralCcsCostDerivedStore() {
     ccsCostDerivedCache = derived;
     ccsCostReportCache = new Map();
     const options = ["daily", "weekly", "monthly", "projects"]
-        .map((report) => defaultCentralCcsCostOptions(report));
+        .map((report) => defaultCentralCcsCostOptions(report, derived.timezone));
     for (const option of options) {
         await buildCentralCcsCostReport(option);
     }
     return { fingerprint: derived.snapshotFingerprint, reports: options.length };
 }
-function defaultCentralCcsCostOptions(report) {
+function defaultCentralCcsCostOptions(report, timezone = systemTimezone()) {
     return {
         report,
-        timezone: systemTimezone(),
+        timezone,
         json: false,
         raw: false,
         speed: "auto",

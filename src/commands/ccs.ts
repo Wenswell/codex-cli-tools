@@ -5174,17 +5174,17 @@ async function refreshCentralCcsCostDerivedStore(): Promise<{ fingerprint: strin
   ccsCostDerivedCache = derived;
   ccsCostReportCache = new Map();
   const options = ["daily", "weekly", "monthly", "projects"]
-    .map((report) => defaultCentralCcsCostOptions(report as CcsCostReport));
+    .map((report) => defaultCentralCcsCostOptions(report as CcsCostReport, derived.timezone));
   for (const option of options) {
     await buildCentralCcsCostReport(option);
   }
   return { fingerprint: derived.snapshotFingerprint, reports: options.length };
 }
 
-function defaultCentralCcsCostOptions(report: CcsCostReport): CcsCostOptions {
+function defaultCentralCcsCostOptions(report: CcsCostReport, timezone = systemTimezone()): CcsCostOptions {
   return {
     report,
-    timezone: systemTimezone(),
+    timezone,
     json: false,
     raw: false,
     speed: "auto",
