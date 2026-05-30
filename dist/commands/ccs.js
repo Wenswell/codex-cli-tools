@@ -52,6 +52,8 @@ const usageTopHistoryChartMaxIntervals = 6;
 const usageTopHistoryChartTargetIntervals = 5;
 const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHistoryChartSummaryGap = 4;
+const usageTopHistoryChartNamedProviderLimit = 2;
+const usageTopHistoryOtherName = "other";
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 let usageTopStatusWriteSequence = 0;
@@ -1805,9 +1807,9 @@ function buildUsageTopHistory(records, request) {
         .sort((left, right) => (right.delta ?? 0) - (left.delta ?? 0));
     const sortedNames = summaries.map((summary) => summary.name);
     const buckets = buildUsageTopHistoryBuckets(pointMap, sortedNames, request.windowStart, windowEnd, bucketMs);
-    const trend = buildUsageTopHistoryTrend(pointMap, sortedNames, buckets, request.windowStart);
+    const series = buildUsageTopHistorySeries(pointMap, sortedNames, buckets, request.windowStart);
     return {
-        version: 1,
+        version: 2,
         updatedAt: windowEnd.toISOString(),
         windowStart: request.windowStart.toISOString(),
         windowEnd: windowEnd.toISOString(),
@@ -1815,7 +1817,7 @@ function buildUsageTopHistory(records, request) {
         names: sortedNames,
         availableNames,
         summaries: summaries.map(toUsageTopHistorySummaryRecord),
-        trend: trend.map(toUsageTopHistoryTrendPoint),
+        series: series.map(toUsageTopHistorySeriesRecord),
         buckets: buckets.map((bucket) => toUsageTopHistoryBucketRecord(bucket, sortedNames)),
     };
 }
@@ -1905,7 +1907,7 @@ function normalizeUsageTopHistoryBucketRecord(value) {
         reset: raw.reset,
     };
 }
-function normalizeUsageTopHistoryTrendPoint(value) {
+function normalizeUsageTopHistoryPointRecord(value) {
     if (!value || typeof value !== "object") {
         return null;
     }
@@ -1918,6 +1920,23 @@ function normalizeUsageTopHistoryTrendPoint(value) {
         value: raw.value,
     };
 }
+function normalizeUsageTopHistorySeriesRecord(value) {
+    if (!value || typeof value !== "object") {
+        return null;
+    }
+    const raw = value;
+    if (typeof raw.name !== "string" || !Array.isArray(raw.points)) {
+        return null;
+    }
+    const points = raw.points.map(normalizeUsageTopHistoryPointRecord);
+    if (points.some((point) => !point)) {
+        return null;
+    }
+    return {
+        name: raw.name,
+        points: points,
+    };
+}
 function normalizeUsageTopHistory(value) {
     if (!value || typeof value !== "object") {
         return null;
@@ -1925,7 +1944,7 @@ function normalizeUsageTopHistory(value) {
     const raw = value;
     const names = normalizeUsageTopStringArray(raw.names);
     const availableNames = normalizeUsageTopStringArray(raw.availableNames);
-    if (raw.version !== 1
+    if (raw.version !== 2
         || typeof raw.updatedAt !== "string"
         || typeof raw.windowStart !== "string"
         || typeof raw.windowEnd !== "string"
@@ -1933,20 +1952,20 @@ function normalizeUsageTopHistory(value) {
         || !names
         || !availableNames
         || !Array.isArray(raw.summaries)
-        || !Array.isArray(raw.trend)
+        || !Array.isArray(raw.series)
         || !Array.isArray(raw.buckets)) {
         return null;
     }
     const summaries = raw.summaries.map(normalizeUsageTopHistorySummaryRecord);
-    const trend = raw.trend.map(normalizeUsageTopHistoryTrendPoint);
+    const series = raw.series.map(normalizeUsageTopHistorySeriesRecord);
     const buckets = raw.buckets.map(normalizeUsageTopHistoryBucketRecord);
     if (summaries.some((summary) => !summary)
-        || trend.some((point) => !point)
+        || series.some((item) => !item)
         || buckets.some((bucket) => !bucket)) {
         return null;
     }
     return {
-        version: 1,
+        version: 2,
         updatedAt: raw.updatedAt,
         windowStart: raw.windowStart,
         windowEnd: raw.windowEnd,
@@ -1954,7 +1973,7 @@ function normalizeUsageTopHistory(value) {
         names,
         availableNames,
         summaries: summaries,
-        trend: trend,
+        series: series,
         buckets: buckets,
     };
 }
@@ -2331,10 +2350,16 @@ function toUsageTopHistoryBucketRecord(bucket, names) {
         }),
     };
 }
-function toUsageTopHistoryTrendPoint(point) {
+function toUsageTopHistoryPointRecord(point) {
     return {
         at: point.at.toISOString(),
         value: point.value,
+    };
+}
+function toUsageTopHistorySeriesRecord(series) {
+    return {
+        name: series.name,
+        points: series.points.map(toUsageTopHistoryPointRecord),
     };
 }
 function formatHistoryLastChangeTime(summary) {
@@ -2416,17 +2441,25 @@ function readUsageTopHistoryTotalAt(pointMap, names, atMs, windowStart) {
     }
     return count > 0 ? total : null;
 }
-function buildUsageTopHistoryTrend(pointMap, names, buckets, windowStart) {
-    if (names.length === 0) {
-        return [];
-    }
-    return [
-        { at: windowStart, value: 0 },
-        ...buckets.flatMap((bucket) => {
-            const total = readUsageTopHistoryTotalAt(pointMap, names, bucket.end.getTime(), windowStart);
-            return total === null ? [] : [{ at: bucket.end, value: total }];
-        }),
-    ];
+function usageTopHistoryChartGroups(names) {
+    const primary = names.slice(0, usageTopHistoryChartNamedProviderLimit)
+        .map((name) => ({ name, names: [name] }));
+    const otherNames = names.slice(usageTopHistoryChartNamedProviderLimit);
+    return otherNames.length > 0
+        ? [...primary, { name: usageTopHistoryOtherName, names: otherNames }]
+        : primary;
+}
+function buildUsageTopHistorySeries(pointMap, names, buckets, windowStart) {
+    return usageTopHistoryChartGroups(names).map((group) => ({
+        name: group.name,
+        points: [
+            { at: windowStart, value: 0 },
+            ...buckets.flatMap((bucket) => {
+                const total = readUsageTopHistoryTotalAt(pointMap, group.names, bucket.end.getTime(), windowStart);
+                return total === null ? [] : [{ at: bucket.end, value: total }];
+            }),
+        ],
+    }));
 }
 function expandUsageTopHistoryChartPoints(points, width) {
     if (points.length >= width) {
@@ -2485,27 +2518,59 @@ function buildUsageTopHistoryChartTicks(axisStart, axisEnd, width) {
     }
     return ticks;
 }
+function usageTopHistoryVisibleCells(line) {
+    const cells = [];
+    let pending = "";
+    for (let index = 0; index < line.length;) {
+        const ansi = /^\u001b\[[0-9;]*m/.exec(line.slice(index));
+        if (ansi) {
+            pending += ansi[0];
+            index += ansi[0].length;
+            continue;
+        }
+        cells.push(`${pending}${line[index]}`);
+        pending = "";
+        index += 1;
+    }
+    return { cells, trailing: pending };
+}
+function usageTopHistoryCellChar(cell) {
+    return cell.replace(/\u001b\[[0-9;]*m/g, "") || " ";
+}
+function usageTopHistoryCellAnsi(cell) {
+    return cell.match(/\u001b\[[0-9;]*m/g)?.join("") ?? "";
+}
+function replaceUsageTopHistoryCellChar(cell, char) {
+    return `${usageTopHistoryCellAnsi(cell)}${char}`;
+}
+function joinUsageTopHistoryVisibleCells(cells, trailing) {
+    let suffix = trailing;
+    while (cells.length > 0 && usageTopHistoryCellChar(cells[cells.length - 1]) === " ") {
+        suffix = `${usageTopHistoryCellAnsi(cells.pop() ?? "")}${suffix}`;
+    }
+    return `${cells.join("")}${suffix}`;
+}
 function formatUsageTopHistoryChartZeroAxis(line, ticks, width) {
-    const chars = Array.from(line);
+    const { cells, trailing } = usageTopHistoryVisibleCells(line);
     const endColumn = usageTopHistoryChartAxisPrefix + width - 1;
-    while (chars.length <= endColumn) {
-        chars.push(" ");
+    while (cells.length <= endColumn) {
+        cells.push(" ");
     }
     for (let column = usageTopHistoryChartAxisPrefix + 1; column <= endColumn; column += 1) {
-        if (chars[column] === " ") {
-            chars[column] = "─";
+        if (usageTopHistoryCellChar(cells[column]) === " ") {
+            cells[column] = replaceUsageTopHistoryCellChar(cells[column], "─");
         }
     }
     for (const tick of ticks) {
         const column = usageTopHistoryChartAxisPrefix + tick.index;
         if (column === usageTopHistoryChartAxisPrefix) {
-            chars[column] = "┼";
+            cells[column] = replaceUsageTopHistoryCellChar(cells[column], "┼");
         }
-        else if (chars[column] === " " || chars[column] === "─") {
-            chars[column] = "┬";
+        else if ([" ", "─"].includes(usageTopHistoryCellChar(cells[column]))) {
+            cells[column] = replaceUsageTopHistoryCellChar(cells[column], "┬");
         }
     }
-    return chars.join("").trimEnd();
+    return joinUsageTopHistoryVisibleCells(cells, trailing);
 }
 function formatUsageTopHistoryChartAxis(ticks, width) {
     const chars = Array.from({ length: width }, () => " ");
@@ -2556,22 +2621,6 @@ function formatHistoryChartCost(value) {
     const rounded = Math.round(value);
     return Math.abs(value - rounded) < usageTopHistoryEpsilon ? `$${rounded}` : formatHistoryCost(value);
 }
-function colorUsageTopHistoryChartLine(line, rowIndex, zeroRowIndex, dataWidth) {
-    return Array.from(line)
-        .map((char, index) => {
-        if (!"┼┬─╭╯╰╮│╶╴".includes(char) || index <= usageTopHistoryChartAxisPrefix) {
-            return char;
-        }
-        if (char === "┬" || index - usageTopHistoryChartAxisPrefix >= dataWidth) {
-            return textDim(char);
-        }
-        if (rowIndex === zeroRowIndex && char === "─") {
-            return char;
-        }
-        return colorCost(char);
-    })
-        .join("");
-}
 function usageTopHistoryChartDataWidth(start, end, axisStart, axisEnd) {
     const axisStartMs = axisStart.getTime();
     const axisEndMs = axisEnd.getTime();
@@ -2582,37 +2631,75 @@ function usageTopHistoryChartDataWidth(start, end, axisStart, axisEnd) {
     const ratio = (endMs - axisStartMs) / (axisEndMs - axisStartMs);
     return Math.max(2, Math.round((usageTopHistoryChartMinWidth - 1) * ratio) + 1);
 }
+function canColorizeUsageTopHistoryChart() {
+    return Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+}
+function usageTopHistoryChartColor(index) {
+    if (!canColorizeUsageTopHistoryChart()) {
+        return undefined;
+    }
+    const colors = [
+        asciichart.cyan,
+        asciichart.green,
+        asciichart.yellow,
+    ];
+    return colors[index % colors.length];
+}
+function colorUsageTopHistorySeriesName(name, index) {
+    const color = usageTopHistoryChartColor(index);
+    return color ? asciichart.colored(name, color) : name;
+}
+function stackUsageTopHistoryChartSeries(series) {
+    const cumulative = Array.from({ length: Math.max(0, ...series.map((values) => values.length)) }, () => 0);
+    return series.map((values) => values.map((value, index) => {
+        cumulative[index] += value;
+        return cumulative[index];
+    }));
+}
+function formatUsageTopHistoryChartLegend(series) {
+    return `${textDim("stack:")} ${series
+        .map((item, index) => colorUsageTopHistorySeriesName(item.name, index))
+        .join(textDim(" / "))}`;
+}
 function formatUsageTopHistoryChartPlot(series, ticks) {
-    const scale = usageTopHistoryChartScale(series);
-    const lines = asciichart.plot(series, {
+    const scale = usageTopHistoryChartScale(series.flat());
+    const config = {
         min: 0,
         max: scale.max,
         height: scale.height,
         format: (value) => `${formatHistoryChartCost(value).padStart(7)} `,
-    }).split("\n");
+    };
+    if (canColorizeUsageTopHistoryChart()) {
+        config.colors = series.map((_, index) => usageTopHistoryChartColor(index));
+    }
+    const lines = asciichart.plot(series, config).split("\n");
     lines[lines.length - 1] = formatUsageTopHistoryChartZeroAxis(lines[lines.length - 1], ticks, usageTopHistoryChartMinWidth);
-    const zeroRowIndex = lines.length - 1;
-    return lines
-        .map((line, index) => colorUsageTopHistoryChartLine(line, index, zeroRowIndex, series.length))
-        .join("\n");
+    return lines.join("\n");
 }
-function formatUsageTopHistoryChartLines(trend) {
-    const points = trend
-        .filter((point) => Number.isFinite(point.value) && !Number.isNaN(point.at.getTime()))
-        .sort((left, right) => left.at.getTime() - right.at.getTime());
-    const lines = [textBold("total trend")];
-    if (points.length < 2) {
+function formatUsageTopHistoryChartLines(series) {
+    const chartSeries = series.map((item) => ({
+        name: item.name,
+        points: item.points
+            .filter((point) => Number.isFinite(point.value) && !Number.isNaN(point.at.getTime()))
+            .sort((left, right) => left.at.getTime() - right.at.getTime()),
+    })).filter((item) => item.points.length >= 2);
+    const lines = [textBold("stacked trend")];
+    if (chartSeries.length === 0) {
         return [...lines, textDim("not enough history yet")];
     }
-    const start = points[0].at;
-    const end = points[points.length - 1].at;
+    const allPoints = chartSeries.flatMap((item) => item.points);
+    const start = new Date(Math.min(...allPoints.map((point) => point.at.getTime())));
+    const end = new Date(Math.max(...allPoints.map((point) => point.at.getTime())));
     const axisEnd = endOfHistoryDay(start);
-    const chartPoints = expandUsageTopHistoryChartPoints(points, usageTopHistoryChartDataWidth(start, end, start, axisEnd));
-    const series = chartPoints.map((point) => point.value);
+    const dataWidth = usageTopHistoryChartDataWidth(start, end, start, axisEnd);
+    const rawSeries = chartSeries.map((item) => expandUsageTopHistoryChartPoints(item.points, dataWidth)
+        .map((point) => point.value));
+    const stackedSeries = stackUsageTopHistoryChartSeries(rawSeries);
     const ticks = buildUsageTopHistoryChartTicks(start, axisEnd, usageTopHistoryChartMinWidth);
     return [
         ...lines,
-        ...formatUsageTopHistoryChartPlot(series, ticks).split("\n"),
+        formatUsageTopHistoryChartLegend(chartSeries),
+        ...formatUsageTopHistoryChartPlot(stackedSeries, ticks).split("\n"),
         textDim(formatUsageTopHistoryChartAxis(ticks, usageTopHistoryChartMinWidth)),
     ];
 }
@@ -2653,8 +2740,8 @@ function formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd) {
         ], ["left", "right", "right", "right", "right"]),
     ];
 }
-function printUsageTopHistoryChartWithSummary(trend, summaries, buckets, windowEnd) {
-    const chartLines = formatUsageTopHistoryChartLines(trend);
+function printUsageTopHistoryChartWithSummary(series, summaries, buckets, windowEnd) {
+    const chartLines = formatUsageTopHistoryChartLines(series);
     const summaryLines = formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd);
     const chartWidth = Math.max(...chartLines.map(visibleLength));
     const lineCount = Math.max(chartLines.length, summaryLines.length);
@@ -2724,10 +2811,16 @@ function toUsageTopBucket(record) {
         reset: record.reset,
     };
 }
-function toUsageTopTrendPoint(record) {
+function toUsageTopPoint(record) {
     return {
         at: parseUsageTopHistoryDate(record.at),
         value: record.value,
+    };
+}
+function toUsageTopSeries(record) {
+    return {
+        name: record.name,
+        points: record.points.map(toUsageTopPoint),
     };
 }
 async function printUsageTopHistory(profiles, profileName) {
@@ -2744,11 +2837,11 @@ async function printUsageTopHistory(profiles, profileName) {
     }
     const summaries = source.history.summaries.map(toUsageTopSummary);
     const buckets = source.history.buckets.map(toUsageTopBucket);
-    const trend = source.history.trend.map(toUsageTopTrendPoint);
+    const series = source.history.series.map(toUsageTopSeries);
     const windowEnd = parseUsageTopHistoryDate(source.history.windowEnd);
     console.log(`ccs usage history  today  bucket ${formatHistoryBucketWindow(source.history.bucketMinutes)}`);
     printKeyValue("source:", source.remote ? colorUrl(source.source) : colorPath(source.source), 7);
-    printUsageTopHistoryChartWithSummary(trend, summaries, buckets, windowEnd);
+    printUsageTopHistoryChartWithSummary(series, summaries, buckets, windowEnd);
     printUsageTopHistoryBuckets(buckets, names);
 }
 async function writeUsageTopStatusText(value) {
