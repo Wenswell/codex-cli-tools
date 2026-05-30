@@ -234,7 +234,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | run PROFILE [ARGS] | cost [daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | PROFILE | run PROFILE [ARGS] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -250,6 +250,14 @@ ccs cost monthly
 ccs cost projects
 ccs cost project PROJECT
 ccs cost day YYYY-MM-DD
+ccs cost push
+ccs cost central
+ccs cost central daily
+ccs cost central weekly
+ccs cost central monthly
+ccs cost central projects
+ccs cost central project PROJECT
+ccs cost central day YYYY-MM-DD
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs config [push|pull]
@@ -272,7 +280,7 @@ ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
 
-`ccs cost` without arguments prints the local cost data source, pricing cache, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
+`ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
 
 `ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for `token_count` usage events. Default tables show only `input`, `output`, and `cost` metric columns.
 
@@ -285,6 +293,38 @@ ccs cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 
 ccs cost day 2026-05-29 --bucket 1h
 ccs cost day 2026-05-29 --json
 ```
+
+`ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH:
+
+```bash
+ccs cost push
+```
+
+The fixed upload target is:
+
+```text
+ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
+```
+
+The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly and prints the remote file, machine name, event count, input, and output totals.
+
+`ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central daily`, `weekly`, `monthly`, `projects`, `project`, and `day` render server-side aggregate reports from all uploaded machine snapshots:
+
+```bash
+ccs cost central
+ccs cost central daily --since 2026-05-01 --until 2026-05-30
+ccs cost central projects --since 2026-05-01 --until 2026-05-30
+ccs cost central day 2026-05-29 --bucket 1h
+```
+
+The central report endpoints are served by `ccs s server`:
+
+```text
+GET /ccs/cost/status
+GET /ccs/cost/report
+```
+
+Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report.
 
 Options:
 
@@ -344,7 +384,7 @@ ccs s server
 ccs s server 8765
 ```
 
-The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves compact aggregated history for a requested window, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. `POST /ccs/top/reset` refreshes immediately and resets polling to `25s`. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
+The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves compact aggregated history for a requested window, `/ccs/cost/status` serves uploaded cost snapshot status, `/ccs/cost/report` serves central cost reports from uploaded snapshots, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. `POST /ccs/top/reset` refreshes immediately and resets polling to `25s`. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line and central cost clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 ```json
 {

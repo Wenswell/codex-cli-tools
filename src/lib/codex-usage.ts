@@ -172,6 +172,16 @@ export async function loadCodexUsageEvents(options: CodexUsageLoadOptions): Prom
   return events;
 }
 
+export function filterCodexUsageEvents(events: CodexUsageEvent[], options: CodexUsageLoadOptions): CodexUsageEvent[] {
+  validateTimezone(options.timezone);
+  const range = dateRangeMs(options);
+  return events.filter((event) => (
+    event.timestampMs >= range.startMs
+    && event.timestampMs < range.endMs
+    && (!options.project || event.project === options.project)
+  ));
+}
+
 export function aggregateDaily(events: CodexUsageEvent[], timezone: string): CodexUsageRow[] {
   return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)), "key-asc");
 }
