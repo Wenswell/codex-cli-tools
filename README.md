@@ -337,7 +337,7 @@ GET /ccs/cost/report
 POST /ccs/cost/refresh
 ```
 
-`POST /ccs/cost/refresh` schedules central derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window push the refresh later, so a group of hourly uploads causes one snapshot scan and one derived-data write. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; report requests read that file and do not parse raw snapshot events on the query path. If the derived file is missing or stale against the current snapshot fingerprint, central report requests fail with a direct cache error.
+`POST /ccs/cost/refresh` schedules central derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window push the refresh later, so a group of hourly uploads causes one snapshot scan and one derived-data write. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; report requests read that file and do not parse raw snapshot events on the query path. During the debounce window, reports keep serving the previous derived version until the next derived file is written.
 
 Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report.
 

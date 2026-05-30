@@ -5221,8 +5221,7 @@ function ccsCostReportCacheKey(snapshotFingerprint: string, priceFingerprint: st
 }
 
 async function readCcsCostDerivedStore(): Promise<CcsCostDerivedStore> {
-  const snapshotFingerprint = ccsCostSnapshotFingerprint(await readCcsCostSnapshotFiles());
-  if (ccsCostDerivedCache?.snapshotFingerprint === snapshotFingerprint) {
+  if (ccsCostDerivedCache) {
     return ccsCostDerivedCache;
   }
   const text = await readTextIfExists(ccsCostDerivedPath());
@@ -5232,9 +5231,6 @@ async function readCcsCostDerivedStore(): Promise<CcsCostDerivedStore> {
   const derived = normalizeCcsCostDerivedStore(JSON.parse(text) as unknown);
   if (!derived) {
     throw new Error(`invalid central ccs cost derived cache: ${ccsCostDerivedPath()}`);
-  }
-  if (derived.snapshotFingerprint !== snapshotFingerprint) {
-    throw new Error(`stale central ccs cost derived cache: ${ccsCostDerivedPath()}`);
   }
   ccsCostDerivedCache = derived;
   return derived;
