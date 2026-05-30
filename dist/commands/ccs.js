@@ -2012,6 +2012,7 @@ async function fetchUsageTopSnapshot(url) {
 async function fetchUsageTopHistory(url) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), usageTopHistoryHttpTimeoutMs);
+    let text = "";
     try {
         const response = await fetch(url, {
             method: "GET",
@@ -2021,7 +2022,7 @@ async function fetchUsageTopHistory(url) {
         if (!response.ok) {
             return null;
         }
-        return parseUsageTopHistory(await response.text());
+        text = await response.text();
     }
     catch {
         return null;
@@ -2029,6 +2030,11 @@ async function fetchUsageTopHistory(url) {
     finally {
         clearTimeout(timeout);
     }
+    const history = parseUsageTopHistory(text);
+    if (!history) {
+        throw new Error(`invalid ccs top history response from ${url}; expected version 2 series payload`);
+    }
+    return history;
 }
 function buildUsageTopHistoryRequest(profileName) {
     return {
