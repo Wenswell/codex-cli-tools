@@ -1,6 +1,6 @@
 # ccs cost spec
 
-Status: draft
+Status: implemented
 
 ## Goal
 
@@ -56,7 +56,7 @@ Supported bucket durations:
 2h
 ```
 
-`--speed auto` reads the active Codex config and applies fast pricing when the configured service tier requires it. `--speed standard` and `--speed fast` force the pricing multiplier.
+`--speed auto` reads the active Codex config and applies fast pricing when the configured service tier requires it. `--speed standard` and `--speed fast` force the pricing mode.
 
 ## Reports
 
@@ -266,7 +266,7 @@ JSON uses stable lower camel case keys.
 Primary index:
 
 ```text
-~/.codex/state_*.sqlite
+~/.codex/state*.sqlite
   threads.id
   threads.cwd
   threads.rollout_path
@@ -309,6 +309,7 @@ payload.info.model
 payload.info.model_name
 payload.metadata.model
 payload.info.metadata.model
+threads.model
 ```
 
 Token usage resolution:
@@ -346,6 +347,8 @@ cached_input_tokens=0
 output_tokens=0
 reasoning_output_tokens=0
 ```
+
+Adjacent duplicate token events are skipped when both the effective delta and `total_token_usage` match the previous effective token event in the same file.
 
 ## Display Metrics
 
@@ -405,6 +408,22 @@ cost =
 ```
 
 All prices are per token.
+
+Standard pricing fields:
+
+```text
+input_cost_per_token
+cache_read_input_token_cost
+output_cost_per_token
+```
+
+Fast pricing fields:
+
+```text
+input_cost_per_token_priority
+cache_read_input_token_cost_priority
+output_cost_per_token_priority
+```
 
 Cost reporting requires pricing entries for every model with priced usage. The command fails and lists the missing model names when pricing is incomplete.
 
@@ -504,12 +523,15 @@ src/lib/pricing.ts
 Changed files:
 
 ```text
+package.json
+pnpm-lock.yaml
 src/commands/ccs.ts
 src/lib/paths.ts
 README.md
+dist/bin/ccs.js
 dist/commands/ccs.js
-dist/lib/paths.js
 dist/lib/codex-usage.js
+dist/lib/paths.js
 dist/lib/pricing.js
 ```
 
@@ -520,6 +542,7 @@ dist/lib/pricing.js
 - token event extraction.
 - project attribution.
 - date, week, month, bucket aggregation.
+- IANA timezone grouping through Luxon.
 
 `src/lib/pricing.ts` owns:
 

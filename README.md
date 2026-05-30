@@ -234,7 +234,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | run PROFILE [ARGS] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | PROFILE | run PROFILE [ARGS] | cost [daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -243,6 +243,13 @@ Supported commands:
 ccs
 ccs PROFILE
 ccs run PROFILE [CODEX_ARGS...]
+ccs cost
+ccs cost daily
+ccs cost weekly
+ccs cost monthly
+ccs cost projects
+ccs cost project PROJECT
+ccs cost day YYYY-MM-DD
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
 ccs config [push|pull]
@@ -264,6 +271,33 @@ ccs sync
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
+
+`ccs cost` reports local Codex session usage from `~/.codex`. It reads the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and streams each selected session JSONL file line by line for `token_count` usage events. Default tables show only `input`, `output`, and `cost` metric columns.
+
+```bash
+ccs cost daily --since 2026-05-01 --until 2026-05-30
+ccs cost weekly --since 2026-05-01 --until 2026-05-30
+ccs cost monthly --since 2026-01-01
+ccs cost projects --since 2026-05-01 --until 2026-05-30
+ccs cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 --until 2026-05-30
+ccs cost day 2026-05-29 --bucket 1h
+ccs cost day 2026-05-29 --json
+```
+
+Options:
+
+```text
+--since YYYY-MM-DD      inclusive start date
+--until YYYY-MM-DD      inclusive end date
+--timezone IANA_NAME    date grouping timezone; defaults to the system timezone
+--bucket 15m|30m|1h|2h  time bucket for ccs cost day; default 1h
+--json                  print stable JSON
+--speed auto|standard|fast
+```
+
+`ccs cost` is the same as `ccs cost daily`. Daily, weekly, monthly, project, and one-project reports include a `total` row. Weeks start on Monday. `ccs cost projects` sorts by highest cost first. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects sort by cost.
+
+Costs use LiteLLM model pricing cached at `~/.cache/codex-tools/model-prices.json`. When the cache is missing, `ccs cost` refreshes it from LiteLLM. `--speed auto` reads top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
 

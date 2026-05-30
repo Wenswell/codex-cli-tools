@@ -10,6 +10,25 @@ import { promisify } from "node:util";
 import * as asciichart from "asciichart";
 import { createTwoFilesPatch } from "diff";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
+import {
+  aggregateDaily,
+  aggregateDayProjects,
+  aggregateDayTimeBuckets,
+  aggregateMonthly,
+  aggregateProjectDaily,
+  aggregateProjects,
+  aggregateWeekly,
+  dateRangeForDay,
+  formatProjectPath,
+  loadCodexUsageEvents,
+  resolveProjectPath,
+  sortRowsByCost,
+  systemTimezone,
+  totalAggregate,
+  type CodexUsageAggregate,
+  type CodexUsageRange,
+  type CodexUsageRow,
+} from "../lib/codex-usage.js";
 import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import {
@@ -18,10 +37,20 @@ import {
   codexConfigPath,
   codexDir,
   codexToolsCacheDir,
+  modelPricesCachePath,
   codexToolsConfigDir,
   profilesPath,
   weztermConfigPath,
 } from "../lib/paths.js";
+import {
+  calculateCodexCostUSD,
+  missingPricingModels,
+  readModelPriceCache,
+  resolveCodexCostSpeed,
+  type CodexCostSpeed,
+  type ModelPriceCache,
+  type ResolvedCodexCostSpeed,
+} from "../lib/pricing.js";
 import {
   bgDarkBlue,
   maskSecret,
@@ -3915,6 +3944,13 @@ function usageLines(): string[] {
     "  ccs                                  # show current profile and usage",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
+    "  ccs cost                             # show Codex session daily cost totals",
+    "  ccs cost daily                       # show Codex session daily cost totals",
+    "  ccs cost weekly                      # show Codex session weekly cost totals",
+    "  ccs cost monthly                     # show Codex session monthly cost totals",
+    "  ccs cost projects                    # show Codex session project cost totals",
+    "  ccs cost project PROJECT             # show one Codex project by day",
+    "  ccs cost day YYYY-MM-DD              # show one Codex day by time and project",
     "  ccs toggle [PROFILE]                 # switch profile",
     "  ccs top [--once] [--mark DURATION]   # show all usage costs with checkpoint lines",
     "  ccs config [push|pull]                # preview, confirm, and sync profiles.json with LAN server",
@@ -3963,8 +3999,383 @@ function parseWeztermArgs(args: string[]): WeztermOptions {
   return { remove };
 }
 
+type CcsCostReport = "daily" | "weekly" | "monthly" | "projects" | "project" | "day";
+
+type CcsCostOptions = CodexUsageRange & {
+  report: CcsCostReport;
+  json: boolean;
+  speed: CodexCostSpeed;
+  bucket: "15m" | "30m" | "1h" | "2h";
+  bucketMinutes: number;
+  project?: string;
+  day?: string;
+};
+
+type CcsCostContext = {
+  priceCache: ModelPriceCache;
+  speed: ResolvedCodexCostSpeed;
+};
+
+const ccsCostReports = new Set<string>(["daily", "weekly", "monthly", "projects", "project", "day"]);
+const ccsCostBucketMinutes = new Map<CcsCostOptions["bucket"], number>([
+  ["15m", 15],
+  ["30m", 30],
+  ["1h", 60],
+  ["2h", 120],
+]);
+
+function printCcsCostHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    "  ccs cost                                           # show Codex session daily cost totals",
+    "  ccs cost daily                                     # show daily totals",
+    "  ccs cost weekly                                    # show weekly totals",
+    "  ccs cost monthly                                   # show monthly totals",
+    "  ccs cost projects                                  # show project totals",
+    "  ccs cost project PROJECT                           # show one project by day",
+    "  ccs cost day YYYY-MM-DD                            # show one day by time and project",
+    "",
+    textBold("Options:"),
+    "  --since YYYY-MM-DD      inclusive start date",
+    "  --until YYYY-MM-DD      inclusive end date",
+    "  --timezone IANA_NAME    date grouping timezone; defaults to the system timezone",
+    "  --bucket 15m|30m|1h|2h  time bucket for ccs cost day; default 1h",
+    "  --json                  print stable JSON",
+    "  --speed auto|standard|fast",
+  ].join("\n"));
+}
+
+async function runCcsCost(args: string[]): Promise<void> {
+  if (args.some(isHelpArgument)) {
+    printCcsCostHelp();
+    return;
+  }
+
+  const options = parseCcsCostArgs(args);
+  const context: CcsCostContext = {
+    priceCache: await readModelPriceCache(),
+    speed: await resolveCodexCostSpeed(options.speed),
+  };
+  const events = await loadCodexUsageEvents({
+    ...(options.report === "day" && options.day ? dateRangeForDay(options.day, options.timezone) : {
+      since: options.since,
+      until: options.until,
+      timezone: options.timezone,
+    }),
+    project: options.project,
+  });
+
+  if (options.report === "daily") {
+    const rows = aggregateDaily(events, options.timezone);
+    assertCcsCostPricing(totalAggregate(rows), context);
+    printOrJsonCcsCostRows(options, rows, "date", context);
+    return;
+  }
+
+  if (options.report === "weekly") {
+    const rows = aggregateWeekly(events, options.timezone);
+    assertCcsCostPricing(totalAggregate(rows), context);
+    printOrJsonCcsCostRows(options, rows, "week", context);
+    return;
+  }
+
+  if (options.report === "monthly") {
+    const rows = aggregateMonthly(events, options.timezone);
+    assertCcsCostPricing(totalAggregate(rows), context);
+    printOrJsonCcsCostRows(options, rows, "month", context);
+    return;
+  }
+
+  if (options.report === "projects") {
+    const unsortedRows = aggregateProjects(events);
+    assertCcsCostPricing(totalAggregate(unsortedRows), context);
+    const rows = sortRowsByCost(unsortedRows, (aggregate) => ccsCostOf(aggregate, context));
+    printOrJsonCcsCostRows(options, rows, "project", context, formatProjectPath);
+    return;
+  }
+
+  if (options.report === "project") {
+    const project = options.project;
+    if (!project) {
+      throw new Error("usage: ccs cost project PROJECT");
+    }
+    const rows = aggregateProjectDaily(events, options.timezone, project);
+    assertCcsCostPricing(totalAggregate(rows), context);
+    printOrJsonCcsCostRows(options, rows, "date", context, undefined, `ccs cost project  ${formatProjectPath(project)}`);
+    return;
+  }
+
+  const day = options.day;
+  if (!day) {
+    throw new Error("usage: ccs cost day YYYY-MM-DD");
+  }
+  const timeRows = aggregateDayTimeBuckets(events, options.timezone, day, options.bucketMinutes);
+  const unsortedProjectRows = aggregateDayProjects(events, options.timezone, day);
+  const total = totalAggregate(unsortedProjectRows);
+  assertCcsCostPricing(total, context);
+  const projectRows = sortRowsByCost(
+    unsortedProjectRows,
+    (aggregate) => ccsCostOf(aggregate, context),
+  );
+  printOrJsonCcsCostDay(options, day, timeRows, projectRows, total, context);
+}
+
+function parseCcsCostArgs(args: string[]): CcsCostOptions {
+  let report: CcsCostReport = "daily";
+  let index = 0;
+  let project: string | undefined;
+  let day: string | undefined;
+
+  const first = args[0];
+  if (first && !first.startsWith("-")) {
+    if (!ccsCostReports.has(first)) {
+      throw new Error(`unknown argument for ccs cost: ${first}`);
+    }
+    report = first as CcsCostReport;
+    index = 1;
+  }
+
+  if (report === "project") {
+    const value = args[index];
+    if (!value || value.startsWith("-")) {
+      throw new Error("usage: ccs cost project PROJECT");
+    }
+    project = resolveProjectPath(value);
+    index += 1;
+  }
+
+  if (report === "day") {
+    const value = args[index];
+    if (!value || value.startsWith("-")) {
+      throw new Error("usage: ccs cost day YYYY-MM-DD");
+    }
+    day = value;
+    index += 1;
+  }
+
+  let since: string | undefined;
+  let until: string | undefined;
+  let timezone = systemTimezone();
+  let json = false;
+  let speed: CodexCostSpeed = "auto";
+  let bucket: CcsCostOptions["bucket"] = "1h";
+  let bucketProvided = false;
+
+  for (; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    if (arg === "--since") {
+      since = readCcsCostOptionValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--until") {
+      until = readCcsCostOptionValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--timezone") {
+      timezone = readCcsCostOptionValue(args, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === "--bucket") {
+      const value = readCcsCostOptionValue(args, index, arg);
+      if (!ccsCostBucketMinutes.has(value as CcsCostOptions["bucket"])) {
+        throw new Error(`invalid ccs cost bucket: ${value}`);
+      }
+      bucket = value as CcsCostOptions["bucket"];
+      bucketProvided = true;
+      index += 1;
+      continue;
+    }
+    if (arg === "--speed") {
+      const value = readCcsCostOptionValue(args, index, arg);
+      if (value !== "auto" && value !== "standard" && value !== "fast") {
+        throw new Error(`invalid ccs cost speed: ${value}`);
+      }
+      speed = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`unknown argument for ccs cost ${report}: ${arg}`);
+  }
+
+  if (report === "day" && (since || until)) {
+    throw new Error("ccs cost day uses YYYY-MM-DD instead of --since or --until");
+  }
+  if (report !== "day" && bucketProvided) {
+    throw new Error("--bucket is only valid for ccs cost day");
+  }
+
+  return {
+    report,
+    since,
+    until,
+    timezone,
+    json,
+    speed,
+    bucket,
+    bucketMinutes: ccsCostBucketMinutes.get(bucket) ?? 60,
+    project,
+    day,
+  };
+}
+
+function readCcsCostOptionValue(args: string[], index: number, option: string): string {
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`missing value for ${option}`);
+  }
+  return value;
+}
+
+function printOrJsonCcsCostRows(
+  options: CcsCostOptions,
+  rows: CodexUsageRow[],
+  key: "date" | "week" | "month" | "project",
+  context: CcsCostContext,
+  formatKey: (value: string) => string = (value) => value,
+  title = `ccs cost ${options.report}  ${formatCcsCostRange(options)}  timezone ${options.timezone}`,
+): void {
+  const total = totalAggregate(rows);
+  if (options.json) {
+    console.log(stringifyJson({
+      report: options.report,
+      range: {
+        since: options.since ?? null,
+        until: options.until ?? null,
+        timezone: options.timezone,
+      },
+      rows: rows.map((row) => ({
+        [key]: row.key,
+        ...ccsCostMetricsJson(row.aggregate, context),
+      })),
+      totals: ccsCostMetricsJson(total, context),
+    }).trimEnd());
+    return;
+  }
+
+  console.log(title);
+  printCcsCostTable(key, rows, total, context, formatKey);
+}
+
+function printOrJsonCcsCostDay(
+  options: CcsCostOptions,
+  day: string,
+  timeRows: CodexUsageRow[],
+  projectRows: CodexUsageRow[],
+  total: CodexUsageAggregate,
+  context: CcsCostContext,
+): void {
+  if (options.json) {
+    console.log(stringifyJson({
+      report: "day",
+      date: day,
+      timezone: options.timezone,
+      bucket: options.bucket,
+      totals: ccsCostMetricsJson(total, context),
+      timeBuckets: timeRows.map((row) => {
+        const [start, end] = row.key.split("-");
+        return {
+          start,
+          end,
+          ...ccsCostMetricsJson(row.aggregate, context),
+        };
+      }),
+      projects: projectRows.map((row) => ({
+        project: row.key,
+        ...ccsCostMetricsJson(row.aggregate, context),
+      })),
+    }).trimEnd());
+    return;
+  }
+
+  console.log(`ccs cost day  ${day}  bucket ${options.bucket}  timezone ${options.timezone}`);
+  console.log(`total  input ${formatInteger(total.inputTokens)}  output ${formatInteger(total.outputTokens)}  cost ${formatCost(ccsCostOf(total, context))}`);
+  console.log("");
+  console.log("by time");
+  printCcsCostTable("time", timeRows, null, context);
+  console.log("");
+  console.log("by project");
+  printCcsCostTable("project", projectRows, null, context, formatProjectPath);
+}
+
+function printCcsCostTable(
+  firstHeader: string,
+  rows: CodexUsageRow[],
+  total: CodexUsageAggregate | null,
+  context: CcsCostContext,
+  formatKey: (value: string) => string = (value) => value,
+): void {
+  const tableRows = [
+    [firstHeader, "input", "output", "cost"],
+    ...rows.map((row) => ccsCostTableRow(formatKey(row.key), row.aggregate, context)),
+  ];
+  if (total) {
+    tableRows.push(ccsCostTableRow("total", total, context));
+  }
+  printTable(tableRows, ["left", "right", "right", "right"]);
+}
+
+function ccsCostTableRow(label: string, aggregate: CodexUsageAggregate, context: CcsCostContext): string[] {
+  return [
+    label,
+    formatInteger(aggregate.inputTokens),
+    formatInteger(aggregate.outputTokens),
+    formatCost(ccsCostOf(aggregate, context)),
+  ];
+}
+
+function ccsCostMetricsJson(aggregate: CodexUsageAggregate, context: CcsCostContext): {
+  inputTokens: number;
+  outputTokens: number;
+  costUSD: number;
+} {
+  return {
+    inputTokens: aggregate.inputTokens,
+    outputTokens: aggregate.outputTokens,
+    costUSD: roundCostUSD(ccsCostOf(aggregate, context)),
+  };
+}
+
+function assertCcsCostPricing(aggregate: CodexUsageAggregate, context: CcsCostContext): void {
+  const missing = missingPricingModels(aggregate.modelUsage, context.priceCache, context.speed);
+  if (missing.length > 0) {
+    throw new Error(`missing pricing models: ${missing.join(", ")}; cache: ${modelPricesCachePath()}`);
+  }
+}
+
+function ccsCostOf(aggregate: CodexUsageAggregate, context: CcsCostContext): number {
+  return calculateCodexCostUSD(aggregate.modelUsage, context.priceCache, context.speed);
+}
+
+function formatCcsCostRange(options: CcsCostOptions): string {
+  if (options.since && options.until) {
+    return `${options.since}..${options.until}`;
+  }
+  if (options.since) {
+    return `${options.since}..`;
+  }
+  if (options.until) {
+    return `..${options.until}`;
+  }
+  return "all";
+}
+
+function formatInteger(value: number): string {
+  return Math.round(value).toLocaleString("en-US");
+}
+
+function roundCostUSD(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+  console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | cost [daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 
 function printStatusUsageHelp(): void {
@@ -3982,6 +4393,11 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (command === "config") {
     await runConfigSync(args);
+    return;
+  }
+
+  if (command === "cost") {
+    await runCcsCost(args);
     return;
   }
 
