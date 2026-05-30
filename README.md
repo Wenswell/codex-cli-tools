@@ -282,7 +282,7 @@ ccs remove | rm | delete PROFILE
 
 `ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
 
-`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for `token_count` usage events. Default tables show only `input`, `output`, and `cost` metric columns.
+`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for `token_count` usage events. Terminal tables show `input`, `output`, `cost`, `share`, and `bar` columns.
 
 ```bash
 ccs cost daily --since 2026-05-01 --until 2026-05-30
@@ -355,7 +355,7 @@ Options:
 
 Daily, weekly, monthly, project, and one-project reports include a `total` row. Weeks start on Monday. `ccs cost projects` sorts by highest cost first. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects sort by cost.
 
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
 
 Costs use LiteLLM model pricing cached at `~/.cache/codex-tools/model-prices.json`. When the cache is missing, `ccs cost` refreshes it from LiteLLM. `--speed auto` reads top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
 

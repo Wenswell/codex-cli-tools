@@ -17,10 +17,10 @@ The report answers these questions:
 The user-facing metric set is intentionally small:
 
 ```text
-input  output  cost
+input  output  cost  share  bar
 ```
 
-Default reports show only the three metric columns listed above.
+Terminal reports show the five columns listed above.
 
 ## Command Surface
 
@@ -83,11 +83,11 @@ Output:
 
 ```text
 ccs cost daily  2026-05-01..2026-05-30  timezone Asia/Shanghai
-date        input  output  cost
-2026-05-01  1.2M   46K     $1
-2026-05-02  2.3M   57K     $2
------------------------------
-total       3.6M   102K    $4
+date        input  output  cost  share   bar
+2026-05-01  1.2M   46K     $1    25.0%   ████████
+2026-05-02  2.3M   57K     $3    75.0%   ███████████████████████
+---------------------------------------------------------
+total       3.5M   103K    $4    100.0%  ██████████████████████████████
 ```
 
 ### Weekly Totals
@@ -101,11 +101,11 @@ ccs cost weekly --since 2026-05-01 --until 2026-05-30
 Weeks start on Monday. The `week` value is the local date of the week start.
 
 ```text
-week        input  output  cost
-2026-04-27  3.5M   90K     $5
-2026-05-04  4.6M   101K    $6
------------------------------
-total       8M     191K    $10
+week        input  output  cost  share   bar
+2026-04-27  3.5M   90K     $5    50.0%   ███████████████
+2026-05-04  4.6M   101K    $5    50.0%   ███████████████
+----------------------------------------------------
+total       8M     191K    $10   100.0%  ██████████████████████████████
 ```
 
 ### Monthly Totals
@@ -117,11 +117,11 @@ ccs cost monthly --since 2026-01-01
 ```
 
 ```text
-month    input  output  cost
-2026-01  12M    457K    $12
-2026-02  23M    568K    $23
--------------------------
-total    36M    1M      $36
+month    input  output  cost  share   bar
+2026-01  12M    457K    $12   33.3%   ██████████
+2026-02  23M    568K    $24   66.7%   ████████████████████
+-------------------------------------------------
+total    35M    1M      $36   100.0%  ██████████████████████████████
 ```
 
 ### Project Totals
@@ -133,11 +133,11 @@ ccs cost projects --since 2026-05-01 --until 2026-05-30
 ```
 
 ```text
-project                                      input  output  cost
-~/Documents/repos/codex-cli-tools            2.3M   57K     $2
-~/Documents/repos/work-doc-organize          1.2M   46K     $1
-----------------------------------------------------------------
-total                                        3.6M   102K    $4
+project                                      input  output  cost  share   bar
+~/Documents/repos/codex-cli-tools            2.3M   57K     $2    66.7%   ████████████████████
+~/Documents/repos/work-doc-organize          1.2M   46K     $1    33.3%   ██████████
+--------------------------------------------------------------------------------
+total                                        3.5M   103K    $3    100.0%  ██████████████████████████████
 ```
 
 Project sorting defaults to highest cost first.
@@ -152,11 +152,11 @@ ccs cost project ~/Documents/repos/codex-cli-tools --since 2026-05-01 --until 20
 
 ```text
 ccs cost project  ~/Documents/repos/codex-cli-tools
-date        input      output   cost
-2026-05-01  123K       4.6K     $0
-2026-05-02  235K       5.7K     $0
--------------------------------
-total       358K       10K      $0
+date        input  output  cost  share   bar
+2026-05-01  123K   4.6K    $1    25.0%   ████████
+2026-05-02  235K   5.7K    $3    75.0%   ███████████████████████
+---------------------------------------------------------
+total       358K   10K     $4    100.0%  ██████████████████████████████
 ```
 
 ### One Day By Time
@@ -171,17 +171,17 @@ The day report prints a total row, then time buckets, then projects.
 
 ```text
 ccs cost day  2026-05-29  bucket 1h  timezone Asia/Shanghai
-total  input 12M  output 457K  cost $12
+total  input 3.5M  output 103K  cost $3
 
 by time
-time         input  output  cost
-09:00-10:00 1.2M   46K     $1
-10:00-11:00 2.3M   57K     $2
+time         input  output  cost  share  bar
+09:00-10:00 1.2M   46K     $1    33.3%  ██████████
+10:00-11:00 2.3M   57K     $2    66.7%  ████████████████████
 
 by project
-project                                      input  output  cost
-~/Documents/repos/codex-cli-tools            2.3M   57K     $2
-~/Documents/repos/work-doc-organize          1.2M   46K     $1
+project                                      input  output  cost  share  bar
+~/Documents/repos/codex-cli-tools            2.3M   57K     $2    66.7%  ████████████████████
+~/Documents/repos/work-doc-organize          1.2M   46K     $1    33.3%  ██████████
 ```
 
 ### One Day By Project
@@ -450,7 +450,7 @@ costUSD
 
 `cached_input_tokens` and `reasoning_output_tokens` are parsed for correct cost calculation and validation. Default tables omit them.
 
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. Headers and total rows use simple emphasis, and total rows are separated from body rows. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
 
 ## Cost Calculation
 
@@ -660,7 +660,7 @@ NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --raw
 
 Acceptance:
 
-- Default tables show only `input`, `output`, and `cost` metric columns.
+- Default tables show `input`, `output`, `cost`, `share`, and `bar` columns.
 - Default terminal tables use compact token units and whole-dollar costs.
 - `--raw` prints full token counts and decimal costs.
 - Daily, weekly, monthly, and project totals each include a total row.
