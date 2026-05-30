@@ -44,6 +44,7 @@ Options:
 --timezone IANA_NAME    date grouping timezone; defaults to the system timezone
 --bucket DURATION       time bucket for ccs cost day; default 1h
 --json                  print stable JSON
+--raw                   print full token counts and decimal costs
 --speed auto|standard|fast
 ```
 
@@ -72,10 +73,11 @@ Output:
 
 ```text
 ccs cost daily  2026-05-01..2026-05-30  timezone Asia/Shanghai
-date        input       output    cost
-2026-05-01  1,234,567   45,678    $1.23
-2026-05-02  2,345,678   56,789    $2.34
-total       3,580,245   102,467   $3.57
+date        input  output  cost
+2026-05-01  1.2M   46K     $1
+2026-05-02  2.3M   57K     $2
+-----------------------------
+total       3.6M   102K    $4
 ```
 
 ### Weekly Totals
@@ -89,10 +91,11 @@ ccs cost weekly --since 2026-05-01 --until 2026-05-30
 Weeks start on Monday. The `week` value is the local date of the week start.
 
 ```text
-week        input       output    cost
-2026-04-27  3,456,789   90,123    $4.56
-2026-05-04  4,567,890   101,234   $5.67
-total       8,024,679   191,357   $10.23
+week        input  output  cost
+2026-04-27  3.5M   90K     $5
+2026-05-04  4.6M   101K    $6
+-----------------------------
+total       8M     191K    $10
 ```
 
 ### Monthly Totals
@@ -104,10 +107,11 @@ ccs cost monthly --since 2026-01-01
 ```
 
 ```text
-month    input        output     cost
-2026-01  12,345,678   456,789    $12.34
-2026-02  23,456,789   567,890    $23.45
-total    35,802,467   1,024,679  $35.79
+month    input  output  cost
+2026-01  12M    457K    $12
+2026-02  23M    568K    $23
+-------------------------
+total    36M    1M      $36
 ```
 
 ### Project Totals
@@ -119,10 +123,11 @@ ccs cost projects --since 2026-05-01 --until 2026-05-30
 ```
 
 ```text
-project                                      input       output    cost
-~/Documents/repos/codex-cli-tools            2,345,678   56,789    $2.34
-~/Documents/repos/work-doc-organize          1,234,567   45,678    $1.23
-total                                        3,580,245   102,467   $3.57
+project                                      input  output  cost
+~/Documents/repos/codex-cli-tools            2.3M   57K     $2
+~/Documents/repos/work-doc-organize          1.2M   46K     $1
+----------------------------------------------------------------
+total                                        3.6M   102K    $4
 ```
 
 Project sorting defaults to highest cost first.
@@ -138,9 +143,10 @@ ccs cost project ~/Documents/repos/codex-cli-tools --since 2026-05-01 --until 20
 ```text
 ccs cost project  ~/Documents/repos/codex-cli-tools
 date        input      output   cost
-2026-05-01  123,456    4,567    $0.12
-2026-05-02  234,567    5,678    $0.23
-total       358,023    10,245   $0.35
+2026-05-01  123K       4.6K     $0
+2026-05-02  235K       5.7K     $0
+-------------------------------
+total       358K       10K      $0
 ```
 
 ### One Day By Time
@@ -155,17 +161,17 @@ The day report prints a total row, then time buckets, then projects.
 
 ```text
 ccs cost day  2026-05-29  bucket 1h  timezone Asia/Shanghai
-total  input 12,345,678  output 456,789  cost $12.34
+total  input 12M  output 457K  cost $12
 
 by time
-time         input       output    cost
-09:00-10:00 1,234,567   45,678    $1.23
-10:00-11:00 2,345,678   56,789    $2.34
+time         input  output  cost
+09:00-10:00 1.2M   46K     $1
+10:00-11:00 2.3M   57K     $2
 
 by project
-project                                      input       output   cost
-~/Documents/repos/codex-cli-tools            2,345,678   56,789   $2.34
-~/Documents/repos/work-doc-organize          1,234,567   45,678   $1.23
+project                                      input  output  cost
+~/Documents/repos/codex-cli-tools            2.3M   57K     $2
+~/Documents/repos/work-doc-organize          1.2M   46K     $1
 ```
 
 ### One Day By Project
@@ -372,6 +378,8 @@ costUSD
 
 `cached_input_tokens` and `reasoning_output_tokens` are parsed for correct cost calculation and validation. Default tables omit them.
 
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. Headers and total rows use simple emphasis, and total rows are separated from body rows. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
+
 ## Cost Calculation
 
 Pricing source:
@@ -575,11 +583,14 @@ NO_COLOR=1 node dist/bin/ccs.js cost projects --since 2026-05-01 --until 2026-05
 NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --bucket 1h
 NO_COLOR=1 node dist/bin/ccs.js cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --json
+NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --raw
 ```
 
 Acceptance:
 
 - Default tables show only `input`, `output`, and `cost` metric columns.
+- Default terminal tables use compact token units and whole-dollar costs.
+- `--raw` prints full token counts and decimal costs.
 - Daily, weekly, monthly, and project totals each include a total row.
 - `ccs cost day` includes both time buckets and projects for that day.
 - `ccs cost project PROJECT` shows one project by day.

@@ -3255,6 +3255,7 @@ function printCcsCostHelp() {
         "  --timezone IANA_NAME    date grouping timezone; defaults to the system timezone",
         "  --bucket 15m|30m|1h|2h  time bucket for ccs cost day; default 1h",
         "  --json                  print stable JSON",
+        "  --raw                   print full token counts and decimal costs",
         "  --speed auto|standard|fast",
     ].join("\n"));
 }
@@ -3298,7 +3299,7 @@ async function runCcsCost(args) {
         const unsortedRows = aggregateProjects(events);
         assertCcsCostPricing(totalAggregate(unsortedRows), context);
         const rows = sortRowsByCost(unsortedRows, (aggregate) => ccsCostOf(aggregate, context));
-        printOrJsonCcsCostRows(options, rows, "project", context, formatProjectPath);
+        printOrJsonCcsCostRows(options, rows, "project", context, formatCcsCostProjectPath);
         return;
     }
     if (options.report === "project") {
@@ -3355,6 +3356,7 @@ function parseCcsCostArgs(args) {
     let until;
     let timezone = systemTimezone();
     let json = false;
+    let raw = false;
     let speed = "auto";
     let bucket = "1h";
     let bucketProvided = false;
@@ -3362,6 +3364,10 @@ function parseCcsCostArgs(args) {
         const arg = args[index];
         if (arg === "--json") {
             json = true;
+            continue;
+        }
+        if (arg === "--raw") {
+            raw = true;
             continue;
         }
         if (arg === "--since") {
@@ -3412,6 +3418,7 @@ function parseCcsCostArgs(args) {
         until,
         timezone,
         json,
+        raw,
         speed,
         bucket,
         bucketMinutes: ccsCostBucketMinutes.get(bucket) ?? 60,
@@ -3445,7 +3452,7 @@ function printOrJsonCcsCostRows(options, rows, key, context, formatKey = (value)
         return;
     }
     console.log(title);
-    printCcsCostTable(key, rows, total, context, formatKey);
+    printCcsCostTable(key, rows, total, context, options.raw, formatKey);
 }
 function printOrJsonCcsCostDay(options, day, timeRows, projectRows, total, context) {
     if (options.json) {
@@ -3471,31 +3478,43 @@ function printOrJsonCcsCostDay(options, day, timeRows, projectRows, total, conte
         return;
     }
     console.log(`ccs cost day  ${day}  bucket ${options.bucket}  timezone ${options.timezone}`);
-    console.log(`total  input ${formatInteger(total.inputTokens)}  output ${formatInteger(total.outputTokens)}  cost ${formatCost(ccsCostOf(total, context))}`);
+    console.log(textBold(`total  input ${colorInput(formatCcsCostTokens(total.inputTokens, options.raw))}  output ${colorOutput(formatCcsCostTokens(total.outputTokens, options.raw))}  cost ${colorCost(formatCcsCostUSD(ccsCostOf(total, context), options.raw))}`));
     console.log("");
     console.log("by time");
-    printCcsCostTable("time", timeRows, null, context);
+    printCcsCostTable("time", timeRows, null, context, options.raw);
     console.log("");
     console.log("by project");
-    printCcsCostTable("project", projectRows, null, context, formatProjectPath);
+    printCcsCostTable("project", projectRows, null, context, options.raw, formatCcsCostProjectPath);
 }
-function printCcsCostTable(firstHeader, rows, total, context, formatKey = (value) => value) {
+function printCcsCostTable(firstHeader, rows, total, context, raw, formatKey = (value) => value) {
+    const header = [firstHeader, "input", "output", "cost"].map(textBold);
+    const bodyRows = rows.map((row) => ccsCostTableRow(formatKey(row.key), row.aggregate, context, raw, false));
+    const totalRow = total ? ccsCostTableRow("total", total, context, raw, true) : null;
     const tableRows = [
-        [firstHeader, "input", "output", "cost"],
-        ...rows.map((row) => ccsCostTableRow(formatKey(row.key), row.aggregate, context)),
+        header,
+        ...bodyRows,
     ];
-    if (total) {
-        tableRows.push(ccsCostTableRow("total", total, context));
+    if (totalRow) {
+        tableRows.push(totalRow);
     }
-    printTable(tableRows, ["left", "right", "right", "right"]);
+    const formatted = formatTableRows(tableRows, ["left", "right", "right", "right"]);
+    const separatorIndex = totalRow ? formatted.length - 1 : -1;
+    const width = Math.max(0, ...formatted.map(visibleLength));
+    for (let index = 0; index < formatted.length; index += 1) {
+        if (index === separatorIndex) {
+            console.log(textDim("-".repeat(width)));
+        }
+        console.log(formatted[index]);
+    }
 }
-function ccsCostTableRow(label, aggregate, context) {
-    return [
+function ccsCostTableRow(label, aggregate, context, raw, emphasize) {
+    const row = [
         label,
-        formatInteger(aggregate.inputTokens),
-        formatInteger(aggregate.outputTokens),
-        formatCost(ccsCostOf(aggregate, context)),
+        colorInput(formatCcsCostTokens(aggregate.inputTokens, raw)),
+        colorOutput(formatCcsCostTokens(aggregate.outputTokens, raw)),
+        colorCost(formatCcsCostUSD(ccsCostOf(aggregate, context), raw)),
     ];
+    return emphasize ? row.map(textBold) : row;
 }
 function ccsCostMetricsJson(aggregate, context) {
     return {
@@ -3527,6 +3546,15 @@ function formatCcsCostRange(options) {
 }
 function formatInteger(value) {
     return Math.round(value).toLocaleString("en-US");
+}
+function formatCcsCostTokens(value, raw) {
+    return raw ? formatInteger(value) : prettifyBigNum(value);
+}
+function formatCcsCostUSD(value, raw) {
+    return raw ? formatCost(value) : `$${Math.round(value).toLocaleString("en-US")}`;
+}
+function formatCcsCostProjectPath(value) {
+    return colorPath(formatProjectPath(value));
 }
 function roundCostUSD(value) {
     return Math.round(value * 1_000_000) / 1_000_000;
