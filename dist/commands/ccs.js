@@ -56,6 +56,7 @@ const usageTopHistoryChartNamedProviderLimit = 2;
 const usageTopHistoryOtherName = "other";
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
+const ccsCostReportHttpTimeoutMs = 30_000;
 let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
@@ -4156,24 +4157,42 @@ function ccsCostReportUrl(stateUrl, options) {
 }
 async function fetchCentralCcsCostReport(url) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), usageTopHistoryHttpTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), ccsCostReportHttpTimeoutMs);
     try {
         const response = await fetch(url, {
             method: "GET",
             headers: { Accept: "application/json" },
             signal: controller.signal,
         });
+        const text = await response.text();
         if (!response.ok) {
-            return null;
+            return { report: null, error: `HTTP ${response.status}${formatCcsCostFetchBody(text)}` };
         }
-        return normalizeCcsCostReportPayload(await response.json());
+        let raw;
+        try {
+            raw = JSON.parse(text);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { report: null, error: `invalid JSON: ${message}` };
+        }
+        const report = normalizeCcsCostReportPayload(raw);
+        return report ? { report } : { report: null, error: "invalid report response shape" };
     }
-    catch {
-        return null;
+    catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+            return { report: null, error: `timeout after ${ccsCostReportHttpTimeoutMs / 1000}s` };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return { report: null, error: message };
     }
     finally {
         clearTimeout(timeout);
     }
+}
+function formatCcsCostFetchBody(text) {
+    const compact = text.trim().replace(/\s+/g, " ");
+    return compact ? `: ${compact.slice(0, 200)}` : "";
 }
 async function fetchCentralCcsCostStatus(url) {
     const controller = new AbortController();
@@ -4226,9 +4245,10 @@ async function printCentralCcsCostStatus(profiles) {
     throw new Error("central ccs cost status unavailable");
 }
 async function printCentralCcsCost(profiles, options) {
+    const errors = [];
     for (const stateUrl of await readUsageTopStateUrls(profiles)) {
         const url = ccsCostReportUrl(stateUrl, options);
-        const report = await fetchCentralCcsCostReport(url);
+        const { report, error } = await fetchCentralCcsCostReport(url);
         if (report) {
             printCcsCostReport(report, options);
             if (!options.json) {
@@ -4236,8 +4256,9 @@ async function printCentralCcsCost(profiles, options) {
             }
             return;
         }
+        errors.push(`${url}: ${error ?? "unknown error"}`);
     }
-    throw new Error("central ccs cost report unavailable");
+    throw new Error(`central ccs cost report unavailable: ${errors.join("; ")}`);
 }
 function normalizeCcsCostStatus(value) {
     if (!value || typeof value !== "object") {
