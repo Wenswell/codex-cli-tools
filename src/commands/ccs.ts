@@ -3944,7 +3944,7 @@ function usageLines(): string[] {
     "  ccs                                  # show current profile and usage",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
-    "  ccs cost                             # show Codex session daily cost totals",
+    "  ccs cost                             # show cost data source and commands",
     "  ccs cost daily                       # show Codex session daily cost totals",
     "  ccs cost weekly                      # show Codex session weekly cost totals",
     "  ccs cost monthly                     # show Codex session monthly cost totals",
@@ -4028,7 +4028,7 @@ const ccsCostBucketMinutes = new Map<CcsCostOptions["bucket"], number>([
 function printCcsCostHelp(): void {
   console.log([
     textBold("Usage:"),
-    "  ccs cost                                           # show Codex session daily cost totals",
+    "  ccs cost                                           # show cost data source and commands",
     "  ccs cost daily                                     # show daily totals",
     "  ccs cost weekly                                    # show weekly totals",
     "  ccs cost monthly                                   # show monthly totals",
@@ -4047,7 +4047,22 @@ function printCcsCostHelp(): void {
   ].join("\n"));
 }
 
+async function printCcsCostStatus(): Promise<void> {
+  const speed = await resolveCodexCostSpeed("auto");
+  printKeyValue("sessions:", colorPath(formatDisplayPath(codexDir())), 9);
+  printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("timezone:", systemTimezone(), 9);
+  printKeyValue("speed:", `auto -> ${speed}`, 9);
+  console.log(textDim("commands: ccs cost | ccs cost [daily|weekly|monthly|projects|project PROJECT|day YYYY-MM-DD]"));
+  console.log(textDim("options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast"));
+}
+
 async function runCcsCost(args: string[]): Promise<void> {
+  if (args.length === 0) {
+    await printCcsCostStatus();
+    return;
+  }
+
   if (args.some(isHelpArgument)) {
     printCcsCostHelp();
     return;
@@ -4123,19 +4138,18 @@ async function runCcsCost(args: string[]): Promise<void> {
 }
 
 function parseCcsCostArgs(args: string[]): CcsCostOptions {
-  let report: CcsCostReport = "daily";
-  let index = 0;
+  let index = 1;
   let project: string | undefined;
   let day: string | undefined;
 
   const first = args[0];
-  if (first && !first.startsWith("-")) {
-    if (!ccsCostReports.has(first)) {
-      throw new Error(`unknown argument for ccs cost: ${first}`);
-    }
-    report = first as CcsCostReport;
-    index = 1;
+  if (!first || first.startsWith("-")) {
+    throw new Error("usage: ccs cost daily|weekly|monthly|projects|project|day [OPTIONS]");
   }
+  if (!ccsCostReports.has(first)) {
+    throw new Error(`unknown argument for ccs cost: ${first}`);
+  }
+  const report = first as CcsCostReport;
 
   if (report === "project") {
     const value = args[index];

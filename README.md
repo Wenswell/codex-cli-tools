@@ -272,7 +272,9 @@ ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
 
-`ccs cost` reports local Codex session usage from `~/.codex`. It reads the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and streams each selected session JSONL file line by line for `token_count` usage events. Default tables show only `input`, `output`, and `cost` metric columns.
+`ccs cost` without arguments prints the local cost data source, pricing cache, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
+
+`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for `token_count` usage events. Default tables show only `input`, `output`, and `cost` metric columns.
 
 ```bash
 ccs cost daily --since 2026-05-01 --until 2026-05-30
@@ -296,7 +298,7 @@ Options:
 --speed auto|standard|fast
 ```
 
-`ccs cost` is the same as `ccs cost daily`. Daily, weekly, monthly, project, and one-project reports include a `total` row. Weeks start on Monday. `ccs cost projects` sorts by highest cost first. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects sort by cost.
+Daily, weekly, monthly, project, and one-project reports include a `total` row. Weeks start on Monday. `ccs cost projects` sorts by highest cost first. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects sort by cost.
 
 Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
 
