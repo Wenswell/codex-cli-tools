@@ -3422,6 +3422,7 @@ const ccsCostBucketMinutes = new Map([
     ["1h", 60],
     ["2h", 120],
 ]);
+const ccsCostBarWidth = 30;
 function printCcsCostHelp() {
     console.log([
         textBold("Usage:"),
@@ -3753,7 +3754,7 @@ function printCcsCostReport(report, options) {
     }
     const rows = report.rows ?? [];
     console.log(ccsCostReportTitle(report, options));
-    printCcsCostRecordTable(ccsCostReportKey(options.report), rows, report.totals, options.raw, (value) => (options.report === "projects" ? formatCcsCostProjectPath(value) : value));
+    printCcsCostRecordTable(ccsCostReportKey(options.report), rows, report.totals, options.raw, (value) => (options.report === "projects" ? formatCcsCostProjectPath(value) : value), report.totals);
 }
 function ccsCostReportJson(report) {
     if (report.report === "day") {
@@ -3823,15 +3824,16 @@ function printCcsCostDayReport(report, options) {
     console.log(textBold(`total  input ${colorInput(formatCcsCostTokens(report.totals.inputTokens, options.raw))}  output ${colorOutput(formatCcsCostTokens(report.totals.outputTokens, options.raw))}  cost ${colorCost(formatCcsCostUSD(report.totals.costUSD, options.raw))}`));
     console.log("");
     console.log("by time");
-    printCcsCostRecordTable("time", report.timeBuckets ?? [], null, options.raw);
+    printCcsCostRecordTable("time", report.timeBuckets ?? [], null, options.raw, undefined, report.totals);
     console.log("");
     console.log("by project");
-    printCcsCostRecordTable("project", report.projects ?? [], null, options.raw, formatCcsCostProjectPath);
+    printCcsCostRecordTable("project", report.projects ?? [], null, options.raw, formatCcsCostProjectPath, report.totals);
 }
-function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (value) => value) {
-    const header = [firstHeader, "input", "output", "cost"].map(textBold);
-    const bodyRows = rows.map((row) => ccsCostRecordTableRow(formatKey(row.key), row, raw, false));
-    const totalRow = total ? ccsCostRecordTableRow("total", total, raw, true) : null;
+function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (value) => value, shareTotal = total) {
+    const totalCostUSD = shareTotal?.costUSD ?? 0;
+    const header = [firstHeader, "input", "output", "cost", "share", "bar"].map(textBold);
+    const bodyRows = rows.map((row) => ccsCostRecordTableRow(formatKey(row.key), row, raw, false, totalCostUSD));
+    const totalRow = total ? ccsCostRecordTableRow("total", total, raw, true, totalCostUSD) : null;
     const tableRows = [
         header,
         ...bodyRows,
@@ -3839,7 +3841,7 @@ function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (val
     if (totalRow) {
         tableRows.push(totalRow);
     }
-    const formatted = formatTableRows(tableRows, ["left", "right", "right", "right"]);
+    const formatted = formatTableRows(tableRows, ["left", "right", "right", "right", "right", "left"]);
     const separatorIndex = totalRow ? formatted.length - 1 : -1;
     const width = Math.max(0, ...formatted.map(visibleLength));
     for (let index = 0; index < formatted.length; index += 1) {
@@ -3849,12 +3851,14 @@ function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (val
         console.log(formatted[index]);
     }
 }
-function ccsCostRecordTableRow(label, record, raw, emphasize) {
+function ccsCostRecordTableRow(label, record, raw, emphasize, totalCostUSD) {
     const row = [
         label,
         colorInput(formatCcsCostTokens(record.inputTokens, raw)),
         colorOutput(formatCcsCostTokens(record.outputTokens, raw)),
         colorCost(formatCcsCostUSD(record.costUSD, raw)),
+        formatCcsCostShare(record.costUSD, totalCostUSD),
+        colorCost(formatCcsCostBar(record.costUSD, totalCostUSD)),
     ];
     return emphasize ? row.map(textBold) : row;
 }
@@ -4812,6 +4816,17 @@ function formatCcsCostTokens(value, raw) {
 }
 function formatCcsCostUSD(value, raw) {
     return raw ? formatCost(value) : `$${Math.round(value).toLocaleString("en-US")}`;
+}
+function formatCcsCostShare(value, total) {
+    const share = total > 0 ? (value / total) * 100 : 0;
+    return `${share.toFixed(1)}%`;
+}
+function formatCcsCostBar(value, total) {
+    if (value <= 0 || total <= 0) {
+        return "";
+    }
+    const cells = Math.min(ccsCostBarWidth, Math.round((value / total) * ccsCostBarWidth));
+    return cells > 0 ? "█".repeat(cells) : "";
 }
 function formatCcsCostProjectPath(value) {
     return colorPath(formatProjectPath(value));
