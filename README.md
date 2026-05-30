@@ -306,7 +306,7 @@ The fixed upload target is:
 ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
 ```
 
-The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly and prints the remote file, machine name, event count, input, and output totals.
+The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` atomically replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly, triggers a debounced central cost refresh, and prints the remote file, machine name, event count, input, output totals, and refresh URL.
 
 Install or update every reporting machine from the GitHub source before adding timers:
 
@@ -314,7 +314,7 @@ Install or update every reporting machine from the GitHub source before adding t
 pnpm add -g github:Wenswell/codex-cli-tools
 ```
 
-Linux user timers should run the global `ccs cost push` command with a PATH that includes the pnpm bin directory. macOS LaunchAgents should use the absolute pnpm shim path, for example `/Users/wswensw/Library/pnpm/ccs`, with `StartInterval` set to `7200` for a two-hour upload interval. The job's environment should include Homebrew and pnpm bins:
+Linux user timers should run the global `ccs cost push` command with a PATH that includes the pnpm bin directory. Use `OnCalendar=*-*-* *:00:00` for one upload at every hourly boundary. macOS LaunchAgents should use the absolute pnpm shim path, for example `/Users/wswensw/Library/pnpm/ccs`, with 24 `StartCalendarInterval` entries at minute `0`. The job's environment should include Homebrew and pnpm bins:
 
 ```text
 /opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -334,7 +334,10 @@ The central report endpoints are served by `ccs s server`:
 ```text
 GET /ccs/cost/status
 GET /ccs/cost/report
+POST /ccs/cost/refresh
 ```
+
+`POST /ccs/cost/refresh` schedules central report cache warming after a five-minute debounce. Multiple uploads inside the debounce window push the refresh later, so a group of hourly uploads causes one snapshot scan and one warm pass. Report requests still check the snapshot file fingerprint on demand and rebuild the cache when uploaded data or pricing data changes.
 
 Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report.
 

@@ -355,6 +355,8 @@ const usageTopHistoryOtherName = "other";
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 const ccsCostReportHttpTimeoutMs = 30_000;
+const ccsCostRefreshHttpTimeoutMs = 5_000;
+const ccsCostRefreshDebounceMs = 5 * 60 * 1000;
 let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
@@ -3734,11 +3736,18 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   const runtime = await createUsageTopRuntime(targets, false);
   let paused = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let ccsCostRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let cleanedUp = false;
   const clearTimer = (): void => {
     if (timer) {
       clearTimeout(timer);
       timer = null;
+    }
+  };
+  const clearCcsCostRefreshTimer = (): void => {
+    if (ccsCostRefreshTimer) {
+      clearTimeout(ccsCostRefreshTimer);
+      ccsCostRefreshTimer = null;
     }
   };
   const publish = async (active = true): Promise<void> => {
@@ -3769,6 +3778,22 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
         schedule();
       })();
     }, delay);
+  };
+  const runCcsCostRefresh = async (): Promise<void> => {
+    try {
+      await warmCentralCcsCostReports();
+    } catch (error) {
+      console.error(`ccs cost refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const scheduleCcsCostRefresh = (): string => {
+    clearCcsCostRefreshTimer();
+    const scheduledAt = new Date(Date.now() + ccsCostRefreshDebounceMs).toISOString();
+    ccsCostRefreshTimer = setTimeout(() => {
+      ccsCostRefreshTimer = null;
+      void runCcsCostRefresh();
+    }, ccsCostRefreshDebounceMs);
+    return scheduledAt;
   };
 
   let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
@@ -3839,6 +3864,15 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       })();
       return;
     }
+    if (request.method === "POST" && url.pathname === "/ccs/cost/refresh") {
+      const scheduledAt = scheduleCcsCostRefresh();
+      sendUsageTopJson(response, 200, {
+        ok: true,
+        debounceMs: ccsCostRefreshDebounceMs,
+        scheduledAt,
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/ccs/top/pause") {
       void (async () => {
         paused = true;
@@ -3888,6 +3922,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       }
       cleanedUp = true;
       clearTimer();
+      clearCcsCostRefreshTimer();
       await publish(false);
       server.close(() => resolve());
     };
@@ -4258,10 +4293,25 @@ type CcsCostStatus = {
   machines: CcsCostSnapshotSummary[];
 };
 
+type CcsCostSnapshotFile = {
+  name: string;
+  path: string;
+  size: number;
+  mtimeMs: number;
+};
+
+type CcsCostSnapshotCache = {
+  fingerprint: string;
+  snapshots: CcsCostSnapshot[];
+};
+
 type CentralCcsCostReportFetchResult = {
   report: CcsCostReportPayload | null;
   error?: string;
 };
+
+let ccsCostSnapshotCache: CcsCostSnapshotCache | null = null;
+let ccsCostReportCache = new Map<string, CcsCostReportPayload>();
 
 const ccsCostReports = new Set<string>(["daily", "weekly", "monthly", "projects", "project", "day"]);
 const ccsCostBucketMinutes = new Map<CcsCostOptions["bucket"], number>([
@@ -4326,7 +4376,7 @@ async function runCcsCost(args: string[], profiles: ProfilesFile): Promise<void>
   }
 
   if (parsed.command === "push") {
-    await pushCcsCostSnapshot(parsed.options);
+    await pushCcsCostSnapshot(profiles, parsed.options);
     return;
   }
 
@@ -4849,18 +4899,21 @@ function ccsCostSnapshotFileName(snapshot: CcsCostSnapshot): string {
   return `${snapshot.machine}.json`;
 }
 
-async function pushCcsCostSnapshot(options?: CcsCostOptions): Promise<void> {
+async function pushCcsCostSnapshot(profiles: ProfilesFile, options?: CcsCostOptions): Promise<void> {
   const snapshot = await buildCcsCostSnapshot(options);
   const tempDir = await mkdtemp(join(tmpdir(), "ccs-cost-"));
   const tempPath = join(tempDir, ccsCostSnapshotFileName(snapshot));
   const remotePath = `${ccsCostRemoteDir}/${ccsCostSnapshotFileName(snapshot)}`;
+  const remoteTempPath = `${remotePath}.${process.pid}.${Date.now()}.tmp`;
   try {
     await writeTextFile(tempPath, stringifyJson(snapshot), 0o600);
     await configSyncSsh(`mkdir -p ${JSON.stringify(ccsCostRemoteDir)}`);
-    await configSyncScp(tempPath, `${configSyncUser}@${configSyncHost}:${remotePath}`);
+    await configSyncScp(tempPath, `${configSyncUser}@${configSyncHost}:${remoteTempPath}`);
+    await configSyncSsh(`mv -f ${JSON.stringify(remoteTempPath)} ${JSON.stringify(remotePath)}`);
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
+  const refreshUrl = await triggerCcsCostRefresh(profiles);
   const totals = snapshot.events.reduce((aggregate, event) => {
     aggregate.inputTokens += event.usage.inputTokens;
     aggregate.outputTokens += event.usage.outputTokens;
@@ -4871,9 +4924,48 @@ async function pushCcsCostSnapshot(options?: CcsCostOptions): Promise<void> {
   printKeyValue("events:", formatInteger(snapshot.events.length), 9);
   printKeyValue("input:", formatCcsCostTokens(totals.inputTokens, false), 9);
   printKeyValue("output:", formatCcsCostTokens(totals.outputTokens, false), 9);
+  printKeyValue("refresh:", colorUrl(refreshUrl), 9);
 }
 
-async function readCcsCostSnapshots(): Promise<CcsCostSnapshot[]> {
+async function triggerCcsCostRefresh(profiles: ProfilesFile): Promise<string> {
+  const errors: string[] = [];
+  const stateUrls = await readUsageTopStateUrls(profiles);
+  if (stateUrls.length === 0) {
+    throw new Error("ccs cost push requires top.stateUrls for refresh trigger");
+  }
+  for (const stateUrl of stateUrls) {
+    const url = ccsCostRefreshUrl(stateUrl);
+    const error = await postCcsCostRefresh(url);
+    if (!error) {
+      return url;
+    }
+    errors.push(`${url}: ${error}`);
+  }
+  throw new Error(`central ccs cost refresh trigger failed: ${errors.join("; ")}`);
+}
+
+async function postCcsCostRefresh(url: string): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ccsCostRefreshHttpTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    return response.ok ? null : `HTTP ${response.status}${formatCcsCostFetchBody(text)}`;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return `timeout after ${ccsCostRefreshHttpTimeoutMs / 1000}s`;
+    }
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readCcsCostSnapshotFiles(): Promise<CcsCostSnapshotFile[]> {
   const dir = ccsCostSnapshotDir();
   let names: string[];
   try {
@@ -4885,11 +4977,39 @@ async function readCcsCostSnapshots(): Promise<CcsCostSnapshot[]> {
     throw error;
   }
 
-  const snapshots: CcsCostSnapshot[] = [];
+  const files: CcsCostSnapshotFile[] = [];
   for (const name of names.filter((entry) => entry.endsWith(".json")).sort()) {
-    snapshots.push(parseCcsCostSnapshot(name, await readTextIfExists(join(dir, name))));
+    const path = join(dir, name);
+    const file = await stat(path);
+    if (file.isFile()) {
+      files.push({ name, path, size: file.size, mtimeMs: file.mtimeMs });
+    }
   }
-  return snapshots;
+  return files;
+}
+
+function ccsCostSnapshotFingerprint(files: CcsCostSnapshotFile[]): string {
+  return files.map((file) => `${file.name}:${file.size}:${file.mtimeMs}`).join("|");
+}
+
+async function readCcsCostSnapshots(): Promise<CcsCostSnapshot[]> {
+  return (await getCcsCostSnapshotCache()).snapshots;
+}
+
+async function getCcsCostSnapshotCache(): Promise<CcsCostSnapshotCache> {
+  const files = await readCcsCostSnapshotFiles();
+  const fingerprint = ccsCostSnapshotFingerprint(files);
+  if (ccsCostSnapshotCache?.fingerprint === fingerprint) {
+    return ccsCostSnapshotCache;
+  }
+
+  const snapshots: CcsCostSnapshot[] = [];
+  for (const file of files) {
+    snapshots.push(parseCcsCostSnapshot(file.name, await readTextIfExists(file.path)));
+  }
+  ccsCostSnapshotCache = { fingerprint, snapshots };
+  ccsCostReportCache = new Map();
+  return ccsCostSnapshotCache;
 }
 
 function parseCcsCostSnapshot(name: string, text: string | null): CcsCostSnapshot {
@@ -4989,26 +5109,37 @@ function normalizeCcsCostTokenUsageRecord(value: unknown): CcsCostTokenUsageReco
 }
 
 async function buildCentralCcsCostReport(options: CcsCostOptions): Promise<CcsCostReportPayload> {
-  const snapshots = await readCcsCostSnapshots();
+  const snapshotCache = await getCcsCostSnapshotCache();
   const priceCache = await readModelPriceCache();
+  const priceFingerprint = await ccsCostPriceFingerprint();
+  const cacheKey = ccsCostReportCacheKey(snapshotCache.fingerprint, priceFingerprint, options);
+  const cached = ccsCostReportCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const snapshots = snapshotCache.snapshots;
+  let report: CcsCostReportPayload;
   if (options.speed !== "auto") {
-    return buildCcsCostReport(
+    report = buildCcsCostReport(
       options,
       snapshots.flatMap((snapshot) => snapshot.events.map(ccsCostEventFromRecord)),
       { priceCache, speed: options.speed },
       "central",
     );
+  } else {
+    report = mergeCcsCostReports(
+      snapshots.map((snapshot) => buildCcsCostReport(
+        options,
+        snapshot.events.map(ccsCostEventFromRecord),
+        { priceCache, speed: snapshot.speed },
+        "central",
+      )),
+      options,
+    );
   }
 
-  return mergeCcsCostReports(
-    snapshots.map((snapshot) => buildCcsCostReport(
-      options,
-      snapshot.events.map(ccsCostEventFromRecord),
-      { priceCache, speed: snapshot.speed },
-      "central",
-    )),
-    options,
-  );
+  ccsCostReportCache.set(cacheKey, report);
+  return report;
 }
 
 async function buildCcsCostStatus(): Promise<CcsCostStatus> {
@@ -5031,6 +5162,55 @@ async function buildCcsCostStatus(): Promise<CcsCostStatus> {
       };
     }).sort((left, right) => left.machine.localeCompare(right.machine)),
   };
+}
+
+async function warmCentralCcsCostReports(): Promise<{ fingerprint: string; reports: number }> {
+  const snapshotCache = await getCcsCostSnapshotCache();
+  const options = ["daily", "weekly", "monthly", "projects"]
+    .map((report) => defaultCentralCcsCostOptions(report as CcsCostReport));
+  for (const option of options) {
+    await buildCentralCcsCostReport(option);
+  }
+  return { fingerprint: snapshotCache.fingerprint, reports: options.length };
+}
+
+function defaultCentralCcsCostOptions(report: CcsCostReport): CcsCostOptions {
+  return {
+    report,
+    timezone: systemTimezone(),
+    json: false,
+    raw: false,
+    speed: "auto",
+    bucket: "1h",
+    bucketMinutes: 60,
+  };
+}
+
+async function ccsCostPriceFingerprint(): Promise<string> {
+  try {
+    const file = await stat(modelPricesCachePath());
+    return `${file.size}:${file.mtimeMs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return "missing";
+    }
+    throw error;
+  }
+}
+
+function ccsCostReportCacheKey(snapshotFingerprint: string, priceFingerprint: string, options: CcsCostOptions): string {
+  return JSON.stringify({
+    snapshotFingerprint,
+    priceFingerprint,
+    report: options.report,
+    since: options.since ?? null,
+    until: options.until ?? null,
+    timezone: options.timezone,
+    bucket: options.bucket,
+    speed: options.speed,
+    project: options.project ?? null,
+    day: options.day ?? null,
+  });
 }
 
 function mergeCcsCostReports(reports: CcsCostReportPayload[], options: CcsCostOptions): CcsCostReportPayload {
@@ -5128,6 +5308,16 @@ function ccsCostStatusUrl(stateUrl: string): string {
   url.pathname = url.pathname.endsWith("/ccs/top/state")
     ? url.pathname.replace(/\/ccs\/top\/state$/, "/ccs/cost/status")
     : "/ccs/cost/status";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function ccsCostRefreshUrl(stateUrl: string): string {
+  const url = new URL(stateUrl);
+  url.pathname = url.pathname.endsWith("/ccs/top/state")
+    ? url.pathname.replace(/\/ccs\/top\/state$/, "/ccs/cost/refresh")
+    : "/ccs/cost/refresh";
   url.search = "";
   url.hash = "";
   return url.toString();
