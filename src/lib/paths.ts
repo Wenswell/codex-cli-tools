@@ -13,6 +13,10 @@ export function codexToolsCacheDir(): string {
   return join(process.env.XDG_CACHE_HOME || join(homeDir(), ".cache"), "codex-tools");
 }
 
+export function modelPricesCachePath(): string {
+  return join(codexToolsCacheDir(), "model-prices.json");
+}
+
 export function profilesPath(): string {
   return join(codexToolsConfigDir(), "profiles.json");
 }
