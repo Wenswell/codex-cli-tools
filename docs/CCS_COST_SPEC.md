@@ -4,7 +4,7 @@ Status: implemented
 
 ## Goal
 
-`ccs cost` reports local Codex session token and cost usage from `~/.codex`.
+`ccs cost` reports local and central Codex session token and cost usage.
 
 The report answers these questions:
 
@@ -32,9 +32,19 @@ ccs cost monthly
 ccs cost projects
 ccs cost project PROJECT
 ccs cost day YYYY-MM-DD
+ccs cost push
+ccs cost central
+ccs cost central daily
+ccs cost central weekly
+ccs cost central monthly
+ccs cost central projects
+ccs cost central project PROJECT
+ccs cost central day YYYY-MM-DD
 ```
 
-`ccs cost` without arguments prints the local session source, pricing cache, timezone, pricing speed, and compact command/options hints. Reports require an explicit subcommand such as `ccs cost daily`.
+`ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and compact command/options hints. Local reports require an explicit subcommand such as `ccs cost daily`.
+
+`ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 
 Options:
 
@@ -291,6 +301,55 @@ Usage events:
 The SQLite index provides project attribution. JSONL files provide request-level token events.
 
 The command uses the newest `state*.sqlite` under `~/.codex`.
+
+## Central Cost
+
+Client upload:
+
+```bash
+ccs cost push
+```
+
+The upload target is fixed to:
+
+```text
+ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
+```
+
+Each machine writes one latest snapshot named from `user@host`. The snapshot contains only normalized token-event facts:
+
+```text
+timestampMs
+project
+model
+inputTokens
+cachedInputTokens
+outputTokens
+reasoningOutputTokens
+totalTokens
+```
+
+Prompt text, response text, and raw session JSONL lines are not uploaded.
+
+Server endpoints are part of `ccs s server`:
+
+```text
+GET /ccs/cost/status
+GET /ccs/cost/report
+```
+
+`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`.
+
+Central CLI:
+
+```bash
+ccs cost central
+ccs cost central daily --since 2026-05-01 --until 2026-05-30
+ccs cost central projects --since 2026-05-01 --until 2026-05-30
+ccs cost central day 2026-05-29 --bucket 1h
+```
+
+Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time. Explicit `--speed standard` or `--speed fast` applies one pricing speed to the whole central report.
 
 ## Event Parsing
 

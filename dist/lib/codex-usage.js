@@ -88,6 +88,13 @@ export async function loadCodexUsageEvents(options) {
     }
     return events;
 }
+export function filterCodexUsageEvents(events, options) {
+    validateTimezone(options.timezone);
+    const range = dateRangeMs(options);
+    return events.filter((event) => (event.timestampMs >= range.startMs
+        && event.timestampMs < range.endMs
+        && (!options.project || event.project === options.project)));
+}
 export function aggregateDaily(events, timezone) {
     return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)), "key-asc");
 }
