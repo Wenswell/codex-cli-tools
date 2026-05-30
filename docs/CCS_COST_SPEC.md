@@ -34,7 +34,7 @@ ccs cost project PROJECT
 ccs cost day YYYY-MM-DD
 ```
 
-`ccs cost` is the same as `ccs cost daily`.
+`ccs cost` without arguments prints the local session source, pricing cache, timezone, pricing speed, and compact command/options hints. Reports require an explicit subcommand such as `ccs cost daily`.
 
 Options:
 
