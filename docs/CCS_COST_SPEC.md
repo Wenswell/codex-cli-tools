@@ -329,7 +329,7 @@ reasoningOutputTokens
 totalTokens
 ```
 
-Prompt text, response text, and raw session JSONL lines are not uploaded.
+Prompt text, response text, and raw session JSONL lines are not uploaded. Snapshot upload uses a temporary remote file followed by an atomic rename to the machine's final snapshot path.
 
 Install or update every reporting machine from the GitHub source:
 
@@ -337,7 +337,7 @@ Install or update every reporting machine from the GitHub source:
 pnpm add -g github:Wenswell/codex-cli-tools
 ```
 
-`ccs cost push` is intended for unattended timers. Linux user services should run the global `ccs cost push` command with pnpm on PATH. macOS LaunchAgents should use the absolute pnpm shim path, such as `/Users/wswensw/Library/pnpm/ccs`, set `StartInterval` to `7200`, and include this PATH:
+`ccs cost push` is intended for unattended timers. Linux user services should run the global `ccs cost push` command with pnpm on PATH and `OnCalendar=*-*-* *:00:00` for one upload at every hourly boundary. macOS LaunchAgents should use the absolute pnpm shim path, such as `/Users/wswensw/Library/pnpm/ccs`, configure 24 `StartCalendarInterval` entries at minute `0`, and include this PATH:
 
 ```text
 /opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -348,9 +348,10 @@ Server endpoints are part of `ccs s server`:
 ```text
 GET /ccs/cost/status
 GET /ccs/cost/report
+POST /ccs/cost/refresh
 ```
 
-`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`.
+`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. `/ccs/cost/refresh` schedules snapshot scan and common-report cache warming after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan.
 
 Central CLI:
 

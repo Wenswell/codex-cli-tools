@@ -57,6 +57,8 @@ const usageTopHistoryOtherName = "other";
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 const ccsCostReportHttpTimeoutMs = 30_000;
+const ccsCostRefreshHttpTimeoutMs = 5_000;
+const ccsCostRefreshDebounceMs = 5 * 60 * 1000;
 let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
@@ -2981,11 +2983,18 @@ async function serveUsageTop(profiles, portValue) {
     const runtime = await createUsageTopRuntime(targets, false);
     let paused = false;
     let timer = null;
+    let ccsCostRefreshTimer = null;
     let cleanedUp = false;
     const clearTimer = () => {
         if (timer) {
             clearTimeout(timer);
             timer = null;
+        }
+    };
+    const clearCcsCostRefreshTimer = () => {
+        if (ccsCostRefreshTimer) {
+            clearTimeout(ccsCostRefreshTimer);
+            ccsCostRefreshTimer = null;
         }
     };
     const publish = async (active = true) => {
@@ -3016,6 +3025,23 @@ async function serveUsageTop(profiles, portValue) {
                 schedule();
             })();
         }, delay);
+    };
+    const runCcsCostRefresh = async () => {
+        try {
+            await warmCentralCcsCostReports();
+        }
+        catch (error) {
+            console.error(`ccs cost refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
+    const scheduleCcsCostRefresh = () => {
+        clearCcsCostRefreshTimer();
+        const scheduledAt = new Date(Date.now() + ccsCostRefreshDebounceMs).toISOString();
+        ccsCostRefreshTimer = setTimeout(() => {
+            ccsCostRefreshTimer = null;
+            void runCcsCostRefresh();
+        }, ccsCostRefreshDebounceMs);
+        return scheduledAt;
     };
     let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
     await writeUsageTopSnapshot(snapshot);
@@ -3086,6 +3112,15 @@ async function serveUsageTop(profiles, portValue) {
             })();
             return;
         }
+        if (request.method === "POST" && url.pathname === "/ccs/cost/refresh") {
+            const scheduledAt = scheduleCcsCostRefresh();
+            sendUsageTopJson(response, 200, {
+                ok: true,
+                debounceMs: ccsCostRefreshDebounceMs,
+                scheduledAt,
+            });
+            return;
+        }
         if (request.method === "POST" && url.pathname === "/ccs/top/pause") {
             void (async () => {
                 paused = true;
@@ -3132,6 +3167,7 @@ async function serveUsageTop(profiles, portValue) {
             }
             cleanedUp = true;
             clearTimer();
+            clearCcsCostRefreshTimer();
             await publish(false);
             server.close(() => resolve());
         };
@@ -3371,6 +3407,8 @@ function parseWeztermArgs(args) {
     }
     return { remove };
 }
+let ccsCostSnapshotCache = null;
+let ccsCostReportCache = new Map();
 const ccsCostReports = new Set(["daily", "weekly", "monthly", "projects", "project", "day"]);
 const ccsCostBucketMinutes = new Map([
     ["15m", 15],
@@ -3429,7 +3467,7 @@ async function runCcsCost(args, profiles) {
         return;
     }
     if (parsed.command === "push") {
-        await pushCcsCostSnapshot(parsed.options);
+        await pushCcsCostSnapshot(profiles, parsed.options);
         return;
     }
     if (parsed.command === "central") {
@@ -3877,19 +3915,22 @@ async function buildCcsCostSnapshot(options) {
 function ccsCostSnapshotFileName(snapshot) {
     return `${snapshot.machine}.json`;
 }
-async function pushCcsCostSnapshot(options) {
+async function pushCcsCostSnapshot(profiles, options) {
     const snapshot = await buildCcsCostSnapshot(options);
     const tempDir = await mkdtemp(join(tmpdir(), "ccs-cost-"));
     const tempPath = join(tempDir, ccsCostSnapshotFileName(snapshot));
     const remotePath = `${ccsCostRemoteDir}/${ccsCostSnapshotFileName(snapshot)}`;
+    const remoteTempPath = `${remotePath}.${process.pid}.${Date.now()}.tmp`;
     try {
         await writeTextFile(tempPath, stringifyJson(snapshot), 0o600);
         await configSyncSsh(`mkdir -p ${JSON.stringify(ccsCostRemoteDir)}`);
-        await configSyncScp(tempPath, `${configSyncUser}@${configSyncHost}:${remotePath}`);
+        await configSyncScp(tempPath, `${configSyncUser}@${configSyncHost}:${remoteTempPath}`);
+        await configSyncSsh(`mv -f ${JSON.stringify(remoteTempPath)} ${JSON.stringify(remotePath)}`);
     }
     finally {
         await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
+    const refreshUrl = await triggerCcsCostRefresh(profiles);
     const totals = snapshot.events.reduce((aggregate, event) => {
         aggregate.inputTokens += event.usage.inputTokens;
         aggregate.outputTokens += event.usage.outputTokens;
@@ -3900,8 +3941,47 @@ async function pushCcsCostSnapshot(options) {
     printKeyValue("events:", formatInteger(snapshot.events.length), 9);
     printKeyValue("input:", formatCcsCostTokens(totals.inputTokens, false), 9);
     printKeyValue("output:", formatCcsCostTokens(totals.outputTokens, false), 9);
+    printKeyValue("refresh:", colorUrl(refreshUrl), 9);
 }
-async function readCcsCostSnapshots() {
+async function triggerCcsCostRefresh(profiles) {
+    const errors = [];
+    const stateUrls = await readUsageTopStateUrls(profiles);
+    if (stateUrls.length === 0) {
+        throw new Error("ccs cost push requires top.stateUrls for refresh trigger");
+    }
+    for (const stateUrl of stateUrls) {
+        const url = ccsCostRefreshUrl(stateUrl);
+        const error = await postCcsCostRefresh(url);
+        if (!error) {
+            return url;
+        }
+        errors.push(`${url}: ${error}`);
+    }
+    throw new Error(`central ccs cost refresh trigger failed: ${errors.join("; ")}`);
+}
+async function postCcsCostRefresh(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ccsCostRefreshHttpTimeoutMs);
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+        });
+        const text = await response.text();
+        return response.ok ? null : `HTTP ${response.status}${formatCcsCostFetchBody(text)}`;
+    }
+    catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+            return `timeout after ${ccsCostRefreshHttpTimeoutMs / 1000}s`;
+        }
+        return error instanceof Error ? error.message : String(error);
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+async function readCcsCostSnapshotFiles() {
     const dir = ccsCostSnapshotDir();
     let names;
     try {
@@ -3913,11 +3993,35 @@ async function readCcsCostSnapshots() {
         }
         throw error;
     }
-    const snapshots = [];
+    const files = [];
     for (const name of names.filter((entry) => entry.endsWith(".json")).sort()) {
-        snapshots.push(parseCcsCostSnapshot(name, await readTextIfExists(join(dir, name))));
+        const path = join(dir, name);
+        const file = await stat(path);
+        if (file.isFile()) {
+            files.push({ name, path, size: file.size, mtimeMs: file.mtimeMs });
+        }
     }
-    return snapshots;
+    return files;
+}
+function ccsCostSnapshotFingerprint(files) {
+    return files.map((file) => `${file.name}:${file.size}:${file.mtimeMs}`).join("|");
+}
+async function readCcsCostSnapshots() {
+    return (await getCcsCostSnapshotCache()).snapshots;
+}
+async function getCcsCostSnapshotCache() {
+    const files = await readCcsCostSnapshotFiles();
+    const fingerprint = ccsCostSnapshotFingerprint(files);
+    if (ccsCostSnapshotCache?.fingerprint === fingerprint) {
+        return ccsCostSnapshotCache;
+    }
+    const snapshots = [];
+    for (const file of files) {
+        snapshots.push(parseCcsCostSnapshot(file.name, await readTextIfExists(file.path)));
+    }
+    ccsCostSnapshotCache = { fingerprint, snapshots };
+    ccsCostReportCache = new Map();
+    return ccsCostSnapshotCache;
 }
 function parseCcsCostSnapshot(name, text) {
     if (!text) {
@@ -4007,12 +4111,24 @@ function normalizeCcsCostTokenUsageRecord(value) {
     return ccsCostTokenUsageRecord(raw);
 }
 async function buildCentralCcsCostReport(options) {
-    const snapshots = await readCcsCostSnapshots();
+    const snapshotCache = await getCcsCostSnapshotCache();
     const priceCache = await readModelPriceCache();
-    if (options.speed !== "auto") {
-        return buildCcsCostReport(options, snapshots.flatMap((snapshot) => snapshot.events.map(ccsCostEventFromRecord)), { priceCache, speed: options.speed }, "central");
+    const priceFingerprint = await ccsCostPriceFingerprint();
+    const cacheKey = ccsCostReportCacheKey(snapshotCache.fingerprint, priceFingerprint, options);
+    const cached = ccsCostReportCache.get(cacheKey);
+    if (cached) {
+        return cached;
     }
-    return mergeCcsCostReports(snapshots.map((snapshot) => buildCcsCostReport(options, snapshot.events.map(ccsCostEventFromRecord), { priceCache, speed: snapshot.speed }, "central")), options);
+    const snapshots = snapshotCache.snapshots;
+    let report;
+    if (options.speed !== "auto") {
+        report = buildCcsCostReport(options, snapshots.flatMap((snapshot) => snapshot.events.map(ccsCostEventFromRecord)), { priceCache, speed: options.speed }, "central");
+    }
+    else {
+        report = mergeCcsCostReports(snapshots.map((snapshot) => buildCcsCostReport(options, snapshot.events.map(ccsCostEventFromRecord), { priceCache, speed: snapshot.speed }, "central")), options);
+    }
+    ccsCostReportCache.set(cacheKey, report);
+    return report;
 }
 async function buildCcsCostStatus() {
     const snapshots = await readCcsCostSnapshots();
@@ -4034,6 +4150,52 @@ async function buildCcsCostStatus() {
             };
         }).sort((left, right) => left.machine.localeCompare(right.machine)),
     };
+}
+async function warmCentralCcsCostReports() {
+    const snapshotCache = await getCcsCostSnapshotCache();
+    const options = ["daily", "weekly", "monthly", "projects"]
+        .map((report) => defaultCentralCcsCostOptions(report));
+    for (const option of options) {
+        await buildCentralCcsCostReport(option);
+    }
+    return { fingerprint: snapshotCache.fingerprint, reports: options.length };
+}
+function defaultCentralCcsCostOptions(report) {
+    return {
+        report,
+        timezone: systemTimezone(),
+        json: false,
+        raw: false,
+        speed: "auto",
+        bucket: "1h",
+        bucketMinutes: 60,
+    };
+}
+async function ccsCostPriceFingerprint() {
+    try {
+        const file = await stat(modelPricesCachePath());
+        return `${file.size}:${file.mtimeMs}`;
+    }
+    catch (error) {
+        if (error.code === "ENOENT") {
+            return "missing";
+        }
+        throw error;
+    }
+}
+function ccsCostReportCacheKey(snapshotFingerprint, priceFingerprint, options) {
+    return JSON.stringify({
+        snapshotFingerprint,
+        priceFingerprint,
+        report: options.report,
+        since: options.since ?? null,
+        until: options.until ?? null,
+        timezone: options.timezone,
+        bucket: options.bucket,
+        speed: options.speed,
+        project: options.project ?? null,
+        day: options.day ?? null,
+    });
 }
 function mergeCcsCostReports(reports, options) {
     if (options.report === "day") {
@@ -4124,6 +4286,15 @@ function ccsCostStatusUrl(stateUrl) {
     url.pathname = url.pathname.endsWith("/ccs/top/state")
         ? url.pathname.replace(/\/ccs\/top\/state$/, "/ccs/cost/status")
         : "/ccs/cost/status";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+}
+function ccsCostRefreshUrl(stateUrl) {
+    const url = new URL(stateUrl);
+    url.pathname = url.pathname.endsWith("/ccs/top/state")
+        ? url.pathname.replace(/\/ccs\/top\/state$/, "/ccs/cost/refresh")
+        : "/ccs/cost/refresh";
     url.search = "";
     url.hash = "";
     return url.toString();
