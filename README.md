@@ -308,6 +308,18 @@ ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
 
 The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly and prints the remote file, machine name, event count, input, and output totals.
 
+Install or update every reporting machine from the GitHub source before adding timers:
+
+```bash
+pnpm add -g github:Wenswell/codex-cli-tools
+```
+
+Linux user timers should run the global `ccs cost push` command with a PATH that includes the pnpm bin directory. macOS LaunchAgents should use the absolute pnpm shim path, for example `/Users/wswensw/Library/pnpm/ccs`, with `StartInterval` set to `7200` for a two-hour upload interval. The job's environment should include Homebrew and pnpm bins:
+
+```text
+/opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
 `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central daily`, `weekly`, `monthly`, `projects`, `project`, and `day` render server-side aggregate reports from all uploaded machine snapshots:
 
 ```bash

@@ -331,6 +331,18 @@ totalTokens
 
 Prompt text, response text, and raw session JSONL lines are not uploaded.
 
+Install or update every reporting machine from the GitHub source:
+
+```bash
+pnpm add -g github:Wenswell/codex-cli-tools
+```
+
+`ccs cost push` is intended for unattended timers. Linux user services should run the global `ccs cost push` command with pnpm on PATH. macOS LaunchAgents should use the absolute pnpm shim path, such as `/Users/wswensw/Library/pnpm/ccs`, set `StartInterval` to `7200`, and include this PATH:
+
+```text
+/opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
 Server endpoints are part of `ccs s server`:
 
 ```text
