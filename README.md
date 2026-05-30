@@ -52,6 +52,10 @@ codex-rename
 codex-notice
 ```
 
+## Design Specs
+
+- [ccs cost spec](docs/CCS_COST_SPEC.md)
+
 ## CLI conventions
 
 - No-argument/status commands print active configuration values, not just file paths.
