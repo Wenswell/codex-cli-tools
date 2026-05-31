@@ -353,6 +353,8 @@ const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHistoryChartSummaryGap = 4;
 const usageTopHistoryChartNamedProviderLimit = 2;
 const usageTopHistoryOtherName = "other";
+const weztermStatusUpdateIntervalMs = 250;
+const weztermStatusStaleAfterSeconds = 2;
 const usageTopHttpTimeoutMs = 1_500;
 const usageTopHistoryHttpTimeoutMs = 3_000;
 const ccsCostReportHttpTimeoutMs = 30_000;
@@ -915,6 +917,10 @@ function nextAlignedTimeMs(now: number, interval: number): number {
   return Math.ceil((now + 1) / interval) * interval;
 }
 
+function msUntilNextAlignedTime(cycleStart: number, interval: number, now = Date.now()): number {
+  return Math.max(0, nextAlignedTimeMs(cycleStart, interval) - now);
+}
+
 function formatList(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "(none)";
 }
@@ -1214,30 +1220,37 @@ function buildWeztermStatusBlock(): string {
     weztermStatusBegin,
     "config.enable_tab_bar = true",
     "config.hide_tab_bar_if_only_one_tab = false",
-    "config.status_update_interval = 1000",
+    `config.status_update_interval = ${weztermStatusUpdateIntervalMs}`,
+    `local ccs_status_stale_after_seconds = ${weztermStatusStaleAfterSeconds}`,
     "",
-    "local function ccs_status()",
+    "local function ccs_status_suffix()",
     `\tlocal path = os.getenv("CCS_WEZTERM_STATUS_FILE") or ${JSON.stringify(usageTopStatusTextPath())}`,
     "\tlocal handle = io.open(path, \"r\")",
     "\tif not handle then",
-    "\t\treturn os.date(\"%H:%M:%S\") .. \" | ccs status inactive\"",
+    "\t\treturn \" | ccs status inactive\"",
     "\tend",
     "",
     "\tlocal value = handle:read(\"*a\") or \"\"",
     "\thandle:close()",
     "\tvalue = value:gsub(\"%s+$\", \"\")",
     "\tif value == \"\" then",
-    "\t\treturn os.date(\"%H:%M:%S\") .. \" | ccs status inactive\"",
+    "\t\treturn \" | ccs status inactive\"",
     "\tend",
-    "\treturn value",
+    "",
+    "\tlocal timestamp, suffix = value:match(\"^(%d+)\\t(.*)$\")",
+    "\tlocal generated_at = tonumber(timestamp)",
+    "\tif not generated_at or suffix == \"\" then",
+    "\t\treturn \" | ccs status inactive\"",
+    "\tend",
+    "",
+    "\tif os.time() - generated_at > ccs_status_stale_after_seconds then",
+    "\t\treturn \" | ccs status inactive\"",
+    "\tend",
+    "\treturn suffix",
     "end",
     "",
     "wezterm.on(\"update-right-status\", function(window)",
-    "\tlocal status = ccs_status()",
-    "\tif status == \"\" then",
-    "\t\twindow:set_right_status(\"\")",
-    "\t\treturn",
-    "\tend",
+    "\tlocal status = os.date(\"%H:%M:%S\") .. ccs_status_suffix()",
     "",
     "\twindow:set_right_status(wezterm.format({",
     "\t\t{ Foreground = { Color = \"#89b4fa\" } },",
@@ -3615,6 +3628,10 @@ async function writeUsageTopStatusText(value: string): Promise<void> {
   }
 }
 
+function formatUsageTopStatusFileText(now: Date, suffix: string): string {
+  return `${Math.floor(now.getTime() / 1000)}\t${suffix}\n`;
+}
+
 function parseUsageTopHistoryDateParam(params: URLSearchParams, name: string): Date | undefined {
   const value = params.get(name);
   if (value === null) {
@@ -3655,19 +3672,28 @@ function parseUsageTopHistoryRequestFromUrl(url: URL, now = new Date()): UsageTo
 
 async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
   let stopped = false;
+  let cachedSuffix = " | ccs top unavailable";
+  let refreshInFlight = false;
+
+  const refreshStatus = async (): Promise<void> => {
+    if (refreshInFlight || stopped) {
+      return;
+    }
+    refreshInFlight = true;
+    try {
+      cachedSuffix = await renderCurrentUsageTopStatusSuffix(profiles, new Date(), "ccs top unavailable");
+    } catch {
+      cachedSuffix = " | ccs top unavailable";
+    } finally {
+      refreshInFlight = false;
+    }
+  };
 
   const writeStatus = async (): Promise<void> => {
-    const now = new Date();
-    let line = `${formatStatusLineClock(now)} | ccs top unavailable`;
-    try {
-      line = `${formatStatusLineClock(now)}${await renderCurrentUsageTopStatusSuffix(profiles, now, "ccs top unavailable")}`;
-      if (!stopped) {
-        await writeUsageTopStatusText(line);
-      }
-    } catch {
-      if (!stopped) {
-        await writeUsageTopStatusText(line).catch(() => undefined);
-      }
+    const displayNow = new Date();
+    const line = `${formatStatusLineClock(displayNow)}${cachedSuffix}`;
+    if (!stopped) {
+      await writeUsageTopStatusText(formatUsageTopStatusFileText(displayNow, cachedSuffix)).catch(() => undefined);
     }
     if (process.stdout.isTTY) {
       process.stdout.write(`\r\u001b[2K${line}`);
@@ -3676,22 +3702,27 @@ async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
     console.log(line);
   };
 
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let cleanedUp = false;
+  const schedule = (cycleStart: number): void => {
+    if (cleanedUp) {
+      return;
+    }
+    const delay = msUntilNextAlignedTime(cycleStart, usageTopTickMs);
+    timer = setTimeout(() => {
+      timer = null;
+      void (async () => {
+        const nextCycleStart = Date.now();
+        void refreshStatus();
+        await writeStatus();
+        schedule(nextCycleStart);
+      })();
+    }, delay);
+  };
+
+  await refreshStatus();
   await writeStatus();
   await new Promise<void>((resolve) => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let cleanedUp = false;
-    const schedule = (): void => {
-      if (cleanedUp) {
-        return;
-      }
-      timer = setTimeout(() => {
-        timer = null;
-        void (async () => {
-          await writeStatus();
-          schedule();
-        })();
-      }, usageTopTickMs);
-    };
     const cleanup = async (): Promise<void> => {
       if (cleanedUp) {
         return;
@@ -3701,14 +3732,14 @@ async function runUsageTopStatusAgent(profiles: ProfilesFile): Promise<void> {
       if (timer) {
         clearTimeout(timer);
       }
-      await writeUsageTopStatusText(`${formatStatusLineClock(new Date())} | ccs top inactive`).catch(() => undefined);
+      await writeUsageTopStatusText(formatUsageTopStatusFileText(new Date(), " | ccs top inactive")).catch(() => undefined);
       if (process.stdout.isTTY) {
         process.stdout.write("\n");
       }
       resolve();
     };
 
-    schedule();
+    schedule(Date.now());
     process.once("SIGINT", () => void cleanup());
     process.once("SIGTERM", () => void cleanup());
   });
