@@ -443,7 +443,7 @@ time          total  input  ciii  |  time          total  input  ciii
 20:00-20:30  +$0.2  +$0.2    $0  |
 ```
 
-For WezTerm, keep `ccs s agent` running in one terminal. It writes a tiny complete status line to `~/.cache/codex-tools/ccs-top-status.txt` every second. The WezTerm integration reads that file directly, so it does not spawn `node` or request HTTP from the GUI status callback. If the configured state source is unavailable, the agent writes `ccs top unavailable`; if the agent stops, the whole status line stops changing instead of showing a fresh clock with stale usage values.
+For WezTerm, keep `ccs s agent` running in one terminal. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
 
 Install the WezTerm status bar integration with the project command:
 
@@ -452,7 +452,7 @@ ccs s wezterm
 ccs s wezterm remove
 ```
 
-`ccs s wezterm` previews the `~/.wezterm.lua` change, then writes after you type exact `yes`; it backs up the existing file under `~/.config/codex-tools/backups/` and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block, then removes it after the same confirmation. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`; override the file path with `CCS_WEZTERM_STATUS_FILE`.
+`ccs s wezterm` previews the `~/.wezterm.lua` change, then writes after you type exact `yes`; it backs up the existing file under `~/.config/codex-tools/backups/` and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block, then removes it after the same confirmation. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`, renders the clock locally, and hides stale status after a short freshness window; override the file path with `CCS_WEZTERM_STATUS_FILE`.
 
 Example:
 
