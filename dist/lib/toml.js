@@ -37,6 +37,37 @@ export function readTopLevelTomlString(content, key) {
     }
     return null;
 }
+export function mergeTomlDefaults(template, existing) {
+    if (!existing.trim()) {
+        return ensureTrailingNewline(template);
+    }
+    const next = existing.replace(/\r\n/g, "\n").split("\n");
+    const templateTopLevel = parseTomlTopLevel(template);
+    const existingTopLevel = parseTomlTopLevel(existing);
+    const missingTopLevel = templateTopLevel.lines.filter((line) => {
+        const key = parseTomlKey(line);
+        return key !== null && !existingTopLevel.keys.has(key);
+    });
+    if (missingTopLevel.length > 0) {
+        insertTopLevelLines(next, missingTopLevel);
+    }
+    for (const templateSection of parseTomlSections(template)) {
+        const currentSection = parseTomlSections(next.join("\n")).find((section) => section.name === templateSection.name);
+        if (!currentSection) {
+            appendSection(next, templateSection.lines);
+            continue;
+        }
+        const currentKeys = new Set(currentSection.lines.map(parseTomlKey).filter((key) => key !== null));
+        const missingLines = templateSection.lines.slice(1).filter((line) => {
+            const key = parseTomlKey(line);
+            return key !== null && !currentKeys.has(key);
+        });
+        if (missingLines.length > 0) {
+            insertSectionLines(next, currentSection, missingLines);
+        }
+    }
+    return ensureTrailingNewline(next.join("\n"));
+}
 function upsertTomlKey(content, sectionName, key, value) {
     const lines = content.split(/\r?\n/);
     let currentSection = "";
@@ -73,28 +104,6 @@ function upsertTomlKey(content, sectionName, key, value) {
     }
     return ensureTrailingNewline(next.join("\n"));
 }
-export function mergeTomlModelProviderSections(template, existing) {
-    const templateSections = parseTomlSections(template);
-    const existingSections = parseTomlSections(existing);
-    const extraSections = existingSections.filter((section) => {
-        return shouldPreserveExtraSection(section.name) &&
-            !templateSections.some((templateSection) => templateSection.name === section.name);
-    });
-    if (extraSections.length === 0) {
-        return ensureTrailingNewline(template);
-    }
-    let next = ensureTrailingNewline(template).replace(/\n*$/, "\n");
-    for (const section of extraSections) {
-        if (!next.endsWith("\n\n")) {
-            next += "\n";
-        }
-        next += `${section.lines.join("\n")}\n`;
-    }
-    return ensureTrailingNewline(next);
-}
-export function listTomlSectionNames(content) {
-    return parseTomlSections(content).map((section) => section.name);
-}
 function upsertTopLevelTomlKey(content, key, value) {
     const lines = content.split(/\r?\n/);
     let inserted = false;
@@ -129,12 +138,17 @@ function parseTomlSections(content) {
     const lines = content.split(/\r?\n/);
     const sections = [];
     let current = null;
-    for (const line of lines) {
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
         const sectionMatch = parseSectionHeader(line);
         if (sectionMatch) {
+            if (current) {
+                current.end = index;
+            }
             current = {
                 name: sectionMatch,
                 lines: [line],
+                end: lines.length,
             };
             sections.push(current);
             continue;
@@ -145,17 +159,62 @@ function parseTomlSections(content) {
     }
     return sections;
 }
+function parseTomlTopLevel(content) {
+    const lines = content.split(/\r?\n/);
+    const end = lines.findIndex((line) => parseSectionHeader(line) !== null);
+    const topLevelLines = lines.slice(0, end === -1 ? lines.length : end);
+    return {
+        lines: topLevelLines,
+        keys: new Set(topLevelLines.map(parseTomlKey).filter((key) => key !== null)),
+        end: end === -1 ? lines.length : end,
+    };
+}
+function insertTopLevelLines(lines, additions) {
+    const topLevel = parseTomlTopLevel(lines.join("\n"));
+    const insertion = [];
+    if (topLevel.end > 0 && lines[topLevel.end - 1]?.trim() !== "") {
+        insertion.push("");
+    }
+    insertion.push(...additions);
+    if (lines[topLevel.end]?.trim()) {
+        insertion.push("");
+    }
+    lines.splice(topLevel.end, 0, ...insertion);
+}
+function appendSection(lines, sectionLines) {
+    while (lines.length > 0 && lines.at(-1) === "") {
+        lines.pop();
+    }
+    if (lines.length > 0) {
+        lines.push("");
+    }
+    lines.push(...sectionLines);
+}
+function insertSectionLines(lines, section, additions) {
+    let insertionIndex = section.end;
+    while (insertionIndex > 0 && lines[insertionIndex - 1]?.trim() === "") {
+        insertionIndex -= 1;
+    }
+    const insertion = [...additions];
+    const followingLine = lines[insertionIndex];
+    if (followingLine !== undefined && parseSectionHeader(followingLine) !== null) {
+        insertion.push("");
+    }
+    lines.splice(insertionIndex, 0, ...insertion);
+}
+function parseTomlKey(line) {
+    if (!line.trim() || /^\s*[#[]/.test(line)) {
+        return null;
+    }
+    const match = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+    return match?.[1] ?? null;
+}
 function ensureTrailingNewline(content) {
     return content.endsWith("\n") ? content : `${content}\n`;
 }
 function parseSectionHeader(line) {
     const match = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
     return match?.[1] ?? null;
-}
-function shouldPreserveExtraSection(sectionName) {
-    return sectionName.startsWith("model_providers.") ||
-        sectionName.startsWith("projects.") ||
-        sectionName === "tui.model_availability_nux";
 }
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

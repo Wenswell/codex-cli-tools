@@ -140,7 +140,7 @@ Use `ccx` and `ccxs` only in directories and tasks you trust.
 
 ## codex-notice
 
-`codex-notice` receives Codex native `notify` payloads and forwards them to a Feishu custom bot.
+`codex-notice` sends manual test notifications to a Feishu custom bot.
 
 Set `FEISHU_BOT_WEBHOOK` in the environment, or create `~/.config/codex-tools/notice.env`:
 
@@ -164,14 +164,6 @@ FEISHU_BOT_WEBHOOK environment variable
 ~/.config/codex-tools/notice.env
 ```
 
-Add this to `~/.codex/config.toml`:
-
-```toml
-notify = ["codex-notice", "hook"]
-```
-
-`ccs init` and `ccs sync` include this `notify` line in the default Codex config template.
-
 Local test:
 
 ```bash
@@ -187,7 +179,6 @@ codex-notice status                    # show active webhook, config, and log
 codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config
 codex-notice test [MESSAGE]            # send a test notification
 codex-notice logs [N]                  # show recent send logs
-codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card
 ```
 
 `codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write, then writes `~/.config/codex-tools/notice.env` with `0600` permissions only after you type exact `yes`.
@@ -209,9 +200,7 @@ done
 剩余回复（点击展开）
 ```
 
-`codex-notice` only sends Feishu notifications for main Codex TUI conversations (`client: "codex-tui"`). Other notify payloads, such as subagent completions, are skipped for Feishu delivery but still written to the local log with the complete original payload.
-
-`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each sent entry stores the complete original Codex notify payload, the generated Feishu card request, and the Feishu response. Skipped entries store the complete original payload and skip reason. The log is ignored by Git.
+`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each sent entry stores the complete generated payload, the generated Feishu card request, and the Feishu response. The log is ignored by Git.
 
 ## ccs
 
@@ -546,14 +535,14 @@ Before writing, it backs up the current files to:
 ~/.config/codex-tools/backups/ccs-YYYYMMDD-HHMMSS/
 ```
 
-`ccs init` preserves the current top-level `model_provider`, preserves any existing extra `[model_providers.*]` sections that are not in the template, restores the current provider's `base_url` after syncing the template, and syncs the default global Codex guidelines to `~/.codex/AGENTS.md`. Later profile switches only change that API URL and `~/.codex/auth.json`.
+`ccs init` keeps the existing `~/.codex/config.toml` as the base file, appends missing top-level keys, missing sections, and missing section keys from `config/codex-config.toml`, and syncs the default global Codex guidelines to `~/.codex/AGENTS.md`. Existing Codex config keys, sections, comments, and local settings stay in place. Later profile switches only change the active provider API URL and `~/.codex/auth.json`.
 
 `ccs init` shows:
 
 - a short summary of files to modify and back up
 - unified diff style output for each file that would change
 - masked secrets in `profiles.json` and `auth.json`
-- warnings for risky changes such as removed sections or current-profile switches
+- warnings for risky changes such as current-profile switches
 
 If `config/ccs-profiles.json` changes later, run:
 
@@ -563,7 +552,7 @@ ccs sync
 
 `ccs sync` prints its plan first and writes only if you type exact `yes` at the prompt.
 
-When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, seeds `top.stateUrls` with the cloud-first/local-fallback defaults when `top` is missing, syncs `~/.codex/config.toml` from the template while preserving the current `model_provider`, current provider `base_url`, and existing extra `[model_providers.*]` sections, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
+When applied, `ccs sync` also creates the same backup directory first. Then it merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys, keeps local profiles that are not in the template, seeds `top.stateUrls` with the cloud-first/local-fallback defaults when `top` is missing, appends missing Codex config keys and sections from `config/codex-config.toml` into `~/.codex/config.toml`, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
 `ccs config` manages local `~/.config/codex-tools/profiles.json` sync with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
 

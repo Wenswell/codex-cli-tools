@@ -43,6 +43,43 @@ export function readTopLevelTomlString(content: string, key: string): string | n
   return null;
 }
 
+export function mergeTomlDefaults(template: string, existing: string): string {
+  if (!existing.trim()) {
+    return ensureTrailingNewline(template);
+  }
+
+  const next = existing.replace(/\r\n/g, "\n").split("\n");
+  const templateTopLevel = parseTomlTopLevel(template);
+  const existingTopLevel = parseTomlTopLevel(existing);
+  const missingTopLevel = templateTopLevel.lines.filter((line) => {
+    const key = parseTomlKey(line);
+    return key !== null && !existingTopLevel.keys.has(key);
+  });
+
+  if (missingTopLevel.length > 0) {
+    insertTopLevelLines(next, missingTopLevel);
+  }
+
+  for (const templateSection of parseTomlSections(template)) {
+    const currentSection = parseTomlSections(next.join("\n")).find((section) => section.name === templateSection.name);
+    if (!currentSection) {
+      appendSection(next, templateSection.lines);
+      continue;
+    }
+
+    const currentKeys = new Set(currentSection.lines.map(parseTomlKey).filter((key): key is string => key !== null));
+    const missingLines = templateSection.lines.slice(1).filter((line) => {
+      const key = parseTomlKey(line);
+      return key !== null && !currentKeys.has(key);
+    });
+    if (missingLines.length > 0) {
+      insertSectionLines(next, currentSection, missingLines);
+    }
+  }
+
+  return ensureTrailingNewline(next.join("\n"));
+}
+
 function upsertTomlKey(content: string, sectionName: string, key: string, value: string): string {
   const lines = content.split(/\r?\n/);
   let currentSection = "";
@@ -83,31 +120,11 @@ function upsertTomlKey(content: string, sectionName: string, key: string, value:
   return ensureTrailingNewline(next.join("\n"));
 }
 
-export function mergeTomlModelProviderSections(template: string, existing: string): string {
-  const templateSections = parseTomlSections(template);
-  const existingSections = parseTomlSections(existing);
-  const extraSections = existingSections.filter((section) => {
-    return shouldPreserveExtraSection(section.name) &&
-      !templateSections.some((templateSection) => templateSection.name === section.name);
-  });
-
-  if (extraSections.length === 0) {
-    return ensureTrailingNewline(template);
-  }
-
-  let next = ensureTrailingNewline(template).replace(/\n*$/, "\n");
-  for (const section of extraSections) {
-    if (!next.endsWith("\n\n")) {
-      next += "\n";
-    }
-    next += `${section.lines.join("\n")}\n`;
-  }
-  return ensureTrailingNewline(next);
-}
-
-export function listTomlSectionNames(content: string): string[] {
-  return parseTomlSections(content).map((section) => section.name);
-}
+type TomlTopLevel = {
+  lines: string[];
+  keys: Set<string>;
+  end: number;
+};
 
 function upsertTopLevelTomlKey(content: string, key: string, value: string): string {
   const lines = content.split(/\r?\n/);
@@ -147,6 +164,7 @@ function upsertTopLevelTomlKey(content: string, key: string, value: string): str
 type TomlSection = {
   name: string;
   lines: string[];
+  end: number;
 };
 
 function parseTomlSections(content: string): TomlSection[] {
@@ -154,12 +172,17 @@ function parseTomlSections(content: string): TomlSection[] {
   const sections: TomlSection[] = [];
   let current: TomlSection | null = null;
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const sectionMatch = parseSectionHeader(line);
     if (sectionMatch) {
+      if (current) {
+        current.end = index;
+      }
       current = {
         name: sectionMatch,
         lines: [line],
+        end: lines.length,
       };
       sections.push(current);
       continue;
@@ -173,6 +196,63 @@ function parseTomlSections(content: string): TomlSection[] {
   return sections;
 }
 
+function parseTomlTopLevel(content: string): TomlTopLevel {
+  const lines = content.split(/\r?\n/);
+  const end = lines.findIndex((line) => parseSectionHeader(line) !== null);
+  const topLevelLines = lines.slice(0, end === -1 ? lines.length : end);
+  return {
+    lines: topLevelLines,
+    keys: new Set(topLevelLines.map(parseTomlKey).filter((key): key is string => key !== null)),
+    end: end === -1 ? lines.length : end,
+  };
+}
+
+function insertTopLevelLines(lines: string[], additions: string[]): void {
+  const topLevel = parseTomlTopLevel(lines.join("\n"));
+  const insertion: string[] = [];
+  if (topLevel.end > 0 && lines[topLevel.end - 1]?.trim() !== "") {
+    insertion.push("");
+  }
+  insertion.push(...additions);
+  if (lines[topLevel.end]?.trim()) {
+    insertion.push("");
+  }
+  lines.splice(topLevel.end, 0, ...insertion);
+}
+
+function appendSection(lines: string[], sectionLines: string[]): void {
+  while (lines.length > 0 && lines.at(-1) === "") {
+    lines.pop();
+  }
+  if (lines.length > 0) {
+    lines.push("");
+  }
+  lines.push(...sectionLines);
+}
+
+function insertSectionLines(lines: string[], section: TomlSection, additions: string[]): void {
+  let insertionIndex = section.end;
+  while (insertionIndex > 0 && lines[insertionIndex - 1]?.trim() === "") {
+    insertionIndex -= 1;
+  }
+
+  const insertion = [...additions];
+  const followingLine = lines[insertionIndex];
+  if (followingLine !== undefined && parseSectionHeader(followingLine) !== null) {
+    insertion.push("");
+  }
+
+  lines.splice(insertionIndex, 0, ...insertion);
+}
+
+function parseTomlKey(line: string): string | null {
+  if (!line.trim() || /^\s*[#[]/.test(line)) {
+    return null;
+  }
+  const match = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(line);
+  return match?.[1] ?? null;
+}
+
 function ensureTrailingNewline(content: string): string {
   return content.endsWith("\n") ? content : `${content}\n`;
 }
@@ -180,12 +260,6 @@ function ensureTrailingNewline(content: string): string {
 function parseSectionHeader(line: string): string | null {
   const match = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
   return match?.[1] ?? null;
-}
-
-function shouldPreserveExtraSection(sectionName: string): boolean {
-  return sectionName.startsWith("model_providers.") ||
-    sectionName.startsWith("projects.") ||
-    sectionName === "tui.model_availability_nux";
 }
 
 function escapeRegExp(value: string): string {

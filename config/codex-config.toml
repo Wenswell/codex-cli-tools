@@ -5,7 +5,6 @@ disable_response_storage = true # 禁止服务端保存响应内容
 network_access = "enabled" # 允许联网
 project_doc_fallback_filenames = ["CLAUDE.md"] # AGENTS.md 找不到时，继续查找这些项目文档
 developer_instructions = "开发原则：\n1.尽可能多使用subAgent来辅助/加速/保护上下文\n2.默认不考虑任何兼容性问题，保持整洁\n3.允许破坏性更新，防止留下历史包袱\n4.应该尽一切可能探索、提出、采用常见方案、业内最佳实践\n5.禁止实施任何兜底性方案，有问题应寻找更优方案/更好做法\n6.强调：禁止为解决问题而使用工程兜底，永远寻求更理想的做法\n7.禁止为了满足用户需求自己造轮子，应该先去寻找常见解法\n7.每一轮修改结束后都及时提交commit\n8.面向文档，及时同步、更新文档\n9.语言简练、结构化、平实朴素，禁止拟人拟物性描述如打、落等\n10.边界不清需求不明确等情况应先明确向用户指出请求明确。"
-notify = ["codex-notice", "hook"] # Codex 原生 notify hook，发送到飞书
 
 approvals_reviewer = "user" # 审批交给用户确认
 service_tier = "fast" # 服务档位，fast 优先速度
@@ -23,7 +22,6 @@ stream_max_retries = 20 # 流式响应最大重试次数
 stream_idle_timeout_ms = 600000 # 流式响应空闲超时，单位毫秒
 
 [features] # 功能开关，--enable xxx 等价于 features.xxx = true
-hooks = true # 启用生命周期 hooks
 enable_fanout = true # 启用任务并行分发
 default_mode_request_user_input = true # 默认模式启用结构化提问工具
 goals = true # 启用目标跟踪能力
@@ -74,4 +72,3 @@ model_reasoning_effort = "xhigh" # reviewer 推理强度
 [tui] # 终端 UI 配置
 show_tooltips = false # 是否显示工具提示
 status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "context-window-size", "total-input-tokens", "total-output-tokens", "fast-mode"] # 状态栏展示项
-

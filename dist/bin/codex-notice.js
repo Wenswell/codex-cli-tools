@@ -45,10 +45,6 @@ async function main() {
         await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
         return;
     }
-    if (command === "hook") {
-        await sendPayload(parseHookPayload(argv.slice(1)));
-        return;
-    }
     console.error(`${textRed("unknown command:")} ${command}`);
     printHelp();
     process.exitCode = 1;
@@ -61,11 +57,10 @@ function printHelp() {
         "  codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config",
         "  codex-notice test [MESSAGE]            # send a test notification",
         "  codex-notice logs [N]                  # show recent send logs",
-        "  codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card",
     ].join("\n"));
 }
 function printCommands() {
-    printKeyValue("commands:", "codex-notice | status | config WEBHOOK | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
+    printKeyValue("commands:", "codex-notice | status | config WEBHOOK | test [MESSAGE] | logs [N]", 10);
 }
 function requireNoExtraArgs(args, usage) {
     if (args.length > 0) {
@@ -82,36 +77,13 @@ function parseLogLimit(args) {
     }
     return Number(raw);
 }
-function parseHookPayload(args) {
-    if (args.length !== 1) {
-        throw new Error("usage: codex-notice hook JSON_PAYLOAD");
-    }
-    try {
-        const payload = JSON.parse(args[0]);
-        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-            throw new Error("payload must be a JSON object");
-        }
-        return payload;
-    }
-    catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`invalid JSON payload: ${message}`);
-    }
-}
 async function sendPayload(payload) {
-    if (shouldSkipNotification(payload)) {
-        await tryWriteSkippedLog(payload, "non-main conversation");
-        return;
-    }
     const webhook = await readWebhook();
     const card = buildCard(payload);
     await postFeishu(webhook, payload, {
         msg_type: "interactive",
         card,
     });
-}
-function shouldSkipNotification(payload) {
-    return payload.client !== "codex-tui";
 }
 async function readWebhook() {
     const webhook = process.env.FEISHU_BOT_WEBHOOK || await readWebhookFromConfigFile();
@@ -226,11 +198,11 @@ async function printLogs(limit) {
             const message = error instanceof Error ? error.message : String(error);
             throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
         }
-        const title = entry.request?.card?.header?.title?.content ?? entry.skipped?.reason ?? "Codex";
+        const title = entry.request?.card?.header?.title?.content ?? "Codex";
         const type = entry.payload?.type ?? "?";
-        const status = entry.skipped ? "skip" : (entry.response?.status ?? "?");
-        const code = entry.skipped ? "-" : (entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?");
-        const msg = entry.skipped?.reason ?? entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
+        const status = entry.response?.status ?? "?";
+        const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
+        const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
         console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
     }
 }
@@ -521,19 +493,7 @@ async function tryWriteSendLog(payload, request, result) {
         });
     }
     catch {
-        // Notify hooks should not fail only because local debug logging failed.
-    }
-}
-async function tryWriteSkippedLog(payload, reason) {
-    try {
-        await writeLogEntry({
-            at: new Date().toISOString(),
-            payload,
-            skipped: { reason },
-        });
-    }
-    catch {
-        // Notify hooks should not fail only because local debug logging failed.
+        // Delivery continues when local debug logging fails.
     }
 }
 function parseJson(text) {
