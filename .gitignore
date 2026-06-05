@@ -1,5 +1,4 @@
 node_modules/
 .env
-codex-notice.log.jsonl
 *.log
 .DS_Store

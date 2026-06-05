@@ -22,6 +22,7 @@ stream_max_retries = 20 # 流式响应最大重试次数
 stream_idle_timeout_ms = 600000 # 流式响应空闲超时，单位毫秒
 
 [features] # 功能开关，--enable xxx 等价于 features.xxx = true
+hooks = true # 启用生命周期 hooks
 enable_fanout = true # 启用任务并行分发
 default_mode_request_user_input = true # 默认模式启用结构化提问工具
 goals = true # 启用目标跟踪能力

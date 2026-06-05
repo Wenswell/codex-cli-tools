@@ -49,7 +49,6 @@ cxx
 cxxs
 senv
 codex-rename
-codex-notice
 ```
 
 ## Design Specs
@@ -137,70 +136,6 @@ claude --dangerously-skip-permissions --resume ARGS...
 ```
 
 Use `ccx` and `ccxs` only in directories and tasks you trust.
-
-## codex-notice
-
-`codex-notice` sends manual test notifications to a Feishu custom bot.
-
-Set `FEISHU_BOT_WEBHOOK` in the environment, or create `~/.config/codex-tools/notice.env`:
-
-```bash
-mkdir -p ~/.config/codex-tools
-chmod 700 ~/.config/codex-tools
-printf 'FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx\n' > ~/.config/codex-tools/notice.env
-chmod 600 ~/.config/codex-tools/notice.env
-```
-
-File format:
-
-```text
-FEISHU_BOT_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
-```
-
-Read order:
-
-```text
-FEISHU_BOT_WEBHOOK environment variable
-~/.config/codex-tools/notice.env
-```
-
-Local test:
-
-```bash
-codex-notice test
-codex-notice test "done"
-```
-
-Other commands:
-
-```bash
-codex-notice                           # show active webhook, config, log, and commands
-codex-notice status                    # show active webhook, config, and log
-codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config
-codex-notice test [MESSAGE]            # send a test notification
-codex-notice logs [N]                  # show recent send logs
-```
-
-`codex-notice` prints the active webhook URL, config path, log path, and one compact `commands:` line. `codex-notice status` prints only the active configuration. `codex-notice config WEBHOOK` previews the config write, then writes `~/.config/codex-tools/notice.env` with `0600` permissions only after you type exact `yes`.
-
-Message format uses a Feishu interactive card. The title is the assistant reply preview with no low-value prefix, so notification lists show the useful content first. Common Markdown decoration is removed from the title only, and common Chinese punctuation is normalized to ASCII punctuation. time/user, cwd, and user input are shown as separate grey blocks, followed by a Markdown preview and a collapsed remaining reply panel when the reply is long.
-
-```text
-[done]
-🕒 2026-05-22 11:05:27  👤 user@host
-
-📁 ~/project
-
-💬 do it
-
----
-
-done
-
-剩余回复（点击展开）
-```
-
-`codex-notice` keeps the latest 10 debug entries in `codex-notice.log.jsonl`. Each sent entry stores the complete generated payload, the generated Feishu card request, and the Feishu response. The log is ignored by Git.
 
 ## ccs
 
@@ -763,7 +698,6 @@ Run commands locally from `dist` after building:
 node dist/bin/ccs.js --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
-node dist/bin/codex-notice.js --help
 ```
 
 Check TypeScript:
@@ -781,7 +715,6 @@ git diff --check
 node dist/bin/ccs.js --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
-node dist/bin/codex-notice.js --help
 ```
 
 Use a temporary `HOME` for manual `ccs init` or `ccs sync` apply-path checks so real `~/.codex` files are not changed during verification.
