@@ -15,7 +15,6 @@ const noticeEnvPath = join(codexToolsConfigDir(), "notice.env");
 
 type CodexNotifyPayload = {
   type?: string;
-  client?: string;
   cwd?: string;
   "input-messages"?: unknown;
   "last-assistant-message"?: string;
@@ -108,9 +107,6 @@ type SendLogEntry = {
   payload: CodexNotifyPayload;
   request?: FeishuCardBody;
   response?: FeishuPostResult;
-  skipped?: {
-    reason: string;
-  };
 };
 
 const argv = process.argv.slice(2);
@@ -149,10 +145,6 @@ async function main(): Promise<void> {
     await sendPayload(buildTestPayload(argv.slice(1).join(" ") || "codex-notice test"));
     return;
   }
-  if (command === "hook") {
-    await sendPayload(parseHookPayload(argv.slice(1)));
-    return;
-  }
 
   console.error(`${textRed("unknown command:")} ${command}`);
   printHelp();
@@ -167,12 +159,11 @@ function printHelp(): void {
     "  codex-notice config WEBHOOK           # preview, confirm, and write Feishu webhook config",
     "  codex-notice test [MESSAGE]            # send a test notification",
     "  codex-notice logs [N]                  # show recent send logs",
-    "  codex-notice hook JSON_PAYLOAD         # receive Codex notify payload and send Feishu card",
   ].join("\n"));
 }
 
 function printCommands(): void {
-  printKeyValue("commands:", "codex-notice | status | config WEBHOOK | test [MESSAGE] | logs [N] | hook JSON_PAYLOAD", 10);
+  printKeyValue("commands:", "codex-notice | status | config WEBHOOK | test [MESSAGE] | logs [N]", 10);
 }
 
 function requireNoExtraArgs(args: string[], usage: string): void {
@@ -192,37 +183,13 @@ function parseLogLimit(args: string[]): number {
   return Number(raw);
 }
 
-function parseHookPayload(args: string[]): CodexNotifyPayload {
-  if (args.length !== 1) {
-    throw new Error("usage: codex-notice hook JSON_PAYLOAD");
-  }
-  try {
-    const payload = JSON.parse(args[0]) as unknown;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      throw new Error("payload must be a JSON object");
-    }
-    return payload as CodexNotifyPayload;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid JSON payload: ${message}`);
-  }
-}
-
 async function sendPayload(payload: CodexNotifyPayload): Promise<void> {
-  if (shouldSkipNotification(payload)) {
-    await tryWriteSkippedLog(payload, "non-main conversation");
-    return;
-  }
   const webhook = await readWebhook();
   const card = buildCard(payload);
   await postFeishu(webhook, payload, {
     msg_type: "interactive",
     card,
   });
-}
-
-function shouldSkipNotification(payload: CodexNotifyPayload): boolean {
-  return payload.client !== "codex-tui";
 }
 
 async function readWebhook(): Promise<string> {
@@ -341,7 +308,6 @@ async function printLogs(limit: number): Promise<void> {
       payload?: CodexNotifyPayload;
       request?: { card?: { header?: { title?: { content?: string } } } };
       response?: { status?: number; responseJson?: { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string } };
-      skipped?: { reason?: string };
     };
     try {
       entry = JSON.parse(line) as typeof entry;
@@ -349,11 +315,11 @@ async function printLogs(limit: number): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`invalid log entry in ${logPath().pathname}: ${message}`);
     }
-    const title = entry.request?.card?.header?.title?.content ?? entry.skipped?.reason ?? "Codex";
+    const title = entry.request?.card?.header?.title?.content ?? "Codex";
     const type = entry.payload?.type ?? "?";
-    const status = entry.skipped ? "skip" : (entry.response?.status ?? "?");
-    const code = entry.skipped ? "-" : (entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?");
-    const msg = entry.skipped?.reason ?? entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
+    const status = entry.response?.status ?? "?";
+    const code = entry.response?.responseJson?.code ?? entry.response?.responseJson?.StatusCode ?? "?";
+    const msg = entry.response?.responseJson?.msg ?? entry.response?.responseJson?.StatusMessage ?? "";
     console.log(`${entry.at ?? ""}  ${status}  ${code}  ${type}  ${title}${msg ? `  ${msg}` : ""}`);
   }
 }
@@ -677,19 +643,7 @@ async function tryWriteSendLog(payload: CodexNotifyPayload, request: FeishuCardB
       response: result,
     });
   } catch {
-    // Notify hooks should not fail only because local debug logging failed.
-  }
-}
-
-async function tryWriteSkippedLog(payload: CodexNotifyPayload, reason: string): Promise<void> {
-  try {
-    await writeLogEntry({
-      at: new Date().toISOString(),
-      payload,
-      skipped: { reason },
-    });
-  } catch {
-    // Notify hooks should not fail only because local debug logging failed.
+    // Delivery continues when local debug logging fails.
   }
 }
 

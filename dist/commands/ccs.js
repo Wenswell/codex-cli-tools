@@ -18,7 +18,7 @@ import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCa
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
-import { listTomlSectionNames, mergeTomlModelProviderSections, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, updateTopLevelTomlString, } from "../lib/toml.js";
+import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
@@ -177,21 +177,8 @@ function formatTimestamp(date) {
 async function planCodexConfigSync() {
     const defaults = await readDefaultCodexConfig();
     const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-    const provider = readTopLevelTomlString(existing, "model_provider")
-        ?? readTopLevelTomlString(defaults, "model_provider")
-        ?? "codex";
-    const baseURL = readTomlBaseUrl(existing);
-    const templateSections = new Set(listTomlSectionNames(defaults));
-    const existingSections = listTomlSectionNames(existing);
-    let next = mergeTomlModelProviderSections(defaults, existing);
-    next = updateTopLevelTomlString(next, "model_provider", provider);
-    if (baseURL !== null) {
-        next = updateTomlBaseUrl(next, baseURL);
-    }
-    const nextSections = listTomlSectionNames(next);
     return {
-        nextContent: next,
-        removedSections: existingSections.filter((name) => !nextSections.includes(name)),
+        nextContent: mergeTomlDefaults(defaults, existing),
     };
 }
 async function syncCodexConfigFromTemplate() {
@@ -568,13 +555,6 @@ function msUntilNextAlignedTime(cycleStart, interval, now = Date.now()) {
 function formatList(values) {
     return values.length > 0 ? values.join(", ") : "(none)";
 }
-function buildConfigSection(plan) {
-    const warnings = [];
-    for (const section of plan.removedSections) {
-        warnings.push(`config section [${section}] will be removed`);
-    }
-    return { lines: [], warnings };
-}
 function printPreviewSummary(title, modifiedFiles, backupFiles, warnings, dryRun) {
     console.log(textBold(`Plan: ${title}`));
     if (dryRun) {
@@ -736,12 +716,11 @@ async function buildInitPreviewPlan() {
     const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
     const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
     const nextAgentsText = await readDefaultCodexAgents();
-    const configSection = buildConfigSection(configPlan);
     const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
     const nextAuthText = nextCurrentProfile?.apiKey
         ? stringifyJson({ OPENAI_API_KEY: nextCurrentProfile.apiKey })
         : currentAuthText;
-    const warnings = [...configSection.warnings];
+    const warnings = [];
     const currentProfiles = await readProfiles();
     if ((currentProfiles.current ?? null) !== (nextProfiles.current ?? null)) {
         warnings.unshift(`profile current will change from ${currentProfiles.current ?? "(none)"} to ${nextProfiles.current ?? "(none)"}`);
@@ -787,7 +766,6 @@ async function buildSyncPreviewPlan() {
     const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
     const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
     const nextAgentsText = await readDefaultCodexAgents();
-    const configSection = buildConfigSection(configPlan);
     const previewFiles = collectChangedPreviewFiles([
         {
             label: "profiles.json",
@@ -813,7 +791,7 @@ async function buildSyncPreviewPlan() {
         title: "ccs sync",
         previewFiles,
         backupFiles,
-        warnings: configSection.warnings,
+        warnings: [],
     };
 }
 function buildWeztermStatusBlock() {

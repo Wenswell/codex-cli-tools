@@ -75,8 +75,7 @@ import {
   printKeyValue,
 } from "../lib/output.js";
 import {
-  listTomlSectionNames,
-  mergeTomlModelProviderSections,
+  mergeTomlDefaults,
   readTomlBaseUrl,
   readTopLevelTomlString,
   updateTomlBaseUrl,
@@ -105,7 +104,6 @@ type CcsFileBackup = {
 
 type ConfigSyncPlan = {
   nextContent: string;
-  removedSections: string[];
 };
 
 type PreviewFile = {
@@ -490,24 +488,9 @@ function formatTimestamp(date: Date): string {
 async function planCodexConfigSync(): Promise<ConfigSyncPlan> {
   const defaults = await readDefaultCodexConfig();
   const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-  const provider = readTopLevelTomlString(existing, "model_provider")
-    ?? readTopLevelTomlString(defaults, "model_provider")
-    ?? "codex";
-  const baseURL = readTomlBaseUrl(existing);
-  const templateSections = new Set(listTomlSectionNames(defaults));
-  const existingSections = listTomlSectionNames(existing);
-
-  let next = mergeTomlModelProviderSections(defaults, existing);
-  next = updateTopLevelTomlString(next, "model_provider", provider);
-  if (baseURL !== null) {
-    next = updateTomlBaseUrl(next, baseURL);
-  }
-
-  const nextSections = listTomlSectionNames(next);
 
   return {
-    nextContent: next,
-    removedSections: existingSections.filter((name) => !nextSections.includes(name)),
+    nextContent: mergeTomlDefaults(defaults, existing),
   };
 }
 
@@ -925,14 +908,6 @@ function formatList(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "(none)";
 }
 
-function buildConfigSection(plan: ConfigSyncPlan): { lines: string[]; warnings: string[] } {
-  const warnings: string[] = [];
-  for (const section of plan.removedSections) {
-    warnings.push(`config section [${section}] will be removed`);
-  }
-  return { lines: [], warnings };
-}
-
 function printPreviewSummary(
   title: string,
   modifiedFiles: string[],
@@ -1128,12 +1103,11 @@ async function buildInitPreviewPlan(): Promise<PreviewPlan> {
   const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
   const currentAuthText = (await readTextIfExists(codexAuthPath())) ?? "";
   const nextAgentsText = await readDefaultCodexAgents();
-  const configSection = buildConfigSection(configPlan);
   const nextCurrentProfile = nextProfiles.profiles?.[nextProfiles.current ?? ""];
   const nextAuthText = nextCurrentProfile?.apiKey
     ? stringifyJson({ OPENAI_API_KEY: nextCurrentProfile.apiKey })
     : currentAuthText;
-  const warnings = [...configSection.warnings];
+  const warnings: string[] = [];
   const currentProfiles = await readProfiles();
   if ((currentProfiles.current ?? null) !== (nextProfiles.current ?? null)) {
     warnings.unshift(
@@ -1184,7 +1158,6 @@ async function buildSyncPreviewPlan(): Promise<PreviewPlan> {
   const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
   const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
   const nextAgentsText = await readDefaultCodexAgents();
-  const configSection = buildConfigSection(configPlan);
   const previewFiles = collectChangedPreviewFiles([
     {
       label: "profiles.json",
@@ -1211,7 +1184,7 @@ async function buildSyncPreviewPlan(): Promise<PreviewPlan> {
     title: "ccs sync",
     previewFiles,
     backupFiles,
-    warnings: configSection.warnings,
+    warnings: [],
   };
 }
 
