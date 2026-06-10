@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   ConnectionSampler,
@@ -129,4 +134,70 @@ test("samples matched idle connections and closes expired entries in monitor mod
 test("parses duration and aligned delay", () => {
   assert.equal(parseDuration("1.5s"), 1500);
   assert.equal(nextAlignedDelay(1000, 1200), 800);
+});
+
+test("pads unknown speed columns", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        connections: [
+          {
+            id: "abc",
+            metadata: { host: "api.example.com", destinationPort: 443 },
+            upload: 100,
+            download: 200,
+            start: "2026-06-10T00:00:00.000Z",
+            chains: ["Proxy", "HK-01"],
+            rule: "DOMAIN-SUFFIX",
+            rulePayload: "example.com",
+          },
+        ],
+      }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+      }, null, 2)}\n`,
+    );
+
+    const stdout = await new Promise((resolve, reject) => {
+      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }, (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+
+    const row = stdout
+      .split("\n")
+      .find((line) => line.startsWith("unknown") || line.startsWith("[unknown]"));
+    assert.ok(row);
+    assert.match(row, /\[unknown\]\s{2}\[unknown\]/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
 });

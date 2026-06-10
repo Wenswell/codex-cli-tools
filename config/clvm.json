@@ -7,5 +7,5 @@
   ],
   "interval": "1s",
   "zeroSpeedThreshold": 0,
-  "closeZeroForSeconds": 678
+  "closeZeroForSeconds": 345
 }
