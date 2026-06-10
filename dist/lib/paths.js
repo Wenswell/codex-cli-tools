@@ -15,6 +15,9 @@ export function modelPricesCachePath() {
 export function profilesPath() {
     return join(codexToolsConfigDir(), "profiles.json");
 }
+export function clvmConfigPath() {
+    return join(codexToolsConfigDir(), "clvm.json");
+}
 export function weztermConfigPath() {
     return join(homeDir(), ".wezterm.lua");
 }

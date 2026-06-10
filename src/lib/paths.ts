@@ -21,6 +21,10 @@ export function profilesPath(): string {
   return join(codexToolsConfigDir(), "profiles.json");
 }
 
+export function clvmConfigPath(): string {
+  return join(codexToolsConfigDir(), "clvm.json");
+}
+
 export function weztermConfigPath(): string {
   return join(homeDir(), ".wezterm.lua");
 }
