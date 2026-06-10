@@ -44,6 +44,7 @@ pnpm link --global
 ccs
 ccx
 ccxs
+clvm
 cx
 cxx
 cxxs
@@ -548,6 +549,78 @@ Behavior:
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
+## clvm
+
+`clvm` monitors Clash Verge Rev / mihomo `/connections` data for configured domains.
+
+Config lives at:
+
+```text
+~/.config/codex-tools/clvm.json
+```
+
+Default status:
+
+```bash
+clvm
+```
+
+The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, and prints a compact command line at the bottom.
+
+Commands:
+
+```bash
+clvm
+clvm monitor
+clvm config
+clvm setup --domain example.com --base-url http://127.0.0.1:9090 --secret SECRET
+clvm setup --interval 1s
+clvm setup --close-zero-for-seconds 300
+clvm setup --close-zero-for-seconds off
+clvm help
+```
+
+`clvm config` prints the active config without calling the mihomo API.
+
+`clvm setup` merges the existing config with the provided flags, prints the target file, active values, and a masked JSON diff, then writes only after you type exact `yes`.
+
+Config shape:
+
+```json
+{
+  "baseUrl": "http://127.0.0.1:9090",
+  "secret": "",
+  "domains": ["example.com"],
+  "interval": "1s",
+  "zeroSpeedThreshold": 0,
+  "closeZeroForSeconds": null
+}
+```
+
+Monitor mode:
+
+```bash
+clvm monitor
+clvm monitor --domain example.com --interval 1s
+clvm monitor --json
+clvm monitor --no-clear
+```
+
+Domain matching:
+
+- `example.com` matches `example.com` and `*.example.com`.
+- Connection host candidates come from mihomo metadata fields such as `host`, `destinationHost`, `sniffHost`, `sni`, and `domain`.
+- Domain rule payload is included when the connection rule is domain-based.
+
+Automatic close:
+
+```bash
+clvm setup --close-zero-for-seconds 300
+clvm monitor
+```
+
+`closeZeroForSeconds` enables automatic close in `clvm monitor`. `clvm` status remains read-only and shows `autoClose=configured` when the threshold is configured.
+
 ## senv
 
 `senv` regenerates a target env file from an example env file while preserving existing values.
@@ -696,6 +769,7 @@ Run commands locally from `dist` after building:
 
 ```bash
 node dist/bin/ccs.js --help
+node dist/bin/clvm.js --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
 ```
@@ -710,9 +784,11 @@ Before committing command-surface or documentation changes, verify:
 
 ```bash
 pnpm check
+pnpm test
 pnpm build
 git diff --check
 node dist/bin/ccs.js --help
+node dist/bin/clvm.js --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
 ```

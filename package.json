@@ -7,6 +7,7 @@
     "ccs": "dist/bin/ccs.js",
     "ccx": "dist/bin/ccx.js",
     "ccxs": "dist/bin/ccxs.js",
+    "clvm": "dist/bin/clvm.js",
     "cx": "dist/bin/cx.js",
     "cxx": "dist/bin/cxx.js",
     "cxxs": "dist/bin/cxxs.js",
@@ -18,8 +19,9 @@
     "config"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/bin/*.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test test/*.test.js"
   },
   "engines": {
     "node": ">=20"
