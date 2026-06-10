@@ -5,6 +5,7 @@ import {
   buildRuntimeConfig,
   closeExpiredConnections,
   domainMatches,
+  mergeClvmConfig,
   nextAlignedDelay,
   normalizeDomains,
   parseClvmConfig,
@@ -21,15 +22,23 @@ test("normalizes and matches domains", () => {
 });
 
 test("builds runtime config from shared config and CLI overrides", () => {
+  const template = {
+    baseUrl: "http://127.0.0.1:9090",
+    secret: "",
+    domains: [],
+    interval: "1s",
+    zeroSpeedThreshold: 0,
+    closeZeroForSeconds: null,
+  };
   const runtime = buildRuntimeConfig(
-    parseClvmConfig(JSON.stringify({
+    mergeClvmConfig(template, parseClvmConfig(JSON.stringify({
       baseUrl: "http://127.0.0.1:9090",
       secret: "secret-value",
       domains: ["example.com"],
       interval: "2s",
       zeroSpeedThreshold: 10,
       closeZeroForSeconds: 300,
-    })),
+    }))),
     { domains: ["api.example.com"], interval: "500ms", closeZeroForSeconds: null },
     { autoCloseEnabled: false, clear: false, once: true },
   );
@@ -39,6 +48,30 @@ test("builds runtime config from shared config and CLI overrides", () => {
   assert.equal(runtime.intervalMs, 500);
   assert.equal(runtime.closeZeroForSeconds, null);
   assert.equal(runtime.autoCloseEnabled, false);
+});
+
+test("sync merges template defaults with local overrides", () => {
+  const template = {
+    baseUrl: "http://127.0.0.1:9090",
+    secret: "",
+    domains: [],
+    interval: "1s",
+    zeroSpeedThreshold: 0,
+    closeZeroForSeconds: null,
+  };
+  const merged = mergeClvmConfig(template, {
+    secret: "local-secret",
+    domains: ["example.com"],
+  });
+
+  assert.deepEqual(merged, {
+    baseUrl: "http://127.0.0.1:9090",
+    secret: "local-secret",
+    domains: ["example.com"],
+    interval: "1s",
+    zeroSpeedThreshold: 0,
+    closeZeroForSeconds: null,
+  });
 });
 
 test("samples matched idle connections and closes expired entries in monitor mode", async () => {
@@ -68,8 +101,18 @@ test("samples matched idle connections and closes expired entries in monitor mod
   assert.equal(result.matchedConnections[0].observedIdleMs, 1000);
 
   const closed = [];
+  const template = {
+    baseUrl: "http://127.0.0.1:9090",
+    secret: "",
+    domains: ["example.com"],
+    interval: "1s",
+    zeroSpeedThreshold: 0,
+    closeZeroForSeconds: null,
+  };
   const config = buildRuntimeConfig(
-    { domains: ["example.com"], closeZeroForSeconds: 0.5 },
+    mergeClvmConfig(template, {
+      closeZeroForSeconds: 0.5,
+    }),
     {},
     { autoCloseEnabled: true, clear: false, once: true },
   );

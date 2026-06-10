@@ -559,6 +559,12 @@ Config lives at:
 ~/.config/codex-tools/clvm.json
 ```
 
+Default template lives at:
+
+```text
+config/clvm.json
+```
+
 Default status:
 
 ```bash
@@ -577,12 +583,15 @@ clvm setup --domain example.com --base-url http://127.0.0.1:9090 --secret SECRET
 clvm setup --interval 1s
 clvm setup --close-zero-for-seconds 300
 clvm setup --close-zero-for-seconds off
+clvm sync
 clvm help
 ```
 
 `clvm config` prints the active config without calling the mihomo API.
 
-`clvm setup` merges the existing config with the provided flags, prints the target file, active values, and a masked JSON diff, then writes only after you type exact `yes`.
+`clvm setup` merges the active config with the provided flags, prints the target file, active values, and a masked JSON diff, then writes only after you type exact `yes`.
+
+`clvm sync` merges `config/clvm.json` into `~/.config/codex-tools/clvm.json`, keeps local overrides, prints the source and target files, and writes only after you type exact `yes`.
 
 Config shape:
 
@@ -770,6 +779,7 @@ Run commands locally from `dist` after building:
 ```bash
 node dist/bin/ccs.js --help
 node dist/bin/clvm.js --help
+node dist/bin/clvm.js sync --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
 ```
@@ -789,6 +799,7 @@ pnpm build
 git diff --check
 node dist/bin/ccs.js --help
 node dist/bin/clvm.js --help
+node dist/bin/clvm.js sync --help
 node dist/bin/senv.js --help
 node dist/bin/codex-rename.js --help
 ```
