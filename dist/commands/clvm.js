@@ -1140,8 +1140,8 @@ function buildLayout(stream) {
         status: 9,
         age: 7,
         zeroFor: 7,
-        up: 8,
-        down: 8,
+        up: 10,
+        down: 10,
         upload: 8,
         download: 8,
     };
