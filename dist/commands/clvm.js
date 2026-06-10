@@ -1,5 +1,6 @@
 import { createTwoFilesPatch } from "diff";
 import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
@@ -19,8 +20,6 @@ const durationUnits = new Map([
     ["h", 3_600_000],
 ]);
 const closedHistoryLimit = 5;
-const defaultBaseUrl = "http://127.0.0.1:9090";
-const defaultInterval = "1s";
 const setupFields = new Set([
     "baseUrl",
     "secret",
@@ -29,6 +28,9 @@ const setupFields = new Set([
     "zeroSpeedThreshold",
     "closeZeroForSeconds",
 ]);
+function clvmTemplatePath() {
+    return fileURLToPath(new URL("../../config/clvm.json", import.meta.url));
+}
 export class ClashApi {
     #baseUrl;
     #secret;
@@ -151,8 +153,7 @@ export async function runClvm(argv) {
         return;
     }
     if (parsed.command === "config") {
-        const fileConfig = await readClvmConfig();
-        const runtimeConfig = buildRuntimeConfig(fileConfig, {}, { autoCloseEnabled: false, clear: false, once: true });
+        const runtimeConfig = buildRuntimeConfig(await loadActiveClvmConfig(), {}, { autoCloseEnabled: false, clear: false, once: true });
         printConfigStatus(runtimeConfig, { includeCommands: true });
         return;
     }
@@ -160,7 +161,11 @@ export async function runClvm(argv) {
         await runSetup(parsed.options);
         return;
     }
-    const fileConfig = await readClvmConfig();
+    if (parsed.command === "sync") {
+        await runSync();
+        return;
+    }
+    const fileConfig = await loadActiveClvmConfig();
     const runtimeConfig = buildRuntimeConfig(fileConfig, parsed.options, {
         autoCloseEnabled: parsed.command === "monitor",
         clear: parsed.command === "monitor",
@@ -187,6 +192,9 @@ function parseArgs(argv) {
     }
     if (first === "setup") {
         return { command: "setup", options: parseSetupOptions(rest) };
+    }
+    if (first === "sync") {
+        return { command: "sync", options: parseSyncOptions(rest) };
     }
     if (first && !first.startsWith("-")) {
         throw new Error(`unknown command: ${first}`);
@@ -285,6 +293,16 @@ function parseSetupOptions(argv) {
     }
     return options;
 }
+function parseSyncOptions(argv) {
+    if (argv.length === 0) {
+        return {};
+    }
+    if (argv.length === 1 && isHelpArg(argv[0])) {
+        printSyncHelp();
+        process.exit(0);
+    }
+    throw new Error(`unknown argument for clvm sync: ${argv[0]}`);
+}
 function isHelpArg(arg) {
     return arg === "help" || arg === "--help" || arg === "-h";
 }
@@ -307,6 +325,7 @@ function printHelp() {
         "  clvm monitor                              # refresh matched connections from mihomo /connections",
         "  clvm config                               # print active config",
         "  clvm setup --domain DOMAIN [OPTIONS]      # preview, confirm, and write config",
+        "  clvm sync                                 # preview, confirm, and sync default config",
         "  clvm help                                 # show this help",
         "",
         "Options:",
@@ -331,10 +350,17 @@ function printSetupHelp() {
         "  clvm setup --close-zero-for-seconds off   # preview, confirm, and disable automatic close",
     ].join("\n"));
 }
+function printSyncHelp() {
+    console.log([
+        "Usage:",
+        "  clvm sync                                 # preview, confirm, and sync config/clvm.json to ~/.config/codex-tools/clvm.json",
+        "  clvm sync help                            # show this help",
+    ].join("\n"));
+}
 async function runSetup(options) {
     const configPath = clvmConfigPath();
     const currentText = (await readTextIfExists(configPath)) ?? "";
-    const currentConfig = currentText ? parseClvmConfig(currentText, configPath) : {};
+    const currentConfig = await loadActiveClvmConfig();
     const nextConfig = buildSetupConfig(currentConfig, options);
     const nextText = renderConfigJson(nextConfig);
     printSetupPlan(configPath, currentText, nextText, buildRuntimeConfig(nextConfig, {}, {
@@ -354,37 +380,45 @@ async function runSetup(options) {
     console.log("");
     printKeyValue("target:", `${textGreen("updated")} ${textBlue(configPath)}`, 12);
 }
+async function runSync() {
+    const configPath = clvmConfigPath();
+    const templatePath = clvmTemplatePath();
+    const currentText = (await readTextIfExists(configPath)) ?? "";
+    const templateConfig = await readClvmTemplateConfig();
+    const localConfig = await readClvmConfig();
+    const nextConfig = mergeClvmConfig(templateConfig, localConfig);
+    const nextText = renderConfigJson(nextConfig);
+    printSyncPlan(templatePath, configPath, currentText, nextText, buildRuntimeConfig(nextConfig, {}, { autoCloseEnabled: false, clear: false, once: true }));
+    if (currentText === nextText) {
+        console.log("");
+        console.log(textDim("no config changes."));
+        return;
+    }
+    if (!(await confirmApply())) {
+        return;
+    }
+    await writeTextFile(configPath, nextText, 0o600);
+    console.log("");
+    printKeyValue("target:", `${textGreen("synced")} ${textBlue(configPath)}`, 12);
+}
 function buildSetupConfig(current, options) {
-    const next = { ...current };
-    if (options.baseUrl !== undefined) {
-        next.baseUrl = options.baseUrl;
-    }
-    if (options.secret !== undefined) {
-        next.secret = options.secret;
-    }
-    if (options.domains !== undefined) {
-        next.domains = normalizeDomains(options.domains);
-    }
-    if (options.interval !== undefined) {
-        next.interval = options.interval;
-    }
-    if (options.zeroSpeedThreshold !== undefined) {
-        next.zeroSpeedThreshold = options.zeroSpeedThreshold;
-    }
-    if (options.closeZeroForSeconds !== undefined) {
-        next.closeZeroForSeconds = options.closeZeroForSeconds;
-    }
-    const runtime = buildRuntimeConfig(next, {}, { autoCloseEnabled: false, clear: false, once: true });
-    return {
-        baseUrl: runtime.baseUrl,
-        secret: runtime.secret,
-        domains: runtime.domains,
-        interval: runtime.interval,
-        zeroSpeedThreshold: runtime.zeroSpeedThreshold,
-        closeZeroForSeconds: runtime.closeZeroForSeconds,
-    };
+    return mergeClvmConfig(current, {
+        baseUrl: options.baseUrl,
+        secret: options.secret,
+        domains: options.domains !== undefined ? normalizeDomains(options.domains) : undefined,
+        interval: options.interval,
+        zeroSpeedThreshold: options.zeroSpeedThreshold,
+        closeZeroForSeconds: options.closeZeroForSeconds,
+    });
 }
 function printSetupPlan(configPath, currentText, nextText, runtimeConfig) {
+    printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
+    printConfigValues(runtimeConfig);
+    printConfigDiff(configPath, currentText, nextText);
+}
+function printSyncPlan(sourcePath, configPath, currentText, nextText, runtimeConfig) {
+    printKeyValue("source:", textBlue(sourcePath), 12);
     printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
     console.log(textDim("no changes are written unless you type yes at the prompt."));
     printConfigValues(runtimeConfig);
@@ -408,7 +442,7 @@ function printConfigValues(config, style = createStyle(config)) {
     printKeyValue("auto close:", config.closeZeroForSeconds === null ? style.dim("off") : style.red(`${formatSeconds(config.closeZeroForSeconds)}`), 12);
 }
 function printCommands(style) {
-    console.log(style.dim("commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm help"));
+    console.log(style.dim("commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help"));
 }
 function printConfigDiff(configPath, currentText, nextText) {
     if (currentText === nextText) {
@@ -567,6 +601,43 @@ async function readClvmConfig() {
     }
     return parseClvmConfig(text, path);
 }
+async function readClvmTemplateConfig() {
+    const path = clvmTemplatePath();
+    const text = await readTextIfExists(path);
+    if (text === null) {
+        throw new Error(`default clvm config template not found: ${path}`);
+    }
+    return requireResolvedClvmConfig(parseClvmConfig(text, path), path);
+}
+async function loadActiveClvmConfig() {
+    const templateConfig = await readClvmTemplateConfig();
+    const localConfig = await readClvmConfig();
+    return mergeClvmConfig(templateConfig, localConfig);
+}
+export function mergeClvmConfig(base, overlay) {
+    return {
+        baseUrl: overlay.baseUrl ?? base.baseUrl,
+        secret: overlay.secret ?? base.secret,
+        domains: overlay.domains ?? base.domains,
+        interval: overlay.interval ?? base.interval,
+        zeroSpeedThreshold: overlay.zeroSpeedThreshold ?? base.zeroSpeedThreshold,
+        closeZeroForSeconds: overlay.closeZeroForSeconds !== undefined
+            ? overlay.closeZeroForSeconds
+            : base.closeZeroForSeconds,
+    };
+}
+function requireResolvedClvmConfig(config, path) {
+    return {
+        baseUrl: requireString(config.baseUrl, `${path} baseUrl`),
+        secret: requireString(config.secret, `${path} secret`),
+        domains: requireStringArray(config.domains, `${path} domains`),
+        interval: requireString(config.interval, `${path} interval`),
+        zeroSpeedThreshold: requireNumber(config.zeroSpeedThreshold, `${path} zeroSpeedThreshold`),
+        closeZeroForSeconds: config.closeZeroForSeconds === undefined
+            ? null
+            : requireNullableSeconds(config.closeZeroForSeconds, `${path} closeZeroForSeconds`),
+    };
+}
 export function parseClvmConfig(text, path = "clvm.json") {
     let parsed;
     try {
@@ -624,29 +695,47 @@ function requireString(value, name) {
     }
     return value;
 }
+function requireStringArray(value, name) {
+    if (!Array.isArray(value)) {
+        throw new Error(`${name} must be an array of strings`);
+    }
+    return value.map((entry, index) => requireString(entry, `${name}[${index}]`));
+}
+function requireNumber(value, name) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new Error(`${name} must be a number`);
+    }
+    return value;
+}
+function requireNullableSeconds(value, name) {
+    if (value === null) {
+        return null;
+    }
+    return parsePositiveSeconds(value, name);
+}
 function isPlainObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export function buildRuntimeConfig(fileConfig, options, mode) {
-    const baseUrl = options.baseUrl ?? fileConfig.baseUrl ?? defaultBaseUrl;
-    const secret = options.secret ?? fileConfig.secret ?? "";
+    const baseUrl = options.baseUrl ?? fileConfig.baseUrl;
+    const secret = options.secret ?? fileConfig.secret;
     const domains = options.domains !== undefined
         ? normalizeDomains(options.domains)
-        : normalizeDomains(fileConfig.domains ?? []);
-    const interval = options.interval ?? fileConfig.interval ?? defaultInterval;
+        : normalizeDomains(fileConfig.domains);
+    const interval = options.interval ?? fileConfig.interval;
     const intervalMs = parseDuration(interval, "interval");
-    const zeroSpeedThreshold = options.zeroSpeedThreshold ?? fileConfig.zeroSpeedThreshold ?? 0;
+    const zeroSpeedThreshold = options.zeroSpeedThreshold ?? fileConfig.zeroSpeedThreshold;
     const closeZeroForSeconds = options.closeZeroForSeconds !== undefined
         ? options.closeZeroForSeconds
-        : fileConfig.closeZeroForSeconds ?? null;
+        : fileConfig.closeZeroForSeconds;
     new URL(baseUrl);
     if (intervalMs <= 0) {
         throw new Error("interval must be greater than 0");
     }
-    if (!Number.isFinite(zeroSpeedThreshold) || zeroSpeedThreshold < 0) {
+    if (zeroSpeedThreshold < 0) {
         throw new Error("zero speed threshold must be a non-negative number");
     }
-    if (closeZeroForSeconds !== null && (!Number.isFinite(closeZeroForSeconds) || closeZeroForSeconds <= 0)) {
+    if (closeZeroForSeconds !== null && closeZeroForSeconds <= 0) {
         throw new Error("closeZeroForSeconds must be a positive number or null");
     }
     return {
