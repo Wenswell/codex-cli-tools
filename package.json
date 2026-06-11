@@ -32,7 +32,6 @@
     "@types/node": "^20.19.1",
     "typescript": "^5.8.3"
   },
-  "packageManager": "pnpm@10.22.0",
   "dependencies": {
     "asciichart": "^1.5.25",
     "diff": "^9.0.0",
