@@ -592,6 +592,7 @@ clvm help
 `clvm setup` merges the active config with the provided flags, prints the target file, active values, backup plan, and a masked JSON diff, then writes only after you type exact `yes`.
 
 `clvm sync` merges `config/clvm.json` into `~/.config/codex-tools/clvm.json`, keeps local overrides, prints the source file, target file, backup plan, and masked JSON diff, then writes only after you type exact `yes`.
+When the merged result already matches the local file, `clvm sync` prints `already synced` and exits without prompting.
 
 When applied, `clvm setup` and `clvm sync` back up the existing target file before writing:
 

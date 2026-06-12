@@ -80,6 +80,42 @@ test("sync merges template defaults with local overrides", () => {
   });
 });
 
+test("sync reports already synced when the merged config matches the local config", async () => {
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    const templateText = await readFile(join(process.cwd(), "config", "clvm.json"), "utf8");
+    await writeFile(join(home, ".config", "codex-tools", "clvm.json"), templateText);
+
+    const stdout = await new Promise((resolve, reject) => {
+      execFile("node", ["dist/bin/clvm.js", "sync"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }, (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+
+    assert.match(stdout, /Will modify:\s+\(none\)/);
+    assert.match(stdout, /target:\s+already synced .*clvm\.json/);
+    assert.doesNotMatch(stdout, /would update/);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("backs up existing clvm config before sync writes", async () => {
   const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
   const previousHome = process.env.HOME;
