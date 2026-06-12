@@ -397,7 +397,7 @@ async function runSync() {
     printSyncPlan(templatePath, configPath, currentText, nextText, existingText !== null, buildRuntimeConfig(nextConfig, {}, { autoCloseEnabled: false, clear: false, once: true }));
     if (currentText === nextText) {
         console.log("");
-        console.log(textDim("no config changes."));
+        console.log(textDim("already synced"));
         return;
     }
     if (!(await confirmApply())) {
@@ -430,7 +430,8 @@ function printSetupPlan(configPath, currentText, nextText, currentExists, runtim
 function printSyncPlan(sourcePath, configPath, currentText, nextText, currentExists, runtimeConfig) {
     printWritePlanSummary("clvm sync", configPath, currentText, nextText, currentExists);
     printKeyValue("source:", textBlue(sourcePath), 12);
-    printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
+    const targetLabel = currentText === nextText ? textDim("already synced") : textBlue("would update");
+    printKeyValue("target:", `${targetLabel} ${textBlue(configPath)}`, 12);
     printConfigValues(runtimeConfig);
     printConfigDiff(configPath, currentText, nextText);
 }

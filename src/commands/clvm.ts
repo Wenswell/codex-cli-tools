@@ -628,7 +628,7 @@ async function runSync(): Promise<void> {
 
   if (currentText === nextText) {
     console.log("");
-    console.log(textDim("no config changes."));
+    console.log(textDim("already synced"));
     return;
   }
 
@@ -679,7 +679,8 @@ function printSyncPlan(
 ): void {
   printWritePlanSummary("clvm sync", configPath, currentText, nextText, currentExists);
   printKeyValue("source:", textBlue(sourcePath), 12);
-  printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
+  const targetLabel = currentText === nextText ? textDim("already synced") : textBlue("would update");
+  printKeyValue("target:", `${targetLabel} ${textBlue(configPath)}`, 12);
   printConfigValues(runtimeConfig);
   printConfigDiff(configPath, currentText, nextText);
 }
