@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile, chmod, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export async function ensureDir(path: string): Promise<void> {
@@ -21,5 +22,20 @@ export async function writeTextFile(path: string, content: string, mode?: number
   await writeFile(path, content, "utf8");
   if (mode !== undefined) {
     await chmod(path, mode);
+  }
+}
+
+export async function writeTextFileAtomic(path: string, content: string, mode?: number): Promise<void> {
+  await ensureDir(dirname(path));
+  const tempPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, content, "utf8");
+    if (mode !== undefined) {
+      await chmod(tempPath, mode);
+    }
+    await rename(tempPath, path);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
   }
 }

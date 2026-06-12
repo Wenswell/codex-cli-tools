@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
@@ -12,7 +12,7 @@ import { createTwoFilesPatch } from "diff";
 import { DateTime } from "luxon";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { aggregateDaily, aggregateDayProjects, aggregateDayTimeBuckets, aggregateMonthly, aggregateProjectDaily, aggregateProjects, aggregateWeekly, dateRangeForDay, filterCodexUsageEvents, formatProjectPath, loadCodexUsageEvents, resolveProjectPath, sortRowsByCost, systemTimezone, totalAggregate, } from "../lib/codex-usage.js";
-import { ensureDir, readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, modelPricesCachePath, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
@@ -57,12 +57,12 @@ const usageTopHistoryChartNamedProviderLimit = 2;
 const usageTopHistoryOtherName = "other";
 const weztermStatusUpdateIntervalMs = 250;
 const weztermStatusStaleAfterSeconds = 2;
-const usageTopHttpTimeoutMs = 1_500;
-const usageTopHistoryHttpTimeoutMs = 3_000;
+const usageHttpTimeoutMs = 5_000;
+const usageTopHttpTimeoutMs = 5_000;
+const usageTopHistoryHttpTimeoutMs = 5_000;
 const ccsCostReportHttpTimeoutMs = 30_000;
 const ccsCostRefreshHttpTimeoutMs = 5_000;
 const ccsCostRefreshDebounceMs = 5 * 60 * 1000;
-let usageTopStatusWriteSequence = 0;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
 const configSyncPort = "32753";
@@ -1071,7 +1071,7 @@ async function fetchUsage(profile) {
         return null;
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
+    const timeout = setTimeout(() => controller.abort(), usageHttpTimeoutMs);
     try {
         const response = await fetch(url, {
             method: "GET",
@@ -1718,10 +1718,7 @@ function buildUsageTopSnapshot(entries, states, now, active, paused = false) {
     };
 }
 async function writeUsageTopSnapshot(snapshot) {
-    const path = usageTopSnapshotPath();
-    const tmpPath = `${path}.${process.pid}.tmp`;
-    await writeTextFile(tmpPath, stringifyJson(snapshot));
-    await rename(tmpPath, path);
+    await writeTextFileAtomic(usageTopSnapshotPath(), stringifyJson(snapshot));
 }
 function parseUsageTopSnapshot(text) {
     if (!text) {
@@ -1771,7 +1768,7 @@ async function readUsageTopHistoryRecords(now = new Date()) {
     return filterUsageTopHistoryRecords(parseUsageTopHistoryRecords(await readTextIfExists(usageTopHistoryPath())), now);
 }
 async function writeUsageTopHistoryRecords(records) {
-    await writeTextFile(usageTopHistoryPath(), records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : ""));
+    await writeTextFileAtomic(usageTopHistoryPath(), records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : ""));
 }
 async function recordUsageTopHistorySnapshot(snapshot) {
     if (!snapshot.active) {
@@ -2848,17 +2845,7 @@ async function printUsageTopHistory(profiles, profileName) {
     printUsageTopHistoryBuckets(buckets, names);
 }
 async function writeUsageTopStatusText(value) {
-    const path = usageTopStatusTextPath();
-    usageTopStatusWriteSequence += 1;
-    const tmpPath = `${path}.${process.pid}.${usageTopStatusWriteSequence}.tmp`;
-    try {
-        await writeTextFile(tmpPath, value);
-        await rename(tmpPath, path);
-    }
-    catch (error) {
-        await rm(tmpPath, { force: true }).catch(() => undefined);
-        throw error;
-    }
+    await writeTextFileAtomic(usageTopStatusTextPath(), value);
 }
 function formatUsageTopStatusFileText(now, suffix) {
     return `${Math.floor(now.getTime() / 1000)}\t${suffix}\n`;
@@ -2995,6 +2982,7 @@ async function serveUsageTop(profiles, portValue) {
     let timer = null;
     let ccsCostRefreshTimer = null;
     let cleanedUp = false;
+    let serverTaskQueue = Promise.resolve();
     const clearTimer = () => {
         if (timer) {
             clearTimeout(timer);
@@ -3029,11 +3017,11 @@ async function serveUsageTop(profiles, portValue) {
         }
         timer = setTimeout(() => {
             timer = null;
-            void (async () => {
+            queueServerTask("ccs top scheduled refresh", async () => {
                 await refreshDueUsageTopRuntime(runtime, new Date(), false, "server");
                 await publish();
                 schedule();
-            })();
+            });
         }, delay);
     };
     const runCcsCostRefresh = async () => {
@@ -3052,6 +3040,16 @@ async function serveUsageTop(profiles, portValue) {
             void runCcsCostRefresh();
         }, ccsCostRefreshDebounceMs);
         return scheduledAt;
+    };
+    const queueServerTask = (name, task) => {
+        serverTaskQueue = serverTaskQueue.then(async () => {
+            try {
+                await task();
+            }
+            catch (error) {
+                console.error(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        });
     };
     let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
     await writeUsageTopSnapshot(snapshot);
@@ -3133,27 +3131,27 @@ async function serveUsageTop(profiles, portValue) {
             return;
         }
         if (request.method === "POST" && url.pathname === "/ccs/top/pause") {
-            void (async () => {
-                paused = true;
-                clearTimer();
+            paused = true;
+            clearTimer();
+            sendUsageTopJson(response, 200, { ok: true, paused });
+            queueServerTask("ccs top pause", async () => {
                 await publish();
-                sendUsageTopJson(response, 200, { ok: true, paused });
-            })();
+            });
             return;
         }
         if (request.method === "POST" && url.pathname === "/ccs/top/resume") {
-            void (async () => {
-                paused = false;
+            paused = false;
+            sendUsageTopJson(response, 200, { ok: true, paused });
+            queueServerTask("ccs top resume", async () => {
                 await resetPolling();
-                sendUsageTopJson(response, 200, { ok: true, paused });
-            })();
+            });
             return;
         }
         if (request.method === "POST" && url.pathname === "/ccs/top/reset") {
-            void (async () => {
+            sendUsageTopJson(response, 200, { ok: true, paused });
+            queueServerTask("ccs top reset", async () => {
                 await resetPolling();
-                sendUsageTopJson(response, 200, { ok: true, paused });
-            })();
+            });
             return;
         }
         if (request.method !== "GET" && request.method !== "POST") {
@@ -3179,6 +3177,7 @@ async function serveUsageTop(profiles, portValue) {
             cleanedUp = true;
             clearTimer();
             clearCcsCostRefreshTimer();
+            await serverTaskQueue;
             await publish(false);
             server.close(() => resolve());
         };
@@ -4151,7 +4150,7 @@ async function buildCcsCostStatus() {
 }
 async function refreshCentralCcsCostDerivedStore() {
     const derived = await buildCcsCostDerivedStore();
-    await writeTextFile(ccsCostDerivedPath(), stringifyJson(derived), 0o600);
+    await writeTextFileAtomic(ccsCostDerivedPath(), stringifyJson(derived), 0o600);
     ccsCostDerivedCache = derived;
     ccsCostReportCache = new Map();
     const options = ["daily", "weekly", "monthly", "projects"]
