@@ -295,6 +295,8 @@ Usage events:
 
 ```text
 ~/.codex/sessions/**/*.jsonl
+  event_msg payload.type=task_started
+  event_msg payload.type=thread_rolled_back
   event_msg payload.type=token_count
 ```
 
@@ -374,8 +376,14 @@ Relevant event types:
 
 ```text
 turn_context
+event_msg payload.type=task_started
+event_msg payload.type=thread_rolled_back
 event_msg payload.type=token_count
 ```
+
+Codex fork files can include copied parent transcript history before the current rollout's own turns. The parser uses `threads.created_at_ms` plus `task_started.turn_id` UUIDv7 time, falling back to `task_started.started_at`, to find the current rollout task boundary. Token events before that boundary are inherited history and are excluded. Token events at or after that boundary are counted, including subagent fork sessions.
+
+`thread_rolled_back` resets adjacent duplicate suppression for later token events. It is a structure event inside the counted rollout; the current rollout boundary remains the source of inherited-history deduplication.
 
 Model resolution:
 
@@ -607,6 +615,7 @@ package.json
 pnpm-lock.yaml
 src/commands/ccs.ts
 src/lib/paths.ts
+test/codex-usage.test.js
 README.md
 dist/bin/ccs.js
 dist/commands/ccs.js
