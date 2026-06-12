@@ -351,9 +351,12 @@ Server endpoints are part of `ccs s server`:
 GET /ccs/cost/status
 GET /ccs/cost/report
 POST /ccs/cost/refresh
+POST /ccs/top/pause
+POST /ccs/top/resume
+POST /ccs/top/reset
 ```
 
-`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version.
+`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`; `pause` and `resume` use the same queued control path. Control and status HTTP clients use at least a five-second timeout.
 
 Central CLI:
 
