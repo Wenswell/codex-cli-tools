@@ -46,6 +46,7 @@ type RolloutIndex = {
   path: string;
   cwd: string;
   threadIds: string[];
+  createdAtMs: number;
   threadModel?: string;
 };
 
@@ -66,6 +67,8 @@ type TokenCountPayload = {
   model?: unknown;
   model_name?: unknown;
   metadata?: unknown;
+  started_at?: unknown;
+  turn_id?: unknown;
 };
 
 type TokenInfo = {
@@ -85,6 +88,7 @@ const usageFields = [
 ] as const;
 
 const sqliteStatePattern = /^state.*\.sqlite$/;
+const taskStartBoundaryToleranceMs = 1000;
 
 export function systemTimezone(): string {
   return DateTime.local().zoneName || "UTC";
@@ -302,12 +306,14 @@ function collectRollouts(threads: CodexThreadRow[]): RolloutIndex[] {
         path,
         cwd: thread.cwd,
         threadIds: [thread.id],
+        createdAtMs: thread.created_at_ms ?? 0,
         threadModel: thread.model ?? undefined,
       });
       continue;
     }
 
     existing.threadIds.push(thread.id);
+    existing.createdAtMs = Math.min(existing.createdAtMs, thread.created_at_ms ?? existing.createdAtMs);
     if (existing.cwd !== thread.cwd) {
       throw new Error(`rollout has multiple cwd values: ${path} (${existing.threadIds.join(", ")})`);
     }
@@ -326,15 +332,23 @@ async function readRolloutUsageEvents(rollout: RolloutIndex, range: TimeRangeMs)
   let currentModel = rollout.threadModel;
   let previousTotalUsage: CodexTokenUsage | null = null;
   let previousSignature = "";
+  let countCurrentTask = false;
+  let reachedCurrentTask = false;
 
   for await (const line of lines) {
     lineNumber += 1;
-    if (!line.includes("turn_context") && !line.includes("token_count")) {
+    if (!line.includes("turn_context")
+      && !line.includes("task_started")
+      && !line.includes("thread_rolled_back")
+      && !line.includes("token_count")) {
       continue;
     }
 
     const parsed = parseJsonLine(line, rollout.path, lineNumber);
     if (parsed.type === "turn_context") {
+      if (!countCurrentTask) {
+        continue;
+      }
       const model = modelFromValue(parsed.payload);
       if (model) {
         currentModel = model;
@@ -346,7 +360,27 @@ async function readRolloutUsageEvents(rollout: RolloutIndex, range: TimeRangeMs)
     }
 
     const payload = asObject<TokenCountPayload>(parsed.payload);
-    if (!payload || payload.type !== "token_count") {
+    if (!payload) {
+      continue;
+    }
+
+    if (payload.type === "task_started") {
+      countCurrentTask = isCurrentRolloutTask(payload, rollout, rollout.path, lineNumber);
+      if (countCurrentTask && !reachedCurrentTask) {
+        reachedCurrentTask = true;
+        previousTotalUsage = null;
+        previousSignature = "";
+        currentModel = rollout.threadModel;
+      }
+      continue;
+    }
+
+    if (payload.type === "thread_rolled_back") {
+      previousSignature = "";
+      continue;
+    }
+
+    if (payload.type !== "token_count" || !countCurrentTask) {
       continue;
     }
 
@@ -395,6 +429,47 @@ async function readRolloutUsageEvents(rollout: RolloutIndex, range: TimeRangeMs)
   }
 
   return events;
+}
+
+function isCurrentRolloutTask(payload: TokenCountPayload, rollout: RolloutIndex, path: string, lineNumber: number): boolean {
+  const startedAtMs = readTaskStartedAtMs(payload, path, lineNumber);
+  if (startedAtMs === null) {
+    return true;
+  }
+  return startedAtMs >= rollout.createdAtMs - taskStartBoundaryToleranceMs;
+}
+
+function readTaskStartedAtMs(payload: TokenCountPayload, path: string, lineNumber: number): number | null {
+  const turnIdTimestampMs = uuidV7TimestampMs(readString(payload.turn_id));
+  if (turnIdTimestampMs !== null) {
+    return turnIdTimestampMs;
+  }
+  if (payload.started_at !== undefined) {
+    const startedAtMs = readUnixSecondsMs(payload.started_at, path, lineNumber);
+    if (startedAtMs !== null) {
+      return startedAtMs;
+    }
+  }
+  return null;
+}
+
+function readUnixSecondsMs(value: unknown, path: string, lineNumber: number): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path}:${lineNumber}: invalid task_started started_at`);
+  }
+  return Math.floor(value * 1000);
+}
+
+function uuidV7TimestampMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const hex = value.replaceAll("-", "").slice(0, 12);
+  if (!/^[0-9a-fA-F]{12}$/.test(hex)) {
+    return null;
+  }
+  const timestampMs = Number.parseInt(hex, 16);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
 }
 
 function parseJsonLine(line: string, path: string, lineNumber: number): ParsedLine {

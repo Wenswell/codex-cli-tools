@@ -207,7 +207,7 @@ ccs remove | rm | delete PROFILE
 
 `ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
 
-`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for `token_count` usage events. Terminal tables show `input`, `output`, `cost`, `share`, and `bar` columns.
+`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for current-thread `token_count` usage events. Forked rollout files can contain copied parent history; `ccs cost` starts counting at the rollout thread's own `task_started` boundary and keeps subagent fork usage when it belongs to the current rollout. Terminal tables show `input`, `output`, `cost`, `share`, and `bar` columns.
 
 ```bash
 ccs cost daily --since 2026-05-01 --until 2026-05-30
