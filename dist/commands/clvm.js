@@ -1,10 +1,10 @@
 import { createTwoFilesPatch } from "diff";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
-import { clvmConfigPath } from "../lib/paths.js";
+import { clvmConfigPath, codexToolsConfigDir } from "../lib/paths.js";
 import { maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, } from "../lib/text.js";
 const domainFields = [
     "host",
@@ -344,26 +344,27 @@ function printHelp() {
 function printSetupHelp() {
     console.log([
         "Usage:",
-        "  clvm setup --domain DOMAIN                # preview, confirm, and write clvm.json",
-        "  clvm setup --base-url URL --secret SECRET # preview, confirm, and update API config",
-        "  clvm setup --interval 1s                  # preview, confirm, and update monitor interval",
-        "  clvm setup --close-zero-for-seconds off   # preview, confirm, and disable automatic close",
+        "  clvm setup --domain DOMAIN                # preview, confirm, back up, and write clvm.json",
+        "  clvm setup --base-url URL --secret SECRET # preview, confirm, back up, and update API config",
+        "  clvm setup --interval 1s                  # preview, confirm, back up, and update monitor interval",
+        "  clvm setup --close-zero-for-seconds off   # preview, confirm, back up, and disable automatic close",
     ].join("\n"));
 }
 function printSyncHelp() {
     console.log([
         "Usage:",
-        "  clvm sync                                 # preview, confirm, and sync config/clvm.json to ~/.config/codex-tools/clvm.json",
+        "  clvm sync                                 # preview, confirm, back up, and sync config/clvm.json to ~/.config/codex-tools/clvm.json",
         "  clvm sync help                            # show this help",
     ].join("\n"));
 }
 async function runSetup(options) {
     const configPath = clvmConfigPath();
-    const currentText = (await readTextIfExists(configPath)) ?? "";
+    const existingText = await readTextIfExists(configPath);
+    const currentText = existingText ?? "";
     const currentConfig = await loadActiveClvmConfig();
     const nextConfig = buildSetupConfig(currentConfig, options);
     const nextText = renderConfigJson(nextConfig);
-    printSetupPlan(configPath, currentText, nextText, buildRuntimeConfig(nextConfig, {}, {
+    printSetupPlan(configPath, currentText, nextText, existingText !== null, buildRuntimeConfig(nextConfig, {}, {
         autoCloseEnabled: false,
         clear: false,
         once: true,
@@ -376,19 +377,24 @@ async function runSetup(options) {
     if (!(await confirmApply())) {
         return;
     }
+    const backupDir = await backupClvmConfig(configPath);
     await writeTextFile(configPath, nextText, 0o600);
     console.log("");
+    if (backupDir) {
+        printKeyValue("backup:", textBlue(backupDir), 12);
+    }
     printKeyValue("target:", `${textGreen("updated")} ${textBlue(configPath)}`, 12);
 }
 async function runSync() {
     const configPath = clvmConfigPath();
     const templatePath = clvmTemplatePath();
-    const currentText = (await readTextIfExists(configPath)) ?? "";
+    const existingText = await readTextIfExists(configPath);
+    const currentText = existingText ?? "";
     const templateConfig = await readClvmTemplateConfig();
     const localConfig = await readClvmConfig();
     const nextConfig = mergeClvmConfig(templateConfig, localConfig);
     const nextText = renderConfigJson(nextConfig);
-    printSyncPlan(templatePath, configPath, currentText, nextText, buildRuntimeConfig(nextConfig, {}, { autoCloseEnabled: false, clear: false, once: true }));
+    printSyncPlan(templatePath, configPath, currentText, nextText, existingText !== null, buildRuntimeConfig(nextConfig, {}, { autoCloseEnabled: false, clear: false, once: true }));
     if (currentText === nextText) {
         console.log("");
         console.log(textDim("no config changes."));
@@ -397,8 +403,12 @@ async function runSync() {
     if (!(await confirmApply())) {
         return;
     }
+    const backupDir = await backupClvmConfig(configPath);
     await writeTextFile(configPath, nextText, 0o600);
     console.log("");
+    if (backupDir) {
+        printKeyValue("backup:", textBlue(backupDir), 12);
+    }
     printKeyValue("target:", `${textGreen("synced")} ${textBlue(configPath)}`, 12);
 }
 function buildSetupConfig(current, options) {
@@ -411,18 +421,51 @@ function buildSetupConfig(current, options) {
         closeZeroForSeconds: options.closeZeroForSeconds,
     });
 }
-function printSetupPlan(configPath, currentText, nextText, runtimeConfig) {
+function printSetupPlan(configPath, currentText, nextText, currentExists, runtimeConfig) {
+    printWritePlanSummary("clvm setup", configPath, currentText, nextText, currentExists);
     printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
-    console.log(textDim("no changes are written unless you type yes at the prompt."));
     printConfigValues(runtimeConfig);
     printConfigDiff(configPath, currentText, nextText);
 }
-function printSyncPlan(sourcePath, configPath, currentText, nextText, runtimeConfig) {
+function printSyncPlan(sourcePath, configPath, currentText, nextText, currentExists, runtimeConfig) {
+    printWritePlanSummary("clvm sync", configPath, currentText, nextText, currentExists);
     printKeyValue("source:", textBlue(sourcePath), 12);
     printKeyValue("target:", `${textBlue("would update")} ${textBlue(configPath)}`, 12);
-    console.log(textDim("no changes are written unless you type yes at the prompt."));
     printConfigValues(runtimeConfig);
     printConfigDiff(configPath, currentText, nextText);
+}
+function printWritePlanSummary(title, configPath, currentText, nextText, currentExists) {
+    const changed = currentText !== nextText;
+    const label = basename(configPath);
+    console.log(textBold(`Plan: ${title}`));
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
+    console.log(`Will modify: ${textBlue(changed ? label : "(none)")}`);
+    console.log(`Will back up: ${textBlue(changed && currentExists ? label : "(none)")}`);
+    console.log(`Warnings: ${textDim("0")}`);
+}
+export async function backupClvmConfig(configPath) {
+    const currentText = await readTextIfExists(configPath);
+    if (currentText === null) {
+        return null;
+    }
+    const backupDir = join(codexToolsConfigDir(), "backups", `clvm-${formatTimestamp(new Date())}`);
+    await writeTextFile(join(backupDir, basename(configPath)), currentText, 0o600);
+    return backupDir;
+}
+function formatTimestamp(date) {
+    const pad = (value) => value.toString().padStart(2, "0");
+    const milliseconds = date.getMilliseconds().toString().padStart(3, "0");
+    return [
+        date.getFullYear().toString(),
+        pad(date.getMonth() + 1),
+        pad(date.getDate()),
+        "-",
+        pad(date.getHours()),
+        pad(date.getMinutes()),
+        pad(date.getSeconds()),
+        "-",
+        milliseconds,
+    ].join("");
 }
 function printConfigStatus(runtimeConfig, { includeCommands }) {
     const style = createStyle(runtimeConfig);

@@ -589,9 +589,15 @@ clvm help
 
 `clvm config` prints the active config without calling the mihomo API.
 
-`clvm setup` merges the active config with the provided flags, prints the target file, active values, and a masked JSON diff, then writes only after you type exact `yes`.
+`clvm setup` merges the active config with the provided flags, prints the target file, active values, backup plan, and a masked JSON diff, then writes only after you type exact `yes`.
 
-`clvm sync` merges `config/clvm.json` into `~/.config/codex-tools/clvm.json`, keeps local overrides, prints the source and target files, and writes only after you type exact `yes`.
+`clvm sync` merges `config/clvm.json` into `~/.config/codex-tools/clvm.json`, keeps local overrides, prints the source file, target file, backup plan, and masked JSON diff, then writes only after you type exact `yes`.
+
+When applied, `clvm setup` and `clvm sync` back up the existing target file before writing:
+
+```text
+~/.config/codex-tools/backups/clvm-YYYYMMDD-HHMMSS-SSS/clvm.json
+```
 
 Config shape:
 
