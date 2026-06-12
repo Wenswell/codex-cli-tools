@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import {
   ConnectionSampler,
   buildRuntimeConfig,
   closeExpiredConnections,
+  backupClvmConfig,
   domainMatches,
   mergeClvmConfig,
   nextAlignedDelay,
@@ -77,6 +78,30 @@ test("sync merges template defaults with local overrides", () => {
     zeroSpeedThreshold: 0,
     closeZeroForSeconds: null,
   });
+});
+
+test("backs up existing clvm config before sync writes", async () => {
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    const configPath = join(home, ".config", "codex-tools", "clvm.json");
+    await writeFile(configPath, `${JSON.stringify({ baseUrl: "http://127.0.0.1:9090" }, null, 2)}\n`);
+
+    const backupDir = await backupClvmConfig(configPath);
+
+    assert.ok(backupDir);
+    const backupText = await readFile(join(backupDir, "clvm.json"), "utf8");
+    assert.equal(backupText, `${JSON.stringify({ baseUrl: "http://127.0.0.1:9090" }, null, 2)}\n`);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("samples matched idle connections and closes expired entries in monitor mode", async () => {
