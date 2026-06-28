@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
-import { ensureProxyRunning, installProxy, readProxyState, restoreProxy } from "../dist/commands/ccs-proxy.js";
+import { ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, stopProxy } from "../dist/commands/ccs-proxy.js";
 
 async function reservePort() {
   const server = createServer();
@@ -113,6 +113,16 @@ test("proxy state persists request metrics", async () => {
           backup_path: "/tmp/backup.toml",
           metrics: {
             total_requests: 2,
+            active_requests: [
+              {
+                id: "active-1",
+                started_at: "2026-01-01T00:00:03.000Z",
+                method: "POST",
+                path: "/v1/chat/completions",
+                request_bytes: 12,
+                session: "019f0eca",
+              },
+            ],
             successful_requests: 1,
             failed_requests: 1,
             upstream_hit_counts: {
@@ -135,6 +145,9 @@ test("proxy state persists request metrics", async () => {
                 upstream: "input",
                 attempts: 1,
                 latency_ms: 120,
+                request_bytes: 43,
+                response_bytes: 51,
+                session: "019eb0b9",
                 error: null,
               },
               {
@@ -145,6 +158,9 @@ test("proxy state persists request metrics", async () => {
                 upstream: "ciii",
                 attempts: 2,
                 latency_ms: 180,
+                request_bytes: 44,
+                response_bytes: 52,
+                session: "019eb0ba",
                 error: "fallback",
               },
             ],
@@ -159,10 +175,253 @@ test("proxy state persists request metrics", async () => {
     const state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.total_requests, 2);
-    assert.equal(state.metrics.failed_requests, 1);
+    assert.deepEqual(state.metrics.status_counts, { "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1 });
+    assert.equal(state.metrics.active_requests.length, 1);
+    assert.equal(state.metrics.active_requests[0].session, "019f0eca");
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
     assert.equal(state.metrics.recent_requests[0].upstream, "input");
+    assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
+    assert.equal(state.metrics.recent_requests[0].response_bytes, 51);
+    assert.equal(state.metrics.latency_ms.last, 120);
+
   } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy records active and history request lifecycle", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let streamStartedResolve;
+  const streamStarted = new Promise((resolve) => {
+    streamStartedResolve = resolve;
+  });
+  let finishStream;
+  const streamRelease = new Promise((resolve) => {
+    finishStream = resolve;
+  });
+  let abortStreamStartedResolve;
+  const abortStreamStarted = new Promise((resolve) => {
+    abortStreamStartedResolve = resolve;
+  });
+  let finishAbortStream;
+  const abortStreamRelease = new Promise((resolve) => {
+    finishAbortStream = resolve;
+  });
+  const upstream = createServer((req, res) => {
+    if (req.url?.startsWith("/slow")) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, path: req.url }));
+      }, 60);
+      return;
+    }
+    if (req.url === "/stream") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: one\n\n");
+      streamStartedResolve();
+      void streamRelease.then(() => {
+        res.end("data: two\n\n");
+      });
+      return;
+    }
+    if (req.url === "/abort-stream") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: one\n\n");
+      abortStreamStartedResolve();
+      void abortStreamRelease.then(() => {
+        res.end("data: two\n\n");
+      });
+      return;
+    }
+    if (req.url === "/client-error") {
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "missing" }));
+      return;
+    }
+    if (req.url === "/server-error") {
+      res.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "down" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(
+      join(stateRoot, "profiles.json"),
+      JSON.stringify(
+        {
+          profiles: {
+            input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" },
+          },
+          current: "input",
+          toggle: ["input"],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    await writeFile(
+      join(stateRoot, "proxy.json"),
+      JSON.stringify(
+        {
+          installed_at: "2026-01-01T00:00:00.000Z",
+          codex_config_path: join(home, ".codex", "config.toml"),
+          provider_name: "codex",
+          original_base_url: "https://proxy.example.com",
+          proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+          listen_host: "127.0.0.1",
+          listen_port: proxyPort,
+          profile_order: ["input"],
+          backup_path: "/tmp/backup.toml",
+          metrics: {
+            total_requests: 0,
+            active_requests: [],
+            status_counts: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0 },
+            upstream_hit_counts: {},
+            latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
+            recent_requests: [],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    await new Promise((resolve, reject) => {
+      upstream.once("error", reject);
+      upstream.listen(upstreamPort, "127.0.0.1", resolve);
+    });
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const sessionId = "019eb0b9-af9f-79b3-9c25-a2f1d1aa0565";
+    const requestPayload = JSON.stringify({ session_id: sessionId, input: "hello" });
+    const okResponse = await fetch(`http://127.0.0.1:${proxyPort}/ok`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestPayload,
+    });
+    assert.equal(okResponse.status, 200);
+    assert.deepEqual(await okResponse.json(), { ok: true });
+
+    let state = await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.path === "/ok");
+    assert.equal(state.metrics.active_requests.length, 0);
+    assert.equal(state.metrics.recent_requests[0].status, 200);
+    assert.equal(state.metrics.recent_requests[0].request_bytes, Buffer.byteLength(requestPayload));
+    assert.equal(state.metrics.recent_requests[0].response_bytes, Buffer.byteLength(JSON.stringify({ ok: true })));
+    assert.equal(state.metrics.recent_requests[0].session, "019eb0b9");
+
+    await Promise.all(
+      Array.from({ length: 6 }, (_, index) => fetch(`http://127.0.0.1:${proxyPort}/slow?i=${index}`, { method: "POST", body: "{}" })
+        .then(async (response) => {
+          assert.equal(response.status, 200);
+          await response.text();
+        })),
+    );
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.total_requests === 7);
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.total_requests, 7);
+    assert.equal(state.metrics.status_counts["2xx"], 7);
+    assert.equal(state.metrics.recent_requests.filter((record) => record.path === "/slow").length, 6);
+
+    const streamFetch = fetch(`http://127.0.0.1:${proxyPort}/stream`, { method: "POST", body: "{}" });
+    await streamStarted;
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 1);
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.active_requests[0].path, "/stream");
+    assert.equal(state.metrics.recent_requests[0].path, "/slow");
+
+    finishStream();
+    const streamResponse = await streamFetch;
+    assert.equal(await streamResponse.text(), "data: one\n\ndata: two\n\n");
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0].path === "/stream");
+
+    const abortController = new AbortController();
+    const abortResponse = await fetch(`http://127.0.0.1:${proxyPort}/abort-stream`, {
+      method: "POST",
+      body: "{}",
+      signal: abortController.signal,
+    });
+    assert.equal(abortResponse.status, 200);
+    await abortStreamStarted;
+    const abortReader = abortResponse.body.getReader();
+    const abortChunk = await abortReader.read();
+    assert.equal(Buffer.from(abortChunk.value).toString("utf8"), "data: one\n\n");
+    abortController.abort();
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0].path === "/abort-stream");
+    finishAbortStream();
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.recent_requests[0].status, 499);
+    assert.equal(state.metrics.recent_requests[0].error, "client closed response before upstream stream completed");
+
+    const clientError = await fetch(`http://127.0.0.1:${proxyPort}/client-error`, { method: "POST", body: "{}" });
+    assert.equal(clientError.status, 404);
+    await clientError.text();
+    const serverError = await fetch(`http://127.0.0.1:${proxyPort}/server-error`, { method: "POST", body: "{}" });
+    assert.equal(serverError.status, 502);
+    await serverError.text();
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.total_requests === 11);
+
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.active_requests.length, 0);
+    assert.deepEqual(state.metrics.status_counts, { "2xx": 8, "3xx": 0, "4xx": 2, "5xx": 1 });
+    assert.equal(state.metrics.total_requests, 11);
+    assert.equal(state.metrics.upstream_hit_counts.input, 10);
+    assert.equal(state.metrics.recent_requests[0].status, 502);
+    assert.equal(state.metrics.recent_requests[1].status, 404);
+    assert.equal(state.metrics.recent_requests[2].status, 499);
+
+    const output = await captureConsole(() => runProxyCommand(["--once"], { ...proxyOptions, once: true }));
+    assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
+    assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
+    assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+method\s+path\n\s+no active requests/);
+    assert.match(output, /history\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+method\s+path/);
+    assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
+    assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
+  } finally {
+    finishStream?.();
+    finishAbortStream?.();
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
     if (previousHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -288,3 +547,55 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     await rm(home, { recursive: true, force: true });
   }
 });
+
+async function waitForFetchOk(url) {
+  const deadline = Date.now() + 5000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(500) });
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw lastError;
+}
+
+async function waitForState(stateRoot, predicate) {
+  const deadline = Date.now() + 5000;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readProxyState(stateRoot);
+    if (lastState && predicate(lastState)) {
+      return lastState;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`proxy state did not match predicate: ${JSON.stringify(lastState?.metrics ?? null)}`);
+}
+
+async function captureConsole(run) {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (...args) => {
+    lines.push(args.join(" "));
+  };
+  try {
+    await run();
+  } finally {
+    console.log = originalLog;
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+async function closeServer(server) {
+  if (!server.listening) {
+    return;
+  }
+  await new Promise((resolve) => server.close(resolve));
+}
