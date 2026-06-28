@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
@@ -5,6 +6,7 @@ import { createServer } from "node:http";
 import { setInterval } from "node:timers";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
@@ -31,6 +33,9 @@ const PROXY_RECENT_STATUS_WIDTH = 3;
 const PROXY_RECENT_UPSTREAM_WIDTH = 12;
 const PROXY_RECENT_LATENCY_WIDTH = 6;
 const PROXY_RECENT_ATTEMPTS_WIDTH = 3;
+const PROXY_START_TIMEOUT_MS = 5000;
+const PROXY_HEALTH_TIMEOUT_MS = 500;
+const PROXY_HEALTH_POLL_MS = 100;
 const REASONING_POINTERS = [
     "/usage/output_tokens_details/reasoning_tokens",
     "/usage/completion_tokens_details/reasoning_tokens",
@@ -39,6 +44,9 @@ const REASONING_POINTERS = [
 ];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
+}
+function pidPath(stateRoot) {
+    return path.join(stateRoot, "proxy.pid");
 }
 function proxyBaseUrl(listenHost, listenPort) {
     return `http://${listenHost}:${listenPort}`;
@@ -57,6 +65,206 @@ async function writeProxyState(stateRoot, state) {
 }
 async function removeProxyState(stateRoot) {
     await rm(statePath(stateRoot), { force: true });
+}
+function proxyLogPath(stateRoot) {
+    return path.join(stateRoot, "proxy.log");
+}
+function proxyStartLockPath(stateRoot) {
+    return path.join(stateRoot, "proxy.start.lock");
+}
+function ccsBinPath() {
+    return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../bin/ccs.js");
+}
+function healthUrl(state) {
+    return new URL(HEALTH_PATH, state.proxy_base_url).toString();
+}
+async function sleep(ms) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
+    try {
+        const response = await fetch(healthUrl(state), {
+            headers: { accept: "application/json" },
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok) {
+            return { healthy: false, pid: null };
+        }
+        const payload = await response.json().catch(() => null);
+        return {
+            healthy: payload?.status === "ok",
+            pid: payload && Number.isInteger(payload.pid) ? Number(payload.pid) : null,
+        };
+    }
+    catch {
+        return { healthy: false, pid: null };
+    }
+}
+async function isProxyHealthy(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
+    return (await readProxyHealth(state, timeoutMs)).healthy;
+}
+async function waitForProxyHealth(state, stateRoot) {
+    const deadline = Date.now() + PROXY_START_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        if (await isProxyHealthy(state)) {
+            return;
+        }
+        await sleep(PROXY_HEALTH_POLL_MS);
+    }
+    throw new Error(`proxy did not become healthy: ${healthUrl(state)}; log: ${proxyLogPath(stateRoot)}`);
+}
+async function waitForProxyStop(state) {
+    const deadline = Date.now() + PROXY_START_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        if (!(await isProxyHealthy(state))) {
+            return;
+        }
+        await sleep(PROXY_HEALTH_POLL_MS);
+    }
+    throw new Error(`proxy did not stop: ${healthUrl(state)}`);
+}
+async function acquireProxyStartLock(stateRoot) {
+    await mkdir(stateRoot, { recursive: true });
+    const lockPath = proxyStartLockPath(stateRoot);
+    const deadline = Date.now() + PROXY_START_TIMEOUT_MS;
+    while (true) {
+        try {
+            return fs.openSync(lockPath, "wx", 0o600);
+        }
+        catch (error) {
+            if (error.code !== "EEXIST") {
+                throw error;
+            }
+            const state = await readProxyState(stateRoot);
+            if (state && await isProxyHealthy(state)) {
+                return null;
+            }
+            if (Date.now() >= deadline) {
+                throw new Error(`proxy startup lock is still active: ${lockPath}`);
+            }
+            await sleep(PROXY_HEALTH_POLL_MS);
+        }
+    }
+}
+function startProxyBackgroundProcess(options, state) {
+    const scriptPath = ccsBinPath();
+    if (!fs.existsSync(scriptPath)) {
+        throw new Error(`ccs proxy entry was not found: ${scriptPath}`);
+    }
+    fs.mkdirSync(options.stateRoot, { recursive: true });
+    const logPath = proxyLogPath(options.stateRoot);
+    const stdout = fs.openSync(logPath, "a");
+    const stderr = fs.openSync(logPath, "a");
+    try {
+        const child = spawn(process.execPath, [scriptPath, "proxy", "serve"], {
+            detached: true,
+            stdio: ["ignore", stdout, stderr],
+            env: {
+                ...process.env,
+                CCS_PROXY_STATE_ROOT: options.stateRoot,
+                CCS_PROXY_LISTEN_HOST: state.listen_host,
+                CCS_PROXY_LISTEN_PORT: String(state.listen_port),
+            },
+        });
+        child.unref();
+        if (!child.pid) {
+            throw new Error("proxy background process did not report a PID");
+        }
+        return child.pid;
+    }
+    finally {
+        fs.closeSync(stdout);
+        fs.closeSync(stderr);
+    }
+}
+async function releaseProxyStartLock(stateRoot, lockFd) {
+    fs.closeSync(lockFd);
+    await rm(proxyStartLockPath(stateRoot), { force: true });
+}
+async function readProxyPid(stateRoot) {
+    const file = pidPath(stateRoot);
+    if (!fs.existsSync(file)) {
+        return { pid: null, running: false };
+    }
+    const raw = (await readFile(file, "utf8")).trim();
+    const pid = Number.parseInt(raw, 10);
+    if (!Number.isInteger(pid)) {
+        return { pid: null, running: false };
+    }
+    try {
+        process.kill(pid, 0);
+        return { pid, running: true };
+    }
+    catch {
+        return { pid, running: false };
+    }
+}
+export async function ensureProxyRunning(options) {
+    const initialState = await readProxyState(options.stateRoot);
+    if (!initialState) {
+        return null;
+    }
+    const logPath = proxyLogPath(options.stateRoot);
+    const initialPid = await readProxyPid(options.stateRoot);
+    const initialHealth = await readProxyHealth(initialState);
+    if (initialHealth.healthy) {
+        return {
+            state: initialState,
+            pid: initialHealth.pid ?? initialPid.pid,
+            healthy: true,
+            started: false,
+            logPath,
+        };
+    }
+    const lockFd = await acquireProxyStartLock(options.stateRoot);
+    if (lockFd === null) {
+        const state = await readProxyState(options.stateRoot);
+        if (!state) {
+            return null;
+        }
+        const pid = await readProxyPid(options.stateRoot);
+        const health = await readProxyHealth(state);
+        if (!health.healthy) {
+            return ensureProxyRunning(options);
+        }
+        return {
+            state,
+            pid: health.pid ?? pid.pid,
+            healthy: true,
+            started: false,
+            logPath,
+        };
+    }
+    try {
+        const state = await readProxyState(options.stateRoot);
+        if (!state) {
+            return null;
+        }
+        const health = await readProxyHealth(state);
+        if (health.healthy) {
+            const pid = await readProxyPid(options.stateRoot);
+            return {
+                state,
+                pid: health.pid ?? pid.pid,
+                healthy: true,
+                started: false,
+                logPath,
+            };
+        }
+        await rm(pidPath(options.stateRoot), { force: true });
+        const pid = startProxyBackgroundProcess(options, state);
+        await waitForProxyHealth(state, options.stateRoot);
+        return {
+            state,
+            pid,
+            healthy: true,
+            started: true,
+            logPath,
+        };
+    }
+    finally {
+        await releaseProxyStartLock(options.stateRoot, lockFd);
+    }
 }
 function currentProviderName(content) {
     return readTopLevelTomlString(content, "model_provider") ?? "codex";
@@ -263,17 +471,19 @@ function fitProxyTerminalLine(line) {
     }
     return `${result}\u001b[0m`;
 }
-function formatProxyStatusLine(now, state, pidState) {
+function formatProxyStatusLine(now, state, runtime) {
     const status = state ? textGreen("installed") : textRed("missing");
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
-    const pid = pidState.pid === null
+    const runtimeLabel = state && runtime?.healthy ? textGreen("healthy") : state ? textYellow("starting") : textDim("none");
+    const pid = runtime?.pid === null || runtime?.pid === undefined
         ? textDim("none")
-        : pidState.running
-            ? textGreen(`running ${pidState.pid}`)
-            : textYellow(`stopped ${pidState.pid}`);
+        : runtime.healthy
+            ? textGreen(String(runtime.pid))
+            : textYellow(String(runtime.pid));
     return [
         `status: ${status}`,
         `proxy: ${proxy}`,
+        `runtime: ${runtimeLabel}`,
         `pid: ${pid}`,
         `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
     ].join("  ");
@@ -584,26 +794,10 @@ export async function restoreProxy(options) {
     if (!state.backup_path || !fs.existsSync(state.backup_path)) {
         throw new Error(`backup file was not found: ${state.backup_path}`);
     }
+    const stopped = await stopProxy(options);
     await copyFile(state.backup_path, options.codexConfigPath);
     await removeProxyState(options.stateRoot);
-}
-async function readProxyPid(stateRoot) {
-    const pidPath = path.join(stateRoot, "proxy.pid");
-    if (!fs.existsSync(pidPath)) {
-        return { pid: null, running: false };
-    }
-    const raw = (await readFile(pidPath, "utf8")).trim();
-    const pid = Number.parseInt(raw, 10);
-    if (!Number.isInteger(pid)) {
-        return { pid: null, running: false };
-    }
-    try {
-        process.kill(pid, 0);
-        return { pid, running: true };
-    }
-    catch {
-        return { pid, running: false };
-    }
+    return stopped;
 }
 function formatProxyRequestsSummary(metrics) {
     return [
@@ -635,11 +829,11 @@ function formatProxyRecentRows(metrics, count = 5) {
     }
     return rows;
 }
-function buildProxyStatusLines(now, state, profileOrder, pidState, options) {
+function buildProxyStatusLines(now, state, profileOrder, runtime, options) {
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
         textBold("ccs proxy"),
-        formatProxyStatusLine(now, state, pidState),
+        formatProxyStatusLine(now, state, runtime),
         formatProxyFilesLine(state, options),
         formatProxyRequestsSummary(metrics),
         formatProxyLatencySummary(metrics),
@@ -661,11 +855,11 @@ async function runProxyStatusLoop(options) {
         }
         refreshing = true;
         try {
-            const state = await readProxyState(options.stateRoot);
+            const runtime = await ensureProxyRunning(options);
+            const state = runtime?.state ?? await readProxyState(options.stateRoot);
             const profiles = await readProfiles();
             const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
-            const pidState = await readProxyPid(options.stateRoot);
-            const lines = buildProxyStatusLines(new Date(), state, profileOrder, pidState, options);
+            const lines = buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
             if (process.stdout.isTTY) {
                 if (firstFrame) {
                     process.stdout.write(lines.join("\n"));
@@ -707,26 +901,48 @@ async function runProxyStatusLoop(options) {
     });
 }
 export async function stopProxy(options) {
-    const pidPath = path.join(options.stateRoot, "proxy.pid");
-    if (!fs.existsSync(pidPath)) {
+    const state = await readProxyState(options.stateRoot);
+    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null };
+    const file = pidPath(options.stateRoot);
+    if (!fs.existsSync(file)) {
+        if (state && health.healthy && health.pid !== null) {
+            try {
+                process.kill(health.pid);
+            }
+            catch {
+                // ignore
+            }
+            await waitForProxyStop(state);
+            return `Proxy stopped. PID=${health.pid}`;
+        }
         return "No running proxy PID file was found.";
     }
-    const raw = (await readFile(pidPath, "utf8")).trim();
+    const raw = (await readFile(file, "utf8")).trim();
     if (!raw) {
-        await rm(pidPath, { force: true });
+        await rm(file, { force: true });
         return "Proxy PID file was empty and has been removed.";
     }
     const pid = Number.parseInt(raw, 10);
-    if (Number.isInteger(pid)) {
+    if (!state) {
+        await rm(file, { force: true });
+        return `Proxy state was missing and the PID file has been removed. PID=${pid}`;
+    }
+    if (!health.healthy) {
+        await rm(file, { force: true });
+        return `Proxy PID file was stale and has been removed. PID=${pid}`;
+    }
+    const targetPid = health.pid ?? pid;
+    if (Number.isInteger(targetPid)) {
         try {
-            process.kill(pid);
+            process.kill(targetPid);
         }
         catch {
             // ignore
         }
     }
-    await rm(pidPath, { force: true });
-    return `Proxy stopped. PID=${pid}`;
+    await waitForProxyStop(state);
+    await rm(file, { force: true });
+    return `Proxy stopped. PID=${targetPid}`;
 }
 export async function serveProxy(options) {
     const state = await readProxyState(options.stateRoot);
@@ -739,7 +955,7 @@ export async function serveProxy(options) {
                 const url = new URL(req.url || "/", "http://localhost");
                 if (req.method === "GET" && url.pathname === HEALTH_PATH) {
                     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-                    res.end(JSON.stringify({ status: "ok" }));
+                    res.end(JSON.stringify({ status: "ok", pid: process.pid }));
                     return;
                 }
                 const profiles = await readProfiles();
@@ -771,22 +987,25 @@ export async function serveProxy(options) {
         server.once("error", reject);
         server.listen(state.listen_port, state.listen_host, () => resolve());
     });
-    const pidPath = path.join(options.stateRoot, "proxy.pid");
-    await writeTextFile(pidPath, `${process.pid}\n`);
+    await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`);
     process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
     await new Promise((resolve) => {
-        process.once("SIGINT", () => server.close(() => resolve()));
-        process.once("SIGTERM", () => server.close(() => resolve()));
+        const close = () => {
+            server.close(() => resolve());
+        };
+        process.once("SIGINT", close);
+        process.once("SIGTERM", close);
     });
+    await rm(pidPath(options.stateRoot), { force: true });
 }
 function usageHelpLines() {
     return [
         "Usage:",
         "  ccs proxy [--once]                  # print or watch proxy status and upstream order",
-        "  ccs proxy install                   # back up config and install proxy routing",
+        "  ccs proxy install                   # back up config, install routing, and start background proxy",
         "  ccs proxy restore                   # restore config from the saved backup",
-        "  ccs proxy stop                      # stop a running proxy process by PID file",
-        "  ccs proxy serve                     # run the proxy server in the foreground",
+        "  ccs proxy stop                      # stop the healthy background proxy",
+        "  ccs proxy serve                     # run the proxy server in the foreground for debugging",
     ];
 }
 export async function runProxyCommand(args, options) {
@@ -812,9 +1031,13 @@ export async function runProxyCommand(args, options) {
             return;
         }
         const plan = await installProxy(options);
+        const runtime = await ensureProxyRunning(options);
         printKeyValue("backup:", textBlue(plan.backupPath), 5);
         printKeyValue("state:", textGreen(plan.statePath), 5);
         printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
+        printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
+        printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
+        printKeyValue("log:", textBlue(proxyLogPath(options.stateRoot)), 8);
         return;
     }
     if (command === "restore") {
@@ -824,7 +1047,8 @@ export async function runProxyCommand(args, options) {
         if (!(await confirmApply())) {
             return;
         }
-        await restoreProxy(options);
+        const stopped = await restoreProxy(options);
+        printKeyValue("runtime:", stopped, 8);
         printKeyValue("state:", textGreen("removed"), 5);
         return;
     }
