@@ -1,13 +1,14 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { setInterval } from "node:timers";
+import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
-import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
 import { textBlue, textDim, textGreen } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
@@ -15,6 +16,11 @@ import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../l
 type Profile = {
   baseURL: string;
   apiKey: string;
+};
+
+type ProxyUpstream = {
+  name: string;
+  baseURL: string;
 };
 
 type ProfilesFile = {
@@ -33,6 +39,33 @@ type ProxyState = {
   listen_port: number;
   profile_order: string[];
   backup_path: string;
+  metrics: ProxyMetrics;
+};
+
+type ProxyMetrics = {
+  total_requests: number;
+  successful_requests: number;
+  failed_requests: number;
+  upstream_hit_counts: Record<string, number>;
+  latency_ms: {
+    count: number;
+    sum: number;
+    min: number | null;
+    max: number | null;
+    samples: number[];
+  };
+  recent_requests: ProxyRequestRecord[];
+};
+
+type ProxyRequestRecord = {
+  at: string;
+  method: string;
+  path: string;
+  status: number;
+  upstream: string | null;
+  attempts: number;
+  latency_ms: number;
+  error: string | null;
 };
 
 type ProxyInstallPlan = {
@@ -57,6 +90,9 @@ const REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 60 * 1000;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
+const PROXY_RECENT_REQUEST_LIMIT = 10;
+const PROXY_LATENCY_SAMPLE_LIMIT = 120;
+const PROXY_STATUS_RENDER_LINES = 12;
 const REASONING_POINTERS = [
   "/usage/output_tokens_details/reasoning_tokens",
   "/usage/completion_tokens_details/reasoning_tokens",
@@ -79,12 +115,12 @@ async function readProfiles(): Promise<ProfilesFile> {
 
 export async function readProxyState(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`): Promise<ProxyState | null> {
   const text = await readTextIfExists(statePath(stateRoot));
-  return text ? (parseJsonObject(text) as ProxyState) : null;
+  return text ? normalizeProxyState(parseJsonObject(text) as ProxyState) : null;
 }
 
 async function writeProxyState(stateRoot: string, state: ProxyState): Promise<void> {
   await mkdir(stateRoot, { recursive: true });
-  await writeTextFile(statePath(stateRoot), stringifyJson(state), 0o600);
+  await writeTextFileAtomic(statePath(stateRoot), stringifyJson(state), 0o600);
 }
 
 async function removeProxyState(stateRoot: string): Promise<void> {
@@ -108,6 +144,167 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
   return [...new Set(names.filter(Boolean))];
 }
 
+function buildProxyUpstreams(profiles: ProfilesFile): ProxyUpstream[] {
+  const order = buildProfileOrder(profiles);
+  return order
+    .map((name) => ({
+      name,
+      baseURL: profiles.profiles?.[name]?.baseURL ?? "",
+    }))
+    .filter((upstream): upstream is ProxyUpstream => Boolean(upstream.baseURL));
+}
+
+function createProxyMetrics(): ProxyMetrics {
+  return {
+    total_requests: 0,
+    successful_requests: 0,
+    failed_requests: 0,
+    upstream_hit_counts: {},
+    latency_ms: {
+      count: 0,
+      sum: 0,
+      min: null,
+      max: null,
+      samples: [],
+    },
+    recent_requests: [],
+  };
+}
+
+function normalizeProxyMetrics(value: unknown): ProxyMetrics {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const latency = raw.latency_ms && typeof raw.latency_ms === "object" ? raw.latency_ms as Record<string, unknown> : {};
+  return {
+    total_requests: Number.isInteger(raw.total_requests) ? Number(raw.total_requests) : 0,
+    successful_requests: Number.isInteger(raw.successful_requests) ? Number(raw.successful_requests) : 0,
+    failed_requests: Number.isInteger(raw.failed_requests) ? Number(raw.failed_requests) : 0,
+    upstream_hit_counts: raw.upstream_hit_counts && typeof raw.upstream_hit_counts === "object" && !Array.isArray(raw.upstream_hit_counts)
+      ? Object.fromEntries(
+          Object.entries(raw.upstream_hit_counts as Record<string, unknown>)
+            .filter(([, count]) => Number.isInteger(count))
+            .map(([name, count]) => [name, Number(count)]),
+        )
+      : {},
+    latency_ms: {
+      count: Number.isInteger(latency.count) ? Number(latency.count) : 0,
+      sum: typeof latency.sum === "number" ? latency.sum : 0,
+      min: typeof latency.min === "number" ? latency.min : null,
+      max: typeof latency.max === "number" ? latency.max : null,
+      samples: Array.isArray(latency.samples)
+        ? latency.samples.filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        : [],
+    },
+    recent_requests: Array.isArray(raw.recent_requests)
+      ? raw.recent_requests.filter((item): item is ProxyRequestRecord => Boolean(item) && typeof item === "object")
+        .map((item) => {
+          const request = item as Record<string, unknown>;
+          return {
+            at: `${request.at ?? ""}`,
+            method: `${request.method ?? ""}`,
+            path: `${request.path ?? ""}`,
+            status: Number.isInteger(request.status) ? Number(request.status) : 0,
+            upstream: request.upstream === null ? null : `${request.upstream ?? ""}` || null,
+            attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
+            latency_ms: typeof request.latency_ms === "number" ? request.latency_ms : 0,
+            error: request.error === null ? null : `${request.error ?? ""}` || null,
+          };
+        })
+      : [],
+  };
+}
+
+function normalizeProxyState(state: ProxyState | null): ProxyState | null {
+  if (!state) {
+    return null;
+  }
+  return {
+    ...state,
+    profile_order: Array.isArray(state.profile_order) ? state.profile_order.filter((value) => typeof value === "string" && value.length > 0) : [],
+    metrics: normalizeProxyMetrics((state as Record<string, unknown>).metrics),
+  };
+}
+
+function ensureProxyMetrics(state: ProxyState): ProxyMetrics {
+  return state.metrics ?? createProxyMetrics();
+}
+
+function updateProxyLatencyStats(latency: ProxyMetrics["latency_ms"], latencyMs: number): void {
+  latency.count += 1;
+  latency.sum += latencyMs;
+  latency.min = latency.min === null ? latencyMs : Math.min(latency.min, latencyMs);
+  latency.max = latency.max === null ? latencyMs : Math.max(latency.max, latencyMs);
+  latency.samples.push(latencyMs);
+  if (latency.samples.length > PROXY_LATENCY_SAMPLE_LIMIT) {
+    latency.samples.splice(0, latency.samples.length - PROXY_LATENCY_SAMPLE_LIMIT);
+  }
+}
+
+function recordProxyRequestMetric(state: ProxyState, record: ProxyRequestRecord): void {
+  const metrics = ensureProxyMetrics(state);
+  metrics.total_requests += 1;
+  if (record.status >= 500) {
+    metrics.failed_requests += 1;
+  } else {
+    metrics.successful_requests += 1;
+  }
+  if (record.upstream) {
+    metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
+  }
+  updateProxyLatencyStats(metrics.latency_ms, record.latency_ms);
+  metrics.recent_requests.unshift(record);
+  metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
+  state.metrics = metrics;
+}
+
+function averageLatency(latency: ProxyMetrics["latency_ms"]): number {
+  return latency.count > 0 ? latency.sum / latency.count : 0;
+}
+
+function percentileLatency(samples: number[], percentile: number): number {
+  if (samples.length === 0) {
+    return 0;
+  }
+  const sorted = [...samples].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
+  return sorted[index];
+}
+
+function formatLatencyMs(value: number): string {
+  return `${Math.round(value)}ms`;
+}
+
+function formatFailureRate(successful: number, failed: number): string {
+  const total = successful + failed;
+  const rate = total > 0 ? (failed / total) * 100 : 0;
+  return `${rate.toFixed(1)}%`;
+}
+
+function formatProxyUpstreamHits(profileOrder: string[], metrics: ProxyMetrics): string {
+  const knownNames = [
+    ...profileOrder,
+    ...Object.keys(metrics.upstream_hit_counts).filter((name) => !profileOrder.includes(name)),
+  ];
+  if (knownNames.length === 0) {
+    return "upstreams: none";
+  }
+  return `upstreams: ${knownNames
+    .map((name) => `${name}=${metrics.upstream_hit_counts[name] ?? 0}`)
+    .join(" | ")}`;
+}
+
+function formatProxyRecentRequest(record: ProxyRequestRecord, index: number): string {
+  const at = record.at ? new Date(record.at).toLocaleTimeString("en-GB", { hour12: false }) : "--:--:--";
+  const error = record.error ? ` ${record.error}` : "";
+  return `${index + 1}. ${at} ${record.method} ${truncateProxyPath(record.path)} ${record.status} ${record.upstream ?? "-"} ${formatLatencyMs(record.latency_ms)} x${record.attempts}${error}`;
+}
+
+function truncateProxyPath(value: string, max = 40): string {
+  if (value.length <= max) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, max - 3))}...`;
+}
+
 export function resolveProxySwitchBaseUrl(state: ProxyState | null): string | null {
   return state?.proxy_base_url ?? null;
 }
@@ -128,6 +325,7 @@ function buildProxyStateFromProfiles(profiles: ProfilesFile, codexConfigText: st
     listen_port: listenPort,
     profile_order: buildProfileOrder(profiles),
     backup_path: "",
+    metrics: createProxyMetrics(),
   };
 }
 
@@ -290,6 +488,107 @@ async function proxyThroughUpstreams(request: IncomingMessage, upstreams: Profil
   );
 }
 
+type ProxyOutcome = {
+  response: Response;
+  upstream: string | null;
+  attempts: number;
+  error: string | null;
+};
+
+async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstreams: ProxyUpstream[], body: Buffer): Promise<ProxyOutcome> {
+  const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
+  let lastStatus = 502;
+  let lastError = "unknown";
+  let attempts = 0;
+
+  for (const upstream of upstreams) {
+    attempts += 1;
+    let response: Response;
+    try {
+      response = await forwardRequest(request, upstream.baseURL, body, UPSTREAM_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      continue;
+    }
+
+    lastStatus = response.status;
+    if (!response.ok && (response.status >= 500 || [401, 403, 408, 429].includes(response.status))) {
+      lastError = `${upstream.baseURL} returned ${response.status}`;
+      continue;
+    }
+
+    if (isStreamContentType(contentType) || isStreamContentType(`${response.headers.get("content-type") || ""}`)) {
+      return { response, upstream: upstream.name, attempts, error: null };
+    }
+
+    if (isJsonContentType(`${response.headers.get("content-type") || ""}`)) {
+      const text = await response.text();
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        const reasoning = parseReasoningTokens(parsed);
+        if (reasoning !== null && REASONING_EQUALS.includes(reasoning)) {
+          return {
+            response: new Response(
+              JSON.stringify({
+                error: {
+                  message: `codex proxy blocked suspicious reasoning response from ${upstream.baseURL}`,
+                  type: "codex_proxy",
+                  code: "reasoning_guard_triggered",
+                  reasoning_tokens: reasoning,
+                  status_code: NON_STREAM_STATUS_CODE,
+                },
+              }),
+              { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
+            ),
+            upstream: upstream.name,
+            attempts,
+            error: null,
+          };
+        }
+      } catch {
+        // keep original payload
+      }
+      return {
+        response: new Response(text, {
+          status: response.status,
+          headers: responseHeadersToObject(response.headers),
+        }),
+        upstream: upstream.name,
+        attempts,
+        error: null,
+      };
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      response: new Response(buffer, {
+        status: response.status,
+        headers: responseHeadersToObject(response.headers),
+      }),
+      upstream: upstream.name,
+      attempts,
+      error: null,
+    };
+  }
+
+  return {
+    response: new Response(
+      JSON.stringify({
+        error: {
+          message: `proxy upstreams failed: ${lastError}`,
+          type: "codex_proxy",
+          code: "upstream_failure",
+          status_code: lastStatus,
+        },
+      }),
+      { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
+    ),
+    upstream: null,
+    attempts,
+    error: lastError,
+  };
+}
+
 function writeResponse(res: ServerResponse, response: Response): void {
   res.writeHead(response.status, responseHeadersToObject(response.headers));
   if (!response.body) {
@@ -354,24 +653,68 @@ async function readProxyPid(stateRoot: string): Promise<{ pid: number | null; ru
   }
 }
 
-function formatProxyStatusLine(
+function formatProxyRequestsSummary(metrics: ProxyMetrics): string {
+  return [
+    `requests: total ${metrics.total_requests}`,
+    `ok ${metrics.successful_requests}`,
+    `failed ${metrics.failed_requests}`,
+    `rate ${formatFailureRate(metrics.successful_requests, metrics.failed_requests)}`,
+  ].join(" | ");
+}
+
+function formatProxyLatencySummary(metrics: ProxyMetrics): string {
+  return [
+    `latency: avg ${formatLatencyMs(averageLatency(metrics.latency_ms))}`,
+    `p50 ${formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 50))}`,
+    `p95 ${formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 95))}`,
+    `min ${formatLatencyMs(metrics.latency_ms.min ?? 0)}`,
+    `max ${formatLatencyMs(metrics.latency_ms.max ?? 0)}`,
+  ].join(" | ");
+}
+
+function formatProxyRecentHeader(metrics: ProxyMetrics): string {
+  return `recent: ${metrics.recent_requests.length > 0 ? "" : "none"}`.trimEnd();
+}
+
+function formatProxyStateLine(now: Date, state: ProxyState | null, pidState: { pid: number | null; running: boolean }): string {
+  return [
+    `status: ${state ? "installed" : "missing"}`,
+    `proxy ${state ? state.proxy_base_url : "unset"}`,
+    `pid ${pidState.pid ? (pidState.running ? "running" : "stopped") : "none"}${pidState.pid ? ` ${pidState.pid}` : ""}`,
+    `time ${now.toLocaleTimeString("en-GB", { hour12: false })}`,
+  ].join(" | ");
+}
+
+function formatProxyFilesLine(options: ProxyOptions): string {
+  return `files: ${colorPath(options.codexConfigPath)}  ${colorPath(options.stateRoot)}`;
+}
+
+function formatProxyRecentRows(metrics: ProxyMetrics, count = 5): string[] {
+  const rows = metrics.recent_requests.slice(0, count).map((record, index) => textDim(formatProxyRecentRequest(record, index)));
+  while (rows.length < count) {
+    rows.push(textDim("-"));
+  }
+  return rows;
+}
+
+function buildProxyStatusLines(
   now: Date,
   state: ProxyState | null,
   profileOrder: string[],
   pidState: { pid: number | null; running: boolean },
-): string {
-  const segments = [
-    now.toLocaleTimeString("en-GB", { hour12: false }),
-    state ? "installed" : "missing",
-    state ? state.proxy_base_url : "proxy unset",
-    `upstreams ${profileOrder.length > 0 ? profileOrder.join(" -> ") : "none"}`,
-    pidState.pid ? `pid ${pidState.running ? "running" : "stopped"} ${pidState.pid}` : "pid none",
+  options: ProxyOptions,
+): string[] {
+  const metrics = state?.metrics ?? createProxyMetrics();
+  return [
+    formatProxyStateLine(now, state, pidState),
+    formatProxyFilesLine(options),
+    formatProxyRequestsSummary(metrics),
+    formatProxyLatencySummary(metrics),
+    formatProxyUpstreamHits(profileOrder, metrics),
+    formatProxyRecentHeader(metrics),
+    ...formatProxyRecentRows(metrics, 5),
+    textDim("commands: ccs proxy [--once] | install | restore | stop | serve"),
   ];
-  return segments.join(" | ");
-}
-
-function formatProxyStatusFooter(options: ProxyOptions): string {
-  return `files: ${colorPath(options.codexConfigPath)}  ${colorPath(options.stateRoot)}`;
 }
 
 async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
@@ -379,7 +722,7 @@ async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
   let timer: ReturnType<typeof setInterval> | null = null;
   let refreshing = false;
   let firstFrame = true;
-  const commandsLine = textDim("commands: ccs proxy [--once] | install | restore | stop | serve");
+  const renderLineCount = PROXY_STATUS_RENDER_LINES;
 
   const render = async (): Promise<void> => {
     if (refreshing || stopped) {
@@ -391,14 +734,13 @@ async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
       const profiles = await readProfiles();
       const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
       const pidState = await readProxyPid(options.stateRoot);
-      const statusLine = formatProxyStatusLine(new Date(), state, profileOrder, pidState);
-      const lines = [statusLine, formatProxyStatusFooter(options), commandsLine];
+      const lines = buildProxyStatusLines(new Date(), state, profileOrder, pidState, options);
       if (process.stdout.isTTY) {
         if (firstFrame) {
           process.stdout.write(lines.join("\n"));
           firstFrame = false;
         } else {
-          process.stdout.write(`\u001b[2A\r\u001b[2K${statusLine}\n\u001b[2K${formatProxyStatusFooter(options)}\n\u001b[2K${commandsLine}`);
+          process.stdout.write(`\u001b[${Math.max(0, renderLineCount - 1)}A\r${lines.map((line) => `\u001b[2K${line}`).join("\n")}`);
         }
       } else {
         console.log(lines.join("\n"));
@@ -473,12 +815,23 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           return;
         }
         const profiles = await readProfiles();
-        const upstreamProfiles = buildProfileOrder(profiles)
-          .map((name) => profiles.profiles?.[name])
-          .filter((profile): profile is Profile => Boolean(profile?.baseURL));
+        const upstreamProfiles = buildProxyUpstreams(profiles);
         const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
-        const response = await proxyThroughUpstreams(req, upstreamProfiles, body);
-        writeResponse(res, response);
+        const requestStartedAt = performance.now();
+        const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body);
+        const latencyMs = Math.max(0, performance.now() - requestStartedAt);
+        recordProxyRequestMetric(state, {
+          at: new Date().toISOString(),
+          method: req.method || "GET",
+          path: url.pathname,
+          status: outcome.response.status,
+          upstream: outcome.upstream,
+          attempts: outcome.attempts,
+          latency_ms: latencyMs,
+          error: outcome.error,
+        });
+        await writeProxyState(options.stateRoot, state);
+        writeResponse(res, outcome.response);
       } catch (error) {
         res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }));

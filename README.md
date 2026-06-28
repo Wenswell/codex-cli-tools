@@ -561,6 +561,7 @@ Behavior:
 - `ccs proxy restore` restores `~/.codex/config.toml` from the saved backup and removes proxy state.
 - `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
 - `ccs proxy` without arguments watches the proxy state, proxy URL, upstream order, and PID live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
+- The live proxy view shows request total, per-upstream hit counts, latency average/p50/p95/min/max, failure rate, and the latest 5 requests.
 - `ccs proxy help` prints the proxy command summary.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
