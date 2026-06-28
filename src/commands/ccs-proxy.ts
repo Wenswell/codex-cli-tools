@@ -410,16 +410,20 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
   });
 }
 
+function usageHelpLines(): string[] {
+  return [
+    "Usage:",
+    "  ccs proxy                           # print proxy status and upstream order",
+    "  ccs proxy install                   # back up config and install proxy routing",
+    "  ccs proxy restore                   # restore config from the saved backup",
+    "  ccs proxy stop                      # stop a running proxy process by PID file",
+    "  ccs proxy serve                     # run the proxy server in the foreground",
+  ];
+}
+
 export async function runProxyCommand(args: string[], options: ProxyOptions): Promise<void> {
   if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
-    console.log([
-      "Usage:",
-      "  ccs proxy",
-      "  ccs proxy install",
-      "  ccs proxy restore",
-      "  ccs proxy stop",
-      "  ccs proxy serve",
-    ].join("\n"));
+    console.log(usageHelpLines().join("\n"));
     return;
   }
 
@@ -427,6 +431,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
   const rest = args.slice(1);
   if (command === "") {
     await printStatus(options);
+    console.log(textDim("commands: ccs proxy | install | restore | stop | serve"));
     return;
   }
   if (command === "install") {

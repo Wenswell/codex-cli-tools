@@ -5979,7 +5979,7 @@ function roundCostUSD(value: number): number {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+  console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 
 function printStatusUsageHelp(): void {
