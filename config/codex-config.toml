@@ -38,7 +38,7 @@ child_agents_md = true # 子代理读取/继承 AGENTS.md 规则
 collaboration_modes = true # 启用协作模式能力
 fast_mode = true # 启用快速模式
 image_detail_original = true # 允许按原始细节读取图片
-memories = true # 启用记忆能力
+memories = false # 启用记忆能力
 
 [agents] # 子代理全局配置
 max_threads = 12 # 最大并行代理线程数

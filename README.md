@@ -518,6 +518,7 @@ ccs remove local
 ```
 
 `ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
+When proxy mode is installed, `ccs toggle` still switches the current profile and the proxy keeps using `profiles.toggle` order for upstream priority, with the first item as the primary upstream.
 
 Switching profile:
 
@@ -540,11 +541,24 @@ ccs run input
 ccs run ciii exec "check this repo"
 ```
 
+Proxy commands live under `ccs proxy`:
+
+```bash
+ccs proxy
+ccs proxy install
+ccs proxy restore
+ccs proxy serve
+ccs proxy stop
+```
+
 Behavior:
 
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
+- `ccs proxy install` stores proxy state in `~/.config/codex-tools/proxy.json`, backs up the current `~/.codex/config.toml`, and rewrites the active provider `base_url` to the proxy URL.
+- `ccs proxy restore` restores `~/.codex/config.toml` from the saved backup and removes proxy state.
+- `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.

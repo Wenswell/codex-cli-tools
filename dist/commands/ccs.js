@@ -18,6 +18,7 @@ import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCa
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
+import { readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
@@ -980,9 +981,11 @@ async function runCodexWithProfile(profiles, name, codexArgs) {
     const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
     const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
     const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
+    const proxyState = await readProxyState();
+    const baseURL = resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL;
     const args = [
         "-c",
-        `model_providers.${provider}.base_url=${JSON.stringify(normalized.baseURL)}`,
+        `model_providers.${provider}.base_url=${JSON.stringify(baseURL)}`,
         "-c",
         `model_providers.${provider}.env_key=${JSON.stringify(apiKeyEnv)}`,
         ...codexArgs,
@@ -1241,7 +1244,8 @@ async function switchProfile(name) {
     }
     await ensureDir(codexDir());
     const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
-    const nextConfig = updateTomlBaseUrl(currentConfig, normalized.baseURL);
+    const proxyState = await readProxyState();
+    const nextConfig = updateTomlBaseUrl(currentConfig, resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL);
     await writeTextFile(codexConfigPath(), nextConfig);
     await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: normalized.apiKey }), 0o600);
     await writeProfiles({
@@ -3364,6 +3368,7 @@ function usageLines() {
         "  ccs                                  # show current profile and usage",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
+        "  ccs proxy [install|restore|stop|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
         "  ccs cost weekly                      # show Codex session weekly cost totals",
@@ -4933,6 +4938,16 @@ export async function runCcs(argv) {
     }
     if (command === "s") {
         await runCcsStatus(profiles, args);
+        return;
+    }
+    if (command === "proxy") {
+        const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
+        await runProxyCommand(args, {
+            codexConfigPath: codexConfigPath(),
+            listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
+            listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
+            stateRoot,
+        });
         return;
     }
     if (command === "run") {
