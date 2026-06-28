@@ -9,8 +9,8 @@ import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
-import { colorPath, printKeyValue } from "../lib/output.js";
-import { textBlue, textDim, textGreen } from "../lib/text.js";
+import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
+import { textBlue, textBold, textDim, textGreen, textMagenta, textRed, textYellow, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
@@ -22,7 +22,15 @@ const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
 const PROXY_RECENT_REQUEST_LIMIT = 10;
 const PROXY_LATENCY_SAMPLE_LIMIT = 120;
-const PROXY_STATUS_RENDER_LINES = 12;
+const PROXY_RECENT_RENDER_COUNT = 5;
+const PROXY_STATUS_RENDER_LINES = 8 + PROXY_RECENT_RENDER_COUNT;
+const PROXY_RECENT_TIME_WIDTH = 8;
+const PROXY_RECENT_METHOD_WIDTH = 6;
+const PROXY_RECENT_PATH_WIDTH = 28;
+const PROXY_RECENT_STATUS_WIDTH = 3;
+const PROXY_RECENT_UPSTREAM_WIDTH = 12;
+const PROXY_RECENT_LATENCY_WIDTH = 6;
+const PROXY_RECENT_ATTEMPTS_WIDTH = 3;
 const REASONING_POINTERS = [
     "/usage/output_tokens_details/reasoning_tokens",
     "/usage/completion_tokens_details/reasoning_tokens",
@@ -193,22 +201,110 @@ function formatProxyUpstreamHits(profileOrder, metrics) {
         ...Object.keys(metrics.upstream_hit_counts).filter((name) => !profileOrder.includes(name)),
     ];
     if (knownNames.length === 0) {
-        return "upstreams: none";
+        return `upstreams: ${textDim("none")}`;
     }
     return `upstreams: ${knownNames
-        .map((name) => `${name}=${metrics.upstream_hit_counts[name] ?? 0}`)
-        .join(" | ")}`;
+        .map((name) => {
+        const count = metrics.upstream_hit_counts[name] ?? 0;
+        return `${colorName(truncateProxyText(name, 16))}=${count === 0 ? textDim("0") : colorCount(String(count))}`;
+    })
+        .join("  ")}`;
 }
-function formatProxyRecentRequest(record, index) {
-    const at = record.at ? new Date(record.at).toLocaleTimeString("en-GB", { hour12: false }) : "--:--:--";
-    const error = record.error ? ` ${record.error}` : "";
-    return `${index + 1}. ${at} ${record.method} ${truncateProxyPath(record.path)} ${record.status} ${record.upstream ?? "-"} ${formatLatencyMs(record.latency_ms)} x${record.attempts}${error}`;
+function formatProxyStatusCode(status) {
+    if (status >= 500) {
+        return textRed(String(status));
+    }
+    if (status >= 400) {
+        return textYellow(String(status));
+    }
+    if (status >= 300) {
+        return textYellow(String(status));
+    }
+    if (status > 0) {
+        return textGreen(String(status));
+    }
+    return textDim("0");
 }
 function truncateProxyPath(value, max = 40) {
     if (value.length <= max) {
         return value;
     }
     return `${value.slice(0, Math.max(0, max - 3))}...`;
+}
+function truncateProxyText(value, max = 40) {
+    if (value.length <= max) {
+        return value;
+    }
+    return `${value.slice(0, Math.max(0, max - 3))}...`;
+}
+function padVisibleRight(value, width) {
+    return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
+}
+function padVisibleLeft(value, width) {
+    return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
+}
+function fitProxyTerminalLine(line) {
+    const columns = process.stdout.columns;
+    if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
+        return line;
+    }
+    let visible = 0;
+    let result = "";
+    for (let index = 0; index < line.length && visible < columns - 1;) {
+        const ansi = /^\u001b\[[0-9;]*m/.exec(line.slice(index));
+        if (ansi) {
+            result += ansi[0];
+            index += ansi[0].length;
+            continue;
+        }
+        result += line[index];
+        visible += 1;
+        index += 1;
+    }
+    return `${result}\u001b[0m`;
+}
+function formatProxyStatusLine(now, state, pidState) {
+    const status = state ? textGreen("installed") : textRed("missing");
+    const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
+    const pid = pidState.pid === null
+        ? textDim("none")
+        : pidState.running
+            ? textGreen(`running ${pidState.pid}`)
+            : textYellow(`stopped ${pidState.pid}`);
+    return [
+        `status: ${status}`,
+        `proxy: ${proxy}`,
+        `pid: ${pid}`,
+        `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
+    ].join("  ");
+}
+function formatProxyFilesLine(state, options) {
+    const parts = [
+        `config ${colorPath(options.codexConfigPath)}`,
+        `state ${colorPath(statePath(options.stateRoot))}`,
+    ];
+    if (state?.backup_path) {
+        parts.push(`backup ${colorPath(state.backup_path)}`);
+    }
+    return `files: ${parts.join("  ")}`;
+}
+function formatProxyRecentRequest(record, index) {
+    const at = record.at ? new Date(record.at).toLocaleTimeString("en-GB", { hour12: false }) : "--:--:--";
+    const method = truncateProxyText(record.method || "-", PROXY_RECENT_METHOD_WIDTH);
+    const path = truncateProxyPath(record.path || "-", PROXY_RECENT_PATH_WIDTH);
+    const upstream = record.upstream ? truncateProxyText(record.upstream, PROXY_RECENT_UPSTREAM_WIDTH) : "-";
+    const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
+    return [
+        `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
+        padVisibleRight(textDim(at), PROXY_RECENT_TIME_WIDTH),
+        padVisibleRight(textMagenta(method), PROXY_RECENT_METHOD_WIDTH),
+        padVisibleRight(colorPath(path), PROXY_RECENT_PATH_WIDTH),
+        padVisibleLeft(formatProxyStatusCode(record.status), PROXY_RECENT_STATUS_WIDTH),
+        padVisibleRight(record.upstream ? colorName(upstream) : textDim(upstream), PROXY_RECENT_UPSTREAM_WIDTH),
+        padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_RECENT_LATENCY_WIDTH),
+        padVisibleLeft(textDim(`x${record.attempts}`), PROXY_RECENT_ATTEMPTS_WIDTH),
+        error,
+    ].join(" ");
 }
 export function resolveProxySwitchBaseUrl(state) {
     return state?.proxy_base_url ?? null;
@@ -511,37 +607,29 @@ async function readProxyPid(stateRoot) {
 }
 function formatProxyRequestsSummary(metrics) {
     return [
-        `requests: total ${metrics.total_requests}`,
-        `ok ${metrics.successful_requests}`,
-        `failed ${metrics.failed_requests}`,
-        `rate ${formatFailureRate(metrics.successful_requests, metrics.failed_requests)}`,
+        `requests: total ${colorCount(String(metrics.total_requests))}`,
+        `ok ${textGreen(String(metrics.successful_requests))}`,
+        `failed ${textRed(String(metrics.failed_requests))}`,
+        `rate ${metrics.failed_requests === 0 ? textGreen(formatFailureRate(metrics.successful_requests, metrics.failed_requests)) : textRed(formatFailureRate(metrics.successful_requests, metrics.failed_requests))}`,
     ].join(" | ");
 }
 function formatProxyLatencySummary(metrics) {
+    if (metrics.latency_ms.count === 0) {
+        return `latency: ${textDim("no requests yet")}`;
+    }
     return [
-        `latency: avg ${formatLatencyMs(averageLatency(metrics.latency_ms))}`,
-        `p50 ${formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 50))}`,
-        `p95 ${formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 95))}`,
-        `min ${formatLatencyMs(metrics.latency_ms.min ?? 0)}`,
-        `max ${formatLatencyMs(metrics.latency_ms.max ?? 0)}`,
+        `latency: avg ${textYellow(formatLatencyMs(averageLatency(metrics.latency_ms)))}`,
+        `p50 ${textYellow(formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 50)))}`,
+        `p95 ${textYellow(formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 95)))}`,
+        `min ${textYellow(formatLatencyMs(metrics.latency_ms.min ?? 0))}`,
+        `max ${textYellow(formatLatencyMs(metrics.latency_ms.max ?? 0))}`,
     ].join(" | ");
 }
 function formatProxyRecentHeader(metrics) {
-    return `recent: ${metrics.recent_requests.length > 0 ? "" : "none"}`.trimEnd();
-}
-function formatProxyStateLine(now, state, pidState) {
-    return [
-        `status: ${state ? "installed" : "missing"}`,
-        `proxy ${state ? state.proxy_base_url : "unset"}`,
-        `pid ${pidState.pid ? (pidState.running ? "running" : "stopped") : "none"}${pidState.pid ? ` ${pidState.pid}` : ""}`,
-        `time ${now.toLocaleTimeString("en-GB", { hour12: false })}`,
-    ].join(" | ");
-}
-function formatProxyFilesLine(options) {
-    return `files: ${colorPath(options.codexConfigPath)}  ${colorPath(options.stateRoot)}`;
+    return `${textBold("recent")}${metrics.recent_requests.length > 0 ? "" : ` ${textDim("none")}`}`;
 }
 function formatProxyRecentRows(metrics, count = 5) {
-    const rows = metrics.recent_requests.slice(0, count).map((record, index) => textDim(formatProxyRecentRequest(record, index)));
+    const rows = metrics.recent_requests.slice(0, count).map((record, index) => formatProxyRecentRequest(record, index));
     while (rows.length < count) {
         rows.push(textDim("-"));
     }
@@ -550,15 +638,16 @@ function formatProxyRecentRows(metrics, count = 5) {
 function buildProxyStatusLines(now, state, profileOrder, pidState, options) {
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
-        formatProxyStateLine(now, state, pidState),
-        formatProxyFilesLine(options),
+        textBold("ccs proxy"),
+        formatProxyStatusLine(now, state, pidState),
+        formatProxyFilesLine(state, options),
         formatProxyRequestsSummary(metrics),
         formatProxyLatencySummary(metrics),
         formatProxyUpstreamHits(profileOrder, metrics),
         formatProxyRecentHeader(metrics),
-        ...formatProxyRecentRows(metrics, 5),
+        ...formatProxyRecentRows(metrics, PROXY_RECENT_RENDER_COUNT),
         textDim("commands: ccs proxy [--once] | install | restore | stop | serve"),
-    ];
+    ].map(fitProxyTerminalLine);
 }
 async function runProxyStatusLoop(options) {
     let stopped = false;
