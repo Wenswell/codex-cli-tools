@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,19 +24,21 @@ const UPSTREAM_TIMEOUT_MS = 60 * 1000;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
 const PROXY_RECENT_REQUEST_LIMIT = 10;
-const PROXY_LATENCY_SAMPLE_LIMIT = 120;
+const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
-const PROXY_STATUS_RENDER_LINES = 8 + PROXY_RECENT_RENDER_COUNT;
-const PROXY_RECENT_TIME_WIDTH = 8;
-const PROXY_RECENT_METHOD_WIDTH = 6;
-const PROXY_RECENT_PATH_WIDTH = 28;
-const PROXY_RECENT_STATUS_WIDTH = 3;
-const PROXY_RECENT_UPSTREAM_WIDTH = 12;
-const PROXY_RECENT_LATENCY_WIDTH = 6;
-const PROXY_RECENT_ATTEMPTS_WIDTH = 3;
+const PROXY_STATUS_RENDER_LINES = 11 + (PROXY_RECENT_RENDER_COUNT * 2);
+const PROXY_TABLE_TIME_WIDTH = 8;
+const PROXY_TABLE_CODE_WIDTH = 4;
+const PROXY_TABLE_UPSTREAM_WIDTH = 12;
+const PROXY_TABLE_MS_WIDTH = 6;
+const PROXY_TABLE_SIZE_WIDTH = 7;
+const PROXY_TABLE_SESSION_WIDTH = 10;
+const PROXY_TABLE_METHOD_WIDTH = 6;
+const PROXY_TABLE_PATH_WIDTH = 30;
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
 const PROXY_HEALTH_POLL_MS = 100;
+const PROXY_STATUS_REFRESH_SECONDS = 1;
 const REASONING_POINTERS = [
     "/usage/output_tokens_details/reasoning_tokens",
     "/usage/completion_tokens_details/reasoning_tokens",
@@ -208,8 +211,9 @@ export async function ensureProxyRunning(options) {
     const initialPid = await readProxyPid(options.stateRoot);
     const initialHealth = await readProxyHealth(initialState);
     if (initialHealth.healthy) {
+        const state = await readProxyState(options.stateRoot) ?? initialState;
         return {
-            state: initialState,
+            state,
             pid: initialHealth.pid ?? initialPid.pid,
             healthy: true,
             started: false,
@@ -292,57 +296,138 @@ function buildProxyUpstreams(profiles) {
 function createProxyMetrics() {
     return {
         total_requests: 0,
-        successful_requests: 0,
-        failed_requests: 0,
+        active_requests: [],
+        status_counts: createProxyStatusCounts(),
         upstream_hit_counts: {},
         latency_ms: {
+            last: null,
             count: 0,
             sum: 0,
             min: null,
             max: null,
-            samples: [],
         },
         recent_requests: [],
+    };
+}
+function createProxyStatusCounts() {
+    return {
+        "2xx": 0,
+        "3xx": 0,
+        "4xx": 0,
+        "5xx": 0,
     };
 }
 function normalizeProxyMetrics(value) {
     const raw = value && typeof value === "object" ? value : {};
     const latency = raw.latency_ms && typeof raw.latency_ms === "object" ? raw.latency_ms : {};
+    const recentRequests = Array.isArray(raw.recent_requests)
+        ? raw.recent_requests.filter((item) => Boolean(item) && typeof item === "object")
+            .map(normalizeProxyHistoryRecord)
+        : [];
+    const statusCounts = normalizeProxyStatusCounts(raw.status_counts, recentRequests, raw);
     return {
         total_requests: Number.isInteger(raw.total_requests) ? Number(raw.total_requests) : 0,
-        successful_requests: Number.isInteger(raw.successful_requests) ? Number(raw.successful_requests) : 0,
-        failed_requests: Number.isInteger(raw.failed_requests) ? Number(raw.failed_requests) : 0,
+        active_requests: Array.isArray(raw.active_requests)
+            ? raw.active_requests.filter((item) => Boolean(item) && typeof item === "object")
+                .map(normalizeProxyActiveRecord)
+                .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
+            : [],
+        status_counts: statusCounts,
         upstream_hit_counts: raw.upstream_hit_counts && typeof raw.upstream_hit_counts === "object" && !Array.isArray(raw.upstream_hit_counts)
             ? Object.fromEntries(Object.entries(raw.upstream_hit_counts)
                 .filter(([, count]) => Number.isInteger(count))
                 .map(([name, count]) => [name, Number(count)]))
             : {},
         latency_ms: {
+            last: typeof latency.last === "number" && Number.isFinite(latency.last)
+                ? latency.last
+                : recentRequests[0]?.latency_ms ?? null,
             count: Number.isInteger(latency.count) ? Number(latency.count) : 0,
             sum: typeof latency.sum === "number" ? latency.sum : 0,
             min: typeof latency.min === "number" ? latency.min : null,
             max: typeof latency.max === "number" ? latency.max : null,
-            samples: Array.isArray(latency.samples)
-                ? latency.samples.filter((value) => typeof value === "number" && Number.isFinite(value))
-                : [],
         },
-        recent_requests: Array.isArray(raw.recent_requests)
-            ? raw.recent_requests.filter((item) => Boolean(item) && typeof item === "object")
-                .map((item) => {
-                const request = item;
-                return {
-                    at: `${request.at ?? ""}`,
-                    method: `${request.method ?? ""}`,
-                    path: `${request.path ?? ""}`,
-                    status: Number.isInteger(request.status) ? Number(request.status) : 0,
-                    upstream: request.upstream === null ? null : `${request.upstream ?? ""}` || null,
-                    attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
-                    latency_ms: typeof request.latency_ms === "number" ? request.latency_ms : 0,
-                    error: request.error === null ? null : `${request.error ?? ""}` || null,
-                };
-            })
-            : [],
+        recent_requests: recentRequests,
     };
+}
+function normalizeProxyStatusCounts(value, recentRequests, rawMetrics) {
+    const successfulRequests = Number.isInteger(rawMetrics.successful_requests) ? Number(rawMetrics.successful_requests) : 0;
+    const failedRequests = Number.isInteger(rawMetrics.failed_requests) ? Number(rawMetrics.failed_requests) : 0;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        const raw = value;
+        const counts = {
+            "2xx": Number.isInteger(raw["2xx"]) ? Number(raw["2xx"]) : 0,
+            "3xx": Number.isInteger(raw["3xx"]) ? Number(raw["3xx"]) : 0,
+            "4xx": Number.isInteger(raw["4xx"]) ? Number(raw["4xx"]) : 0,
+            "5xx": Number.isInteger(raw["5xx"]) ? Number(raw["5xx"]) : 0,
+        };
+        if (counts["2xx"] + counts["3xx"] + counts["4xx"] + counts["5xx"] > 0) {
+            return counts;
+        }
+        if (successfulRequests > 0 || failedRequests > 0 || recentRequests.length > 0) {
+            return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
+        }
+        return counts;
+    }
+    return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
+}
+function buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests) {
+    if (successfulRequests > 0 || failedRequests > 0) {
+        return {
+            "2xx": successfulRequests,
+            "3xx": 0,
+            "4xx": 0,
+            "5xx": failedRequests,
+        };
+    }
+    const counts = createProxyStatusCounts();
+    for (const request of recentRequests) {
+        incrementProxyStatusCount(counts, request.status);
+    }
+    return counts;
+}
+function normalizeProxyActiveRecord(request) {
+    const startedAt = stringField(request.started_at) || stringField(request.at) || "";
+    return {
+        id: stringField(request.id) || randomUUID(),
+        started_at: startedAt,
+        method: stringField(request.method),
+        path: stringField(request.path),
+        request_bytes: numberField(request.request_bytes),
+        session: nullableStringField(request.session),
+    };
+}
+function normalizeProxyHistoryRecord(request) {
+    const startedAt = stringField(request.started_at) || stringField(request.at) || "";
+    const completedAt = stringField(request.completed_at) || stringField(request.at) || startedAt;
+    return {
+        id: stringField(request.id) || randomUUID(),
+        started_at: startedAt,
+        completed_at: completedAt,
+        method: stringField(request.method),
+        path: stringField(request.path),
+        status: Number.isInteger(request.status) ? Number(request.status) : null,
+        upstream: nullableStringField(request.upstream),
+        attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
+        latency_ms: numberField(request.latency_ms),
+        request_bytes: numberField(request.request_bytes),
+        response_bytes: numberField(request.response_bytes),
+        session: nullableStringField(request.session),
+        error: nullableStringField(request.error),
+    };
+}
+function stringField(value) {
+    return typeof value === "string" ? value : "";
+}
+function nullableStringField(value) {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    const text = `${value}`;
+    return text.length > 0 ? text : null;
+}
+function numberField(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 function normalizeProxyState(state) {
     if (!state) {
@@ -357,51 +442,74 @@ function normalizeProxyState(state) {
 function ensureProxyMetrics(state) {
     return state.metrics ?? createProxyMetrics();
 }
+let proxyStateMutationQueue = Promise.resolve();
+async function mutateProxyMetrics(state, stateRoot, mutate) {
+    const mutation = proxyStateMutationQueue.then(async () => {
+        const currentState = await readProxyState(stateRoot) ?? state;
+        const metrics = ensureProxyMetrics(currentState);
+        mutate(metrics);
+        currentState.metrics = metrics;
+        await writeProxyState(stateRoot, currentState);
+        state.metrics = metrics;
+    });
+    proxyStateMutationQueue = mutation.then(() => undefined, () => undefined);
+    await mutation;
+}
 function updateProxyLatencyStats(latency, latencyMs) {
+    latency.last = latencyMs;
     latency.count += 1;
     latency.sum += latencyMs;
     latency.min = latency.min === null ? latencyMs : Math.min(latency.min, latencyMs);
     latency.max = latency.max === null ? latencyMs : Math.max(latency.max, latencyMs);
-    latency.samples.push(latencyMs);
-    if (latency.samples.length > PROXY_LATENCY_SAMPLE_LIMIT) {
-        latency.samples.splice(0, latency.samples.length - PROXY_LATENCY_SAMPLE_LIMIT);
-    }
 }
-function recordProxyRequestMetric(state, record) {
-    const metrics = ensureProxyMetrics(state);
-    metrics.total_requests += 1;
-    if (record.status >= 500) {
-        metrics.failed_requests += 1;
+async function startProxyRequestMetric(state, stateRoot, record) {
+    await mutateProxyMetrics(state, stateRoot, (metrics) => {
+        metrics.active_requests = [
+            record,
+            ...metrics.active_requests.filter((request) => request.id !== record.id),
+        ].slice(0, PROXY_ACTIVE_REQUEST_LIMIT);
+    });
+}
+async function updateProxyActiveRequestMetric(state, stateRoot, record) {
+    await mutateProxyMetrics(state, stateRoot, (metrics) => {
+        metrics.active_requests = metrics.active_requests.map((request) => request.id === record.id ? record : request);
+    });
+}
+async function completeProxyRequestMetric(state, stateRoot, record) {
+    await mutateProxyMetrics(state, stateRoot, (metrics) => {
+        metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
+        metrics.total_requests += 1;
+        incrementProxyStatusCount(metrics.status_counts, record.status);
+        if (record.upstream) {
+            metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
+        }
+        updateProxyLatencyStats(metrics.latency_ms, record.latency_ms);
+        metrics.recent_requests.unshift(record);
+        metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
+    });
+}
+function incrementProxyStatusCount(counts, status) {
+    if (status === null) {
+        counts["5xx"] += 1;
     }
-    else {
-        metrics.successful_requests += 1;
+    else if (status >= 500) {
+        counts["5xx"] += 1;
     }
-    if (record.upstream) {
-        metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
+    else if (status >= 400) {
+        counts["4xx"] += 1;
     }
-    updateProxyLatencyStats(metrics.latency_ms, record.latency_ms);
-    metrics.recent_requests.unshift(record);
-    metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
-    state.metrics = metrics;
+    else if (status >= 300) {
+        counts["3xx"] += 1;
+    }
+    else if (status >= 200) {
+        counts["2xx"] += 1;
+    }
 }
 function averageLatency(latency) {
     return latency.count > 0 ? latency.sum / latency.count : 0;
 }
-function percentileLatency(samples, percentile) {
-    if (samples.length === 0) {
-        return 0;
-    }
-    const sorted = [...samples].sort((left, right) => left - right);
-    const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
-    return sorted[index];
-}
 function formatLatencyMs(value) {
     return `${Math.round(value)}ms`;
-}
-function formatFailureRate(successful, failed) {
-    const total = successful + failed;
-    const rate = total > 0 ? (failed / total) * 100 : 0;
-    return `${rate.toFixed(1)}%`;
 }
 function formatProxyUpstreamHits(profileOrder, metrics) {
     const knownNames = [
@@ -409,16 +517,19 @@ function formatProxyUpstreamHits(profileOrder, metrics) {
         ...Object.keys(metrics.upstream_hit_counts).filter((name) => !profileOrder.includes(name)),
     ];
     if (knownNames.length === 0) {
-        return `upstreams: ${textDim("none")}`;
+        return textDim("none");
     }
-    return `upstreams: ${knownNames
+    return knownNames
         .map((name) => {
         const count = metrics.upstream_hit_counts[name] ?? 0;
         return `${colorName(truncateProxyText(name, 16))}=${count === 0 ? textDim("0") : colorCount(String(count))}`;
     })
-        .join("  ")}`;
+        .join(",");
 }
 function formatProxyStatusCode(status) {
+    if (status === null) {
+        return textDim("");
+    }
     if (status >= 500) {
         return textRed(String(status));
     }
@@ -431,7 +542,7 @@ function formatProxyStatusCode(status) {
     if (status > 0) {
         return textGreen(String(status));
     }
-    return textDim("0");
+    return textDim("");
 }
 function truncateProxyPath(value, max = 40) {
     if (value.length <= max) {
@@ -472,8 +583,6 @@ function fitProxyTerminalLine(line) {
     return `${result}\u001b[0m`;
 }
 function formatProxyStatusLine(now, state, runtime) {
-    const status = state ? textGreen("installed") : textRed("missing");
-    const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
     const runtimeLabel = state && runtime?.healthy ? textGreen("healthy") : state ? textYellow("starting") : textDim("none");
     const pid = runtime?.pid === null || runtime?.pid === undefined
         ? textDim("none")
@@ -481,40 +590,82 @@ function formatProxyStatusLine(now, state, runtime) {
             ? textGreen(String(runtime.pid))
             : textYellow(String(runtime.pid));
     return [
-        `status: ${status}`,
-        `proxy: ${proxy}`,
-        `runtime: ${runtimeLabel}`,
-        `pid: ${pid}`,
+        textBold("ccs proxy"),
         `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
+        `runtime: ${state ? runtimeLabel : textRed("missing")}`,
+        `pid: ${pid}`,
+        `refresh: ${textDim(`${PROXY_STATUS_REFRESH_SECONDS}s`)}`,
     ].join("  ");
 }
-function formatProxyFilesLine(state, options) {
-    const parts = [
-        `config ${colorPath(options.codexConfigPath)}`,
-        `state ${colorPath(statePath(options.stateRoot))}`,
+function formatProxyPathsLines(state, options) {
+    return [
+        `proxy: ${state ? colorUrl(state.proxy_base_url) : textDim("unset")}`,
+        `state: ${colorPath(statePath(options.stateRoot))}`,
+        `log: ${colorPath(proxyLogPath(options.stateRoot))}`,
+        `config: ${colorPath(options.codexConfigPath)}`,
     ];
-    if (state?.backup_path) {
-        parts.push(`backup ${colorPath(state.backup_path)}`);
-    }
-    return `files: ${parts.join("  ")}`;
 }
-function formatProxyRecentRequest(record, index) {
-    const at = record.at ? new Date(record.at).toLocaleTimeString("en-GB", { hour12: false }) : "--:--:--";
-    const method = truncateProxyText(record.method || "-", PROXY_RECENT_METHOD_WIDTH);
-    const path = truncateProxyPath(record.path || "-", PROXY_RECENT_PATH_WIDTH);
-    const upstream = record.upstream ? truncateProxyText(record.upstream, PROXY_RECENT_UPSTREAM_WIDTH) : "-";
+function formatProxyHistoryRequest(record, index) {
+    const time = formatProxyTime(record.completed_at);
+    const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
+    const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+    const upstream = formatProxyUpstream(record.upstream, record.attempts);
     const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
     return [
         `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
-        padVisibleRight(textDim(at), PROXY_RECENT_TIME_WIDTH),
-        padVisibleRight(textMagenta(method), PROXY_RECENT_METHOD_WIDTH),
-        padVisibleRight(colorPath(path), PROXY_RECENT_PATH_WIDTH),
-        padVisibleLeft(formatProxyStatusCode(record.status), PROXY_RECENT_STATUS_WIDTH),
-        padVisibleRight(record.upstream ? colorName(upstream) : textDim(upstream), PROXY_RECENT_UPSTREAM_WIDTH),
-        padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_RECENT_LATENCY_WIDTH),
-        padVisibleLeft(textDim(`x${record.attempts}`), PROXY_RECENT_ATTEMPTS_WIDTH),
+        padVisibleRight(textDim(time), PROXY_TABLE_TIME_WIDTH),
+        padVisibleLeft(formatProxyStatusCode(record.status), PROXY_TABLE_CODE_WIDTH),
+        padVisibleRight(upstream, PROXY_TABLE_UPSTREAM_WIDTH),
+        padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_TABLE_MS_WIDTH),
+        padVisibleLeft(formatProxyBytes(record.response_bytes), PROXY_TABLE_SIZE_WIDTH),
+        padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
+        colorPath(path),
         error,
     ].join(" ");
+}
+function formatProxyActiveRequest(record, nowMs, index) {
+    const startedAt = Date.parse(record.started_at);
+    const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
+    const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
+    const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+    return [
+        `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
+        padVisibleRight(textDim(formatProxyTime(record.started_at)), PROXY_TABLE_TIME_WIDTH),
+        padVisibleLeft(textDim("..."), PROXY_TABLE_CODE_WIDTH),
+        padVisibleRight(textDim("-"), PROXY_TABLE_UPSTREAM_WIDTH),
+        padVisibleLeft(textYellow(formatLatencyMs(elapsedMs)), PROXY_TABLE_MS_WIDTH),
+        padVisibleLeft(formatProxyBytes(record.request_bytes), PROXY_TABLE_SIZE_WIDTH),
+        padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
+        colorPath(path),
+    ].join(" ");
+}
+function formatProxyTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "--:--:--" : date.toLocaleTimeString("en-GB", { hour12: false });
+}
+function formatProxyBytes(value) {
+    if (!Number.isFinite(value) || value <= 0) {
+        return textDim("-");
+    }
+    if (value < 1024) {
+        return `${Math.round(value)}B`;
+    }
+    if (value < 1024 * 1024) {
+        return `${Math.round(value / 1024)}K`;
+    }
+    return `${(value / 1024 / 1024).toFixed(1)}M`;
+}
+function formatProxySession(value) {
+    return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
+}
+function formatProxyUpstream(upstream, attempts) {
+    if (!upstream) {
+        return textDim("-");
+    }
+    const suffix = attempts > 1 ? textDim(`x${attempts}`) : "";
+    return `${colorName(truncateProxyText(upstream, PROXY_TABLE_UPSTREAM_WIDTH - visibleLength(suffix)))}${suffix}`;
 }
 export function resolveProxySwitchBaseUrl(state) {
     return state?.proxy_base_url ?? null;
@@ -586,6 +737,47 @@ async function readBody(request, limitBytes) {
     }
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
+function extractSessionShortId(body) {
+    if (body.length === 0) {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(body.toString("utf8"));
+        const sessionId = findJsonStringField(parsed, "session_id");
+        return sessionId ? shortSessionId(sessionId) : null;
+    }
+    catch {
+        return null;
+    }
+}
+function findJsonStringField(value, field) {
+    if (!value || typeof value !== "object") {
+        return null;
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findJsonStringField(item, field);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+    const raw = value;
+    if (typeof raw[field] === "string" && raw[field].length > 0) {
+        return raw[field];
+    }
+    for (const item of Object.values(raw)) {
+        const found = findJsonStringField(item, field);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+}
+function shortSessionId(value) {
+    return value.length <= 10 ? value : value.slice(0, 8);
+}
 async function forwardRequest(request, upstreamBaseUrl, body, timeoutMs) {
     const requestUrl = new URL(request.url || "/", "http://localhost");
     const headers = new Headers();
@@ -613,66 +805,15 @@ async function forwardRequest(request, upstreamBaseUrl, body, timeoutMs) {
         signal: AbortSignal.timeout(timeoutMs),
     });
 }
-async function proxyThroughUpstreams(request, upstreams, body) {
-    const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
-    let lastStatus = 502;
-    let lastError = "unknown";
-    for (const upstream of upstreams) {
-        let response;
-        try {
-            response = await forwardRequest(request, upstream.baseURL, body, UPSTREAM_TIMEOUT_MS);
-        }
-        catch (error) {
-            lastError = error instanceof Error ? error.message : String(error);
-            continue;
-        }
-        lastStatus = response.status;
-        if (!response.ok && (response.status >= 500 || [401, 403, 408, 429].includes(response.status))) {
-            lastError = `${upstream.baseURL} returned ${response.status}`;
-            continue;
-        }
-        if (isStreamContentType(contentType) || isStreamContentType(`${response.headers.get("content-type") || ""}`)) {
-            return response;
-        }
-        if (isJsonContentType(`${response.headers.get("content-type") || ""}`)) {
-            const text = await response.text();
-            try {
-                const parsed = JSON.parse(text);
-                const reasoning = parseReasoningTokens(parsed);
-                if (reasoning !== null && REASONING_EQUALS.includes(reasoning)) {
-                    return new Response(JSON.stringify({
-                        error: {
-                            message: `codex proxy blocked suspicious reasoning response from ${upstream.baseURL}`,
-                            type: "codex_proxy",
-                            code: "reasoning_guard_triggered",
-                            reasoning_tokens: reasoning,
-                            status_code: NON_STREAM_STATUS_CODE,
-                        },
-                    }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } });
-                }
-            }
-            catch {
-                // keep original payload
-            }
-            return new Response(text, {
-                status: response.status,
-                headers: responseHeadersToObject(response.headers),
-            });
-        }
-        const buffer = Buffer.from(await response.arrayBuffer());
-        return new Response(buffer, {
-            status: response.status,
-            headers: responseHeadersToObject(response.headers),
-        });
+class ProxyResponseWriteError extends Error {
+    status;
+    responseBytes;
+    constructor(message, status, responseBytes) {
+        super(message);
+        this.status = status;
+        this.responseBytes = responseBytes;
+        this.name = "ProxyResponseWriteError";
     }
-    return new Response(JSON.stringify({
-        error: {
-            message: `proxy upstreams failed: ${lastError}`,
-            type: "codex_proxy",
-            code: "upstream_failure",
-            status_code: lastStatus,
-        },
-    }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } });
 }
 async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
     const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
@@ -757,13 +898,66 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
         error: lastError,
     };
 }
-function writeResponse(res, response) {
+async function writeResponse(res, response) {
     res.writeHead(response.status, responseHeadersToObject(response.headers));
     if (!response.body) {
-        res.end();
-        return;
+        return endEmptyResponse(res);
     }
-    Readable.fromWeb(response.body).pipe(res);
+    return writeReadableResponse(res, Readable.fromWeb(response.body));
+}
+async function endEmptyResponse(res) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error = null) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (error) {
+                reject(new ProxyResponseWriteError(error.message, 500, 0));
+                return;
+            }
+            resolve(0);
+        };
+        res.once("finish", () => finish());
+        res.once("error", (error) => finish(error));
+        res.end();
+    });
+}
+async function writeReadableResponse(res, stream) {
+    return new Promise((resolve, reject) => {
+        let responseBytes = 0;
+        let settled = false;
+        let finished = false;
+        const finish = (error = null) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            if (error) {
+                stream.destroy();
+                reject(error);
+                return;
+            }
+            resolve(responseBytes);
+        };
+        stream.on("data", (chunk) => {
+            const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            responseBytes += value.length;
+        });
+        stream.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 502, responseBytes)));
+        res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
+        res.on("close", () => {
+            if (!finished) {
+                finish(new ProxyResponseWriteError("client closed response before upstream stream completed", 499, responseBytes));
+            }
+        });
+        res.on("finish", () => {
+            finished = true;
+            finish();
+        });
+        stream.pipe(res);
+    });
 }
 export async function installProxy(options) {
     if (!fs.existsSync(options.codexConfigPath)) {
@@ -799,47 +993,69 @@ export async function restoreProxy(options) {
     await removeProxyState(options.stateRoot);
     return stopped;
 }
-function formatProxyRequestsSummary(metrics) {
+function formatProxyRequestsSummary(metrics, profileOrder) {
     return [
-        `requests: total ${colorCount(String(metrics.total_requests))}`,
-        `ok ${textGreen(String(metrics.successful_requests))}`,
-        `failed ${textRed(String(metrics.failed_requests))}`,
-        `rate ${metrics.failed_requests === 0 ? textGreen(formatFailureRate(metrics.successful_requests, metrics.failed_requests)) : textRed(formatFailureRate(metrics.successful_requests, metrics.failed_requests))}`,
-    ].join(" | ");
+        `status total=${colorCount(String(metrics.total_requests))}`,
+        `active=${metrics.active_requests.length === 0 ? textDim("0") : textYellow(String(metrics.active_requests.length))}`,
+        `2xx=${formatProxyStatusCount(metrics.status_counts["2xx"], textGreen)}`,
+        `3xx=${formatProxyStatusCount(metrics.status_counts["3xx"], textYellow)}`,
+        `4xx=${formatProxyStatusCount(metrics.status_counts["4xx"], textYellow)}`,
+        `5xx=${formatProxyStatusCount(metrics.status_counts["5xx"], textRed)}`,
+        `upstreams=${formatProxyUpstreamHits(profileOrder, metrics)}`,
+    ].join(" ");
+}
+function formatProxyStatusCount(value, color) {
+    return value === 0 ? textDim("0") : color(String(value));
 }
 function formatProxyLatencySummary(metrics) {
     if (metrics.latency_ms.count === 0) {
-        return `latency: ${textDim("no requests yet")}`;
+        return `latency last=${textDim("-")} avg=${textDim("-")} min=${textDim("-")} max=${textDim("-")}`;
     }
     return [
-        `latency: avg ${textYellow(formatLatencyMs(averageLatency(metrics.latency_ms)))}`,
-        `p50 ${textYellow(formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 50)))}`,
-        `p95 ${textYellow(formatLatencyMs(percentileLatency(metrics.latency_ms.samples, 95)))}`,
-        `min ${textYellow(formatLatencyMs(metrics.latency_ms.min ?? 0))}`,
-        `max ${textYellow(formatLatencyMs(metrics.latency_ms.max ?? 0))}`,
-    ].join(" | ");
+        `latency last=${textYellow(formatLatencyMs(metrics.latency_ms.last ?? 0))}`,
+        `avg=${textYellow(formatLatencyMs(averageLatency(metrics.latency_ms)))}`,
+        `min=${textYellow(formatLatencyMs(metrics.latency_ms.min ?? 0))}`,
+        `max=${textYellow(formatLatencyMs(metrics.latency_ms.max ?? 0))}`,
+    ].join(" ");
 }
-function formatProxyRecentHeader(metrics) {
-    return `${textBold("recent")}${metrics.recent_requests.length > 0 ? "" : ` ${textDim("none")}`}`;
+function formatProxyTableHeader() {
+    return [
+        "    ",
+        padVisibleRight(textDim("time"), PROXY_TABLE_TIME_WIDTH),
+        padVisibleLeft(textDim("code"), PROXY_TABLE_CODE_WIDTH),
+        padVisibleRight(textDim("up"), PROXY_TABLE_UPSTREAM_WIDTH),
+        padVisibleLeft(textDim("ms"), PROXY_TABLE_MS_WIDTH),
+        padVisibleLeft(textDim("size"), PROXY_TABLE_SIZE_WIDTH),
+        padVisibleRight(textDim("session"), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(textDim("method"), PROXY_TABLE_METHOD_WIDTH),
+        textDim("path"),
+    ].join(" ");
 }
-function formatProxyRecentRows(metrics, count = 5) {
-    const rows = metrics.recent_requests.slice(0, count).map((record, index) => formatProxyRecentRequest(record, index));
-    while (rows.length < count) {
-        rows.push(textDim("-"));
+function formatProxyActiveRows(metrics, now, count = PROXY_RECENT_RENDER_COUNT) {
+    if (metrics.active_requests.length === 0) {
+        return [`  ${textDim("no active requests")}`];
     }
-    return rows;
+    return metrics.active_requests.slice(0, count).map((record, index) => formatProxyActiveRequest(record, now.getTime(), index));
+}
+function formatProxyHistoryRows(metrics, count = PROXY_RECENT_RENDER_COUNT) {
+    if (metrics.recent_requests.length === 0) {
+        return [`  ${textDim("no historical requests")}`];
+    }
+    return metrics.recent_requests.slice(0, count).map((record, index) => formatProxyHistoryRequest(record, index));
 }
 function buildProxyStatusLines(now, state, profileOrder, runtime, options) {
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
-        textBold("ccs proxy"),
         formatProxyStatusLine(now, state, runtime),
-        formatProxyFilesLine(state, options),
-        formatProxyRequestsSummary(metrics),
+        ...formatProxyPathsLines(state, options),
+        formatProxyRequestsSummary(metrics, profileOrder),
         formatProxyLatencySummary(metrics),
-        formatProxyUpstreamHits(profileOrder, metrics),
-        formatProxyRecentHeader(metrics),
-        ...formatProxyRecentRows(metrics, PROXY_RECENT_RENDER_COUNT),
+        textBold("active"),
+        formatProxyTableHeader(),
+        ...formatProxyActiveRows(metrics, now),
+        textBold("history"),
+        formatProxyTableHeader(),
+        ...formatProxyHistoryRows(metrics),
         textDim("commands: ccs proxy [--once] | install | restore | stop | serve"),
     ].map(fitProxyTerminalLine);
 }
@@ -958,24 +1174,64 @@ export async function serveProxy(options) {
                     res.end(JSON.stringify({ status: "ok", pid: process.pid }));
                     return;
                 }
-                const profiles = await readProfiles();
-                const upstreamProfiles = buildProxyUpstreams(profiles);
-                const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
-                const requestStartedAt = performance.now();
-                const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body);
-                const latencyMs = Math.max(0, performance.now() - requestStartedAt);
-                recordProxyRequestMetric(state, {
-                    at: new Date().toISOString(),
+                const requestStartedAt = new Date();
+                const requestStartedAtMs = performance.now();
+                const activeRecord = {
+                    id: randomUUID(),
+                    started_at: requestStartedAt.toISOString(),
                     method: req.method || "GET",
                     path: url.pathname,
-                    status: outcome.response.status,
-                    upstream: outcome.upstream,
-                    attempts: outcome.attempts,
+                    request_bytes: 0,
+                    session: null,
+                };
+                await startProxyRequestMetric(state, options.stateRoot, activeRecord);
+                let status = null;
+                let upstream = null;
+                let attempts = 0;
+                let responseBytes = 0;
+                let errorText = null;
+                try {
+                    const profiles = await readProfiles();
+                    const upstreamProfiles = buildProxyUpstreams(profiles);
+                    const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
+                    activeRecord.request_bytes = body.length;
+                    activeRecord.session = extractSessionShortId(body);
+                    await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                    const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body);
+                    status = outcome.response.status;
+                    upstream = outcome.upstream;
+                    attempts = outcome.attempts;
+                    errorText = outcome.error;
+                    responseBytes = await writeResponse(res, outcome.response);
+                }
+                catch (error) {
+                    if (error instanceof ProxyResponseWriteError) {
+                        status = error.status;
+                        responseBytes = error.responseBytes;
+                        errorText = error.message;
+                    }
+                    else {
+                        status = status ?? 500;
+                        errorText = error instanceof Error ? error.message : String(error);
+                    }
+                    if (!res.headersSent) {
+                        const payload = JSON.stringify({ error: { message: errorText } });
+                        responseBytes = Buffer.byteLength(payload);
+                        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+                        res.end(payload);
+                    }
+                }
+                const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
+                await completeProxyRequestMetric(state, options.stateRoot, {
+                    ...activeRecord,
+                    completed_at: new Date().toISOString(),
+                    status,
+                    upstream,
+                    attempts,
                     latency_ms: latencyMs,
-                    error: outcome.error,
+                    response_bytes: responseBytes,
+                    error: errorText,
                 });
-                await writeProxyState(options.stateRoot, state);
-                writeResponse(res, outcome.response);
             }
             catch (error) {
                 res.writeHead(500, { "content-type": "application/json; charset=utf-8" });

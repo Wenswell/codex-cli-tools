@@ -562,9 +562,10 @@ Behavior:
 - `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
 - `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
 - Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
-- `ccs proxy` without arguments watches the proxy state, proxy URL, files, PID, request totals, latency summary, upstream hit counts, and the latest 5 requests live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
+- `ccs proxy` without arguments watches runtime state, active paths, state/log files, request status totals, latency summary, upstream hit counts, active requests, and completed history live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
-- The live proxy view uses a title line, a compact status line, color-coded runtime state, request metrics, yellow latency values, green upstream hit counts, and a fixed-width recent-request table.
+- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy. Completed, failed, and fully streamed responses move to `history`. Both tables use `time code up ms size session method path` columns and show up to 5 rows.
+- Proxy metrics count completed requests by HTTP status group: `2xx`, `3xx`, `4xx`, and `5xx`. Latency shows `last`, `avg`, `min`, and `max`.
 - `ccs proxy help` prints the proxy command summary.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
