@@ -18,7 +18,7 @@ import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCa
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
-import { readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
@@ -966,6 +966,23 @@ function printProfile(name, profiles) {
 function printProfileDetails(name, profile) {
     printProfileSummary("profile", name, profile);
 }
+function proxyOptions() {
+    const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
+    return {
+        codexConfigPath: codexConfigPath(),
+        listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
+        listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
+        stateRoot,
+    };
+}
+async function resolveActiveBaseUrl(profileBaseUrl) {
+    const proxyState = await readProxyState();
+    if (!proxyState) {
+        return profileBaseUrl;
+    }
+    const runtime = await ensureProxyRunning(proxyOptions());
+    return resolveProxySwitchBaseUrl(runtime?.state ?? proxyState) ?? profileBaseUrl;
+}
 async function runCodexWithProfile(profiles, name, codexArgs) {
     if (!name || name.startsWith("-")) {
         throw new Error("usage: ccs run PROFILE [CODEX_ARGS...]");
@@ -981,8 +998,7 @@ async function runCodexWithProfile(profiles, name, codexArgs) {
     const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
     const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
     const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
-    const proxyState = await readProxyState();
-    const baseURL = resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL;
+    const baseURL = await resolveActiveBaseUrl(normalized.baseURL);
     const args = [
         "-c",
         `model_providers.${provider}.base_url=${JSON.stringify(baseURL)}`,
@@ -1244,8 +1260,7 @@ async function switchProfile(name) {
     }
     await ensureDir(codexDir());
     const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
-    const proxyState = await readProxyState();
-    const nextConfig = updateTomlBaseUrl(currentConfig, resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL);
+    const nextConfig = updateTomlBaseUrl(currentConfig, await resolveActiveBaseUrl(normalized.baseURL));
     await writeTextFile(codexConfigPath(), nextConfig);
     await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: normalized.apiKey }), 0o600);
     await writeProfiles({
@@ -4941,13 +4956,7 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "proxy") {
-        const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
-        await runProxyCommand(args, {
-            codexConfigPath: codexConfigPath(),
-            listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
-            listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
-            stateRoot,
-        });
+        await runProxyCommand(args, proxyOptions());
         return;
     }
     if (command === "run") {

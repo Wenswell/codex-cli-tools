@@ -74,7 +74,7 @@ import {
   colorUrl,
   printKeyValue,
 } from "../lib/output.js";
-import { readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   mergeTomlDefaults,
   readTomlBaseUrl,
@@ -1384,6 +1384,25 @@ function printProfileDetails(name: string, profile: Profile): void {
   printProfileSummary("profile", name, profile);
 }
 
+function proxyOptions() {
+  const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
+  return {
+    codexConfigPath: codexConfigPath(),
+    listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
+    listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
+    stateRoot,
+  };
+}
+
+async function resolveActiveBaseUrl(profileBaseUrl: string): Promise<string> {
+  const proxyState = await readProxyState();
+  if (!proxyState) {
+    return profileBaseUrl;
+  }
+  const runtime = await ensureProxyRunning(proxyOptions());
+  return resolveProxySwitchBaseUrl(runtime?.state ?? proxyState) ?? profileBaseUrl;
+}
+
 async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefined, codexArgs: string[]): Promise<void> {
   if (!name || name.startsWith("-")) {
     throw new Error("usage: ccs run PROFILE [CODEX_ARGS...]");
@@ -1401,8 +1420,7 @@ async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefi
   const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
   const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
   const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
-  const proxyState = await readProxyState();
-  const baseURL = resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL;
+  const baseURL = await resolveActiveBaseUrl(normalized.baseURL);
   const args = [
     "-c",
     `model_providers.${provider}.base_url=${JSON.stringify(baseURL)}`,
@@ -1704,8 +1722,7 @@ async function switchProfile(name: string): Promise<Profile> {
   await ensureDir(codexDir());
 
   const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
-  const proxyState = await readProxyState();
-  const nextConfig = updateTomlBaseUrl(currentConfig, resolveProxySwitchBaseUrl(proxyState) ?? normalized.baseURL);
+  const nextConfig = updateTomlBaseUrl(currentConfig, await resolveActiveBaseUrl(normalized.baseURL));
   await writeTextFile(codexConfigPath(), nextConfig);
 
   await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: normalized.apiKey }), 0o600);
@@ -6088,13 +6105,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "proxy") {
-    const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
-    await runProxyCommand(args, {
-      codexConfigPath: codexConfigPath(),
-      listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
-      listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
-      stateRoot,
-    });
+    await runProxyCommand(args, proxyOptions());
     return;
   }
 

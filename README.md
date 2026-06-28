@@ -557,11 +557,14 @@ Behavior:
 - Updates the current provider's `base_url` in `~/.codex/config.toml`.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
-- `ccs proxy install` stores proxy state in `~/.config/codex-tools/proxy.json`, backs up the current `~/.codex/config.toml`, and rewrites the active provider `base_url` to the proxy URL.
+- `ccs proxy install` stores proxy state in `~/.config/codex-tools/proxy.json`, backs up the current `~/.codex/config.toml`, rewrites the active provider `base_url` to the proxy URL, and starts the proxy in the background.
 - `ccs proxy restore` restores `~/.codex/config.toml` from the saved backup and removes proxy state.
 - `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
+- `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
+- Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
 - `ccs proxy` without arguments watches the proxy state, proxy URL, files, PID, request totals, latency summary, upstream hit counts, and the latest 5 requests live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
-- The live proxy view uses a title line, a compact status line, color-coded request metrics, yellow latency values, green upstream hit counts, and a fixed-width recent-request table.
+- `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
+- The live proxy view uses a title line, a compact status line, color-coded runtime state, request metrics, yellow latency values, green upstream hit counts, and a fixed-width recent-request table.
 - `ccs proxy help` prints the proxy command summary.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
