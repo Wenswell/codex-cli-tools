@@ -2,12 +2,13 @@ import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer } from "node:http";
+import { setInterval } from "node:timers";
 import { Readable } from "node:stream";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
-import { colorPath, colorUrl, printKeyValue } from "../lib/output.js";
+import { colorPath, printKeyValue } from "../lib/output.js";
 import { textBlue, textDim, textGreen } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
@@ -256,14 +257,94 @@ export async function restoreProxy(options) {
     await copyFile(state.backup_path, options.codexConfigPath);
     await removeProxyState(options.stateRoot);
 }
-async function printStatus(options) {
-    const state = await readProxyState(options.stateRoot);
-    const profiles = await readProfiles();
-    const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
-    printKeyValue("state:", state ? textGreen("installed") : textDim("missing"));
-    printKeyValue("proxy:", state ? colorUrl(state.proxy_base_url) : textDim("unset"));
-    printKeyValue("upstreams:", profileOrder.length > 0 ? profileOrder.join(" -> ") : textDim("none"));
-    printKeyValue("files:", `${colorPath(options.codexConfigPath)}  ${colorPath(options.stateRoot)}`);
+async function readProxyPid(stateRoot) {
+    const pidPath = path.join(stateRoot, "proxy.pid");
+    if (!fs.existsSync(pidPath)) {
+        return { pid: null, running: false };
+    }
+    const raw = (await readFile(pidPath, "utf8")).trim();
+    const pid = Number.parseInt(raw, 10);
+    if (!Number.isInteger(pid)) {
+        return { pid: null, running: false };
+    }
+    try {
+        process.kill(pid, 0);
+        return { pid, running: true };
+    }
+    catch {
+        return { pid, running: false };
+    }
+}
+function formatProxyStatusLine(now, state, profileOrder, pidState) {
+    const segments = [
+        now.toLocaleTimeString("en-GB", { hour12: false }),
+        state ? "installed" : "missing",
+        state ? state.proxy_base_url : "proxy unset",
+        `upstreams ${profileOrder.length > 0 ? profileOrder.join(" -> ") : "none"}`,
+        pidState.pid ? `pid ${pidState.running ? "running" : "stopped"} ${pidState.pid}` : "pid none",
+    ];
+    return segments.join(" | ");
+}
+function formatProxyStatusFooter(options) {
+    return `files: ${colorPath(options.codexConfigPath)}  ${colorPath(options.stateRoot)}`;
+}
+async function runProxyStatusLoop(options) {
+    let stopped = false;
+    let timer = null;
+    let refreshing = false;
+    let firstFrame = true;
+    const commandsLine = textDim("commands: ccs proxy [--once] | install | restore | stop | serve");
+    const render = async () => {
+        if (refreshing || stopped) {
+            return;
+        }
+        refreshing = true;
+        try {
+            const state = await readProxyState(options.stateRoot);
+            const profiles = await readProfiles();
+            const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
+            const pidState = await readProxyPid(options.stateRoot);
+            const statusLine = formatProxyStatusLine(new Date(), state, profileOrder, pidState);
+            const lines = [statusLine, formatProxyStatusFooter(options), commandsLine];
+            if (process.stdout.isTTY) {
+                if (firstFrame) {
+                    process.stdout.write(lines.join("\n"));
+                    firstFrame = false;
+                }
+                else {
+                    process.stdout.write(`\u001b[2A\r\u001b[2K${statusLine}\n\u001b[2K${formatProxyStatusFooter(options)}\n\u001b[2K${commandsLine}`);
+                }
+            }
+            else {
+                console.log(lines.join("\n"));
+            }
+        }
+        finally {
+            refreshing = false;
+        }
+    };
+    await render();
+    if (options.once || !process.stdout.isTTY) {
+        return;
+    }
+    await new Promise((resolve) => {
+        const cleanup = () => {
+            if (stopped) {
+                return;
+            }
+            stopped = true;
+            if (timer) {
+                clearInterval(timer);
+            }
+            process.stdout.write("\n");
+            resolve();
+        };
+        timer = setInterval(() => {
+            void render();
+        }, 1000);
+        process.once("SIGINT", cleanup);
+        process.once("SIGTERM", cleanup);
+    });
 }
 export async function stopProxy(options) {
     const pidPath = path.join(options.stateRoot, "proxy.pid");
@@ -330,7 +411,7 @@ export async function serveProxy(options) {
 function usageHelpLines() {
     return [
         "Usage:",
-        "  ccs proxy                           # print proxy status and upstream order",
+        "  ccs proxy [--once]                  # print or watch proxy status and upstream order",
         "  ccs proxy install                   # back up config and install proxy routing",
         "  ccs proxy restore                   # restore config from the saved backup",
         "  ccs proxy stop                      # stop a running proxy process by PID file",
@@ -345,8 +426,11 @@ export async function runProxyCommand(args, options) {
     const command = args[0] ?? "";
     const rest = args.slice(1);
     if (command === "") {
-        await printStatus(options);
-        console.log(textDim("commands: ccs proxy | install | restore | stop | serve"));
+        await runProxyStatusLoop(options);
+        return;
+    }
+    if (command === "--once") {
+        await runProxyStatusLoop({ ...options, once: true });
         return;
     }
     if (command === "install") {
