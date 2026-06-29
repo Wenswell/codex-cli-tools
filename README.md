@@ -564,7 +564,8 @@ Behavior:
 - Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
 - `ccs proxy` without arguments watches runtime state, active paths, state/log files, request status totals, latency summary, upstream hit counts, active requests, and completed history live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
-- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy. Completed, failed, and fully streamed responses move to `history`. Both tables use `time code up ms size session method path` columns and show up to 5 rows.
+- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy. Completed, failed, and fully streamed responses move to `history`. Both tables use `time code up ms size session req_model up_model method path` columns and show up to 5 rows.
+- For `/v1/chat/completions`, `/chat/completions`, `/v1/responses`, and `/responses`, proxy metrics record request model and upstream model metadata when the JSON or SSE payload contains it. Missing model fields are stored as `null` and render as empty cells. SSE model extraction stops after the first valid model value and keeps the forwarded response bytes unchanged.
 - Proxy metrics count completed requests by HTTP status group: `2xx`, `3xx`, `4xx`, and `5xx`. Latency shows `last`, `avg`, `min`, and `max`.
 - `ccs proxy help` prints the proxy command summary.
 - Does not print API keys directly; status output masks keys and includes `user@host`.

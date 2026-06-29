@@ -178,10 +178,14 @@ test("proxy state persists request metrics", async () => {
     assert.deepEqual(state.metrics.status_counts, { "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1 });
     assert.equal(state.metrics.active_requests.length, 1);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
+    assert.equal(state.metrics.active_requests[0].request_model, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
     assert.equal(state.metrics.recent_requests[0].upstream, "input");
     assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
     assert.equal(state.metrics.recent_requests[0].response_bytes, 51);
+    assert.equal(state.metrics.recent_requests[0].request_model, null);
+    assert.equal(state.metrics.recent_requests[0].upstream_model, null);
+    assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
     assert.equal(state.metrics.latency_ms.last, 120);
 
   } finally {
@@ -408,13 +412,223 @@ test("proxy records active and history request lifecycle", async () => {
     const output = await captureConsole(() => runProxyCommand(["--once"], { ...proxyOptions, once: true }));
     assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+method\s+path\n\s+no active requests/);
-    assert.match(output, /history\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+method\s+path/);
+    assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path\n\s+no active requests/);
+    assert.match(output, /history\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
   } finally {
     finishStream?.();
     finishAbortStream?.();
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy records request and upstream model metadata for OpenAI paths", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const paths = [
+    {
+      path: "/v1/chat/completions",
+      requestModel: "chat-request-v1",
+      responseBody: { id: "chat-v1", model: "chat-upstream-v1" },
+      upstreamModel: "chat-upstream-v1",
+      source: "json.model",
+      streamModel: "chat-stream-v1",
+      streamSource: "sse.data.model",
+    },
+    {
+      path: "/chat/completions",
+      requestModel: "chat-request-root",
+      responseBody: { id: "chat-root", model: "chat-upstream-root" },
+      upstreamModel: "chat-upstream-root",
+      source: "json.model",
+      streamModel: "chat-stream-root",
+      streamSource: "sse.data.model",
+    },
+    {
+      path: "/v1/responses",
+      requestModel: "responses-request-v1",
+      responseBody: { id: "responses-v1", response: { model: "responses-upstream-v1" }, model: "ignored-root" },
+      upstreamModel: "responses-upstream-v1",
+      source: "json.response.model",
+      streamModel: "responses-stream-v1",
+      streamSource: "sse.data.response.model",
+    },
+    {
+      path: "/responses",
+      requestModel: "responses-request-root",
+      responseBody: { id: "responses-root", model: "responses-upstream-root" },
+      upstreamModel: "responses-upstream-root",
+      source: "json.model",
+      streamModel: "responses-stream-root",
+      streamSource: "sse.data.model",
+    },
+  ];
+  const pathByName = new Map(paths.map((entry) => [entry.path, entry]));
+  let activeStreamResolve;
+  const activeStreamStarted = new Promise((resolve) => {
+    activeStreamResolve = resolve;
+  });
+  let releaseActiveStream;
+  const activeStreamRelease = new Promise((resolve) => {
+    releaseActiveStream = resolve;
+  });
+
+  const upstream = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const spec = pathByName.get(url.pathname);
+    if (!spec) {
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "missing" }));
+      return;
+    }
+
+    if (url.searchParams.get("stream") === "1") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const payload = spec.streamSource === "sse.data.response.model"
+        ? { response: { model: spec.streamModel }, delta: "hello" }
+        : { model: spec.streamModel, choices: [] };
+      res.write("event: message\n");
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+
+    if (url.searchParams.get("hold") === "1") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ model: spec.streamModel })}\n\n`);
+      activeStreamResolve();
+      void activeStreamRelease.then(() => {
+        res.end("data: [DONE]\n\n");
+      });
+      return;
+    }
+
+    if (url.searchParams.get("missing") === "1") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ id: "missing-model" }));
+      return;
+    }
+
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(spec.responseBody));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    for (const spec of paths) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}${spec.path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: spec.requestModel }),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), spec.responseBody);
+      const state = await waitForState(
+        stateRoot,
+        (candidate) => candidate.metrics.recent_requests[0]?.path === spec.path,
+      );
+      const record = state.metrics.recent_requests[0];
+      assert.equal(record.request_model, spec.requestModel);
+      assert.equal(record.upstream_model, spec.upstreamModel);
+      assert.equal(record.upstream_model_source, spec.source);
+    }
+
+    for (const spec of paths) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}${spec.path}?stream=1`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: `${spec.requestModel}-stream` }),
+      });
+      assert.equal(response.status, 200);
+      const expectedPayload = spec.streamSource === "sse.data.response.model"
+        ? { response: { model: spec.streamModel }, delta: "hello" }
+        : { model: spec.streamModel, choices: [] };
+      const expectedBody = `event: message\ndata: ${JSON.stringify(expectedPayload)}\n\ndata: [DONE]\n\n`;
+      assert.equal(await response.text(), expectedBody);
+      const state = await waitForState(
+        stateRoot,
+        (candidate) => candidate.metrics.recent_requests[0]?.path === spec.path,
+      );
+      const record = state.metrics.recent_requests[0];
+      assert.equal(record.request_model, `${spec.requestModel}-stream`);
+      assert.equal(record.upstream_model, spec.streamModel);
+      assert.equal(record.upstream_model_source, spec.streamSource);
+    }
+
+    const activeSpec = paths[0];
+    const activeFetch = fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "active-request-model" }),
+    });
+    await activeStreamStarted;
+    let state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests[0]?.path === activeSpec.path,
+    );
+    assert.equal(state.metrics.active_requests[0].request_model, "active-request-model");
+
+    releaseActiveStream();
+    assert.equal(await (await activeFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.path === activeSpec.path);
+
+    const missingResponse = await fetch(`http://127.0.0.1:${proxyPort}/responses?missing=1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "no model" }),
+    });
+    assert.equal(missingResponse.status, 200);
+    await missingResponse.text();
+    state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.path === "/responses");
+    assert.equal(state.metrics.recent_requests[0].request_model, null);
+    assert.equal(state.metrics.recent_requests[0].upstream_model, null);
+    assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
+
+    const output = await captureConsole(() => runProxyCommand(["--once"], { ...proxyOptions, once: true }));
+    assert.match(output, /time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
+    assert.doesNotMatch(output, /\bnull\b/);
+    assert.match(output, /POST\s+\/responses/);
+    assert.match(output, /responses-strea\.\.\.\s+POST\s+\/responses/);
+  } finally {
+    releaseActiveStream?.();
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
@@ -564,6 +778,59 @@ async function waitForFetchOk(url) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw lastError;
+}
+
+async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(
+    join(stateRoot, "profiles.json"),
+    JSON.stringify(
+      {
+        profiles: {
+          input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" },
+        },
+        current: "input",
+        toggle: ["input"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(
+    join(stateRoot, "proxy.json"),
+    JSON.stringify(
+      {
+        installed_at: "2026-01-01T00:00:00.000Z",
+        codex_config_path: join(home, ".codex", "config.toml"),
+        provider_name: "codex",
+        original_base_url: "https://proxy.example.com",
+        proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+        listen_host: "127.0.0.1",
+        listen_port: proxyPort,
+        profile_order: ["input"],
+        backup_path: "/tmp/backup.toml",
+        metrics: {
+          total_requests: 0,
+          active_requests: [],
+          status_counts: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0 },
+          upstream_hit_counts: {},
+          latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
+          recent_requests: [],
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+async function listenServer(server, port) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
 }
 
 async function waitForState(stateRoot, predicate) {

@@ -104,7 +104,7 @@ Column behavior:
 - Missing model fields render as empty values.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
-### Questions
+### Decisions
 
-- Confirm status table column names: `req_model` and `up_model`.
-- Confirm stream model extraction should stop at the first valid model value.
+- Status table column names are `req_model` and `up_model`.
+- Stream model extraction stops at the first valid model value.

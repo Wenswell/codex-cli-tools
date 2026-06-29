@@ -8,6 +8,7 @@ import { setInterval } from "node:timers";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { TextDecoder } from "node:util";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
@@ -33,6 +34,7 @@ const PROXY_TABLE_UPSTREAM_WIDTH = 12;
 const PROXY_TABLE_MS_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 7;
 const PROXY_TABLE_SESSION_WIDTH = 10;
+const PROXY_TABLE_MODEL_WIDTH = 18;
 const PROXY_TABLE_METHOD_WIDTH = 6;
 const PROXY_TABLE_PATH_WIDTH = 30;
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -395,6 +397,7 @@ function normalizeProxyActiveRecord(request) {
         path: stringField(request.path),
         request_bytes: numberField(request.request_bytes),
         session: nullableStringField(request.session),
+        request_model: nullableStringField(request.request_model),
     };
 }
 function normalizeProxyHistoryRecord(request) {
@@ -413,6 +416,9 @@ function normalizeProxyHistoryRecord(request) {
         request_bytes: numberField(request.request_bytes),
         response_bytes: numberField(request.response_bytes),
         session: nullableStringField(request.session),
+        request_model: nullableStringField(request.request_model),
+        upstream_model: nullableStringField(request.upstream_model),
+        upstream_model_source: nullableStringField(request.upstream_model_source),
         error: nullableStringField(request.error),
     };
 }
@@ -609,6 +615,8 @@ function formatProxyHistoryRequest(record, index) {
     const time = formatProxyTime(record.completed_at);
     const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+    const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
+    const upstreamModel = truncateProxyText(record.upstream_model ?? "", PROXY_TABLE_MODEL_WIDTH);
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
     return [
@@ -619,6 +627,8 @@ function formatProxyHistoryRequest(record, index) {
         padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_TABLE_MS_WIDTH),
         padVisibleLeft(formatProxyBytes(record.response_bytes), PROXY_TABLE_SIZE_WIDTH),
         padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
+        padVisibleRight(upstreamModel ? colorName(upstreamModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
         padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
         colorPath(path),
         error,
@@ -629,6 +639,7 @@ function formatProxyActiveRequest(record, nowMs, index) {
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
     const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+    const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
     return [
         `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
         padVisibleRight(textDim(formatProxyTime(record.started_at)), PROXY_TABLE_TIME_WIDTH),
@@ -637,6 +648,8 @@ function formatProxyActiveRequest(record, nowMs, index) {
         padVisibleLeft(textYellow(formatLatencyMs(elapsedMs)), PROXY_TABLE_MS_WIDTH),
         padVisibleLeft(formatProxyBytes(record.request_bytes), PROXY_TABLE_SIZE_WIDTH),
         padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
+        padVisibleRight(textDim(""), PROXY_TABLE_MODEL_WIDTH),
         padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
         colorPath(path),
     ].join(" ");
@@ -750,6 +763,67 @@ function extractSessionShortId(body) {
         return null;
     }
 }
+function proxyEndpointClass(pathname) {
+    if (pathname === "/v1/chat/completions" || pathname === "/chat/completions") {
+        return "chat/completions";
+    }
+    if (pathname === "/v1/responses" || pathname === "/responses") {
+        return "responses";
+    }
+    return null;
+}
+function parseJsonBody(body) {
+    if (body.length === 0) {
+        return null;
+    }
+    try {
+        return JSON.parse(body.toString("utf8"));
+    }
+    catch {
+        return null;
+    }
+}
+function extractRequestModel(body, endpointClass) {
+    if (!endpointClass) {
+        return null;
+    }
+    const parsed = parseJsonBody(body);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? jsonStringAt(parsed, ["model"])
+        : null;
+}
+function extractUpstreamModelFromJson(payload, endpointClass) {
+    if (!endpointClass || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+        return { model: null, source: null };
+    }
+    if (endpointClass === "chat/completions") {
+        const model = jsonStringAt(payload, ["model"]);
+        return model ? { model, source: "json.model" } : { model: null, source: null };
+    }
+    const responseModel = jsonStringAt(payload, ["response", "model"]);
+    if (responseModel) {
+        return { model: responseModel, source: "json.response.model" };
+    }
+    const model = jsonStringAt(payload, ["model"]);
+    return model ? { model, source: "json.model" } : { model: null, source: null };
+}
+function extractUpstreamModelFromSsePayload(payload, endpointClass) {
+    const extraction = extractUpstreamModelFromJson(payload, endpointClass);
+    if (!extraction.model || !extraction.source) {
+        return extraction;
+    }
+    return { model: extraction.model, source: `sse.data.${extraction.source.slice("json.".length)}` };
+}
+function jsonStringAt(value, pathSegments) {
+    let current = value;
+    for (const segment of pathSegments) {
+        if (!current || typeof current !== "object" || Array.isArray(current)) {
+            return null;
+        }
+        current = current[segment];
+    }
+    return typeof current === "string" && current.length > 0 ? current : null;
+}
 function findJsonStringField(value, field) {
     if (!value || typeof value !== "object") {
         return null;
@@ -815,7 +889,79 @@ class ProxyResponseWriteError extends Error {
         this.name = "ProxyResponseWriteError";
     }
 }
-async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
+class ProxySseModelScanner {
+    endpointClass;
+    decoder = new TextDecoder("utf-8");
+    buffer = "";
+    modelValue = null;
+    modelSource = null;
+    constructor(endpointClass) {
+        this.endpointClass = endpointClass;
+    }
+    push(chunk) {
+        if (!this.endpointClass || this.modelValue) {
+            return;
+        }
+        this.buffer += this.decoder.decode(chunk, { stream: true });
+        this.consumeCompleteEvents();
+    }
+    finish() {
+        if (this.endpointClass && !this.modelValue) {
+            this.buffer += this.decoder.decode();
+            this.consumeEvent(this.buffer);
+            this.buffer = "";
+        }
+        return { model: this.modelValue, source: this.modelSource };
+    }
+    current() {
+        return { model: this.modelValue, source: this.modelSource };
+    }
+    consumeCompleteEvents() {
+        while (!this.modelValue) {
+            const separator = findSseEventSeparator(this.buffer);
+            if (!separator) {
+                return;
+            }
+            const event = this.buffer.slice(0, separator.index);
+            this.buffer = this.buffer.slice(separator.index + separator.length);
+            this.consumeEvent(event);
+        }
+    }
+    consumeEvent(event) {
+        const data = event
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).replace(/^ /, ""))
+            .join("\n")
+            .trim();
+        if (!data || data === "[DONE]") {
+            return;
+        }
+        try {
+            const parsed = JSON.parse(data);
+            const extraction = extractUpstreamModelFromSsePayload(parsed, this.endpointClass);
+            if (extraction.model) {
+                this.modelValue = extraction.model;
+                this.modelSource = extraction.source;
+            }
+        }
+        catch {
+            // SSE data frames can contain non-JSON control text.
+        }
+    }
+}
+function findSseEventSeparator(value) {
+    const separators = ["\r\n\r\n", "\n\n", "\r\r"];
+    let match = null;
+    for (const separator of separators) {
+        const index = value.indexOf(separator);
+        if (index >= 0 && (!match || index < match.index)) {
+            match = { index, length: separator.length };
+        }
+    }
+    return match;
+}
+async function proxyThroughUpstreamsWithStats(request, upstreams, body, endpointClass) {
     const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
     let lastStatus = 502;
     let lastError = "unknown";
@@ -836,12 +982,14 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
             continue;
         }
         if (isStreamContentType(contentType) || isStreamContentType(`${response.headers.get("content-type") || ""}`)) {
-            return { response, upstream: upstream.name, attempts, error: null };
+            return { response, upstream: upstream.name, attempts, upstreamModel: null, upstreamModelSource: null, error: null };
         }
         if (isJsonContentType(`${response.headers.get("content-type") || ""}`)) {
             const text = await response.text();
+            let upstreamModel = { model: null, source: null };
             try {
                 const parsed = JSON.parse(text);
+                upstreamModel = extractUpstreamModelFromJson(parsed, endpointClass);
                 const reasoning = parseReasoningTokens(parsed);
                 if (reasoning !== null && REASONING_EQUALS.includes(reasoning)) {
                     return {
@@ -856,6 +1004,8 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
                         }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } }),
                         upstream: upstream.name,
                         attempts,
+                        upstreamModel: upstreamModel.model,
+                        upstreamModelSource: upstreamModel.source,
                         error: null,
                     };
                 }
@@ -870,6 +1020,8 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
                 }),
                 upstream: upstream.name,
                 attempts,
+                upstreamModel: upstreamModel.model,
+                upstreamModelSource: upstreamModel.source,
                 error: null,
             };
         }
@@ -881,6 +1033,8 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
             }),
             upstream: upstream.name,
             attempts,
+            upstreamModel: null,
+            upstreamModelSource: null,
             error: null,
         };
     }
@@ -895,15 +1049,20 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body) {
         }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } }),
         upstream: null,
         attempts,
+        upstreamModel: null,
+        upstreamModelSource: null,
         error: lastError,
     };
 }
-async function writeResponse(res, response) {
+async function writeResponse(res, response, endpointClass, modelObserver) {
     res.writeHead(response.status, responseHeadersToObject(response.headers));
     if (!response.body) {
         return endEmptyResponse(res);
     }
-    return writeReadableResponse(res, Readable.fromWeb(response.body));
+    const scanner = isStreamContentType(`${response.headers.get("content-type") || ""}`)
+        ? new ProxySseModelScanner(endpointClass)
+        : null;
+    return writeReadableResponse(res, Readable.fromWeb(response.body), scanner, modelObserver);
 }
 async function endEmptyResponse(res) {
     return new Promise((resolve, reject) => {
@@ -924,7 +1083,7 @@ async function endEmptyResponse(res) {
         res.end();
     });
 }
-async function writeReadableResponse(res, stream) {
+async function writeReadableResponse(res, stream, scanner, modelObserver) {
     return new Promise((resolve, reject) => {
         let responseBytes = 0;
         let settled = false;
@@ -944,6 +1103,12 @@ async function writeReadableResponse(res, stream) {
         stream.on("data", (chunk) => {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             responseBytes += value.length;
+            if (scanner) {
+                scanner.push(value);
+                const extraction = scanner.current();
+                modelObserver.model = extraction.model;
+                modelObserver.source = extraction.source;
+            }
         });
         stream.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 502, responseBytes)));
         res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
@@ -954,6 +1119,11 @@ async function writeReadableResponse(res, stream) {
         });
         res.on("finish", () => {
             finished = true;
+            if (scanner) {
+                const extraction = scanner.finish();
+                modelObserver.model = extraction.model;
+                modelObserver.source = extraction.source;
+            }
             finish();
         });
         stream.pipe(res);
@@ -1027,6 +1197,8 @@ function formatProxyTableHeader() {
         padVisibleLeft(textDim("ms"), PROXY_TABLE_MS_WIDTH),
         padVisibleLeft(textDim("size"), PROXY_TABLE_SIZE_WIDTH),
         padVisibleRight(textDim("session"), PROXY_TABLE_SESSION_WIDTH),
+        padVisibleRight(textDim("req_model"), PROXY_TABLE_MODEL_WIDTH),
+        padVisibleRight(textDim("up_model"), PROXY_TABLE_MODEL_WIDTH),
         padVisibleRight(textDim("method"), PROXY_TABLE_METHOD_WIDTH),
         textDim("path"),
     ].join(" ");
@@ -1183,26 +1355,36 @@ export async function serveProxy(options) {
                     path: url.pathname,
                     request_bytes: 0,
                     session: null,
+                    request_model: null,
                 };
                 await startProxyRequestMetric(state, options.stateRoot, activeRecord);
                 let status = null;
                 let upstream = null;
                 let attempts = 0;
                 let responseBytes = 0;
+                let upstreamModel = null;
+                let upstreamModelSource = null;
                 let errorText = null;
+                const endpointClass = proxyEndpointClass(url.pathname);
                 try {
                     const profiles = await readProfiles();
                     const upstreamProfiles = buildProxyUpstreams(profiles);
                     const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
                     activeRecord.request_bytes = body.length;
                     activeRecord.session = extractSessionShortId(body);
+                    activeRecord.request_model = extractRequestModel(body, endpointClass);
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                    const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body);
+                    const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body, endpointClass);
                     status = outcome.response.status;
                     upstream = outcome.upstream;
                     attempts = outcome.attempts;
+                    upstreamModel = outcome.upstreamModel;
+                    upstreamModelSource = outcome.upstreamModelSource;
                     errorText = outcome.error;
-                    responseBytes = await writeResponse(res, outcome.response);
+                    const streamModelObserver = { model: upstreamModel, source: upstreamModelSource };
+                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
+                    upstreamModel = streamModelObserver.model;
+                    upstreamModelSource = streamModelObserver.source;
                 }
                 catch (error) {
                     if (error instanceof ProxyResponseWriteError) {
@@ -1230,6 +1412,9 @@ export async function serveProxy(options) {
                     attempts,
                     latency_ms: latencyMs,
                     response_bytes: responseBytes,
+                    request_model: activeRecord.request_model,
+                    upstream_model: upstreamModel,
+                    upstream_model_source: upstreamModelSource,
                     error: errorText,
                 });
             }
