@@ -46,14 +46,14 @@ Active rows show `...` for code, elapsed time for `ms`, and known request bytes 
 
 ## Model field plan
 
-First version scope covers four OpenAI-style endpoints:
+First version scope covers four concrete OpenAI-style paths:
 
-- `responses`
-- `chat/completions`
-- `completions`
-- `embeddings`
+- `/v1/chat/completions`
+- `/v1/responses`
+- `/chat/completions`
+- `/responses`
 
-Endpoint matching normalizes an optional `/v1` prefix, so `/v1/responses` and `/responses` are the same endpoint class.
+The four paths map to two endpoint classes: `chat/completions` and `responses`.
 
 ### Field semantics
 
@@ -65,12 +65,12 @@ The proxy forwards requests directly. Model fields are observational metadata on
 
 ### Extraction plan
 
-| Endpoint | `request_model` | Non-stream `upstream_model` | Stream `upstream_model` |
-| --- | --- | --- | --- |
-| `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
-| `chat/completions` | request JSON `model` | response JSON `model` | SSE `model` |
-| `completions` | request JSON `model` | response JSON `model` | SSE `model` |
-| `embeddings` | request JSON `model` | response JSON `model` | no stream support in first version |
+| Path | Endpoint class | `request_model` | Non-stream `upstream_model` | Stream `upstream_model` |
+| --- | --- | --- | --- | --- |
+| `/v1/chat/completions` | `chat/completions` | request JSON `model` | response JSON `model` | SSE `model` |
+| `/chat/completions` | `chat/completions` | request JSON `model` | response JSON `model` | SSE `model` |
+| `/v1/responses` | `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
+| `/responses` | `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
 
 ### Lifecycle integration
 
@@ -97,15 +97,14 @@ Column behavior:
 
 ### Tests
 
-- Request JSON model is recorded for all four endpoint classes.
-- Non-stream JSON responses extract `upstream_model` for all four endpoint classes when present.
-- SSE responses extract `upstream_model` for `responses`, `chat/completions`, and `completions`.
+- Request JSON model is recorded for all four concrete paths.
+- Non-stream JSON responses extract `upstream_model` for all four concrete paths when present.
+- SSE responses extract `upstream_model` for all four concrete paths when present.
 - SSE forwarding preserves the exact client-visible response bytes.
 - Missing model fields render as empty values.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
 ### Questions
 
-- Confirm the first-version endpoint set is exactly `responses`, `chat/completions`, `completions`, and `embeddings`.
 - Confirm status table column names: `req_model` and `up_model`.
 - Confirm stream model extraction should stop at the first valid model value.
