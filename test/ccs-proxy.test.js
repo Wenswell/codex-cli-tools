@@ -178,7 +178,16 @@ test("proxy state persists request metrics", async () => {
     assert.deepEqual(state.metrics.status_counts, { "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1 });
     assert.equal(state.metrics.active_requests.length, 1);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
+    assert.equal(state.metrics.active_requests[0].completed_at, null);
+    assert.equal(state.metrics.active_requests[0].status, null);
+    assert.equal(state.metrics.active_requests[0].upstream, null);
+    assert.equal(state.metrics.active_requests[0].attempts, 0);
+    assert.equal(state.metrics.active_requests[0].latency_ms, 0);
+    assert.equal(state.metrics.active_requests[0].response_bytes, 0);
     assert.equal(state.metrics.active_requests[0].request_model, null);
+    assert.equal(state.metrics.active_requests[0].upstream_model, null);
+    assert.equal(state.metrics.active_requests[0].upstream_model_source, null);
+    assert.equal(state.metrics.active_requests[0].error, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
     assert.equal(state.metrics.recent_requests[0].upstream, "input");
     assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
@@ -361,10 +370,14 @@ test("proxy records active and history request lifecycle", async () => {
 
     const streamFetch = fetch(`http://127.0.0.1:${proxyPort}/stream`, { method: "POST", body: "{}" });
     await streamStarted;
-    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 1);
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests[0]?.status === 200);
     state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.active_requests[0].path, "/stream");
+    assert.equal(state.metrics.active_requests[0].completed_at, null);
+    assert.equal(state.metrics.active_requests[0].status, 200);
+    assert.equal(state.metrics.active_requests[0].upstream, "input");
+    assert.equal(state.metrics.active_requests[0].attempts, 1);
     assert.equal(state.metrics.recent_requests[0].path, "/slow");
 
     finishStream();
@@ -390,6 +403,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.ok(state);
     assert.equal(state.metrics.recent_requests[0].status, 499);
     assert.equal(state.metrics.recent_requests[0].error, "client closed response before upstream stream completed");
+    assert.equal(state.metrics.recent_requests[0].upstream_model, null);
 
     const clientError = await fetch(`http://127.0.0.1:${proxyPort}/client-error`, { method: "POST", body: "{}" });
     assert.equal(clientError.status, 404);
@@ -420,7 +434,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assert.match(output, /client closed response before upstream stream completed/);
-    assertProxyHistoryColumnsAligned(output);
+    assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
   } finally {
@@ -492,14 +506,9 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     },
   ];
   const pathByName = new Map(paths.map((entry) => [entry.path, entry]));
-  let activeStreamResolve;
-  const activeStreamStarted = new Promise((resolve) => {
-    activeStreamResolve = resolve;
-  });
-  let releaseActiveStream;
-  const activeStreamRelease = new Promise((resolve) => {
-    releaseActiveStream = resolve;
-  });
+  const firstHold = holdControl();
+  const secondHold = holdControl();
+  const thirdHold = holdControl();
 
   const upstream = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -522,11 +531,13 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
       return;
     }
 
-    if (url.searchParams.get("hold") === "1") {
+    const hold = url.searchParams.get("hold");
+    if (hold === "1" || hold === "2" || hold === "3") {
+      const control = hold === "1" ? firstHold : hold === "2" ? secondHold : thirdHold;
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(`data: ${JSON.stringify({ model: spec.streamModel })}\n\n`);
-      activeStreamResolve();
-      void activeStreamRelease.then(() => {
+      control.markStarted();
+      void control.release.then(() => {
         res.end("data: [DONE]\n\n");
       });
       return;
@@ -606,14 +617,14 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "active-request-model" }),
     });
-    await activeStreamStarted;
+    await firstHold.started;
     let state = await waitForState(
       stateRoot,
       (candidate) => candidate.metrics.active_requests[0]?.path === activeSpec.path,
     );
     assert.equal(state.metrics.active_requests[0].request_model, "active-request-model");
 
-    releaseActiveStream();
+    firstHold.finish();
     assert.equal(await (await activeFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
     await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.path === activeSpec.path);
 
@@ -629,14 +640,70 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
 
-    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
+    const activeOutputFetch = fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=2`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "active-output-model" }),
+    });
+    await secondHold.started;
+    state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests[0]?.upstream_model === activeSpec.streamModel,
+    );
+    assert.equal(state.metrics.active_requests[0].completed_at, null);
+    assert.equal(state.metrics.active_requests[0].status, 200);
+    assert.equal(state.metrics.active_requests[0].upstream, "input");
+    assert.equal(state.metrics.active_requests[0].attempts, 1);
+    assert.equal(state.metrics.active_requests[0].request_model, "active-output-model");
+    assert.equal(state.metrics.active_requests[0].upstream_model, activeSpec.streamModel);
+    assert.equal(state.metrics.active_requests[0].upstream_model_source, "sse.data.model");
+
+    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
     assert.match(output, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bnull\b/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /active-ou…\s+chat-stre…\s+\/v1\/chat\/c…/);
     assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
     assert.match(output, /responses…\s+responses…\s+\/responses/);
-    assertProxyHistoryColumnsAligned(output);
+    assertProxyRequestColumnsAligned(output, "active");
+    assertProxyRequestColumnsAligned(output, "history");
+
+    secondHold.finish();
+    assert.equal(await (await activeOutputFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
+    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.request_model === "active-output-model");
+
+    const abortController = new AbortController();
+    const abortResponse = await fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=3`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "active-abort-model" }),
+      signal: abortController.signal,
+    });
+    assert.equal(abortResponse.status, 200);
+    await thirdHold.started;
+    const abortReader = abortResponse.body.getReader();
+    const abortChunk = await abortReader.read();
+    assert.equal(Buffer.from(abortChunk.value).toString("utf8"), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\n`);
+    await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests[0]?.request_model === "active-abort-model"
+        && candidate.metrics.active_requests[0]?.upstream_model === activeSpec.streamModel,
+    );
+    abortController.abort();
+    await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.recent_requests[0]?.request_model === "active-abort-model",
+    );
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.recent_requests[0].status, 499);
+    assert.equal(state.metrics.recent_requests[0].upstream_model, activeSpec.streamModel);
+    assert.equal(state.metrics.recent_requests[0].upstream_model_source, "sse.data.model");
   } finally {
-    releaseActiveStream?.();
+    firstHold.finish();
+    secondHold.finish();
+    thirdHold.finish();
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
@@ -674,7 +741,20 @@ test("proxy status table renders configured columns and compact units", () => {
       backup_path: "/tmp/backup.toml",
       metrics: {
         total_requests: 5,
-        active_requests: [],
+        active_requests: [
+          proxyHistoryRecord({
+            completed_at: null,
+            started_at: "2026-01-01T00:00:00.000Z",
+            status: 200,
+            upstream: "input",
+            latency_ms: 0,
+            request_bytes: 2048,
+            response_bytes: 0,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5",
+            path: "/active",
+          }),
+        ],
         status_counts: { "2xx": 5, "3xx": 0, "4xx": 0, "5xx": 0 },
         upstream_hit_counts: { input: 5 },
         latency_ms: { last: 56, count: 5, sum: 123, min: 56, max: 187200 },
@@ -745,12 +825,14 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
+  assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
   assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
   assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
   assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
-  assertProxyHistoryColumnsAligned(lines);
+  assertProxyRequestColumnsAligned(lines, "active");
+  assertProxyRequestColumnsAligned(lines, "history");
 });
 
 test("proxy runtime starts in the background and restore stops it", async () => {
@@ -963,6 +1045,18 @@ async function captureConsole(run) {
   return `${lines.join("\n")}\n`;
 }
 
+function holdControl() {
+  let markStarted;
+  const started = new Promise((resolve) => {
+    markStarted = resolve;
+  });
+  let finish;
+  const release = new Promise((resolve) => {
+    finish = resolve;
+  });
+  return { started, release, markStarted, finish };
+}
+
 function stripAnsi(value) {
   return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
@@ -994,13 +1088,14 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-function assertProxyHistoryColumnsAligned(output) {
+function assertProxyRequestColumnsAligned(output, section) {
   const pathWidth = 18;
   const lines = output.split("\n").map(stripAnsi);
-  const historyIndex = lines.indexOf("history");
-  assert.ok(historyIndex >= 0);
-  const header = lines[historyIndex + 1];
-  const firstRow = lines.slice(historyIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes("no historical requests"));
+  const sectionIndex = lines.indexOf(section);
+  assert.ok(sectionIndex >= 0);
+  const header = lines[sectionIndex + 1];
+  const emptyText = section === "active" ? "no active requests" : "no historical requests";
+  const firstRow = lines.slice(sectionIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes(emptyText));
   assert.ok(firstRow);
   const columns = ["session", "time", "up", "code", "ms", "size", "req_model", "up_model", "path", "error"];
   for (const column of columns) {
