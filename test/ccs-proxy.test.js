@@ -414,6 +414,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path\n\s+no active requests/);
     assert.match(output, /history\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
+    assertProxyHistoryColumnsAligned(output);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
   } finally {
@@ -627,6 +628,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.doesNotMatch(output, /\bnull\b/);
     assert.match(output, /POST\s+\/responses/);
     assert.match(output, /responses-strea\.\.\.\s+POST\s+\/responses/);
+    assertProxyHistoryColumnsAligned(output);
   } finally {
     releaseActiveStream?.();
     await stopProxy({
@@ -865,4 +867,17 @@ async function closeServer(server) {
     return;
   }
   await new Promise((resolve) => server.close(resolve));
+}
+
+function assertProxyHistoryColumnsAligned(output) {
+  const lines = output.split("\n");
+  const historyIndex = lines.indexOf("history");
+  assert.ok(historyIndex >= 0);
+  const header = lines[historyIndex + 1];
+  const firstRow = lines.slice(historyIndex + 2).find((line) => /^\s+\d+\./.test(line));
+  assert.ok(firstRow);
+  const methodColumn = header.indexOf("method");
+  const pathColumn = header.indexOf("path");
+  assert.equal(firstRow.indexOf("POST"), methodColumn);
+  assert.equal(firstRow.indexOf("/", methodColumn), pathColumn);
 }

@@ -1,0 +1,78 @@
+import { padVisibleLeft, padVisibleRight, textBold, truncateVisible, visibleLength } from "./text.js";
+const DEFAULT_GAP = 2;
+export function renderTable(columns, rows, options = {}) {
+    const header = options.header ?? true;
+    const gap = options.gap ?? DEFAULT_GAP;
+    const widths = resolveColumnWidths(columns, rows, options.maxWidth, gap, header);
+    const lines = header
+        ? [formatTableRow(columns, Object.fromEntries(columns.map((column) => [column.key, options.boldHeader === false ? column.title : textBold(column.title)])), widths, gap)]
+        : [];
+    for (const row of rows) {
+        lines.push(formatTableRow(columns, row, widths, gap));
+    }
+    return lines;
+}
+export function printTable(columns, rows, options = {}) {
+    for (const line of renderTable(columns, rows, options)) {
+        console.log(line);
+    }
+}
+function resolveColumnWidths(columns, rows, maxWidth, gap, includeHeader) {
+    const naturalWidths = columns.map((column) => {
+        const values = rows.map((row) => formatCellValue(row[column.key]));
+        if (includeHeader) {
+            values.push(column.title);
+        }
+        const natural = Math.max(0, ...values.map(visibleLength));
+        const minWidth = column.minWidth ?? 0;
+        const maxColumnWidth = column.width ?? column.maxWidth ?? Number.POSITIVE_INFINITY;
+        return Math.max(minWidth, Math.min(natural, maxColumnWidth));
+    });
+    const fixedWidths = naturalWidths.map((width, index) => columns[index].width ?? width);
+    if (!maxWidth || maxWidth <= 0 || columns.length === 0) {
+        return fixedWidths;
+    }
+    const separatorWidth = gap * Math.max(0, columns.length - 1);
+    const available = Math.max(0, maxWidth - separatorWidth);
+    const widths = [...fixedWidths];
+    let flexIndex = -1;
+    for (let index = columns.length - 1; index >= 0; index -= 1) {
+        if (columns[index].flex) {
+            flexIndex = index;
+            break;
+        }
+    }
+    if (flexIndex >= 0) {
+        const otherWidth = widths.reduce((sum, width, index) => sum + (index === flexIndex ? 0 : width), 0);
+        const column = columns[flexIndex];
+        widths[flexIndex] = clampWidth(available - otherWidth, column.minWidth ?? 0, column.maxWidth ?? Number.POSITIVE_INFINITY);
+    }
+    let overflow = widths.reduce((sum, width) => sum + width, 0) - available;
+    for (let index = columns.length - 1; index >= 0 && overflow > 0; index -= 1) {
+        const column = columns[index];
+        const minimum = column.minWidth ?? Math.min(widths[index], visibleLength(column.title));
+        const shrink = Math.min(overflow, Math.max(0, widths[index] - minimum));
+        widths[index] -= shrink;
+        overflow -= shrink;
+    }
+    return widths;
+}
+function formatTableRow(columns, row, widths, gap) {
+    return columns.map((column, index) => {
+        const width = widths[index] ?? 0;
+        const raw = formatCellValue(row[column.key]);
+        const value = column.truncate === false ? raw : truncateVisible(raw, width);
+        return (column.align ?? "left") === "right"
+            ? padVisibleLeft(value, width)
+            : padVisibleRight(value, width);
+    }).join(" ".repeat(gap)).trimEnd();
+}
+function formatCellValue(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+    return String(value);
+}
+function clampWidth(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}

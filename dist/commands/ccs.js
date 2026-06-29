@@ -16,10 +16,11 @@ import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from 
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, modelPricesCachePath, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
-import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, visibleLength, } from "../lib/text.js";
+import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, padVisibleLeft, padVisibleRight, visibleLength, truncateVisible, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
+import { printTable, renderTable } from "../lib/table.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
@@ -1287,19 +1288,6 @@ async function printStatus() {
     printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
     return normalized;
 }
-function alignTableCell(value, width, align) {
-    const padding = " ".repeat(Math.max(0, width - visibleLength(value)));
-    return align === "right" ? `${padding}${value}` : `${value}${padding}`;
-}
-function formatTableRows(rows, aligns = []) {
-    const widths = rows[0]?.map((_, index) => (Math.max(...rows.map((row) => visibleLength(row[index] ?? ""))))) ?? [];
-    return rows.map((row) => (row.map((value, index) => (alignTableCell(value, widths[index] ?? 0, aligns[index] ?? "left"))).join("  ").trimEnd()));
-}
-function printTable(rows, aligns = []) {
-    for (const row of formatTableRows(rows, aligns)) {
-        console.log(row);
-    }
-}
 async function printProfileList(profiles, includeUsage) {
     const entries = Object.entries(profiles.profiles ?? {});
     const current = profiles.current ?? "";
@@ -1320,14 +1308,22 @@ async function printProfileList(profiles, includeUsage) {
         })))
         : [];
     const rows = [...switchRows, ...usageRows];
-    printTable(rows.map((row) => ([
-        row.marker,
-        ...(includeUsage ? [row.type] : []),
-        colorName(row.name),
-        colorUrl(row.profile.baseURL),
-        row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-        ...(includeUsage ? row.usage : []),
-    ])), includeUsage ? ["left", "left", "left", "left", "left", "right", "right", "right", "right", "right"] : []);
+    const columns = [
+        { key: "marker", title: "" },
+        ...(includeUsage ? [{ key: "type", title: "" }] : []),
+        { key: "name", title: "" },
+        { key: "url", title: "" },
+        { key: "key", title: "" },
+        ...(includeUsage ? usageTableColumns() : []),
+    ];
+    printTable(columns, rows.map((row) => ({
+        marker: row.marker,
+        type: row.type,
+        name: colorName(row.name),
+        url: colorUrl(row.profile.baseURL),
+        key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+        ...usageTableValues(row.usage),
+    })), { header: false });
 }
 async function printUsageTargets(profiles) {
     const rows = await Promise.all(Object.entries(profiles.usage ?? {}).map(async ([name, profile]) => ({
@@ -1339,12 +1335,35 @@ async function printUsageTargets(profiles) {
         console.log(textDim("no usage profiles"));
         return;
     }
-    printTable(rows.map((row) => [
-        colorName(row.name),
-        colorUrl(row.profile.baseURL),
-        row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-        ...row.usage,
-    ]), ["left", "left", "left", "right", "right", "right", "right", "right"]);
+    printTable([
+        { key: "name", title: "" },
+        { key: "url", title: "" },
+        { key: "key", title: "" },
+        ...usageTableColumns(),
+    ], rows.map((row) => ({
+        name: colorName(row.name),
+        url: colorUrl(row.profile.baseURL),
+        key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+        ...usageTableValues(row.usage),
+    })), { header: false });
+}
+function usageTableColumns() {
+    return [
+        { key: "cost", title: "", align: "right" },
+        { key: "input", title: "", align: "right" },
+        { key: "output", title: "", align: "right" },
+        { key: "cache", title: "", align: "right" },
+        { key: "requests", title: "", align: "right" },
+    ];
+}
+function usageTableValues(usage) {
+    return {
+        cost: usage[0] ?? "",
+        input: usage[1] ?? "",
+        output: usage[2] ?? "",
+        cache: usage[3] ?? "",
+        requests: usage[4] ?? "",
+    };
 }
 function collectUsageTopTargets(profiles) {
     return [
@@ -1430,12 +1449,6 @@ function formatUsageTopEntry(entry, state, now) {
     }
     const status = tags.length > 0 ? `${textDim("(")}${tags.join(textDim(", "))}${textDim(")")}` : "";
     return `${formatTopName(name)} ${colorCost(formatTopCost(used))} ${padVisibleRight(status, usageTopStatusWidth)}`;
-}
-function padVisibleRight(value, width) {
-    return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
-}
-function padVisibleLeft(value, width) {
-    return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
 }
 function formatTopName(name) {
     return bgDarkBlue(` ${name} `);
@@ -1554,20 +1567,7 @@ function fitSingleTerminalLine(line) {
     if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
         return line;
     }
-    let visible = 0;
-    let result = "";
-    for (let index = 0; index < line.length && visible < columns - 1;) {
-        const ansi = /^\u001b\[[0-9;]*m/.exec(line.slice(index));
-        if (ansi) {
-            result += ansi[0];
-            index += ansi[0].length;
-            continue;
-        }
-        result += line[index];
-        visible += 1;
-        index += 1;
-    }
-    return `${result}\u001b[0m`;
+    return truncateVisible(line, columns - 1, "");
 }
 function buildUsageTopLine(entries, states, now) {
     const parts = entries.map((entry) => (formatUsageTopEntry(entry, states.get(entry.name), now)));
@@ -2432,20 +2432,29 @@ function printUsageTopHistoryBuckets(buckets, names) {
         const right = visibleBuckets[index + 1]
             ? formatUsageTopHistoryBucketRow(visibleBuckets[index + 1], names)
             : emptyColumns;
-        rows.push([...left, "|", ...right]);
+        rows.push(usageTopHistoryBucketTableRow(columns, left, right));
     }
-    printTable([
-        [...columns, "|", ...columns],
-        ...rows,
-    ], [
-        "left",
-        "right",
-        ...names.map(() => "right"),
-        "left",
-        "left",
-        "right",
-        ...names.map(() => "right"),
-    ]);
+    const tableColumns = [
+        ...usageTopHistoryBucketColumns(columns, "left"),
+        { key: "separator", title: "" },
+        ...usageTopHistoryBucketColumns(columns, "right"),
+    ];
+    printTable(tableColumns, rows);
+}
+function usageTopHistoryBucketColumns(columns, side) {
+    return columns.map((title, index) => ({
+        key: `${side}_${index}`,
+        title,
+        align: index === 0 ? "left" : "right",
+    }));
+}
+function usageTopHistoryBucketTableRow(columns, left, right) {
+    const values = { separator: "|" };
+    for (let index = 0; index < columns.length; index += 1) {
+        values[`left_${index}`] = left[index] ?? "";
+        values[`right_${index}`] = right[index] ?? "";
+    }
+    return values;
 }
 function readUsageTopHistoryTotalAt(pointMap, names, atMs, windowStart) {
     let total = 0;
@@ -2744,19 +2753,22 @@ function usageTopHistoryRecentDelta(name, buckets, windowEnd) {
 function formatUsageTopHistorySummaryLines(summaries, buckets, windowEnd) {
     return [
         textBold("summary"),
-        ...formatTableRows([
-            ["provider", "now", "5h delta", "last", "change"],
-            ...summaries.map((summary) => {
-                const recentDelta = usageTopHistoryRecentDelta(summary.name, buckets, windowEnd);
-                return [
-                    colorName(summary.name),
-                    formatHistoryValue(summary.latest),
-                    formatHistoryDeltaCell(recentDelta.delta, recentDelta.reset),
-                    formatHistoryLastChangeTime(summary),
-                    formatHistoryLastChangeDelta(summary),
-                ];
-            }),
-        ], ["left", "right", "right", "right", "right"]),
+        ...renderTable([
+            { key: "provider", title: "provider" },
+            { key: "now", title: "now", align: "right" },
+            { key: "recent", title: "5h delta", align: "right" },
+            { key: "last", title: "last", align: "right" },
+            { key: "change", title: "change", align: "right" },
+        ], summaries.map((summary) => {
+            const recentDelta = usageTopHistoryRecentDelta(summary.name, buckets, windowEnd);
+            return {
+                provider: colorName(summary.name),
+                now: formatHistoryValue(summary.latest),
+                recent: formatHistoryDeltaCell(recentDelta.delta, recentDelta.reset),
+                last: formatHistoryLastChangeTime(summary),
+                change: formatHistoryLastChangeDelta(summary),
+            };
+        })),
     ];
 }
 function printUsageTopHistoryChartWithSummary(series, summaries, buckets, windowEnd) {
@@ -3856,17 +3868,13 @@ function printCcsCostDayReport(report, options) {
 }
 function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (value) => value, shareTotal = total) {
     const totalCostUSD = shareTotal?.costUSD ?? 0;
-    const header = [firstHeader, "input", "output", "cost", "share", "bar"].map(textBold);
     const bodyRows = rows.map((row) => ccsCostRecordTableRow(formatKey(row.key), row, raw, false, totalCostUSD));
     const totalRow = total ? ccsCostRecordTableRow("total", total, raw, true, totalCostUSD) : null;
-    const tableRows = [
-        header,
-        ...bodyRows,
-    ];
+    const tableRows = [...bodyRows];
     if (totalRow) {
         tableRows.push(totalRow);
     }
-    const formatted = formatTableRows(tableRows, ["left", "right", "right", "right", "right", "left"]);
+    const formatted = renderTable(ccsCostRecordTableColumns(firstHeader), tableRows.map(ccsCostRecordTableValues));
     const separatorIndex = totalRow ? formatted.length - 1 : -1;
     const width = Math.max(0, ...formatted.map(visibleLength));
     for (let index = 0; index < formatted.length; index += 1) {
@@ -3875,6 +3883,26 @@ function printCcsCostRecordTable(firstHeader, rows, total, raw, formatKey = (val
         }
         console.log(formatted[index]);
     }
+}
+function ccsCostRecordTableColumns(firstHeader) {
+    return [
+        { key: "label", title: firstHeader },
+        { key: "input", title: "input", align: "right" },
+        { key: "output", title: "output", align: "right" },
+        { key: "cost", title: "cost", align: "right" },
+        { key: "share", title: "share", align: "right" },
+        { key: "bar", title: "bar" },
+    ];
+}
+function ccsCostRecordTableValues(row) {
+    return {
+        label: row[0] ?? "",
+        input: row[1] ?? "",
+        output: row[2] ?? "",
+        cost: row[3] ?? "",
+        share: row[4] ?? "",
+        bar: row[5] ?? "",
+    };
 }
 function ccsCostRecordTableRow(label, record, raw, emphasize, totalCostUSD) {
     const row = [
@@ -4645,17 +4673,22 @@ async function printCentralCcsCostStatus(profiles) {
                 return;
             }
             printTable([
-                ["machine", "speed", "events", "input", "output", "cost", "updated"],
-                ...status.machines.map((machine) => [
-                    colorName(machine.machine),
-                    machine.speed,
-                    formatInteger(machine.events),
-                    colorInput(formatCcsCostTokens(machine.inputTokens, false)),
-                    colorOutput(formatCcsCostTokens(machine.outputTokens, false)),
-                    colorCost(formatCcsCostUSD(machine.costUSD, false)),
-                    textDim(formatClockTime(new Date(machine.generatedAt))),
-                ]),
-            ], ["left", "left", "right", "right", "right", "right", "right"]);
+                { key: "machine", title: "machine" },
+                { key: "speed", title: "speed" },
+                { key: "events", title: "events", align: "right" },
+                { key: "input", title: "input", align: "right" },
+                { key: "output", title: "output", align: "right" },
+                { key: "cost", title: "cost", align: "right" },
+                { key: "updated", title: "updated", align: "right" },
+            ], status.machines.map((machine) => ({
+                machine: colorName(machine.machine),
+                speed: machine.speed,
+                events: formatInteger(machine.events),
+                input: colorInput(formatCcsCostTokens(machine.inputTokens, false)),
+                output: colorOutput(formatCcsCostTokens(machine.outputTokens, false)),
+                cost: colorCost(formatCcsCostUSD(machine.costUSD, false)),
+                updated: textDim(formatClockTime(new Date(machine.generatedAt))),
+            })));
             return;
         }
     }

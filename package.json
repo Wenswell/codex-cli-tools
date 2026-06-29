@@ -35,6 +35,9 @@
   "dependencies": {
     "asciichart": "^1.5.25",
     "diff": "^9.0.0",
-    "luxon": "^3.7.2"
+    "luxon": "^3.7.2",
+    "slice-ansi": "^9.0.0",
+    "string-width": "^8.2.1",
+    "strip-ansi": "^7.2.0"
   }
 }

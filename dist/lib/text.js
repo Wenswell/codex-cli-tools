@@ -1,3 +1,6 @@
+import sliceAnsi from "slice-ansi";
+import stringWidth from "string-width";
+import stripAnsi from "strip-ansi";
 export function maskSecret(value) {
     if (value.length <= 9) {
         return "*".repeat(value.length);
@@ -5,7 +8,26 @@ export function maskSecret(value) {
     return `${value.slice(0, 6)}***${value.slice(-3)}`;
 }
 export function visibleLength(value) {
-    return value.replace(/\u001b\[[0-9;]*m/g, "").length;
+    return stringWidth(stripAnsi(value));
+}
+export function truncateVisible(value, width, ellipsis = "...") {
+    if (width <= 0) {
+        return "";
+    }
+    if (visibleLength(value) <= width) {
+        return value;
+    }
+    const suffixWidth = visibleLength(ellipsis);
+    if (width <= suffixWidth) {
+        return sliceAnsi(ellipsis, 0, width);
+    }
+    return `${sliceAnsi(value, 0, width - suffixWidth)}${ellipsis}`;
+}
+export function padVisibleRight(value, width) {
+    return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
+}
+export function padVisibleLeft(value, width) {
+    return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
 }
 const canColorize = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 function withAnsi(code, value) {
