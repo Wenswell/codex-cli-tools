@@ -343,7 +343,7 @@ function normalizeProxyMetrics(value) {
         total_requests: Number.isInteger(raw.total_requests) ? Number(raw.total_requests) : 0,
         active_requests: Array.isArray(raw.active_requests)
             ? raw.active_requests.filter((item) => Boolean(item) && typeof item === "object")
-                .map(normalizeProxyActiveRecord)
+                .map((request) => normalizeProxyRequestRecord(request, "active"))
                 .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
             : [],
         status_counts: statusCounts,
@@ -400,21 +400,13 @@ function buildProxyStatusCounts(recentRequests, successfulRequests, failedReques
     }
     return counts;
 }
-function normalizeProxyActiveRecord(request) {
-    const startedAt = stringField(request.started_at) || stringField(request.at) || "";
-    return {
-        id: stringField(request.id) || randomUUID(),
-        started_at: startedAt,
-        method: stringField(request.method),
-        path: stringField(request.path),
-        request_bytes: numberField(request.request_bytes),
-        session: nullableStringField(request.session),
-        request_model: nullableStringField(request.request_model),
-    };
-}
 function normalizeProxyHistoryRecord(request) {
+    return normalizeProxyRequestRecord(request, "history");
+}
+function normalizeProxyRequestRecord(request, collection) {
     const startedAt = stringField(request.started_at) || stringField(request.at) || "";
-    const completedAt = stringField(request.completed_at) || stringField(request.at) || startedAt;
+    const completedAt = nullableStringField(request.completed_at)
+        ?? (collection === "history" ? nullableStringField(request.at) ?? startedAt : null);
     return {
         id: stringField(request.id) || randomUUID(),
         started_at: startedAt,
@@ -610,38 +602,26 @@ function formatProxyPathsLines(state, options) {
 function formatProxyFilePath(value) {
     return formatHomePath(value);
 }
-function formatProxyHistoryRequest(record) {
-    const time = formatProxyTime(record.completed_at);
+function formatProxyRequest(record, nowMs) {
+    const completed = record.completed_at !== null;
+    const startedAt = Date.parse(record.started_at);
+    const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
+    const time = formatProxyTime(record.completed_at ?? record.started_at);
+    const latencyMs = completed ? record.latency_ms : elapsedMs;
+    const size = completed ? record.response_bytes : record.request_bytes;
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
-        code: formatProxyStatusCode(record.status),
+        code: record.status === null && !completed ? textDim("…") : formatProxyStatusCode(record.status),
         up: upstream,
-        ms: textYellow(formatLatencyMs(record.latency_ms)),
-        size: formatProxyBytes(record.response_bytes),
+        ms: textYellow(formatLatencyMs(latencyMs)),
+        size: formatProxyBytes(size),
         session: formatProxySession(record.session),
         req_model: formatProxyRequestModel(record.request_model),
         up_model: formatProxyUpstreamModel(record.request_model, record.upstream_model),
         path: colorPath(path),
         error: formatProxyError(record.error),
-    };
-}
-function formatProxyActiveRequest(record, nowMs) {
-    const startedAt = Date.parse(record.started_at);
-    const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
-    const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
-    return {
-        time: textDim(formatProxyTime(record.started_at)),
-        code: textDim("…"),
-        up: textDim("-"),
-        ms: textYellow(formatLatencyMs(elapsedMs)),
-        size: formatProxyBytes(record.request_bytes),
-        session: formatProxySession(record.session),
-        req_model: formatProxyRequestModel(record.request_model),
-        up_model: textOrange("[unknown]"),
-        path: colorPath(path),
-        error: textDim(""),
     };
 }
 function formatProxyTime(value) {
@@ -1106,11 +1086,20 @@ async function endEmptyResponse(res) {
         res.end();
     });
 }
+function updateProxyModelObserver(modelObserver, extraction) {
+    if (modelObserver.model === extraction.model && modelObserver.source === extraction.source) {
+        return Promise.resolve();
+    }
+    modelObserver.model = extraction.model;
+    modelObserver.source = extraction.source;
+    return Promise.resolve(modelObserver.update?.(extraction));
+}
 async function writeReadableResponse(res, stream, scanner, modelObserver) {
     return new Promise((resolve, reject) => {
         let responseBytes = 0;
         let settled = false;
         let finished = false;
+        let modelUpdateQueue = Promise.resolve();
         const finish = (error = null) => {
             if (settled) {
                 return;
@@ -1123,14 +1112,18 @@ async function writeReadableResponse(res, stream, scanner, modelObserver) {
             }
             resolve(responseBytes);
         };
+        const queueModelObserverUpdate = (extraction) => {
+            modelUpdateQueue = modelUpdateQueue.then(() => updateProxyModelObserver(modelObserver, extraction));
+            return modelUpdateQueue;
+        };
         stream.on("data", (chunk) => {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             responseBytes += value.length;
             if (scanner) {
                 scanner.push(value);
-                const extraction = scanner.current();
-                modelObserver.model = extraction.model;
-                modelObserver.source = extraction.source;
+                void queueModelObserverUpdate(scanner.current()).catch((error) => {
+                    stream.destroy(error instanceof Error ? error : new Error(String(error)));
+                });
             }
         });
         stream.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 502, responseBytes)));
@@ -1142,12 +1135,18 @@ async function writeReadableResponse(res, stream, scanner, modelObserver) {
         });
         res.on("finish", () => {
             finished = true;
-            if (scanner) {
-                const extraction = scanner.finish();
-                modelObserver.model = extraction.model;
-                modelObserver.source = extraction.source;
-            }
-            finish();
+            void (async () => {
+                if (scanner) {
+                    await queueModelObserverUpdate(scanner.finish());
+                }
+                else {
+                    await modelUpdateQueue;
+                }
+                finish();
+            })().catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                finish(new ProxyResponseWriteError(message, 500, responseBytes));
+            });
         });
         stream.pipe(res);
     });
@@ -1225,7 +1224,7 @@ function formatProxyActiveRows(metrics, now, count = PROXY_RECENT_RENDER_COUNT) 
             `  ${textDim("no active requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyActiveRequest(record, now.getTime())));
+    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime())));
 }
 function formatProxyHistoryRows(metrics, count = PROXY_RECENT_RENDER_COUNT) {
     if (metrics.recent_requests.length === 0) {
@@ -1234,7 +1233,8 @@ function formatProxyHistoryRows(metrics, count = PROXY_RECENT_RENDER_COUNT) {
             `  ${textDim("no historical requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map(formatProxyHistoryRequest));
+    const nowMs = Date.now();
+    return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map((record) => formatProxyRequest(record, nowMs)));
 }
 async function renderProxyStatusLines(options) {
     const runtime = await ensureProxyRunning(options);
@@ -1372,11 +1372,20 @@ export async function serveProxy(options) {
                 const activeRecord = {
                     id: randomUUID(),
                     started_at: requestStartedAt.toISOString(),
+                    completed_at: null,
                     method: req.method || "GET",
                     path: url.pathname,
+                    status: null,
+                    upstream: null,
+                    attempts: 0,
+                    latency_ms: 0,
                     request_bytes: 0,
+                    response_bytes: 0,
                     session: null,
                     request_model: null,
+                    upstream_model: null,
+                    upstream_model_source: null,
+                    error: null,
                 };
                 await startProxyRequestMetric(state, options.stateRoot, activeRecord);
                 let status = null;
@@ -1402,7 +1411,22 @@ export async function serveProxy(options) {
                     upstreamModel = outcome.upstreamModel;
                     upstreamModelSource = outcome.upstreamModelSource;
                     errorText = outcome.error;
-                    const streamModelObserver = { model: upstreamModel, source: upstreamModelSource };
+                    activeRecord.status = status;
+                    activeRecord.upstream = upstream;
+                    activeRecord.attempts = attempts;
+                    activeRecord.upstream_model = upstreamModel;
+                    activeRecord.upstream_model_source = upstreamModelSource;
+                    activeRecord.error = errorText;
+                    await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                    const streamModelObserver = {
+                        model: upstreamModel,
+                        source: upstreamModelSource,
+                        update: async (extraction) => {
+                            activeRecord.upstream_model = extraction.model;
+                            activeRecord.upstream_model_source = extraction.source;
+                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                        },
+                    };
                     responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
                     upstreamModel = streamModelObserver.model;
                     upstreamModelSource = streamModelObserver.source;
@@ -1423,6 +1447,12 @@ export async function serveProxy(options) {
                         res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
                         res.end(payload);
                     }
+                    upstreamModel = activeRecord.upstream_model;
+                    upstreamModelSource = activeRecord.upstream_model_source;
+                    activeRecord.status = status;
+                    activeRecord.response_bytes = responseBytes;
+                    activeRecord.error = errorText;
+                    await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                 }
                 const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
                 await completeProxyRequestMetric(state, options.stateRoot, {

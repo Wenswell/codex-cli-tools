@@ -5,9 +5,9 @@
 ## Request lifecycle
 
 - A proxied HTTP request enters `metrics.active_requests` after the proxy accepts the request.
-- Active records include request id, start time, method, path, session short id, and request byte size.
+- Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, and error text.
+- History records are the completed form of the same request record and include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, and error text.
 - Streaming responses stay active while the response body is being written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
@@ -33,8 +33,8 @@ Old state files are normalized at read time. Missing model fields render through
 - Path lines: proxy URL, state path, log path, and config path.
 - Summary line: `status total=... active=... 2xx=... 3xx=... 4xx=... 5xx=... upstreams=...`.
 - Latency line: `latency last=... avg=... min=... max=...`.
-- `active`: up to 5 current requests.
-- `history`: up to 5 completed requests.
+- `active`: up to 5 current requests rendered by the shared request-row formatter.
+- `history`: up to 5 completed requests rendered by the shared request-row formatter.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
@@ -42,7 +42,13 @@ Request tables use the shared terminal table renderer. Fixed-width columns are r
 session time up code ms size req_model up_model path error
 ```
 
-Active rows show `…` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `ms`, known request bytes for `size`, and known upstream, status, and model fields as soon as the proxy observes them. Active rows show `…` for code while no status is known. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+
+## Implementation notes
+
+- `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
+- Active records are normalized through the same request-record normalizer as history records.
+- Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
 
@@ -94,7 +100,7 @@ Column behavior:
 
 - `req_model`: `request_model`, truncated for terminal width.
 - `up_model`: orange `[unknown]` when missing, dim `[same]` when it equals `req_model`, and the red truncated upstream model name when different.
-- Active rows show `up_model` as `[unknown]`.
+- Active rows follow the shared `up_model` rendering rules; SSE streams update active rows after the first model frame is observed.
 - History rows show status-normalized model fields.
 - `path`: fixed-width request path.
 - `error`: request error text, left-aligned in the final remaining-width column and not table-truncated.
