@@ -3,7 +3,7 @@ import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { DateTime } from "luxon";
-import { codexDir, homeDir } from "./paths.js";
+import { codexDir, formatHomePath, homeDir } from "./paths.js";
 import { sqlString, sqliteJson } from "./sqlite.js";
 import type { CodexModelUsage, CodexTokenUsage } from "./pricing.js";
 
@@ -111,11 +111,7 @@ export function resolveProjectPath(value: string): string {
 }
 
 export function formatProjectPath(path: string): string {
-  const home = homeDir();
-  if (path === home) {
-    return "~";
-  }
-  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+  return formatHomePath(path);
 }
 
 export function emptyAggregate(): CodexUsageAggregate {

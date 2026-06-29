@@ -410,12 +410,16 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.recent_requests[2].status, 499);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
+    assert.match(output, /state: ~\/\.config\/codex-tools\/proxy\.json/);
+    assert.match(output, /log: ~\/\.config\/codex-tools\/proxy\.log/);
+    assert.match(output, /config: ~\/\.codex\/config\.toml/);
+    assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
-    assert.match(output, /\/abort-stream\s+client closed response before upstream stream completed/);
+    assert.match(output, /client closed response before upstream stream completed/);
     assertProxyHistoryColumnsAligned(output);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);

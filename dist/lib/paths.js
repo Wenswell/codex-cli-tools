@@ -3,6 +3,13 @@ import { join } from "node:path";
 export function homeDir() {
     return process.env.HOME || homedir();
 }
+export function formatHomePath(path) {
+    const home = homeDir();
+    if (path === home) {
+        return "~";
+    }
+    return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
 export function codexToolsConfigDir() {
     return join(homeDir(), ".config", "codex-tools");
 }
