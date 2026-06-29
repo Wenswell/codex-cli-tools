@@ -54,6 +54,9 @@ export function textGreen(value) {
 export function textMagenta(value) {
     return withAnsi("38;5;213", value);
 }
+export function textOrange(value) {
+    return withAnsi("38;5;208", value);
+}
 export function textRed(value) {
     return withAnsi("38;5;203", value);
 }

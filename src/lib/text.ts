@@ -69,6 +69,10 @@ export function textMagenta(value: string): string {
   return withAnsi("38;5;213", value);
 }
 
+export function textOrange(value: string): string {
+  return withAnsi("38;5;208", value);
+}
+
 export function textRed(value: string): string {
   return withAnsi("38;5;203", value);
 }

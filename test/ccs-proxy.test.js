@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
-import { ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, stopProxy } from "../dist/commands/ccs-proxy.js";
+import { buildProxyStatusLines, ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, stopProxy } from "../dist/commands/ccs-proxy.js";
 
 async function reservePort() {
   const server = createServer();
@@ -412,8 +412,9 @@ test("proxy records active and history request lifecycle", async () => {
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path\n\s+no active requests/);
-    assert.match(output, /history\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
+    assert.doesNotMatch(output, /\bmethod\b/);
     assertProxyHistoryColumnsAligned(output);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
@@ -624,10 +625,10 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
+    assert.match(output, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /POST\s+\/responses/);
-    assert.match(output, /responses-stream-…\s+POST\s+\/responses/);
+    assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
+    assert.match(output, /responses…\s+responses…\s+\/responses/);
     assertProxyHistoryColumnsAligned(output);
   } finally {
     releaseActiveStream?.();
@@ -650,6 +651,101 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     }
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("proxy status table renders configured columns and compact units", () => {
+  const stateRoot = "/tmp/codex-tools";
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    {
+      installed_at: "2026-01-01T00:00:00.000Z",
+      codex_config_path: "/home/test/.codex/config.toml",
+      provider_name: "codex",
+      original_base_url: "https://proxy.example.com",
+      proxy_base_url: "http://127.0.0.1:4610",
+      listen_host: "127.0.0.1",
+      listen_port: 4610,
+      profile_order: ["input"],
+      backup_path: "/tmp/backup.toml",
+      metrics: {
+        total_requests: 5,
+        active_requests: [],
+        status_counts: { "2xx": 5, "3xx": 0, "4xx": 0, "5xx": 0 },
+        upstream_hit_counts: { input: 5 },
+        latency_ms: { last: 56, count: 5, sum: 123, min: 56, max: 187200 },
+        recent_requests: [
+          proxyHistoryRecord({
+            session: "019f0df6",
+            completed_at: "2026-01-01T00:00:05.000Z",
+            upstream: "input",
+            latency_ms: 56,
+            response_bytes: 32 * 1024,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5",
+            path: "/same",
+          }),
+          proxyHistoryRecord({
+            session: "019f0df7",
+            completed_at: "2026-01-01T00:00:04.000Z",
+            upstream: "input",
+            latency_ms: 123,
+            response_bytes: 982 * 1024,
+            request_model: null,
+            upstream_model: null,
+            path: "/unknown",
+          }),
+          proxyHistoryRecord({
+            session: "019f0df8",
+            completed_at: "2026-01-01T00:00:03.000Z",
+            upstream: "input",
+            latency_ms: 2340,
+            response_bytes: 3.41 * 1024 * 1024,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5-mini",
+            path: "/seconds",
+          }),
+          proxyHistoryRecord({
+            session: "019f0df9",
+            completed_at: "2026-01-01T00:00:02.000Z",
+            upstream: "input",
+            latency_ms: 43_200,
+            response_bytes: 76.3 * 1024 * 1024,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5-mini",
+            path: "/large",
+          }),
+          proxyHistoryRecord({
+            session: "019f0dfa",
+            completed_at: "2026-01-01T00:00:01.000Z",
+            upstream: "input",
+            latency_ms: 187_200,
+            response_bytes: 1024,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5-mini",
+            path: "/minutes",
+          }),
+        ],
+      },
+    },
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot,
+    },
+  ).join("\n");
+
+  assert.match(lines, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
+  assert.doesNotMatch(lines, /\bmethod\b/);
+  assert.doesNotMatch(lines, /^\s+\d+\./m);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
+  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
+  assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
+  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
+  assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
+  assertProxyHistoryColumnsAligned(lines);
 });
 
 test("proxy runtime starts in the background and restore stops it", async () => {
@@ -862,6 +958,30 @@ async function captureConsole(run) {
   return `${lines.join("\n")}\n`;
 }
 
+function stripAnsi(value) {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function proxyHistoryRecord(overrides) {
+  return {
+    completed_at: "2026-01-01T00:00:00.000Z",
+    method: "POST",
+    path: "/responses",
+    status: 200,
+    upstream: "input",
+    attempts: 1,
+    latency_ms: 123,
+    request_bytes: 0,
+    response_bytes: 0,
+    session: "019f0df6",
+    request_model: null,
+    upstream_model: null,
+    upstream_model_source: null,
+    error: null,
+    ...overrides,
+  };
+}
+
 async function closeServer(server) {
   if (!server.listening) {
     return;
@@ -870,14 +990,19 @@ async function closeServer(server) {
 }
 
 function assertProxyHistoryColumnsAligned(output) {
-  const lines = output.split("\n");
+  const lines = output.split("\n").map(stripAnsi);
   const historyIndex = lines.indexOf("history");
   assert.ok(historyIndex >= 0);
   const header = lines[historyIndex + 1];
-  const firstRow = lines.slice(historyIndex + 2).find((line) => /^\s+\d+\./.test(line));
+  const firstRow = lines.slice(historyIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes("no historical requests"));
   assert.ok(firstRow);
-  const methodColumn = header.indexOf("method");
+  const columns = ["session", "time", "up", "code", "ms", "size", "req_model", "up_model", "path"];
+  for (const column of columns) {
+    assert.notEqual(header.indexOf(column), -1, column);
+  }
+  assert.equal(header.indexOf("method"), -1);
   const pathColumn = header.indexOf("path");
-  assert.equal(firstRow.indexOf("POST"), methodColumn);
-  assert.equal(firstRow.indexOf("/", methodColumn), pathColumn);
+  assert.equal(firstRow.trimEnd().length, pathColumn + "path".length);
+  assert.equal(header.indexOf("session") < header.indexOf("time"), true);
+  assert.equal(header.indexOf("up_model") < pathColumn, true);
 }
