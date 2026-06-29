@@ -14,7 +14,7 @@ import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
-import { textBlue, textBold, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
+import { textBlue, textBold, textDim, textGreen, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable } from "../lib/table.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
@@ -36,7 +36,6 @@ const PROXY_TABLE_MS_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_MODEL_WIDTH = 10;
-const PROXY_TABLE_METHOD_WIDTH = 6;
 const PROXY_TABLE_PATH_WIDTH = 30;
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
@@ -49,17 +48,15 @@ const REASONING_POINTERS = [
     "/response/usage/completion_tokens_details/reasoning_tokens",
 ];
 const PROXY_REQUEST_TABLE_COLUMNS = [
-    // { key: "index", title: "", width: 4, align: "right" },
-    { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH },
-    { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH },
-    { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH },
+    { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
+    { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
+    { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
     { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
     { key: "ms", title: "ms", width: PROXY_TABLE_MS_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-    { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH },
-    { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH },
-    // { key: "method", title: "method", width: PROXY_TABLE_METHOD_WIDTH },
-    { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, flex: true, minWidth: 12 },
+    { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
+    { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
+    { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, flex: true, minWidth: 12, align: "right" },
 ];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
@@ -529,7 +526,16 @@ function averageLatency(latency) {
     return latency.count > 0 ? latency.sum / latency.count : 0;
 }
 function formatLatencyMs(value) {
-    return `${Math.round(value)}ms`;
+    if (!Number.isFinite(value) || value < 0) {
+        return textDim("-");
+    }
+    if (value < 1000) {
+        return `${Math.round(value)}ms`;
+    }
+    if (value < 60_000) {
+        return `${formatThreeSignificant(value / 1000)}s`;
+    }
+    return `${formatThreeSignificant(value / 60_000)}m`;
 }
 function formatProxyUpstreamHits(profileOrder, metrics) {
     const knownNames = [
@@ -600,45 +606,36 @@ function formatProxyPathsLines(state, options) {
         `config: ${colorPath(options.codexConfigPath)}`,
     ];
 }
-function formatProxyHistoryRequest(record, index) {
+function formatProxyHistoryRequest(record) {
     const time = formatProxyTime(record.completed_at);
-    const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
-    const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
-    const upstreamModel = truncateProxyText(record.upstream_model ?? "", PROXY_TABLE_MODEL_WIDTH);
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
     return {
-        index: `${index + 1}.`,
         time: textDim(time),
         code: formatProxyStatusCode(record.status),
         up: upstream,
         ms: textYellow(formatLatencyMs(record.latency_ms)),
         size: formatProxyBytes(record.response_bytes),
         session: formatProxySession(record.session),
-        req_model: requestModel ? colorName(requestModel) : textDim(""),
-        up_model: upstreamModel ? colorName(upstreamModel) : textDim(""),
-        method: textMagenta(method),
+        req_model: formatProxyRequestModel(record.request_model),
+        up_model: formatProxyUpstreamModel(record.request_model, record.upstream_model),
         path: `${colorPath(path)}${error}`,
     };
 }
-function formatProxyActiveRequest(record, nowMs, index) {
+function formatProxyActiveRequest(record, nowMs) {
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
-    const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
-    const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
     return {
-        index: `${index + 1}.`,
         time: textDim(formatProxyTime(record.started_at)),
         code: textDim("…"),
         up: textDim("-"),
         ms: textYellow(formatLatencyMs(elapsedMs)),
         size: formatProxyBytes(record.request_bytes),
         session: formatProxySession(record.session),
-        req_model: requestModel ? colorName(requestModel) : textDim(""),
-        up_model: textDim(""),
-        method: textMagenta(method),
+        req_model: formatProxyRequestModel(record.request_model),
+        up_model: textRed("[unknown]"),
         path: colorPath(path),
     };
 }
@@ -654,9 +651,39 @@ function formatProxyBytes(value) {
         return `${Math.round(value)}B`;
     }
     if (value < 1024 * 1024) {
-        return `${Math.round(value / 1024)}K`;
+        return `${formatThreeSignificant(value / 1024)}K`;
     }
-    return `${(value / 1024 / 1024).toFixed(1)}M`;
+    if (value < 1024 * 1024 * 1024) {
+        return `${formatThreeSignificant(value / 1024 / 1024)}M`;
+    }
+    return `${formatThreeSignificant(value / 1024 / 1024 / 1024)}G`;
+}
+function formatThreeSignificant(value) {
+    if (!Number.isFinite(value)) {
+        return "-";
+    }
+    if (value >= 100) {
+        return Math.round(value).toString();
+    }
+    if (value >= 10) {
+        return value.toFixed(1);
+    }
+    return value.toFixed(2);
+}
+function formatProxyRequestModel(model) {
+    if (!model) {
+        return textRed("[unknown]");
+    }
+    return colorName(truncateProxyText(model, PROXY_TABLE_MODEL_WIDTH));
+}
+function formatProxyUpstreamModel(requestModel, upstreamModel) {
+    if (!upstreamModel) {
+        return textRed("[unknown]");
+    }
+    if (requestModel && upstreamModel === requestModel) {
+        return textDim("[same]");
+    }
+    return textOrange(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
 }
 function formatProxySession(value) {
     return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
@@ -1190,7 +1217,7 @@ function formatProxyActiveRows(metrics, now, count = PROXY_RECENT_RENDER_COUNT) 
             `  ${textDim("no active requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record, index) => formatProxyActiveRequest(record, now.getTime(), index)));
+    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyActiveRequest(record, now.getTime())));
 }
 function formatProxyHistoryRows(metrics, count = PROXY_RECENT_RENDER_COUNT) {
     if (metrics.recent_requests.length === 0) {
@@ -1199,7 +1226,7 @@ function formatProxyHistoryRows(metrics, count = PROXY_RECENT_RENDER_COUNT) {
             `  ${textDim("no historical requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map((record, index) => formatProxyHistoryRequest(record, index)));
+    return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map(formatProxyHistoryRequest));
 }
 async function renderProxyStatusLines(options) {
     const runtime = await ensureProxyRunning(options);
@@ -1208,7 +1235,7 @@ async function renderProxyStatusLines(options) {
     const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
     return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
 }
-function buildProxyStatusLines(now, state, profileOrder, runtime, options) {
+export function buildProxyStatusLines(now, state, profileOrder, runtime, options) {
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
         formatProxyStatusLine(now, state, runtime),
