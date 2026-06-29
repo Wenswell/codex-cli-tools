@@ -565,6 +565,7 @@ Behavior:
 - `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
 - `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
 - Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
+- A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
 - `ccs proxy` without arguments prints runtime state, active paths, state/log files, request status totals, latency summary, upstream hit counts, active requests, and completed history once and exits. `ccs proxy --once` prints the same snapshot. `ccs proxy watch` refreshes the same view live in the terminal.
 - `ccs proxy` terminal output displays local file paths under `$HOME` with `~/`.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
