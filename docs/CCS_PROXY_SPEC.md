@@ -43,3 +43,69 @@ time code up ms size session method path
 ```
 
 Active rows show `...` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name.
+
+## Model field plan
+
+First version scope covers four OpenAI-style endpoints:
+
+- `responses`
+- `chat/completions`
+- `completions`
+- `embeddings`
+
+Endpoint matching normalizes an optional `/v1` prefix, so `/v1/responses` and `/responses` are the same endpoint class.
+
+### Field semantics
+
+- `request_model`: model string read from the incoming request JSON body.
+- `upstream_model`: model string read from the upstream response payload.
+- `upstream_model_source`: extraction source for `upstream_model`, such as `json.model`, `json.response.model`, or `sse.data.model`.
+
+The proxy forwards requests directly. Model fields are observational metadata only.
+
+### Extraction plan
+
+| Endpoint | `request_model` | Non-stream `upstream_model` | Stream `upstream_model` |
+| --- | --- | --- | --- |
+| `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
+| `chat/completions` | request JSON `model` | response JSON `model` | SSE `model` |
+| `completions` | request JSON `model` | response JSON `model` | SSE `model` |
+| `embeddings` | request JSON `model` | response JSON `model` | no stream support in first version |
+
+### Lifecycle integration
+
+- Active request records include `request_model` after the request body is read.
+- History request records include `request_model`, `upstream_model`, and `upstream_model_source`.
+- Non-stream JSON responses are already buffered for inspection, so model extraction runs before response forwarding.
+- Stream responses are forwarded through a transform that preserves bytes and scans SSE `data:` JSON frames for the first model value.
+- Missing model fields are stored as `null`.
+
+### Status view plan
+
+The status table adds compact model visibility without expanding the command surface:
+
+```text
+time code up ms size session req_model up_model method path
+```
+
+Column behavior:
+
+- `req_model`: `request_model`, truncated for terminal width.
+- `up_model`: `upstream_model`, truncated for terminal width.
+- Active rows show `up_model` as empty.
+- History rows show both model fields when available.
+
+### Tests
+
+- Request JSON model is recorded for all four endpoint classes.
+- Non-stream JSON responses extract `upstream_model` for all four endpoint classes when present.
+- SSE responses extract `upstream_model` for `responses`, `chat/completions`, and `completions`.
+- SSE forwarding preserves the exact client-visible response bytes.
+- Missing model fields render as empty values.
+- Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
+
+### Questions
+
+- Confirm the first-version endpoint set is exactly `responses`, `chat/completions`, `completions`, and `embeddings`.
+- Confirm status table column names: `req_model` and `up_model`.
+- Confirm stream model extraction should stop at the first valid model value.
