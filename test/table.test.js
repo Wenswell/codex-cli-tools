@@ -58,13 +58,13 @@ test("table truncates by visible width and keeps the last flex column within max
 
   assert.deepEqual(lines.map(stripAnsi), [
     "    model    path",
-    " 1. gpt-5... /v1/response...",
+    " 1. gpt-5.5… /v1/responses/…",
   ]);
   assert.ok(lines.every((line) => visibleLength(line) <= 28));
 });
 
 test("truncateVisible handles ANSI colored text", () => {
-  assert.equal(stripAnsi(truncateVisible(textGreen("abcdef"), 5)), "ab...");
+  assert.equal(stripAnsi(truncateVisible(textGreen("abcdef"), 5)), "abcd…");
   assert.equal(visibleLength(truncateVisible(textGreen("中文abcdef"), 7)), 7);
 });
 

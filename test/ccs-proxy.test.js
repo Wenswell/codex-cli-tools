@@ -627,7 +627,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.match(output, /time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
     assert.doesNotMatch(output, /\bnull\b/);
     assert.match(output, /POST\s+\/responses/);
-    assert.match(output, /responses-strea\.\.\.\s+POST\s+\/responses/);
+    assert.match(output, /responses-stream-…\s+POST\s+\/responses/);
     assertProxyHistoryColumnsAligned(output);
   } finally {
     releaseActiveStream?.();
