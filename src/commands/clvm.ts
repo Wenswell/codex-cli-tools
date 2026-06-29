@@ -5,6 +5,7 @@ import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsConfigDir } from "../lib/paths.js";
+import { renderTable, type TableColumn } from "../lib/table.js";
 import {
   maskSecret,
   textBlue,
@@ -1431,26 +1432,19 @@ function printMonitorResult(result: MonitorResult, config: RuntimeConfig, stream
 }
 
 function printCurrentConnections(shownConnections: ConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
-  const headerLine = `${pad("status", layout.status)} ${pad("endpoint", layout.endpoint)} ${pad("age", layout.age)} ${pad("zeroFor", layout.zeroFor)} ${pad("up/s", layout.up)} ${pad("down/s", layout.down)} ${pad("upload", layout.upload)} ${pad("download", layout.download)} ${pad("chain", layout.chain)} rule`;
-
-  stream.write(`${style.bold(headerLine)}\n`);
-
-  for (const connection of shownConnections) {
-    stream.write(
-      [
-        statusCell(connection.status, layout.status, style),
-        style.cyan(pad(truncate(connection.endpoint, layout.endpoint), layout.endpoint)),
-        pad(formatDuration(connection.ageMs), layout.age),
-        pad(formatDuration(connection.observedIdleMs), layout.zeroFor),
-        speedCell(connection.uploadBytesPerSecond, layout.up, style),
-        speedCell(connection.downloadBytesPerSecond, layout.down, style),
-        bytesCell(connection.uploadTotal, layout.upload, style),
-        bytesCell(connection.downloadTotal, layout.download, style),
-        style.magenta(pad(truncate(connection.chains.join(" > "), layout.chain), layout.chain)),
-        style.dim(truncate(connection.rule, layout.rule)),
-      ].join(" ") + "\n",
-    );
-  }
+  const rows = shownConnections.map((connection) => ({
+    status: statusCell(connection.status, style),
+    endpoint: style.cyan(connection.endpoint),
+    age: formatDuration(connection.ageMs),
+    zeroFor: formatDuration(connection.observedIdleMs),
+    up: speedCell(connection.uploadBytesPerSecond, style),
+    down: speedCell(connection.downloadBytesPerSecond, style),
+    upload: bytesCell(connection.uploadTotal, style),
+    download: bytesCell(connection.downloadTotal, style),
+    chain: style.magenta(connection.chains.join(" > ")),
+    rule: style.dim(connection.rule),
+  }));
+  stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
 }
 
 function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
@@ -1458,24 +1452,17 @@ function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layo
     return;
   }
 
-  const headerLine = `${pad("closedAt", 19)} ${pad("endpoint", layout.endpoint)} ${pad("zeroFor", layout.zeroFor)} ${pad("upload", layout.upload)} ${pad("download", layout.download)} ${pad("chain", layout.chain)} rule`;
-
   stream.write(`\n${style.bold("recent closed")}\n`);
-  stream.write(`${style.bold(headerLine)}\n`);
-
-  for (const connection of closedHistory) {
-    stream.write(
-      [
-        pad(formatLocalTimestamp(connection.closedAt), 19),
-        style.cyan(pad(truncate(connection.endpoint, layout.endpoint), layout.endpoint)),
-        pad(formatDuration(connection.observedIdleMs), layout.zeroFor),
-        bytesCell(connection.uploadTotal, layout.upload, style),
-        bytesCell(connection.downloadTotal, layout.download, style),
-        style.magenta(pad(truncate(connection.chains.join(" > "), layout.chain), layout.chain)),
-        style.dim(truncate(connection.rule, layout.rule)),
-      ].join(" ") + "\n",
-    );
-  }
+  const rows = closedHistory.map((connection) => ({
+    closedAt: formatLocalTimestamp(connection.closedAt),
+    endpoint: style.cyan(connection.endpoint),
+    zeroFor: formatDuration(connection.observedIdleMs),
+    upload: bytesCell(connection.uploadTotal, style),
+    download: bytesCell(connection.downloadTotal, style),
+    chain: style.magenta(connection.chains.join(" > ")),
+    rule: style.dim(connection.rule),
+  }));
+  stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
 }
 
 function toJsonResult(result: MonitorResult): Record<string, unknown> {
@@ -1550,8 +1537,35 @@ function statusRank(status: ConnectionEntry["status"]): number {
   }[status] ?? 4;
 }
 
-function statusCell(status: ConnectionEntry["status"], width: number, style: Style): string {
-  const text = pad(formatStatus(status), width);
+function currentConnectionColumns(layout: Layout): TableColumn[] {
+  return [
+    { key: "status", title: "status", width: layout.status },
+    { key: "endpoint", title: "endpoint", width: layout.endpoint },
+    { key: "age", title: "age", width: layout.age },
+    { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
+    { key: "up", title: "up/s", width: layout.up, align: "right" },
+    { key: "down", title: "down/s", width: layout.down, align: "right" },
+    { key: "upload", title: "upload", width: layout.upload, align: "right" },
+    { key: "download", title: "download", width: layout.download, align: "right" },
+    { key: "chain", title: "chain", width: layout.chain },
+    { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
+  ];
+}
+
+function closedConnectionColumns(layout: Layout): TableColumn[] {
+  return [
+    { key: "closedAt", title: "closedAt", width: 19 },
+    { key: "endpoint", title: "endpoint", width: layout.endpoint },
+    { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
+    { key: "upload", title: "upload", width: layout.upload, align: "right" },
+    { key: "download", title: "download", width: layout.download, align: "right" },
+    { key: "chain", title: "chain", width: layout.chain },
+    { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
+  ];
+}
+
+function statusCell(status: ConnectionEntry["status"], style: Style): string {
+  const text = formatStatus(status);
   if (status === "zero") {
     return style.yellow(text);
   }
@@ -1561,16 +1575,16 @@ function statusCell(status: ConnectionEntry["status"], width: number, style: Sty
   return style.dim(text);
 }
 
-function speedCell(bytesPerSecond: number | null, width: number, style: Style): string {
-  const text = pad(formatSpeed(bytesPerSecond), width);
+function speedCell(bytesPerSecond: number | null, style: Style): string {
+  const text = formatSpeed(bytesPerSecond);
   if (bytesPerSecond === null || bytesPerSecond === 0) {
     return style.dim(text);
   }
   return style.green(text);
 }
 
-function bytesCell(bytes: number | null, width: number, style: Style): string {
-  const text = pad(formatBytes(bytes), width);
+function bytesCell(bytes: number | null, style: Style): string {
+  const text = formatBytes(bytes);
   if (bytes === null || bytes === 0) {
     return style.dim(text);
   }
@@ -1652,16 +1666,4 @@ function padNumber(value: number): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
-}
-
-function pad(value: unknown, width: number): string {
-  return String(value).padEnd(width, " ");
-}
-
-function truncate(value: unknown, width: number): string {
-  const text = String(value ?? "");
-  if (text.length <= width) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, width - 3))}...`;
 }

@@ -14,8 +14,9 @@ import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
-import { textBlue, textBold, textDim, textGreen, textMagenta, textRed, textYellow, visibleLength } from "../lib/text.js";
+import { textBlue, textBold, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
+import { renderTable, type TableColumn, type TableRow } from "../lib/table.js";
 
 type Profile = {
   baseURL: string;
@@ -163,6 +164,20 @@ const REASONING_POINTERS = [
   "/usage/completion_tokens_details/reasoning_tokens",
   "/response/usage/output_tokens_details/reasoning_tokens",
   "/response/usage/completion_tokens_details/reasoning_tokens",
+];
+
+const PROXY_REQUEST_TABLE_COLUMNS: TableColumn[] = [
+  { key: "index", title: "", width: 4, align: "right" },
+  { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH },
+  { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
+  { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH },
+  { key: "ms", title: "ms", width: PROXY_TABLE_MS_WIDTH, align: "right" },
+  { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
+  { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH },
+  { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH },
+  { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH },
+  { key: "method", title: "method", width: PROXY_TABLE_METHOD_WIDTH },
+  { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, flex: true, minWidth: 12 },
 ];
 
 function statePath(stateRoot: string): string {
@@ -729,25 +744,11 @@ function formatProxyStatusCode(status: number | null): string {
 }
 
 function truncateProxyPath(value: string, max = 40): string {
-  if (value.length <= max) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, max - 3))}...`;
+  return truncateVisible(value, max);
 }
 
 function truncateProxyText(value: string, max = 40): string {
-  if (value.length <= max) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, max - 3))}...`;
-}
-
-function padVisibleRight(value: string, width: number): string {
-  return `${value}${" ".repeat(Math.max(0, width - visibleLength(value)))}`;
-}
-
-function padVisibleLeft(value: string, width: number): string {
-  return `${" ".repeat(Math.max(0, width - visibleLength(value)))}${value}`;
+  return truncateVisible(value, max);
 }
 
 function fitProxyTerminalLine(line: string): string {
@@ -756,21 +757,7 @@ function fitProxyTerminalLine(line: string): string {
     return line;
   }
 
-  let visible = 0;
-  let result = "";
-  for (let index = 0; index < line.length && visible < columns - 1;) {
-    const ansi = /^\u001b\[[0-9;]*m/.exec(line.slice(index));
-    if (ansi) {
-      result += ansi[0];
-      index += ansi[0].length;
-      continue;
-    }
-    result += line[index];
-    visible += 1;
-    index += 1;
-  }
-
-  return `${result}\u001b[0m`;
+  return truncateVisible(line, columns - 1, "");
 }
 
 function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: ProxyRuntimeState | null): string {
@@ -798,7 +785,7 @@ function formatProxyPathsLines(state: ProxyState | null, options: ProxyOptions):
   ];
 }
 
-function formatProxyHistoryRequest(record: ProxyRequestRecord, index: number): string {
+function formatProxyHistoryRequest(record: ProxyRequestRecord, index: number): TableRow {
   const time = formatProxyTime(record.completed_at);
   const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
   const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
@@ -806,41 +793,40 @@ function formatProxyHistoryRequest(record: ProxyRequestRecord, index: number): s
   const upstreamModel = truncateProxyText(record.upstream_model ?? "", PROXY_TABLE_MODEL_WIDTH);
   const upstream = formatProxyUpstream(record.upstream, record.attempts);
   const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
-  return [
-    `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
-    padVisibleRight(textDim(time), PROXY_TABLE_TIME_WIDTH),
-    padVisibleLeft(formatProxyStatusCode(record.status), PROXY_TABLE_CODE_WIDTH),
-    padVisibleRight(upstream, PROXY_TABLE_UPSTREAM_WIDTH),
-    padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_TABLE_MS_WIDTH),
-    padVisibleLeft(formatProxyBytes(record.response_bytes), PROXY_TABLE_SIZE_WIDTH),
-    padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
-    padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(upstreamModel ? colorName(upstreamModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
-    colorPath(path),
-    error,
-  ].join(" ");
+  return {
+    index: `${index + 1}.`,
+    time: textDim(time),
+    code: formatProxyStatusCode(record.status),
+    up: upstream,
+    ms: textYellow(formatLatencyMs(record.latency_ms)),
+    size: formatProxyBytes(record.response_bytes),
+    session: formatProxySession(record.session),
+    req_model: requestModel ? colorName(requestModel) : textDim(""),
+    up_model: upstreamModel ? colorName(upstreamModel) : textDim(""),
+    method: textMagenta(method),
+    path: `${colorPath(path)}${error}`,
+  };
 }
 
-function formatProxyActiveRequest(record: ProxyActiveRequestRecord, nowMs: number, index: number): string {
+function formatProxyActiveRequest(record: ProxyActiveRequestRecord, nowMs: number, index: number): TableRow {
   const startedAt = Date.parse(record.started_at);
   const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
   const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
   const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
   const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
-  return [
-    `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
-    padVisibleRight(textDim(formatProxyTime(record.started_at)), PROXY_TABLE_TIME_WIDTH),
-    padVisibleLeft(textDim("..."), PROXY_TABLE_CODE_WIDTH),
-    padVisibleRight(textDim("-"), PROXY_TABLE_UPSTREAM_WIDTH),
-    padVisibleLeft(textYellow(formatLatencyMs(elapsedMs)), PROXY_TABLE_MS_WIDTH),
-    padVisibleLeft(formatProxyBytes(record.request_bytes), PROXY_TABLE_SIZE_WIDTH),
-    padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
-    padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(textDim(""), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
-    colorPath(path),
-  ].join(" ");
+  return {
+    index: `${index + 1}.`,
+    time: textDim(formatProxyTime(record.started_at)),
+    code: textDim("..."),
+    up: textDim("-"),
+    ms: textYellow(formatLatencyMs(elapsedMs)),
+    size: formatProxyBytes(record.request_bytes),
+    session: formatProxySession(record.session),
+    req_model: requestModel ? colorName(requestModel) : textDim(""),
+    up_model: textDim(""),
+    method: textMagenta(method),
+    path: colorPath(path),
+  };
 }
 
 function formatProxyTime(value: string): string {
@@ -1452,34 +1438,32 @@ function formatProxyLatencySummary(metrics: ProxyMetrics): string {
   ].join(" ");
 }
 
-function formatProxyTableHeader(): string {
-  return [
-    "    ",
-    padVisibleRight(textDim("time"), PROXY_TABLE_TIME_WIDTH),
-    padVisibleLeft(textDim("code"), PROXY_TABLE_CODE_WIDTH),
-    padVisibleRight(textDim("up"), PROXY_TABLE_UPSTREAM_WIDTH),
-    padVisibleLeft(textDim("ms"), PROXY_TABLE_MS_WIDTH),
-    padVisibleLeft(textDim("size"), PROXY_TABLE_SIZE_WIDTH),
-    padVisibleRight(textDim("session"), PROXY_TABLE_SESSION_WIDTH),
-    padVisibleRight(textDim("req_model"), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(textDim("up_model"), PROXY_TABLE_MODEL_WIDTH),
-    padVisibleRight(textDim("method"), PROXY_TABLE_METHOD_WIDTH),
-    textDim("path"),
-  ].join(" ");
+function renderProxyRequestTable(rows: TableRow[]): string[] {
+  return renderTable(PROXY_REQUEST_TABLE_COLUMNS, rows, {
+    gap: 1,
+    maxWidth: process.stdout.columns,
+    boldHeader: false,
+  }).map((line) => `  ${line}`);
 }
 
 function formatProxyActiveRows(metrics: ProxyMetrics, now: Date, count = PROXY_RECENT_RENDER_COUNT): string[] {
   if (metrics.active_requests.length === 0) {
-    return [`  ${textDim("no active requests")}`];
+    return [
+      ...renderProxyRequestTable([]),
+      `  ${textDim("no active requests")}`,
+    ];
   }
-  return metrics.active_requests.slice(0, count).map((record, index) => formatProxyActiveRequest(record, now.getTime(), index));
+  return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record, index) => formatProxyActiveRequest(record, now.getTime(), index)));
 }
 
 function formatProxyHistoryRows(metrics: ProxyMetrics, count = PROXY_RECENT_RENDER_COUNT): string[] {
   if (metrics.recent_requests.length === 0) {
-    return [`  ${textDim("no historical requests")}`];
+    return [
+      ...renderProxyRequestTable([]),
+      `  ${textDim("no historical requests")}`,
+    ];
   }
-  return metrics.recent_requests.slice(0, count).map((record, index) => formatProxyHistoryRequest(record, index));
+  return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map((record, index) => formatProxyHistoryRequest(record, index)));
 }
 
 function buildProxyStatusLines(
@@ -1496,10 +1480,8 @@ function buildProxyStatusLines(
     formatProxyRequestsSummary(metrics, profileOrder),
     formatProxyLatencySummary(metrics),
     textBold("active"),
-    formatProxyTableHeader(),
     ...formatProxyActiveRows(metrics, now),
     textBold("history"),
-    formatProxyTableHeader(),
     ...formatProxyHistoryRows(metrics),
     textDim("commands: ccs proxy [--once] | install | restore | stop | serve"),
   ].map(fitProxyTerminalLine);
