@@ -27,7 +27,7 @@ Old state files are normalized at read time. Missing fields are rendered as empt
 
 ## Status view
 
-`ccs proxy` and `ccs proxy --once` print the same fields:
+`ccs proxy`, `ccs proxy --once`, and each `ccs proxy watch` refresh print the same fields:
 
 - Title line: `ccs proxy`, current time, runtime, pid, and refresh interval.
 - Path lines: proxy URL, state path, log path, and config path.

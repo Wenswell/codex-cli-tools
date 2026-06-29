@@ -161,7 +161,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [--once] [install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -548,6 +548,7 @@ Proxy commands live under `ccs proxy`:
 ```bash
 ccs proxy
 ccs proxy --once
+ccs proxy watch
 ccs proxy install
 ccs proxy restore
 ccs proxy serve
@@ -564,7 +565,7 @@ Behavior:
 - `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
 - `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
 - Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
-- `ccs proxy` without arguments watches runtime state, active paths, state/log files, request status totals, latency summary, upstream hit counts, active requests, and completed history live in the terminal. `ccs proxy --once` prints the same snapshot once and exits.
+- `ccs proxy` without arguments prints runtime state, active paths, state/log files, request status totals, latency summary, upstream hit counts, active requests, and completed history once and exits. `ccs proxy --once` prints the same snapshot. `ccs proxy watch` refreshes the same view live in the terminal.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
 - The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy. Completed, failed, and fully streamed responses move to `history`. Both tables use `time code up ms size session req_model up_model method path` columns, include an aligned row-number column, and show up to 5 rows.
 - For `/v1/chat/completions`, `/chat/completions`, `/v1/responses`, and `/responses`, proxy metrics record request model and upstream model metadata when the JSON or SSE payload contains it. Missing model fields are stored as `null` and render as empty cells. SSE model extraction stops after the first valid model value and keeps the forwarded response bytes unchanged.

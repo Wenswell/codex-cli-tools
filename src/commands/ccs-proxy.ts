@@ -1466,6 +1466,14 @@ function formatProxyHistoryRows(metrics: ProxyMetrics, count = PROXY_RECENT_REND
   return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map((record, index) => formatProxyHistoryRequest(record, index)));
 }
 
+async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> {
+  const runtime = await ensureProxyRunning(options);
+  const state = runtime?.state ?? await readProxyState(options.stateRoot);
+  const profiles = await readProfiles();
+  const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
+  return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
+}
+
 function buildProxyStatusLines(
   now: Date,
   state: ProxyState | null,
@@ -1483,11 +1491,15 @@ function buildProxyStatusLines(
     ...formatProxyActiveRows(metrics, now),
     textBold("history"),
     ...formatProxyHistoryRows(metrics),
-    textDim("commands: ccs proxy [--once] | install | restore | stop | serve"),
+    textDim("commands: ccs proxy | watch | install | restore | stop | serve"),
   ].map(fitProxyTerminalLine);
 }
 
-async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
+async function runProxyStatusOnce(options: ProxyOptions): Promise<void> {
+  console.log((await renderProxyStatusLines({ ...options, once: true })).join("\n"));
+}
+
+async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let refreshing = false;
@@ -1500,20 +1512,12 @@ async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
     }
     refreshing = true;
     try {
-      const runtime = await ensureProxyRunning(options);
-      const state = runtime?.state ?? await readProxyState(options.stateRoot);
-      const profiles = await readProfiles();
-      const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
-      const lines = buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
-      if (process.stdout.isTTY) {
-        if (firstFrame) {
-          process.stdout.write(lines.join("\n"));
-          firstFrame = false;
-        } else {
-          process.stdout.write(`\u001b[${Math.max(0, renderLineCount - 1)}A\r${lines.map((line) => `\u001b[2K${line}`).join("\n")}`);
-        }
+      const lines = await renderProxyStatusLines(options);
+      if (firstFrame) {
+        process.stdout.write(lines.join("\n"));
+        firstFrame = false;
       } else {
-        console.log(lines.join("\n"));
+        process.stdout.write(`\u001b[${Math.max(0, renderLineCount - 1)}A\r${lines.map((line) => `\u001b[2K${line}`).join("\n")}`);
       }
     } finally {
       refreshing = false;
@@ -1521,7 +1525,8 @@ async function runProxyStatusLoop(options: ProxyOptions): Promise<void> {
   };
 
   await render();
-  if (options.once || !process.stdout.isTTY) {
+  if (!process.stdout.isTTY) {
+    process.stdout.write("\n");
     return;
   }
 
@@ -1704,7 +1709,9 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
 function usageHelpLines(): string[] {
   return [
     "Usage:",
-    "  ccs proxy [--once]                  # print or watch proxy status and upstream order",
+    "  ccs proxy                           # print proxy status and upstream order once",
+    "  ccs proxy --once                    # print proxy status and upstream order once",
+    "  ccs proxy watch                     # watch proxy status and upstream order",
     "  ccs proxy install                   # back up config, install routing, and start background proxy",
     "  ccs proxy restore                   # restore config from the saved backup",
     "  ccs proxy stop                      # stop the healthy background proxy",
@@ -1721,11 +1728,15 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
   const command = args[0] ?? "";
   const rest = args.slice(1);
   if (command === "") {
-    await runProxyStatusLoop(options);
+    await runProxyStatusOnce(options);
     return;
   }
   if (command === "--once") {
-    await runProxyStatusLoop({ ...options, once: true });
+    await runProxyStatusOnce(options);
+    return;
+  }
+  if (command === "watch") {
+    await runProxyStatusWatch(options);
     return;
   }
   if (command === "install") {
