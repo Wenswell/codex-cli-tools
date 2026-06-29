@@ -6,6 +6,7 @@
 
 - A proxied HTTP request enters `metrics.active_requests` after the proxy accepts the request.
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
+- Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
 - History records are the completed form of the same request record and include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, and error text.
 - Streaming responses stay active while the response body is being written to the client.
@@ -49,6 +50,7 @@ Active rows show elapsed time for `ms`, known request bytes for `size`, and know
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
 - Active records are normalized through the same request-record normalizer as history records.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
+- Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
 

@@ -498,6 +498,15 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
         metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
     });
 }
+async function resetProxyActiveRequestsOnStart(state, stateRoot) {
+    const metrics = ensureProxyMetrics(state);
+    if (metrics.active_requests.length === 0) {
+        return;
+    }
+    await mutateProxyMetrics(state, stateRoot, (currentMetrics) => {
+        currentMetrics.active_requests = [];
+    });
+}
 function incrementProxyStatusCount(counts, status) {
     if (status === null) {
         counts["5xx"] += 1;
@@ -1358,6 +1367,7 @@ export async function serveProxy(options) {
     if (!state) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
+    await resetProxyActiveRequestsOnStart(state, options.stateRoot);
     const server = createServer((req, res) => {
         void (async () => {
             try {

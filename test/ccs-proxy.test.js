@@ -835,6 +835,145 @@ test("proxy status table renders configured columns and compact units", () => {
   assertProxyRequestColumnsAligned(lines, "history");
 });
 
+test("proxy startup clears persisted active requests from older processes", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const previousListenHost = process.env.CCS_PROXY_LISTEN_HOST;
+  const previousListenPort = process.env.CCS_PROXY_LISTEN_PORT;
+  const listenPort = await reservePort();
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    process.env.CCS_PROXY_LISTEN_HOST = "127.0.0.1";
+    process.env.CCS_PROXY_LISTEN_PORT = String(listenPort);
+
+    const codexDir = join(home, ".codex");
+    await mkdir(codexDir, { recursive: true });
+    const codexConfigPath = join(codexDir, "config.toml");
+    await writeFile(
+      codexConfigPath,
+      [
+        'model_provider = "codex"',
+        "",
+        "[model_providers.codex]",
+        'name = "OpenAI"',
+        'base_url = "http://127.0.0.1:4610"',
+        'wire_api = "responses"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(
+      join(stateRoot, "profiles.json"),
+      JSON.stringify(
+        {
+          profiles: {
+            input: { baseURL: "https://proxy.example.com", apiKey: "" },
+          },
+          current: "input",
+          toggle: ["input"],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    await writeFile(
+      join(stateRoot, "proxy.json"),
+      JSON.stringify(
+        {
+          installed_at: "2026-01-01T00:00:00.000Z",
+          codex_config_path: codexConfigPath,
+          provider_name: "codex",
+          original_base_url: "https://proxy.example.com",
+          proxy_base_url: `http://127.0.0.1:${listenPort}`,
+          listen_host: "127.0.0.1",
+          listen_port: listenPort,
+          profile_order: ["input"],
+          backup_path: "/tmp/backup.toml",
+          metrics: {
+            total_requests: 3,
+            active_requests: [
+              proxyHistoryRecord({
+                id: "stale-active",
+                started_at: "2026-01-01T00:00:00.000Z",
+                completed_at: null,
+                path: "/responses",
+                status: 200,
+                upstream: "input",
+                request_bytes: 123,
+                response_bytes: 0,
+                request_model: "gpt-5.4",
+                upstream_model: "gpt-5.4",
+              }),
+            ],
+            status_counts: { "2xx": 3, "3xx": 0, "4xx": 0, "5xx": 0 },
+            upstream_hit_counts: { input: 3 },
+            latency_ms: { last: 123, count: 3, sum: 456, min: 56, max: 200 },
+            recent_requests: [
+              proxyHistoryRecord({
+                id: "history-1",
+                completed_at: "2026-01-01T00:00:05.000Z",
+                path: "/history",
+              }),
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const runtime = await ensureProxyRunning({
+      codexConfigPath,
+      listenHost: "127.0.0.1",
+      listenPort,
+      stateRoot,
+    });
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${listenPort}/__codex_proxy/health`);
+
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0);
+    assert.equal(state.metrics.total_requests, 3);
+    assert.equal(state.metrics.recent_requests.length, 1);
+    assert.equal(state.metrics.recent_requests[0].path, "/history");
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    if (previousListenHost === undefined) {
+      delete process.env.CCS_PROXY_LISTEN_HOST;
+    } else {
+      process.env.CCS_PROXY_LISTEN_HOST = previousListenHost;
+    }
+    if (previousListenPort === undefined) {
+      delete process.env.CCS_PROXY_LISTEN_PORT;
+    } else {
+      process.env.CCS_PROXY_LISTEN_PORT = previousListenPort;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy runtime starts in the background and restore stops it", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
