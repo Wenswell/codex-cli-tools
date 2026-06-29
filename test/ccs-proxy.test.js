@@ -412,9 +412,10 @@ test("proxy records active and history request lifecycle", async () => {
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\n\s+no active requests/);
-    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
+    assert.match(output, /\/abort-stream\s+client closed response …/);
     assertProxyHistoryColumnsAligned(output);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
@@ -625,7 +626,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
+    assert.match(output, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bnull\b/);
     assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
     assert.match(output, /responses…\s+responses…\s+\/responses/);
@@ -737,7 +738,7 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path/);
+  assert.match(lines, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
@@ -990,19 +991,27 @@ async function closeServer(server) {
 }
 
 function assertProxyHistoryColumnsAligned(output) {
+  const pathWidth = 30;
   const lines = output.split("\n").map(stripAnsi);
   const historyIndex = lines.indexOf("history");
   assert.ok(historyIndex >= 0);
   const header = lines[historyIndex + 1];
   const firstRow = lines.slice(historyIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes("no historical requests"));
   assert.ok(firstRow);
-  const columns = ["session", "time", "up", "code", "ms", "size", "req_model", "up_model", "path"];
+  const columns = ["session", "time", "up", "code", "ms", "size", "req_model", "up_model", "path", "error"];
   for (const column of columns) {
     assert.notEqual(header.indexOf(column), -1, column);
   }
   assert.equal(header.indexOf("method"), -1);
   const pathColumn = header.indexOf("path");
-  assert.equal(firstRow.trimEnd().length, pathColumn + "path".length);
+  const errorColumn = header.indexOf("error");
+  const pathStart = errorColumn - pathWidth - 1;
+  const firstSlash = firstRow.indexOf("/", pathStart);
+  assert.equal(firstSlash >= pathStart && firstSlash < errorColumn, true);
+  if (firstRow.includes("client closed")) {
+    assert.equal(firstRow.indexOf("client closed"), errorColumn);
+  }
   assert.equal(header.indexOf("session") < header.indexOf("time"), true);
   assert.equal(header.indexOf("up_model") < pathColumn, true);
+  assert.equal(pathColumn < errorColumn, true);
 }

@@ -32,7 +32,7 @@ const PROXY_STATUS_RENDER_LINES = 11 + (PROXY_RECENT_RENDER_COUNT * 2);
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_CODE_WIDTH = 4;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
-const PROXY_TABLE_MS_WIDTH = 6;
+const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_MODEL_WIDTH = 10;
@@ -52,11 +52,12 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
     { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
-    { key: "ms", title: "ms", width: PROXY_TABLE_MS_WIDTH, align: "right" },
+    { key: "ms", title: "ms", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
     { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
-    { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, flex: true, minWidth: 12, align: "right" },
+    { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, align: "right" },
+    { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
 ];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
@@ -610,7 +611,6 @@ function formatProxyHistoryRequest(record) {
     const time = formatProxyTime(record.completed_at);
     const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
-    const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
     return {
         time: textDim(time),
         code: formatProxyStatusCode(record.status),
@@ -620,7 +620,8 @@ function formatProxyHistoryRequest(record) {
         session: formatProxySession(record.session),
         req_model: formatProxyRequestModel(record.request_model),
         up_model: formatProxyUpstreamModel(record.request_model, record.upstream_model),
-        path: `${colorPath(path)}${error}`,
+        path: colorPath(path),
+        error: formatProxyError(record.error),
     };
 }
 function formatProxyActiveRequest(record, nowMs) {
@@ -635,8 +636,9 @@ function formatProxyActiveRequest(record, nowMs) {
         size: formatProxyBytes(record.request_bytes),
         session: formatProxySession(record.session),
         req_model: formatProxyRequestModel(record.request_model),
-        up_model: textRed("[unknown]"),
+        up_model: textOrange("[unknown]"),
         path: colorPath(path),
+        error: textDim(""),
     };
 }
 function formatProxyTime(value) {
@@ -678,12 +680,15 @@ function formatProxyRequestModel(model) {
 }
 function formatProxyUpstreamModel(requestModel, upstreamModel) {
     if (!upstreamModel) {
-        return textRed("[unknown]");
+        return textOrange("[unknown]");
     }
     if (requestModel && upstreamModel === requestModel) {
         return textDim("[same]");
     }
-    return textOrange(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
+    return textRed(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
+}
+function formatProxyError(error) {
+    return error ? textRed(truncateProxyText(error, 24)) : textDim("");
 }
 function formatProxySession(value) {
     return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
