@@ -154,7 +154,7 @@ test("proxy state persists request metrics", async () => {
                 at: "2026-01-01T00:00:01.000Z",
                 method: "POST",
                 path: "/v1/responses",
-                status: 502,
+                status: 500,
                 upstream: "ciii",
                 attempts: 2,
                 latency_ms: 180,
@@ -175,7 +175,7 @@ test("proxy state persists request metrics", async () => {
     const state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.total_requests, 2);
-    assert.deepEqual(state.metrics.status_counts, { "2xx": 1, "3xx": 0, "4xx": 0, "5xx": 1 });
+    assert.deepEqual(state.metrics.status_counts, { "200": 1, "500": 1 });
     assert.equal(state.metrics.active_requests.length, 1);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
     assert.equal(state.metrics.active_requests[0].completed_at, null);
@@ -310,7 +310,7 @@ test("proxy records active and history request lifecycle", async () => {
           metrics: {
             total_requests: 0,
             active_requests: [],
-            status_counts: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0 },
+            status_counts: {},
             upstream_hit_counts: {},
             latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
             recent_requests: [],
@@ -365,7 +365,7 @@ test("proxy records active and history request lifecycle", async () => {
     state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.total_requests, 7);
-    assert.equal(state.metrics.status_counts["2xx"], 7);
+    assert.equal(state.metrics.status_counts["200"], 7);
     assert.equal(state.metrics.recent_requests.filter((record) => record.path === "/slow").length, 6);
 
     const streamFetch = fetch(`http://127.0.0.1:${proxyPort}/stream`, { method: "POST", body: "{}" });
@@ -416,7 +416,7 @@ test("proxy records active and history request lifecycle", async () => {
     state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.active_requests.length, 0);
-    assert.deepEqual(state.metrics.status_counts, { "2xx": 8, "3xx": 0, "4xx": 2, "5xx": 1 });
+    assert.deepEqual(state.metrics.status_counts, { "200": 8, "404": 1, "499": 1, "502": 1 });
     assert.equal(state.metrics.total_requests, 11);
     assert.equal(state.metrics.upstream_hit_counts.input, 10);
     assert.equal(state.metrics.recent_requests[0].status, 502);
@@ -428,7 +428,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /log: ~\/\.config\/codex-tools\/proxy\.log/);
     assert.match(output, /config: ~\/\.codex\/config\.toml/);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
+    assert.match(output, /status total=11 active=0 200=8 404=1 499=1 502=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
@@ -755,7 +755,7 @@ test("proxy status table renders configured columns and compact units", () => {
             path: "/active",
           }),
         ],
-        status_counts: { "2xx": 5, "3xx": 0, "4xx": 0, "5xx": 0 },
+        status_counts: {},
         upstream_hit_counts: { input: 5 },
         latency_ms: { last: 56, count: 5, sum: 123, min: 56, max: 187200 },
         recent_requests: [
@@ -835,6 +835,53 @@ test("proxy status table renders configured columns and compact units", () => {
   assertProxyRequestColumnsAligned(lines, "history");
 });
 
+test("proxy status summary renders exact status counts", () => {
+  const stateRoot = "/tmp/codex-tools";
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    {
+      installed_at: "2026-01-01T00:00:00.000Z",
+      codex_config_path: "/home/test/.codex/config.toml",
+      provider_name: "codex",
+      original_base_url: "https://proxy.example.com",
+      proxy_base_url: "http://127.0.0.1:4610",
+      listen_host: "127.0.0.1",
+      listen_port: 4610,
+      profile_order: ["input"],
+      backup_path: "/tmp/backup.toml",
+      metrics: {
+        total_requests: 6,
+        active_requests: [],
+        status_counts: { "200": 5, "502": 1 },
+        upstream_hit_counts: { input: 6 },
+        latency_ms: { last: 56, count: 6, sum: 123, min: 56, max: 187200 },
+        recent_requests: [
+          proxyHistoryRecord({
+            session: "019f0df6",
+            completed_at: "2026-01-01T00:00:05.000Z",
+            upstream: "input",
+            latency_ms: 56,
+            response_bytes: 32 * 1024,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5",
+            path: "/same",
+          }),
+        ],
+      },
+    },
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot,
+    },
+  ).join("\n");
+
+  assert.match(lines, /status total=6 active=0 200=5 502=1 upstreams=input=6/);
+});
+
 test("proxy startup clears persisted active requests from older processes", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -911,7 +958,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
                 upstream_model: "gpt-5.4",
               }),
             ],
-            status_counts: { "2xx": 3, "3xx": 0, "4xx": 0, "5xx": 0 },
+            status_counts: {},
             upstream_hit_counts: { input: 3 },
             latency_ms: { last: 123, count: 3, sum: 456, min: 56, max: 200 },
             recent_requests: [
@@ -1137,7 +1184,7 @@ async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
         metrics: {
           total_requests: 0,
           active_requests: [],
-          status_counts: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0 },
+          status_counts: {},
           upstream_hit_counts: {},
           latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
           recent_requests: [],

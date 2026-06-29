@@ -20,7 +20,7 @@
 - `total_requests`: completed request count.
 - `active_requests`: currently processed HTTP requests.
 - `recent_requests`: completed history, newest first.
-- `status_counts`: completed request groups keyed as `2xx`, `3xx`, `4xx`, and `5xx`.
+- `status_counts`: completed request counts keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
 - `upstream_hit_counts`: completed request counts per selected upstream.
 - `latency_ms`: completed request latency with `last`, `count`, `sum`, `min`, and `max`.
 
@@ -32,10 +32,12 @@ Old state files are normalized at read time. Missing model fields render through
 
 - Title line: `ccs proxy`, current time, runtime, pid, and refresh interval.
 - Path lines: proxy URL, state path, log path, and config path.
-- Summary line: `status total=... active=... 2xx=... 3xx=... 4xx=... 5xx=... upstreams=...`.
+- Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
 - `history`: up to 5 completed requests rendered by the shared request-row formatter.
+
+`status total` is the sum of all exact status-code counters. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 

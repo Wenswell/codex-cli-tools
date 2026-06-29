@@ -62,12 +62,7 @@ type ProxyMetrics = {
   recent_requests: ProxyRequestRecord[];
 };
 
-type ProxyStatusCounts = {
-  "2xx": number;
-  "3xx": number;
-  "4xx": number;
-  "5xx": number;
-};
+type ProxyStatusCounts = Record<string, number>;
 
 type ProxyRequestRecord = {
   id: string;
@@ -461,12 +456,7 @@ function createProxyMetrics(): ProxyMetrics {
 }
 
 function createProxyStatusCounts(): ProxyStatusCounts {
-  return {
-    "2xx": 0,
-    "3xx": 0,
-    "4xx": 0,
-    "5xx": 0,
-  };
+  return {};
 }
 
 function normalizeProxyMetrics(value: unknown): ProxyMetrics {
@@ -510,19 +500,18 @@ function normalizeProxyStatusCounts(value: unknown, recentRequests: ProxyRequest
   const failedRequests = Number.isInteger(rawMetrics.failed_requests) ? Number(rawMetrics.failed_requests) : 0;
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const raw = value as Record<string, unknown>;
-    const counts = {
-      "2xx": Number.isInteger(raw["2xx"]) ? Number(raw["2xx"]) : 0,
-      "3xx": Number.isInteger(raw["3xx"]) ? Number(raw["3xx"]) : 0,
-      "4xx": Number.isInteger(raw["4xx"]) ? Number(raw["4xx"]) : 0,
-      "5xx": Number.isInteger(raw["5xx"]) ? Number(raw["5xx"]) : 0,
-    };
-    if (counts["2xx"] + counts["3xx"] + counts["4xx"] + counts["5xx"] > 0) {
-      return counts;
+    const exactCounts = Object.fromEntries(
+      Object.entries(raw)
+        .filter(([status, count]) => /^\d{3}$/.test(status) && Number.isInteger(count))
+        .map(([status, count]) => [status, Number(count)]),
+    );
+    if (Object.keys(exactCounts).length > 0) {
+      return exactCounts;
     }
-    if (successfulRequests > 0 || failedRequests > 0 || recentRequests.length > 0) {
+    if (recentRequests.length > 0) {
       return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
     }
-    return counts;
+    return exactCounts;
   }
 
   return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
@@ -530,12 +519,14 @@ function normalizeProxyStatusCounts(value: unknown, recentRequests: ProxyRequest
 
 function buildProxyStatusCounts(recentRequests: ProxyRequestRecord[], successfulRequests: number, failedRequests: number): ProxyStatusCounts {
   if (successfulRequests > 0 || failedRequests > 0) {
-    return {
-      "2xx": successfulRequests,
-      "3xx": 0,
-      "4xx": 0,
-      "5xx": failedRequests,
-    };
+    const counts = createProxyStatusCounts();
+    if (successfulRequests > 0) {
+      counts["200"] = successfulRequests;
+    }
+    if (failedRequests > 0) {
+      counts["500"] = failedRequests;
+    }
+    return counts;
   }
 
   const counts = createProxyStatusCounts();
@@ -679,17 +670,8 @@ async function resetProxyActiveRequestsOnStart(state: ProxyState, stateRoot: str
 }
 
 function incrementProxyStatusCount(counts: ProxyStatusCounts, status: number | null): void {
-  if (status === null) {
-    counts["5xx"] += 1;
-  } else if (status >= 500) {
-    counts["5xx"] += 1;
-  } else if (status >= 400) {
-    counts["4xx"] += 1;
-  } else if (status >= 300) {
-    counts["3xx"] += 1;
-  } else if (status >= 200) {
-    counts["2xx"] += 1;
-  }
+  const key = String(status ?? 500);
+  counts[key] = (counts[key] ?? 0) + 1;
 }
 
 function averageLatency(latency: ProxyMetrics["latency_ms"]): number {
@@ -1451,19 +1433,41 @@ export async function restoreProxy(options: ProxyOptions): Promise<string> {
 }
 
 function formatProxyRequestsSummary(metrics: ProxyMetrics, profileOrder: string[]): string {
+  const statusCounts = formatExactProxyStatusCounts(metrics.status_counts);
   return [
-    `status total=${colorCount(String(metrics.total_requests))}`,
+    `status total=${colorCount(String(totalProxyStatusCounts(metrics.status_counts)))}`,
     `active=${metrics.active_requests.length === 0 ? textDim("0") : textYellow(String(metrics.active_requests.length))}`,
-    `2xx=${formatProxyStatusCount(metrics.status_counts["2xx"], textGreen)}`,
-    `3xx=${formatProxyStatusCount(metrics.status_counts["3xx"], textYellow)}`,
-    `4xx=${formatProxyStatusCount(metrics.status_counts["4xx"], textYellow)}`,
-    `5xx=${formatProxyStatusCount(metrics.status_counts["5xx"], textRed)}`,
+    ...statusCounts,
     `upstreams=${formatProxyUpstreamHits(profileOrder, metrics)}`,
   ].join(" ");
 }
 
 function formatProxyStatusCount(value: number, color: (text: string) => string): string {
   return value === 0 ? textDim("0") : color(String(value));
+}
+
+function totalProxyStatusCounts(counts: ProxyStatusCounts): number {
+  return Object.values(counts).reduce((sum, count) => sum + count, 0);
+}
+
+function formatExactProxyStatusCounts(counts: ProxyStatusCounts): string[] {
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([status, count]) => `${status}=${formatProxyStatusCount(count, proxyStatusCountColor(Number(status)))}`);
+}
+
+function proxyStatusCountColor(status: number): (text: string) => string {
+  if (status >= 500) {
+    return textRed;
+  }
+  if (status >= 400) {
+    return textYellow;
+  }
+  if (status >= 300) {
+    return textYellow;
+  }
+  return textGreen;
 }
 
 function formatProxyLatencySummary(metrics: ProxyMetrics): string {
