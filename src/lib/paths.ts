@@ -5,6 +5,14 @@ export function homeDir(): string {
   return process.env.HOME || homedir();
 }
 
+export function formatHomePath(path: string): string {
+  const home = homeDir();
+  if (path === home) {
+    return "~";
+  }
+  return path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
+}
+
 export function codexToolsConfigDir(): string {
   return join(homeDir(), ".config", "codex-tools");
 }

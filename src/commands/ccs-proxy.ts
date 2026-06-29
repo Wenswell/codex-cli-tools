@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexConfigPath, profilesPath } from "../lib/paths.js";
+import { codexConfigPath, formatHomePath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { textBlue, textBold, textDim, textGreen, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
@@ -153,7 +153,7 @@ const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_MODEL_WIDTH = 10;
-const PROXY_TABLE_PATH_WIDTH = 18;
+const PROXY_TABLE_PATH_WIDTH = 11;
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
 const PROXY_HEALTH_POLL_MS = 100;
@@ -786,10 +786,14 @@ function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: Pro
 function formatProxyPathsLines(state: ProxyState | null, options: ProxyOptions): string[] {
   return [
     `proxy: ${state ? colorUrl(state.proxy_base_url) : textDim("unset")}`,
-    `state: ${colorPath(statePath(options.stateRoot))}`,
-    `log: ${colorPath(proxyLogPath(options.stateRoot))}`,
-    `config: ${colorPath(options.codexConfigPath)}`,
+    `state: ${colorPath(formatProxyFilePath(statePath(options.stateRoot)))}`,
+    `log: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
+    `config: ${colorPath(formatProxyFilePath(options.codexConfigPath))}`,
   ];
+}
+
+function formatProxyFilePath(value: string): string {
+  return formatHomePath(value);
 }
 
 function formatProxyHistoryRequest(record: ProxyRequestRecord): TableRow {
@@ -1777,24 +1781,24 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
   }
   if (command === "install") {
     rejectRemovedYesFlags(rest, "ccs proxy install");
-    printKeyValue("plan:", `proxy ${options.listenHost}:${options.listenPort} -> ${options.codexConfigPath}`, 5);
+    printKeyValue("plan:", `proxy ${options.listenHost}:${options.listenPort} -> ${formatProxyFilePath(options.codexConfigPath)}`, 5);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
       return;
     }
     const plan = await installProxy(options);
     const runtime = await ensureProxyRunning(options);
-    printKeyValue("backup:", textBlue(plan.backupPath), 5);
-    printKeyValue("state:", textGreen(plan.statePath), 5);
+    printKeyValue("backup:", textBlue(formatProxyFilePath(plan.backupPath)), 5);
+    printKeyValue("state:", textGreen(formatProxyFilePath(plan.statePath)), 5);
     printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
     printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
     printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
-    printKeyValue("log:", textBlue(proxyLogPath(options.stateRoot)), 8);
+    printKeyValue("log:", textBlue(formatProxyFilePath(proxyLogPath(options.stateRoot))), 8);
     return;
   }
   if (command === "restore") {
     rejectRemovedYesFlags(rest, "ccs proxy restore");
-    printKeyValue("plan:", `restore ${options.codexConfigPath} from proxy state`, 5);
+    printKeyValue("plan:", `restore ${formatProxyFilePath(options.codexConfigPath)} from proxy state`, 5);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
       return;

@@ -44,6 +44,8 @@ session time up code ms size req_model up_model path error
 
 Active rows show `…` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
+Local file paths in terminal output render relative to `$HOME` with `~/`.
+
 ## Model field plan
 
 First version scope covers four concrete OpenAI-style paths:
