@@ -8,6 +8,7 @@ import { setInterval } from "node:timers";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { TextDecoder } from "node:util";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, profilesPath } from "../lib/paths.js";
@@ -74,6 +75,7 @@ type ProxyActiveRequestRecord = {
   path: string;
   request_bytes: number;
   session: string | null;
+  request_model: string | null;
 };
 
 type ProxyRequestRecord = {
@@ -89,6 +91,9 @@ type ProxyRequestRecord = {
   request_bytes: number;
   response_bytes: number;
   session: string | null;
+  request_model: string | null;
+  upstream_model: string | null;
+  upstream_model_source: string | null;
   error: string | null;
 };
 
@@ -119,6 +124,15 @@ type ProxyOptions = {
   once?: boolean;
 };
 
+type ProxyEndpointClass = "chat/completions" | "responses";
+
+type ProxyModelExtraction = {
+  model: string | null;
+  source: string | null;
+};
+
+type ProxyWriteModelObserver = ProxyModelExtraction;
+
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
@@ -137,6 +151,7 @@ const PROXY_TABLE_UPSTREAM_WIDTH = 12;
 const PROXY_TABLE_MS_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 7;
 const PROXY_TABLE_SESSION_WIDTH = 10;
+const PROXY_TABLE_MODEL_WIDTH = 18;
 const PROXY_TABLE_METHOD_WIDTH = 6;
 const PROXY_TABLE_PATH_WIDTH = 30;
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -534,6 +549,7 @@ function normalizeProxyActiveRecord(request: Record<string, unknown>): ProxyActi
     path: stringField(request.path),
     request_bytes: numberField(request.request_bytes),
     session: nullableStringField(request.session),
+    request_model: nullableStringField(request.request_model),
   };
 }
 
@@ -553,6 +569,9 @@ function normalizeProxyHistoryRecord(request: Record<string, unknown>): ProxyReq
     request_bytes: numberField(request.request_bytes),
     response_bytes: numberField(request.response_bytes),
     session: nullableStringField(request.session),
+    request_model: nullableStringField(request.request_model),
+    upstream_model: nullableStringField(request.upstream_model),
+    upstream_model_source: nullableStringField(request.upstream_model_source),
     error: nullableStringField(request.error),
   };
 }
@@ -783,6 +802,8 @@ function formatProxyHistoryRequest(record: ProxyRequestRecord, index: number): s
   const time = formatProxyTime(record.completed_at);
   const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
   const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+  const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
+  const upstreamModel = truncateProxyText(record.upstream_model ?? "", PROXY_TABLE_MODEL_WIDTH);
   const upstream = formatProxyUpstream(record.upstream, record.attempts);
   const error = record.error ? ` ${textRed(truncateProxyText(record.error, 24))}` : "";
   return [
@@ -793,6 +814,8 @@ function formatProxyHistoryRequest(record: ProxyRequestRecord, index: number): s
     padVisibleLeft(textYellow(formatLatencyMs(record.latency_ms)), PROXY_TABLE_MS_WIDTH),
     padVisibleLeft(formatProxyBytes(record.response_bytes), PROXY_TABLE_SIZE_WIDTH),
     padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+    padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
+    padVisibleRight(upstreamModel ? colorName(upstreamModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
     padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
     colorPath(path),
     error,
@@ -804,6 +827,7 @@ function formatProxyActiveRequest(record: ProxyActiveRequestRecord, nowMs: numbe
   const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
   const method = truncateProxyText(record.method || "-", PROXY_TABLE_METHOD_WIDTH);
   const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
+  const requestModel = truncateProxyText(record.request_model ?? "", PROXY_TABLE_MODEL_WIDTH);
   return [
     `  ${padVisibleLeft(`${index + 1}.`, 3)}`,
     padVisibleRight(textDim(formatProxyTime(record.started_at)), PROXY_TABLE_TIME_WIDTH),
@@ -812,6 +836,8 @@ function formatProxyActiveRequest(record: ProxyActiveRequestRecord, nowMs: numbe
     padVisibleLeft(textYellow(formatLatencyMs(elapsedMs)), PROXY_TABLE_MS_WIDTH),
     padVisibleLeft(formatProxyBytes(record.request_bytes), PROXY_TABLE_SIZE_WIDTH),
     padVisibleRight(formatProxySession(record.session), PROXY_TABLE_SESSION_WIDTH),
+    padVisibleRight(requestModel ? colorName(requestModel) : textDim(""), PROXY_TABLE_MODEL_WIDTH),
+    padVisibleRight(textDim(""), PROXY_TABLE_MODEL_WIDTH),
     padVisibleRight(textMagenta(method), PROXY_TABLE_METHOD_WIDTH),
     colorPath(path),
   ].join(" ");
@@ -938,6 +964,73 @@ function extractSessionShortId(body: Buffer): string | null {
   }
 }
 
+function proxyEndpointClass(pathname: string): ProxyEndpointClass | null {
+  if (pathname === "/v1/chat/completions" || pathname === "/chat/completions") {
+    return "chat/completions";
+  }
+  if (pathname === "/v1/responses" || pathname === "/responses") {
+    return "responses";
+  }
+  return null;
+}
+
+function parseJsonBody(body: Buffer): unknown | null {
+  if (body.length === 0) {
+    return null;
+  }
+  try {
+    return JSON.parse(body.toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function extractRequestModel(body: Buffer, endpointClass: ProxyEndpointClass | null): string | null {
+  if (!endpointClass) {
+    return null;
+  }
+  const parsed = parseJsonBody(body);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? jsonStringAt(parsed, ["model"])
+    : null;
+}
+
+function extractUpstreamModelFromJson(payload: unknown, endpointClass: ProxyEndpointClass | null): ProxyModelExtraction {
+  if (!endpointClass || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { model: null, source: null };
+  }
+  if (endpointClass === "chat/completions") {
+    const model = jsonStringAt(payload, ["model"]);
+    return model ? { model, source: "json.model" } : { model: null, source: null };
+  }
+
+  const responseModel = jsonStringAt(payload, ["response", "model"]);
+  if (responseModel) {
+    return { model: responseModel, source: "json.response.model" };
+  }
+  const model = jsonStringAt(payload, ["model"]);
+  return model ? { model, source: "json.model" } : { model: null, source: null };
+}
+
+function extractUpstreamModelFromSsePayload(payload: unknown, endpointClass: ProxyEndpointClass | null): ProxyModelExtraction {
+  const extraction = extractUpstreamModelFromJson(payload, endpointClass);
+  if (!extraction.model || !extraction.source) {
+    return extraction;
+  }
+  return { model: extraction.model, source: `sse.data.${extraction.source.slice("json.".length)}` };
+}
+
+function jsonStringAt(value: unknown, pathSegments: string[]): string | null {
+  let current = value;
+  for (const segment of pathSegments) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return typeof current === "string" && current.length > 0 ? current : null;
+}
+
 function findJsonStringField(value: unknown, field: string): string | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -1005,6 +1098,8 @@ type ProxyOutcome = {
   response: Response;
   upstream: string | null;
   attempts: number;
+  upstreamModel: string | null;
+  upstreamModelSource: string | null;
   error: string | null;
 };
 
@@ -1015,7 +1110,88 @@ class ProxyResponseWriteError extends Error {
   }
 }
 
-async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstreams: ProxyUpstream[], body: Buffer): Promise<ProxyOutcome> {
+class ProxySseModelScanner {
+  private readonly decoder = new TextDecoder("utf-8");
+  private buffer = "";
+  private modelValue: string | null = null;
+  private modelSource: string | null = null;
+
+  constructor(private readonly endpointClass: ProxyEndpointClass | null) {}
+
+  push(chunk: Buffer): void {
+    if (!this.endpointClass || this.modelValue) {
+      return;
+    }
+    this.buffer += this.decoder.decode(chunk, { stream: true });
+    this.consumeCompleteEvents();
+  }
+
+  finish(): ProxyModelExtraction {
+    if (this.endpointClass && !this.modelValue) {
+      this.buffer += this.decoder.decode();
+      this.consumeEvent(this.buffer);
+      this.buffer = "";
+    }
+    return { model: this.modelValue, source: this.modelSource };
+  }
+
+  current(): ProxyModelExtraction {
+    return { model: this.modelValue, source: this.modelSource };
+  }
+
+  private consumeCompleteEvents(): void {
+    while (!this.modelValue) {
+      const separator = findSseEventSeparator(this.buffer);
+      if (!separator) {
+        return;
+      }
+      const event = this.buffer.slice(0, separator.index);
+      this.buffer = this.buffer.slice(separator.index + separator.length);
+      this.consumeEvent(event);
+    }
+  }
+
+  private consumeEvent(event: string): void {
+    const data = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      const extraction = extractUpstreamModelFromSsePayload(parsed, this.endpointClass);
+      if (extraction.model) {
+        this.modelValue = extraction.model;
+        this.modelSource = extraction.source;
+      }
+    } catch {
+      // SSE data frames can contain non-JSON control text.
+    }
+  }
+}
+
+function findSseEventSeparator(value: string): { index: number; length: number } | null {
+  const separators = ["\r\n\r\n", "\n\n", "\r\r"];
+  let match: { index: number; length: number } | null = null;
+  for (const separator of separators) {
+    const index = value.indexOf(separator);
+    if (index >= 0 && (!match || index < match.index)) {
+      match = { index, length: separator.length };
+    }
+  }
+  return match;
+}
+
+async function proxyThroughUpstreamsWithStats(
+  request: IncomingMessage,
+  upstreams: ProxyUpstream[],
+  body: Buffer,
+  endpointClass: ProxyEndpointClass | null,
+): Promise<ProxyOutcome> {
   const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
   let lastStatus = 502;
   let lastError = "unknown";
@@ -1038,13 +1214,15 @@ async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstream
     }
 
     if (isStreamContentType(contentType) || isStreamContentType(`${response.headers.get("content-type") || ""}`)) {
-      return { response, upstream: upstream.name, attempts, error: null };
+      return { response, upstream: upstream.name, attempts, upstreamModel: null, upstreamModelSource: null, error: null };
     }
 
     if (isJsonContentType(`${response.headers.get("content-type") || ""}`)) {
       const text = await response.text();
+      let upstreamModel: ProxyModelExtraction = { model: null, source: null };
       try {
         const parsed = JSON.parse(text) as unknown;
+        upstreamModel = extractUpstreamModelFromJson(parsed, endpointClass);
         const reasoning = parseReasoningTokens(parsed);
         if (reasoning !== null && REASONING_EQUALS.includes(reasoning)) {
           return {
@@ -1062,6 +1240,8 @@ async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstream
             ),
             upstream: upstream.name,
             attempts,
+            upstreamModel: upstreamModel.model,
+            upstreamModelSource: upstreamModel.source,
             error: null,
           };
         }
@@ -1075,6 +1255,8 @@ async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstream
         }),
         upstream: upstream.name,
         attempts,
+        upstreamModel: upstreamModel.model,
+        upstreamModelSource: upstreamModel.source,
         error: null,
       };
     }
@@ -1087,6 +1269,8 @@ async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstream
       }),
       upstream: upstream.name,
       attempts,
+      upstreamModel: null,
+      upstreamModelSource: null,
       error: null,
     };
   }
@@ -1105,16 +1289,26 @@ async function proxyThroughUpstreamsWithStats(request: IncomingMessage, upstream
     ),
     upstream: null,
     attempts,
+    upstreamModel: null,
+    upstreamModelSource: null,
     error: lastError,
   };
 }
 
-async function writeResponse(res: ServerResponse, response: Response): Promise<number> {
+async function writeResponse(
+  res: ServerResponse,
+  response: Response,
+  endpointClass: ProxyEndpointClass | null,
+  modelObserver: ProxyWriteModelObserver,
+): Promise<number> {
   res.writeHead(response.status, responseHeadersToObject(response.headers));
   if (!response.body) {
     return endEmptyResponse(res);
   }
-  return writeReadableResponse(res, Readable.fromWeb(response.body as never));
+  const scanner = isStreamContentType(`${response.headers.get("content-type") || ""}`)
+    ? new ProxySseModelScanner(endpointClass)
+    : null;
+  return writeReadableResponse(res, Readable.fromWeb(response.body as never), scanner, modelObserver);
 }
 
 async function endEmptyResponse(res: ServerResponse): Promise<number> {
@@ -1137,7 +1331,12 @@ async function endEmptyResponse(res: ServerResponse): Promise<number> {
   });
 }
 
-async function writeReadableResponse(res: ServerResponse, stream: Readable): Promise<number> {
+async function writeReadableResponse(
+  res: ServerResponse,
+  stream: Readable,
+  scanner: ProxySseModelScanner | null,
+  modelObserver: ProxyWriteModelObserver,
+): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let responseBytes = 0;
     let settled = false;
@@ -1159,6 +1358,12 @@ async function writeReadableResponse(res: ServerResponse, stream: Readable): Pro
     stream.on("data", (chunk: Buffer | string) => {
       const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       responseBytes += value.length;
+      if (scanner) {
+        scanner.push(value);
+        const extraction = scanner.current();
+        modelObserver.model = extraction.model;
+        modelObserver.source = extraction.source;
+      }
     });
     stream.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 502, responseBytes)));
     res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
@@ -1169,6 +1374,11 @@ async function writeReadableResponse(res: ServerResponse, stream: Readable): Pro
     });
     res.on("finish", () => {
       finished = true;
+      if (scanner) {
+        const extraction = scanner.finish();
+        modelObserver.model = extraction.model;
+        modelObserver.source = extraction.source;
+      }
       finish();
     });
     stream.pipe(res);
@@ -1251,6 +1461,8 @@ function formatProxyTableHeader(): string {
     padVisibleLeft(textDim("ms"), PROXY_TABLE_MS_WIDTH),
     padVisibleLeft(textDim("size"), PROXY_TABLE_SIZE_WIDTH),
     padVisibleRight(textDim("session"), PROXY_TABLE_SESSION_WIDTH),
+    padVisibleRight(textDim("req_model"), PROXY_TABLE_MODEL_WIDTH),
+    padVisibleRight(textDim("up_model"), PROXY_TABLE_MODEL_WIDTH),
     padVisibleRight(textDim("method"), PROXY_TABLE_METHOD_WIDTH),
     textDim("path"),
   ].join(" ");
@@ -1420,6 +1632,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           path: url.pathname,
           request_bytes: 0,
           session: null,
+          request_model: null,
         };
         await startProxyRequestMetric(state, options.stateRoot, activeRecord);
 
@@ -1427,20 +1640,29 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         let upstream: string | null = null;
         let attempts = 0;
         let responseBytes = 0;
+        let upstreamModel: string | null = null;
+        let upstreamModelSource: string | null = null;
         let errorText: string | null = null;
+        const endpointClass = proxyEndpointClass(url.pathname);
         try {
           const profiles = await readProfiles();
           const upstreamProfiles = buildProxyUpstreams(profiles);
           const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
           activeRecord.request_bytes = body.length;
           activeRecord.session = extractSessionShortId(body);
+          activeRecord.request_model = extractRequestModel(body, endpointClass);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-          const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body);
+          const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body, endpointClass);
           status = outcome.response.status;
           upstream = outcome.upstream;
           attempts = outcome.attempts;
+          upstreamModel = outcome.upstreamModel;
+          upstreamModelSource = outcome.upstreamModelSource;
           errorText = outcome.error;
-          responseBytes = await writeResponse(res, outcome.response);
+          const streamModelObserver = { model: upstreamModel, source: upstreamModelSource };
+          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
+          upstreamModel = streamModelObserver.model;
+          upstreamModelSource = streamModelObserver.source;
         } catch (error) {
           if (error instanceof ProxyResponseWriteError) {
             status = error.status;
@@ -1467,6 +1689,9 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           attempts,
           latency_ms: latencyMs,
           response_bytes: responseBytes,
+          request_model: activeRecord.request_model,
+          upstream_model: upstreamModel,
+          upstream_model_source: upstreamModelSource,
           error: errorText,
         });
       } catch (error) {
