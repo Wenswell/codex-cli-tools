@@ -409,7 +409,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.recent_requests[1].status, 404);
     assert.equal(state.metrics.recent_requests[2].status, 499);
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], { ...proxyOptions, once: true }));
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /status total=11 active=0 2xx=8 3xx=0 4xx=2 5xx=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path\n\s+no active requests/);
@@ -623,7 +623,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], { ...proxyOptions, once: true }));
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /time\s+code\s+up\s+ms\s+size\s+session\s+req_model\s+up_model\s+method\s+path/);
     assert.doesNotMatch(output, /\bnull\b/);
     assert.match(output, /POST\s+\/responses/);
