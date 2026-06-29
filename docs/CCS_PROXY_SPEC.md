@@ -42,7 +42,7 @@ Request tables use the shared terminal table renderer. The row number is an expl
 time code up ms size session req_model up_model method path
 ```
 
-Active rows show `...` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name.
+Active rows show `…` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Truncated table cells use the shared single-character ellipsis `…`.
 
 ## Model field plan
 

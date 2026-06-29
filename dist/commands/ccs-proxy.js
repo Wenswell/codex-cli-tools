@@ -29,13 +29,13 @@ const PROXY_RECENT_REQUEST_LIMIT = 10;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
 const PROXY_STATUS_RENDER_LINES = 11 + (PROXY_RECENT_RENDER_COUNT * 2);
-const PROXY_TABLE_TIME_WIDTH = 8;
+const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_CODE_WIDTH = 4;
-const PROXY_TABLE_UPSTREAM_WIDTH = 12;
+const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_MS_WIDTH = 6;
-const PROXY_TABLE_SIZE_WIDTH = 7;
-const PROXY_TABLE_SESSION_WIDTH = 10;
-const PROXY_TABLE_MODEL_WIDTH = 18;
+const PROXY_TABLE_SIZE_WIDTH = 6;
+const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
+const PROXY_TABLE_MODEL_WIDTH = 10;
 const PROXY_TABLE_METHOD_WIDTH = 6;
 const PROXY_TABLE_PATH_WIDTH = 30;
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -49,16 +49,16 @@ const REASONING_POINTERS = [
     "/response/usage/completion_tokens_details/reasoning_tokens",
 ];
 const PROXY_REQUEST_TABLE_COLUMNS = [
-    { key: "index", title: "", width: 4, align: "right" },
+    // { key: "index", title: "", width: 4, align: "right" },
+    { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH },
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH },
-    { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH },
+    { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
     { key: "ms", title: "ms", width: PROXY_TABLE_MS_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-    { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH },
     { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH },
     { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH },
-    { key: "method", title: "method", width: PROXY_TABLE_METHOD_WIDTH },
+    // { key: "method", title: "method", width: PROXY_TABLE_METHOD_WIDTH },
     { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, flex: true, minWidth: 12 },
 ];
 function statePath(stateRoot) {
@@ -631,7 +631,7 @@ function formatProxyActiveRequest(record, nowMs, index) {
     return {
         index: `${index + 1}.`,
         time: textDim(formatProxyTime(record.started_at)),
-        code: textDim("..."),
+        code: textDim("…"),
         up: textDim("-"),
         ms: textYellow(formatLatencyMs(elapsedMs)),
         size: formatProxyBytes(record.request_bytes),

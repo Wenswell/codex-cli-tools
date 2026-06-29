@@ -70,7 +70,7 @@ codex-rename
 - Logs preserve complete original input, event, and response data. Summaries or previews can be added, but cannot replace the raw facts.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
-- Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. ANSI color and wide characters are measured by terminal display width before padding or truncation.
+- Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
 
 ## cx / cxx / cxxs
 

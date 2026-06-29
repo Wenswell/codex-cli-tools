@@ -14,7 +14,7 @@ export function visibleLength(value: string): number {
   return stringWidth(stripAnsi(value));
 }
 
-export function truncateVisible(value: string, width: number, ellipsis = "..."): string {
+export function truncateVisible(value: string, width: number, ellipsis = "…"): string {
   if (width <= 0) {
     return "";
   }

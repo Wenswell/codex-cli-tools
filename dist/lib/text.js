@@ -10,7 +10,7 @@ export function maskSecret(value) {
 export function visibleLength(value) {
     return stringWidth(stripAnsi(value));
 }
-export function truncateVisible(value, width, ellipsis = "...") {
+export function truncateVisible(value, width, ellipsis = "…") {
     if (width <= 0) {
         return "";
     }
