@@ -55,6 +55,7 @@ codex-rename
 ## Design Specs
 
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
+- [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 
 ## CLI conventions
 
