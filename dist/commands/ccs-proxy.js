@@ -36,7 +36,7 @@ const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_MODEL_WIDTH = 10;
-const PROXY_TABLE_PATH_WIDTH = 30;
+const PROXY_TABLE_PATH_WIDTH = 18;
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
 const PROXY_HEALTH_POLL_MS = 100;
@@ -57,7 +57,7 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, align: "right" },
-    { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
+    { key: "error", title: "error", flex: true, minWidth: 12, align: "left", truncate: false },
 ];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
@@ -688,7 +688,7 @@ function formatProxyUpstreamModel(requestModel, upstreamModel) {
     return textRed(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
 }
 function formatProxyError(error) {
-    return error ? textRed(truncateProxyText(error, 24)) : textDim("");
+    return error ? textRed(error) : textDim("");
 }
 function formatProxySession(value) {
     return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
@@ -1243,16 +1243,16 @@ async function renderProxyStatusLines(options) {
 export function buildProxyStatusLines(now, state, profileOrder, runtime, options) {
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
-        formatProxyStatusLine(now, state, runtime),
-        ...formatProxyPathsLines(state, options),
-        formatProxyRequestsSummary(metrics, profileOrder),
-        formatProxyLatencySummary(metrics),
+        fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
+        ...formatProxyPathsLines(state, options).map(fitProxyTerminalLine),
+        fitProxyTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
+        fitProxyTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
         ...formatProxyActiveRows(metrics, now),
         textBold("history"),
         ...formatProxyHistoryRows(metrics),
-        textDim("commands: ccs proxy | watch | install | restore | stop | serve"),
-    ].map(fitProxyTerminalLine);
+        fitProxyTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
+    ];
 }
 async function runProxyStatusOnce(options) {
     console.log((await renderProxyStatusLines({ ...options, once: true })).join("\n"));

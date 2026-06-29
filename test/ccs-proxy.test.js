@@ -415,7 +415,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
-    assert.match(output, /\/abort-stream\s+client closed response …/);
+    assert.match(output, /\/abort-stream\s+client closed response before upstream stream completed/);
     assertProxyHistoryColumnsAligned(output);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
@@ -991,7 +991,7 @@ async function closeServer(server) {
 }
 
 function assertProxyHistoryColumnsAligned(output) {
-  const pathWidth = 30;
+  const pathWidth = 18;
   const lines = output.split("\n").map(stripAnsi);
   const historyIndex = lines.indexOf("history");
   assert.ok(historyIndex >= 0);

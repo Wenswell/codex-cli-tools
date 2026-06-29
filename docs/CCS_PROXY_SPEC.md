@@ -36,13 +36,13 @@ Old state files are normalized at read time. Missing model fields render through
 - `active`: up to 5 current requests.
 - `history`: up to 5 completed requests.
 
-Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column is left-aligned. The visible data columns are:
+Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
 ```text
 session time up code ms size req_model up_model path error
 ```
 
-Active rows show `…` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show `…` for code, elapsed time for `ms`, and known request bytes for `size`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Model field plan
 
@@ -95,7 +95,7 @@ Column behavior:
 - Active rows show `up_model` as `[unknown]`.
 - History rows show status-normalized model fields.
 - `path`: fixed-width request path.
-- `error`: request error text, left-aligned in the final column.
+- `error`: request error text, left-aligned in the final remaining-width column and not table-truncated.
 
 ### Tests
 
@@ -104,7 +104,7 @@ Column behavior:
 - SSE responses extract `upstream_model` for all four concrete paths when present.
 - SSE forwarding preserves the exact client-visible response bytes.
 - Missing upstream model fields render as `[unknown]`, equal upstream models render as `[same]`, and differing upstream models render as model names.
-- Status tables right-align fixed columns, left-align the final `error` column, and format time/size with compact 3-significant-digit units after the base unit.
+- Status tables right-align fixed columns, left-align the final `error` column without table-side truncation, and format time/size with compact 3-significant-digit units after the base unit.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
 ### Decisions
