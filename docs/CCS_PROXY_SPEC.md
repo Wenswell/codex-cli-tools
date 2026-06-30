@@ -2,6 +2,16 @@
 
 `ccs proxy` reports proxy runtime state and HTTP request state from `~/.config/codex-tools/proxy.json`.
 
+## Storage files
+
+Proxy state lives under `~/.config/codex-tools`:
+
+- `proxy.json`: lightweight runtime state snapshot, counters, active requests, and the newest completed-request snapshot.
+- `proxy-requests.jsonl`: complete completed-request history, one normalized request record per line in completion order.
+- `proxy.log`: guard and local proxy error events as JSONL.
+- `proxy-runtime.log`: background process stdout and stderr.
+- `proxy.pid`: background process id.
+
 ## Request lifecycle
 
 - A proxied HTTP request enters `metrics.active_requests` after the proxy accepts the request.
@@ -19,7 +29,7 @@
 
 - `total_requests`: completed request count.
 - `active_requests`: currently processed HTTP requests.
-- `recent_requests`: completed history, newest first.
+- `recent_requests`: newest completed-request snapshot, capped at 10 records and ordered newest first.
 - `status_counts`: completed request counts keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
 - `reasoning_token_counts`: completed request counts keyed by observed `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
 - `upstream_hit_counts`: completed request counts per selected upstream.
@@ -61,21 +71,32 @@ The reasoning guard is always active for supported JSON and SSE response payload
 - The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
 - Transport errors record `upstream_error`.
 
-The proxy also writes each guard action as one JSON line in `~/.config/codex-tools/proxy.log`.
+The proxy writes each guard action as one JSON line in `~/.config/codex-tools/proxy.log`. Local proxy request errors also write JSONL events to the same event log.
 
 ## Status view
 
 `ccs proxy` and `ccs proxy --once` print a full snapshot:
 
 - Title line: `ccs proxy`, current time, runtime, pid, proxy URL, and trailing refresh interval.
-- Path lines: state path, log path, and config path.
+- Path lines: state, requests, events, runtime, and config paths.
 - Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
 - Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups.
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
-- `history`: up to 5 completed requests rendered by the shared request-row formatter.
+- `history`: completed requests rendered by the shared request-row formatter.
 
-`ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line and omits the state, log, and config file path lines.
+History row count follows these rules:
+
+- TTY output computes the count from `process.stdout.rows` after title, path, summary, active, history header, and command footer lines are reserved.
+- Tiny terminals can render zero history rows.
+- Non-TTY output renders 5 history rows for deterministic piped output.
+- `--history N` overrides adaptive sizing for `ccs proxy`, `ccs proxy --once`, and `ccs proxy watch`.
+- `N` is a positive integer.
+- Default rendering reads completed history from `proxy.json.metrics.recent_requests`.
+- Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
+- Explicit `--history N` reads the tail of `proxy-requests.jsonl` when `N` exceeds the snapshot length.
+
+`ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize.
 
 `status total` is the sum of all exact status-code counters. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
@@ -96,6 +117,8 @@ Active rows show elapsed time for `lat.`, known request bytes for `size`, and kn
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
 - Current upstream display is derived from `profiles.current`; historical upstream hit counts remain visible through `upstream_hit_counts`.
+- Completed requests append to `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
+- Status rendering reads JSONL through a reverse block tail reader only for explicit history counts that exceed the compact snapshot.
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
 
@@ -176,6 +199,10 @@ Column behavior:
 - Status tables display `code` and `reas.` as separate columns.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
+- Completed requests are appended to `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 10.
+- Background stdout/stderr are written to `proxy-runtime.log`.
+- Status history count follows TTY rows, non-TTY fixed 5, and explicit `--history N`.
+- Watch repaints on terminal resize.
 - Guard action prefixes render in the status table `error` column.
 - Missing request and upstream model fields render as `-`, equal upstream models render as `[same]`, and differing upstream models render as model names.
 - Status tables right-align fixed columns, left-align the final `error` column as one current-width line, and format time/size with compact 3-significant-digit units after the base unit.

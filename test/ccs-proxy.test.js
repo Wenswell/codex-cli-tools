@@ -395,7 +395,9 @@ test("proxy records active and history request lifecycle", async () => {
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /state: ~\/\.config\/codex-tools\/proxy\.json/);
-    assert.match(output, /log: ~\/\.config\/codex-tools\/proxy\.log/);
+    assert.match(output, /requests: ~\/\.config\/codex-tools\/proxy-requests\.jsonl/);
+    assert.match(output, /events: ~\/\.config\/codex-tools\/proxy\.log/);
+    assert.match(output, /runtime: ~\/\.config\/codex-tools\/proxy-runtime\.log/);
     assert.match(output, /config: ~\/\.codex\/config\.toml/);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
@@ -408,6 +410,20 @@ test("proxy records active and history request lifecycle", async () => {
     assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
+
+    const cappedResponse = await fetch(`http://127.0.0.1:${proxyPort}/cap`, { method: "POST", body: "{}" });
+    assert.equal(cappedResponse.status, 200);
+    await cappedResponse.text();
+    state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 11);
+    assert.equal(state.metrics.recent_requests.length, 10);
+    assert.equal(state.metrics.recent_requests[0].path, "/cap");
+    const requestHistoryLines = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n");
+    assert.equal(requestHistoryLines.length, 11);
+    const requestHistory = requestHistoryLines.map((line) => JSON.parse(line));
+    assert.equal(requestHistory[0].path, "/ok");
+    assert.equal(requestHistory.at(-1).path, "/cap");
+    assert.equal(requestHistory.at(-1).completed_at !== null, true);
+    assert.equal(requestHistory.at(-1).status, 200);
   } finally {
     finishStream?.();
     await stopProxy({
@@ -827,7 +843,15 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
     assert.equal(record.guard_actions.length, 1);
     assert.equal(record.guard_actions[0].action, "upstream_error");
     assert.match(record.guard_actions[0].error, /upstream_fetch_failed: fetch failed/);
-    await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
+    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
+    const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_guard_action"]);
+    assert.equal(events[0].request_id, record.id);
+    assert.equal(events[0].path, "/transport-retry");
+    assert.equal(events[0].action, "upstream_error");
+    assert.equal(events[0].attempt, 1);
+    assert.equal(events[0].status, null);
+    assert.equal(events[0].reasoning_tokens, null);
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1656,6 +1680,184 @@ test("proxy status summary renders exact status counts", () => {
   assert.match(lines, /reasoning total=12 max=1552 0=1 516=2 1034=3 1552=1 other=5/);
 });
 
+test("proxy status history count follows TTY rows, non-TTY default, and explicit override", () => {
+  const stateRoot = "/tmp/codex-tools";
+  const state = proxyStateFixture(stateRoot, {
+    total_requests: 12,
+    status_counts: { "200": 12 },
+    upstream_hit_counts: { input: 12 },
+    latency_ms: { last: 10, count: 12, sum: 120, min: 10, max: 10 },
+    recent_requests: Array.from({ length: 12 }, (_, index) => proxyHistoryRecord({
+      id: `history-${index}`,
+      completed_at: `2026-01-01T00:00:${String(59 - index).padStart(2, "0")}.000Z`,
+      path: `/history-${index}`,
+    })),
+  });
+  const render = (options, stdoutProperties) => withStdoutProperties(stdoutProperties, () => buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    state,
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot,
+      ...options,
+    },
+  ).join("\n"));
+
+  const nonTty = render({}, { isTTY: false, columns: 140, rows: 40 });
+  assert.equal(countHistoryRows(nonTty), 5);
+  assert.match(nonTty, /\/history-4/);
+  assert.doesNotMatch(nonTty, /\/history-5/);
+
+  const ttyTall = render({}, { isTTY: true, columns: 140, rows: 24 });
+  assert.equal(countHistoryRows(ttyTall), 9);
+  assert.match(ttyTall, /\/history-8/);
+  assert.doesNotMatch(ttyTall, /\/history-9/);
+
+  const ttyTiny = render({}, { isTTY: true, columns: 140, rows: 8 });
+  assert.equal(countHistoryRows(ttyTiny), 0);
+  assert.doesNotMatch(ttyTiny, /\/history-0/);
+
+  const explicit = render({ historyCount: 7 }, { isTTY: true, columns: 140, rows: 8 });
+  assert.equal(countHistoryRows(explicit), 7);
+  assert.match(explicit, /\/history-6/);
+});
+
+test("proxy rejects invalid --history values", async () => {
+  const options = {
+    codexConfigPath: "/tmp/config.toml",
+    listenHost: "127.0.0.1",
+    listenPort: 4610,
+    stateRoot: "/tmp/codex-tools",
+  };
+  for (const args of [
+    ["--history"],
+    ["--history", "abc"],
+    ["--history", "1.5"],
+    ["--history", "0"],
+    ["--history", "-1"],
+    ["--once", "--history", "0"],
+    ["watch", "--history", "-1"],
+  ]) {
+    await assert.rejects(
+      () => runProxyCommand(args, options),
+      /ccs proxy --history requires a positive integer/,
+    );
+  }
+  for (const args of [
+    ["--history", "2", "watch"],
+    ["--once", "watch"],
+    ["watch", "--once"],
+    ["watch", "--history", "2", "--once"],
+    ["install", "extra"],
+    ["restore", "extra"],
+  ]) {
+    await assert.rejects(
+      () => runProxyCommand(args, options),
+      /unknown argument/,
+    );
+  }
+  await assert.rejects(
+    () => runProxyCommand(["install", "--yes"], options),
+    /ccs proxy install no longer accepts -y\/--yes/,
+  );
+});
+
+test("proxy --history uses snapshot rows until explicit count needs JSONL tail", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const health = createServer((req, res) => {
+    if (req.url === "/__codex_proxy/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", pid: 1234 }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      health.once("error", reject);
+      health.listen(0, "127.0.0.1", resolve);
+    });
+    const address = health.address();
+    assert.ok(address && typeof address === "object");
+    const proxyPort = address.port;
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
+    await writeProxyStateFixture(home, stateRoot, proxyPort, {
+      total_requests: 8,
+      status_counts: { "200": 8 },
+      upstream_hit_counts: { input: 8 },
+      latency_ms: { last: 10, count: 8, sum: 80, min: 10, max: 10 },
+      recent_requests: Array.from({ length: 5 }, (_, index) => proxyHistoryRecord({
+        id: `snapshot-${index}`,
+        completed_at: `2026-01-01T00:00:${String(50 - index).padStart(2, "0")}.000Z`,
+        path: `/snapshot-${index}`,
+      })),
+    });
+    const jsonlRecords = Array.from({ length: 8 }, (_, index) => proxyHistoryRecord({
+      id: `jsonl-${index}`,
+      completed_at: `2026-01-01T00:00:${String(10 + index).padStart(2, "0")}.000Z`,
+      path: `/jsonl-${index}`,
+    }));
+    await writeFile(
+      join(stateRoot, "proxy-requests.jsonl"),
+      `${jsonlRecords.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const defaultOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
+    assert.equal(countHistoryRows(defaultOutput), 5);
+    assert.match(defaultOutput, /\/snapshot-4/);
+    assert.doesNotMatch(defaultOutput, /\/jsonl-/);
+
+    const onceOutput = await captureConsole(() => runProxyCommand(["--once", "--history", "3"], proxyOptions));
+    assert.equal(countHistoryRows(onceOutput), 3);
+    assert.match(onceOutput, /\/snapshot-2/);
+    assert.doesNotMatch(onceOutput, /\/snapshot-3/);
+
+    const snapshotOutput = await captureConsole(() => runProxyCommand(["--history", "5"], proxyOptions));
+    assert.equal(countHistoryRows(snapshotOutput), 5);
+    assert.match(snapshotOutput, /\/snapshot-4/);
+    assert.doesNotMatch(snapshotOutput, /\/jsonl-/);
+
+    const jsonlOutput = await captureConsole(() => runProxyCommand(["--history", "7"], proxyOptions));
+    assert.equal(countHistoryRows(jsonlOutput), 7);
+    assert.match(jsonlOutput, /\/jsonl-7/);
+    assert.match(jsonlOutput, /\/jsonl-1/);
+    assert.doesNotMatch(jsonlOutput, /\/jsonl-0/);
+    assert.doesNotMatch(jsonlOutput, /\/snapshot-/);
+  } finally {
+    await closeServer(health);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy watch uses terminal frame repaint and omits file path lines", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -1718,7 +1920,180 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
-    assert.doesNotMatch(output, /state:|log:|config:/);
+    assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
+  } finally {
+    await closeServer(health);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy watch --history uses explicit history count", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const health = createServer((req, res) => {
+    if (req.url === "/__codex_proxy/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", pid: 1234 }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      health.once("error", reject);
+      health.listen(0, "127.0.0.1", resolve);
+    });
+    const address = health.address();
+    assert.ok(address && typeof address === "object");
+    const proxyPort = address.port;
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
+    await writeProxyStateFixture(home, stateRoot, proxyPort, {
+      total_requests: 5,
+      status_counts: { "200": 5 },
+      upstream_hit_counts: { input: 5 },
+      latency_ms: { last: 10, count: 5, sum: 50, min: 10, max: 10 },
+      recent_requests: Array.from({ length: 5 }, (_, index) => proxyHistoryRecord({
+        id: `watch-history-${index}`,
+        completed_at: `2026-01-01T00:00:${String(50 - index).padStart(2, "0")}.000Z`,
+        path: `/h${index}`,
+      })),
+    });
+
+    const output = await captureStdout(
+      () => runProxyCommand(
+        ["watch", "--history", "3"],
+        {
+          codexConfigPath: join(home, ".codex", "config.toml"),
+          listenHost: "127.0.0.1",
+          listenPort: proxyPort,
+          stateRoot,
+        },
+      ),
+      {
+        isTTY: true,
+        columns: 120,
+        rows: 8,
+        onWrite: (output) => {
+          if (output.includes("\u001b[J")) {
+            setImmediate(() => process.emit("SIGINT"));
+          }
+        },
+      },
+    );
+
+    assert.match(output, /\/h0/);
+    assert.match(output, /\/h2/);
+    assert.doesNotMatch(output, /\/h3/);
+  } finally {
+    await closeServer(health);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy watch repaints immediately on terminal resize", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const health = createServer((req, res) => {
+    if (req.url === "/__codex_proxy/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", pid: 1234 }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      health.once("error", reject);
+      health.listen(0, "127.0.0.1", resolve);
+    });
+    const address = health.address();
+    assert.ok(address && typeof address === "object");
+    const proxyPort = address.port;
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
+    await writeProxyStateFixture(home, stateRoot, proxyPort, {
+      total_requests: 12,
+      status_counts: { "200": 12 },
+      upstream_hit_counts: { input: 12 },
+      latency_ms: { last: 10, count: 12, sum: 120, min: 10, max: 10 },
+      recent_requests: Array.from({ length: 12 }, (_, index) => proxyHistoryRecord({
+        id: `resize-${index}`,
+        completed_at: `2026-01-01T00:00:${String(59 - index).padStart(2, "0")}.000Z`,
+        path: `/resize-${index}`,
+      })),
+    });
+
+    let frameCount = 0;
+    let resizeSent = false;
+    const output = await captureStdout(
+      () => runProxyCommand(
+        ["watch"],
+        {
+          codexConfigPath: join(home, ".codex", "config.toml"),
+          listenHost: "127.0.0.1",
+          listenPort: proxyPort,
+          stateRoot,
+        },
+      ),
+      {
+        isTTY: true,
+        columns: 140,
+        rows: 18,
+        onWrite: (output) => {
+          frameCount = output.split("\u001b[H").length - 1;
+          if (frameCount === 1 && !resizeSent) {
+            resizeSent = true;
+            Object.defineProperty(process.stdout, "rows", {
+              configurable: true,
+              value: 24,
+            });
+            setImmediate(() => process.stdout.emit("resize"));
+            return;
+          }
+          if (frameCount >= 2) {
+            setImmediate(() => process.emit("SIGINT"));
+          }
+        },
+      },
+    );
+
+    assert.equal(frameCount >= 2, true);
+    assert.match(output, /\/resize-3/);
+    assert.match(output, /\/resize-8/);
+    assert.equal(output.split("\u001b[H").length - 1 >= 2, true);
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -1947,6 +2322,8 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     const healthPayload = await health.json();
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
+    await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
+    assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
 
     await unlink(join(stateRoot, "proxy.pid"));
     const stopped = await restoreProxy({
@@ -2026,6 +2403,14 @@ async function waitForLogIncludes(logPath, pattern) {
   assert.fail(`proxy log did not include ${pattern}: ${lastText}`);
 }
 
+async function readTextOrEmpty(filePath) {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
 async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
   await writeProxyTestStateWithProfiles(
     home,
@@ -2084,6 +2469,39 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
   );
 }
 
+async function writeProxyStateFixture(home, stateRoot, proxyPort, metrics = {}) {
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(
+    join(stateRoot, "profiles.json"),
+    JSON.stringify(
+      {
+        profiles: {
+          input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "" },
+        },
+        current: "input",
+        toggle: ["input"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(
+    join(stateRoot, "proxy.json"),
+    JSON.stringify(
+      {
+        ...proxyStateFixture(stateRoot, metrics),
+        codex_config_path: join(home, ".codex", "config.toml"),
+        proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+        listen_port: proxyPort,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
 async function listenServer(server, port) {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -2122,6 +2540,7 @@ async function captureStdout(run, options = {}) {
   const originalWrite = process.stdout.write;
   const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
   const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+  const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
   let output = "";
   Object.defineProperty(process.stdout, "isTTY", {
     configurable: true,
@@ -2130,6 +2549,10 @@ async function captureStdout(run, options = {}) {
   Object.defineProperty(process.stdout, "columns", {
     configurable: true,
     value: options.columns ?? process.stdout.columns,
+  });
+  Object.defineProperty(process.stdout, "rows", {
+    configurable: true,
+    value: options.rows ?? process.stdout.rows,
   });
   process.stdout.write = (chunk, encoding, callback) => {
     output += Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === "string" ? encoding : "utf8") : String(chunk);
@@ -2156,8 +2579,36 @@ async function captureStdout(run, options = {}) {
     } else {
       delete process.stdout.columns;
     }
+    if (originalRows) {
+      Object.defineProperty(process.stdout, "rows", originalRows);
+    } else {
+      delete process.stdout.rows;
+    }
   }
   return output;
+}
+
+function withStdoutProperties(properties, run) {
+  const descriptors = Object.fromEntries(
+    Object.keys(properties).map((key) => [key, Object.getOwnPropertyDescriptor(process.stdout, key)]),
+  );
+  try {
+    for (const [key, value] of Object.entries(properties)) {
+      Object.defineProperty(process.stdout, key, {
+        configurable: true,
+        value,
+      });
+    }
+    return run();
+  } finally {
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (descriptor) {
+        Object.defineProperty(process.stdout, key, descriptor);
+      } else {
+        delete process.stdout[key];
+      }
+    }
+  }
 }
 
 function holdControl() {
@@ -2178,6 +2629,8 @@ function stripAnsi(value) {
 
 function proxyHistoryRecord(overrides) {
   return {
+    id: overrides?.id ?? "history-record",
+    started_at: overrides?.started_at ?? "2026-01-01T00:00:00.000Z",
     completed_at: "2026-01-01T00:00:00.000Z",
     method: "POST",
     path: "/responses",
@@ -2196,6 +2649,49 @@ function proxyHistoryRecord(overrides) {
     error: null,
     ...overrides,
   };
+}
+
+function proxyStateFixture(stateRoot, metrics = {}) {
+  return {
+    installed_at: "2026-01-01T00:00:00.000Z",
+    codex_config_path: "/home/test/.codex/config.toml",
+    provider_name: "codex",
+    original_base_url: "https://proxy.example.com",
+    proxy_base_url: "http://127.0.0.1:4610",
+    listen_host: "127.0.0.1",
+    listen_port: 4610,
+    profile_order: ["input"],
+    backup_path: "/tmp/backup.toml",
+    metrics: {
+      total_requests: 0,
+      active_requests: [],
+      status_counts: {},
+      reasoning_token_counts: {},
+      upstream_hit_counts: {},
+      latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
+      recent_requests: [],
+      ...metrics,
+    },
+  };
+}
+
+function countHistoryRows(output) {
+  const lines = output.split("\n").map(stripAnsi);
+  const historyIndex = lines.indexOf("history");
+  assert.ok(historyIndex >= 0);
+  let count = 0;
+  for (const line of lines.slice(historyIndex + 2)) {
+    if (!line.startsWith("  ")) {
+      break;
+    }
+    if (line.includes("no historical requests")) {
+      continue;
+    }
+    if (line.trim().length > 0) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function reasoningJson(model, reasoningTokens) {

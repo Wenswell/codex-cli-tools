@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -123,6 +123,7 @@ type ProxyOptions = {
   listenHost: string;
   listenPort: number;
   stateRoot: string;
+  historyCount?: number;
   once?: boolean;
   watch?: boolean;
 };
@@ -150,6 +151,7 @@ const FETCH_FAILED_TRANSPORT_RETRIES = 1;
 const PROXY_RECENT_REQUEST_LIMIT = 10;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
+const PROXY_JSONL_TAIL_BLOCK_BYTES = 64 * 1024;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_CODE_WIDTH = 4;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
@@ -220,6 +222,24 @@ function proxyLogPath(stateRoot: string): string {
   return path.join(stateRoot, "proxy.log");
 }
 
+function proxyRequestsPath(stateRoot: string): string {
+  return path.join(stateRoot, "proxy-requests.jsonl");
+}
+
+function proxyRuntimeLogPath(stateRoot: string): string {
+  return path.join(stateRoot, "proxy-runtime.log");
+}
+
+async function appendProxyJsonLine(filePath: string, value: Record<string, unknown>): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await appendFile(filePath, `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function appendProxyRequestRecord(stateRoot: string, record: ProxyRequestRecord): Promise<void> {
+  await mkdir(stateRoot, { recursive: true });
+  await appendFile(proxyRequestsPath(stateRoot), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
 function proxyStartLockPath(stateRoot: string): string {
   return path.join(stateRoot, "proxy.start.lock");
 }
@@ -267,7 +287,7 @@ async function waitForProxyHealth(state: ProxyState, stateRoot: string): Promise
     }
     await sleep(PROXY_HEALTH_POLL_MS);
   }
-  throw new Error(`proxy did not become healthy: ${healthUrl(state)}; log: ${proxyLogPath(stateRoot)}`);
+  throw new Error(`proxy did not become healthy: ${healthUrl(state)}; runtime log: ${proxyRuntimeLogPath(stateRoot)}`);
 }
 
 async function waitForProxyStop(state: ProxyState): Promise<void> {
@@ -312,7 +332,7 @@ function startProxyBackgroundProcess(options: ProxyOptions, state: ProxyState): 
   }
 
   fs.mkdirSync(options.stateRoot, { recursive: true });
-  const logPath = proxyLogPath(options.stateRoot);
+  const logPath = proxyRuntimeLogPath(options.stateRoot);
   const stdout = fs.openSync(logPath, "a");
   const stderr = fs.openSync(logPath, "a");
   try {
@@ -365,7 +385,7 @@ export async function ensureProxyRunning(options: ProxyOptions): Promise<ProxyRu
   if (!initialState) {
     return null;
   }
-  const logPath = proxyLogPath(options.stateRoot);
+  const logPath = proxyRuntimeLogPath(options.stateRoot);
   const initialPid = await readProxyPid(options.stateRoot);
   const initialHealth = await readProxyHealth(initialState);
   if (initialHealth.healthy) {
@@ -487,6 +507,7 @@ function normalizeProxyMetrics(value: unknown): ProxyMetrics {
   const recentRequests = Array.isArray(raw.recent_requests)
     ? raw.recent_requests.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
       .map(normalizeProxyHistoryRecord)
+      .slice(0, PROXY_RECENT_REQUEST_LIMIT)
     : [];
   const statusCounts = normalizeProxyStatusCounts(raw.status_counts, recentRequests, raw);
   return {
@@ -670,12 +691,12 @@ let proxyStateMutationQueue: Promise<void> = Promise.resolve();
 async function mutateProxyMetrics(
   state: ProxyState,
   stateRoot: string,
-  mutate: (metrics: ProxyMetrics) => void,
+  mutate: (metrics: ProxyMetrics) => void | Promise<void>,
 ): Promise<void> {
   const mutation = proxyStateMutationQueue.then(async () => {
     const currentState = await readProxyState(stateRoot) ?? state;
     const metrics = ensureProxyMetrics(currentState);
-    mutate(metrics);
+    await mutate(metrics);
     currentState.metrics = metrics;
     await writeProxyState(stateRoot, currentState);
     state.metrics = metrics;
@@ -716,7 +737,7 @@ async function updateProxyActiveRequestMetric(
 }
 
 async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, record: ProxyRequestRecord): Promise<void> {
-  await mutateProxyMetrics(state, stateRoot, (metrics) => {
+  await mutateProxyMetrics(state, stateRoot, async (metrics) => {
     metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
     metrics.total_requests += 1;
     incrementProxyStatusCount(metrics.status_counts, record.status);
@@ -727,6 +748,7 @@ async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, 
     updateProxyLatencyStats(metrics.latency_ms, record.latency_ms);
     metrics.recent_requests.unshift(record);
     metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
+    await appendProxyRequestRecord(stateRoot, record);
   });
 }
 
@@ -846,7 +868,9 @@ function formatProxyPathsLines(options: ProxyOptions): string[] {
   }
   return [
     `state: ${colorPath(formatProxyFilePath(statePath(options.stateRoot)))}`,
-    `log: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
+    `requests: ${colorPath(formatProxyFilePath(proxyRequestsPath(options.stateRoot)))}`,
+    `events: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
+    `runtime: ${colorPath(formatProxyFilePath(proxyRuntimeLogPath(options.stateRoot)))}`,
     `config: ${colorPath(formatProxyFilePath(options.codexConfigPath))}`,
   ];
 }
@@ -960,12 +984,8 @@ function formatProxyGuardActionPrefixValue(action: ProxyGuardActionRecord): stri
   return "";
 }
 
-function writeProxyProcessLog(event: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
-}
-
-function logProxyGuardAction(request: ProxyRequestRecord, action: ProxyGuardActionRecord): void {
-  writeProxyProcessLog({
+async function logProxyGuardAction(stateRoot: string, request: ProxyRequestRecord, action: ProxyGuardActionRecord): Promise<void> {
+  await appendProxyJsonLine(proxyLogPath(stateRoot), {
     event: "ccs_proxy_guard_action",
     request_id: request.id,
     method: request.method,
@@ -976,6 +996,19 @@ function logProxyGuardAction(request: ProxyRequestRecord, action: ProxyGuardActi
     status: action.status,
     reasoning_tokens: action.reasoning_tokens,
     error: action.error,
+  });
+}
+
+async function logProxyRequestError(stateRoot: string, request: ProxyRequestRecord, status: number | null, error: string): Promise<void> {
+  await appendProxyJsonLine(proxyLogPath(stateRoot), {
+    event: "ccs_proxy_request_error",
+    request_id: request.id,
+    method: request.method,
+    path: request.path,
+    upstream: request.upstream,
+    attempts: request.attempts,
+    status,
+    error,
   });
 }
 
@@ -1942,6 +1975,41 @@ function renderProxyRequestTable(rows: TableRow[]): string[] {
   }).map((line) => `${PROXY_REQUEST_TABLE_INDENT}${line}`);
 }
 
+function proxyActiveRowCount(metrics: ProxyMetrics): number {
+  return metrics.active_requests.length === 0
+    ? 1
+    : Math.min(metrics.active_requests.length, PROXY_RECENT_RENDER_COUNT);
+}
+
+function proxyActiveSectionLineCount(metrics: ProxyMetrics): number {
+  return 1 + 1 + proxyActiveRowCount(metrics);
+}
+
+function proxyPathLineCount(options: ProxyOptions): number {
+  return options.watch ? 0 : 5;
+}
+
+function resolveProxyHistoryRenderCount(metrics: ProxyMetrics, options: ProxyOptions): number {
+  if (options.historyCount !== undefined) {
+    return options.historyCount;
+  }
+  if (!process.stdout.isTTY) {
+    return PROXY_RECENT_RENDER_COUNT;
+  }
+  const terminalRows = process.stdout.rows;
+  if (!Number.isInteger(terminalRows) || terminalRows <= 0) {
+    return PROXY_RECENT_RENDER_COUNT;
+  }
+  const fixedLines = 1
+    + proxyPathLineCount(options)
+    + 3
+    + proxyActiveSectionLineCount(metrics)
+    + 1
+    + 1
+    + 1;
+  return Math.max(0, terminalRows - fixedLines);
+}
+
 function formatProxyActiveRows(metrics: ProxyMetrics, now: Date, count = PROXY_RECENT_RENDER_COUNT): string[] {
   if (metrics.active_requests.length === 0) {
     return [
@@ -1952,15 +2020,71 @@ function formatProxyActiveRows(metrics: ProxyMetrics, now: Date, count = PROXY_R
   return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime())));
 }
 
-function formatProxyHistoryRows(metrics: ProxyMetrics, count = PROXY_RECENT_RENDER_COUNT): string[] {
-  if (metrics.recent_requests.length === 0) {
+function formatProxyHistoryRows(records: ProxyRequestRecord[], count: number): string[] {
+  if (count === 0) {
+    return renderProxyRequestTable([]);
+  }
+  if (records.length === 0) {
     return [
       ...renderProxyRequestTable([]),
       `  ${textDim("no historical requests")}`,
     ];
   }
   const nowMs = Date.now();
-  return renderProxyRequestTable(metrics.recent_requests.slice(0, count).map((record) => formatProxyRequest(record, nowMs)));
+  return renderProxyRequestTable(records.slice(0, count).map((record) => formatProxyRequest(record, nowMs)));
+}
+
+async function readProxyRequestTail(stateRoot: string, count: number): Promise<ProxyRequestRecord[]> {
+  if (count <= 0) {
+    return [];
+  }
+  let file;
+  try {
+    file = await open(proxyRequestsPath(stateRoot), "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  try {
+    const stat = await file.stat();
+    let position = stat.size;
+    let carry = "";
+    const records: ProxyRequestRecord[] = [];
+    while (position > 0 && records.length < count) {
+      const length = Math.min(PROXY_JSONL_TAIL_BLOCK_BYTES, position);
+      position -= length;
+      const buffer = Buffer.allocUnsafe(length);
+      await file.read(buffer, 0, length, position);
+      const lines = `${buffer.toString("utf8")}${carry}`.split("\n");
+      carry = position > 0 ? lines.shift() ?? "" : "";
+      for (let index = lines.length - 1; index >= 0 && records.length < count; index -= 1) {
+        const line = lines[index].trim();
+        if (!line) {
+          continue;
+        }
+        records.push(normalizeProxyHistoryRecord(parseJsonObject(line)));
+      }
+    }
+    if (position === 0 && carry.trim() && records.length < count) {
+      records.push(normalizeProxyHistoryRecord(parseJsonObject(carry.trim())));
+    }
+    return records;
+  } finally {
+    await file.close();
+  }
+}
+
+async function resolveProxyHistoryRecords(stateRoot: string, metrics: ProxyMetrics, count: number, explicitHistory: boolean): Promise<ProxyRequestRecord[]> {
+  if (count <= 0) {
+    return [];
+  }
+  if (explicitHistory && count > metrics.recent_requests.length) {
+    return readProxyRequestTail(stateRoot, count);
+  }
+  return metrics.recent_requests.slice(0, count);
 }
 
 async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> {
@@ -1969,7 +2093,10 @@ async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> 
   const profiles = await readProfiles();
   const currentProfileOrder = buildProfileOrder(profiles);
   const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
-  return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
+  const metrics = state?.metrics ?? createProxyMetrics();
+  const historyCount = resolveProxyHistoryRenderCount(metrics, options);
+  const historyRecords = await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
+  return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords);
 }
 
 export function buildProxyStatusLines(
@@ -1978,8 +2105,11 @@ export function buildProxyStatusLines(
   profileOrder: string[],
   runtime: ProxyRuntimeState | null,
   options: ProxyOptions,
+  historyRecords?: ProxyRequestRecord[],
 ): string[] {
   const metrics = state?.metrics ?? createProxyMetrics();
+  const historyCount = resolveProxyHistoryRenderCount(metrics, options);
+  const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
   return [
     fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
     ...formatProxyPathsLines(options).map(fitProxyTerminalLine),
@@ -1989,7 +2119,7 @@ export function buildProxyStatusLines(
     textBold("active"),
     ...formatProxyActiveRows(metrics, now),
     textBold("history"),
-    ...formatProxyHistoryRows(metrics),
+    ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount),
     fitProxyTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
   ];
 }
@@ -2002,6 +2132,7 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let refreshing = false;
+  let renderPending = false;
   const useAlternateScreen = Boolean(process.stdout.isTTY);
   const restoreTerminal = (): void => {
     if (useAlternateScreen) {
@@ -2010,20 +2141,24 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   };
 
   const render = async (): Promise<void> => {
-    if (refreshing || stopped) {
+    if (stopped) {
+      return;
+    }
+    if (refreshing) {
+      renderPending = true;
       return;
     }
     refreshing = true;
-    try {
+    do {
+      renderPending = false;
       const lines = await renderProxyStatusLines({ ...options, watch: true });
       if (useAlternateScreen) {
         process.stdout.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
       } else {
         process.stdout.write(`${lines.join("\n")}\n`);
       }
-    } finally {
-      refreshing = false;
-    }
+    } while (renderPending && !stopped);
+    refreshing = false;
   };
 
   if (useAlternateScreen) {
@@ -2036,6 +2171,9 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
     }
 
     await new Promise<void>((resolve) => {
+      const repaintOnResize = (): void => {
+        void render();
+      };
       const cleanup = (): void => {
         if (stopped) {
           return;
@@ -2046,6 +2184,7 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
         }
         process.off("SIGINT", cleanup);
         process.off("SIGTERM", cleanup);
+        process.stdout.off("resize", repaintOnResize);
         restoreTerminal();
         resolve();
       };
@@ -2054,6 +2193,7 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
         void render();
       }, PROXY_STATUS_REFRESH_SECONDS * 1000);
 
+      process.stdout.on("resize", repaintOnResize);
       process.once("SIGINT", cleanup);
       process.once("SIGTERM", cleanup);
     });
@@ -2211,7 +2351,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               activeRecord.reasoning_tokens = action.reasoning_tokens;
               activeRecord.guard_actions.push(action);
               activeRecord.error = action.error;
-              logProxyGuardAction(activeRecord, action);
+              await logProxyGuardAction(options.stateRoot, activeRecord, action);
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           });
@@ -2265,6 +2405,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           activeRecord.status = status;
           activeRecord.response_bytes = responseBytes;
           activeRecord.error = errorText;
+          await logProxyRequestError(options.stateRoot, activeRecord, status, errorText);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
         }
 
@@ -2284,8 +2425,16 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           error: errorText,
         });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+          event: "ccs_proxy_request_error",
+          method: req.method || "GET",
+          path: req.url || "/",
+          status: 500,
+          error: message,
+        });
         res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }));
+        res.end(JSON.stringify({ error: { message } }));
       }
     })();
   });
@@ -2311,14 +2460,45 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
 function usageHelpLines(): string[] {
   return [
     "Usage:",
-    "  ccs proxy                           # print proxy status and active upstream once",
-    "  ccs proxy --once                    # print proxy status and active upstream once",
-    "  ccs proxy watch                     # watch proxy status and active upstream",
-    "  ccs proxy install                   # back up config, install routing, and start background proxy",
-    "  ccs proxy restore                   # restore config from the saved backup",
-    "  ccs proxy stop                      # stop the healthy background proxy",
-    "  ccs proxy serve                     # run the proxy server in the foreground for debugging",
+    "  ccs proxy                                # print proxy status and active upstream once",
+    "  ccs proxy --history N                    # print proxy status with N history rows",
+    "  ccs proxy --once                         # print proxy status and active upstream once",
+    "  ccs proxy --once --history N             # print proxy status with N history rows",
+    "  ccs proxy watch                          # watch proxy status and active upstream",
+    "  ccs proxy watch --history N              # watch proxy status with N history rows",
+    "  ccs proxy install                        # back up config, install routing, and start background proxy",
+    "  ccs proxy restore                        # restore config from the saved backup",
+    "  ccs proxy stop                           # stop the healthy background proxy",
+    "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
   ];
+}
+
+function parseProxyHistoryCount(rawCount: string | undefined): number {
+  if (!rawCount) {
+    throw new Error("ccs proxy --history requires a positive integer");
+  }
+  if (!/^[1-9]\d*$/.test(rawCount)) {
+    throw new Error("ccs proxy --history requires a positive integer");
+  }
+  return Number(rawCount);
+}
+
+function parseProxyStatusHistoryArgs(args: string[], commandName: string): { historyCount?: number } {
+  if (args.length === 0) {
+    return {};
+  }
+  if (args[0] !== "--history") {
+    throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
+  }
+  const historyCount = parseProxyHistoryCount(args[1]);
+  rejectProxyCommandArgs(args.slice(2), `${commandName} --history`);
+  return { historyCount };
+}
+
+function rejectProxyCommandArgs(args: string[], commandName: string): void {
+  if (args.length > 0) {
+    throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
+  }
 }
 
 export async function runProxyCommand(args: string[], options: ProxyOptions): Promise<void> {
@@ -2333,16 +2513,25 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     await runProxyStatusOnce(options);
     return;
   }
+  if (command === "--history") {
+    const historyCount = parseProxyHistoryCount(args[1]);
+    rejectProxyCommandArgs(args.slice(2), "ccs proxy --history");
+    await runProxyStatusOnce({ ...options, historyCount });
+    return;
+  }
   if (command === "--once") {
-    await runProxyStatusOnce(options);
+    const parsed = parseProxyStatusHistoryArgs(rest, "ccs proxy --once");
+    await runProxyStatusOnce(parsed.historyCount === undefined ? options : { ...options, historyCount: parsed.historyCount });
     return;
   }
   if (command === "watch") {
-    await runProxyStatusWatch(options);
+    const parsed = parseProxyStatusHistoryArgs(rest, "ccs proxy watch");
+    await runProxyStatusWatch(parsed.historyCount === undefined ? options : { ...options, historyCount: parsed.historyCount });
     return;
   }
   if (command === "install") {
     rejectRemovedYesFlags(rest, "ccs proxy install");
+    rejectProxyCommandArgs(rest, "ccs proxy install");
     printKeyValue("plan:", `proxy ${options.listenHost}:${options.listenPort} -> ${formatProxyFilePath(options.codexConfigPath)}`, 5);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
@@ -2355,11 +2544,14 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
     printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
     printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
-    printKeyValue("log:", textBlue(formatProxyFilePath(proxyLogPath(options.stateRoot))), 8);
+    printKeyValue("requests:", textBlue(formatProxyFilePath(proxyRequestsPath(options.stateRoot))), 9);
+    printKeyValue("events:", textBlue(formatProxyFilePath(proxyLogPath(options.stateRoot))), 7);
+    printKeyValue("runtime_log:", textBlue(formatProxyFilePath(proxyRuntimeLogPath(options.stateRoot))), 12);
     return;
   }
   if (command === "restore") {
     rejectRemovedYesFlags(rest, "ccs proxy restore");
+    rejectProxyCommandArgs(rest, "ccs proxy restore");
     printKeyValue("plan:", `restore ${formatProxyFilePath(options.codexConfigPath)} from proxy state`, 5);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
@@ -2371,10 +2563,12 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     return;
   }
   if (command === "stop") {
+    rejectProxyCommandArgs(rest, "ccs proxy stop");
     console.log(await stopProxy(options));
     return;
   }
   if (command === "serve") {
+    rejectProxyCommandArgs(rest, "ccs proxy serve");
     await serveProxy(options);
     return;
   }
