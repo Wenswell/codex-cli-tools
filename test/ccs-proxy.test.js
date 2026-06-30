@@ -272,7 +272,7 @@ test("proxy records active and history request lifecycle", async () => {
       JSON.stringify(
         {
           profiles: {
-            input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" },
+            input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "input-key" },
           },
           current: "input",
           toggle: ["input"],
@@ -696,11 +696,17 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
   const currentPort = await reservePort();
   const otherPort = await reservePort();
   const statuses = [401, 403, 408, 429, 503];
+  const currentHeaders = [];
   let currentHits = 0;
   let otherHits = 0;
 
   const current = createServer((req, res) => {
     currentHits += 1;
+    currentHeaders.push({
+      authorization: req.headers.authorization,
+      apiKey: req.headers["api-key"],
+      xApiKey: req.headers["x-api-key"],
+    });
     const status = Number((req.url ?? "").split("/").pop());
     res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ status, upstream: "current" }));
@@ -720,8 +726,8 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
       stateRoot,
       proxyPort,
       {
-        input: { baseURL: `http://127.0.0.1:${otherPort}`, apiKey: "" },
-        ciii: { baseURL: `http://127.0.0.1:${currentPort}`, apiKey: "" },
+        input: { baseURL: `http://127.0.0.1:${otherPort}`, apiKey: "input-key" },
+        ciii: { baseURL: `http://127.0.0.1:${currentPort}`, apiKey: "ciii-key" },
       },
       "ciii",
       ["input", "ciii"],
@@ -743,7 +749,12 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     for (const status of statuses) {
       const response = await fetch(`http://127.0.0.1:${proxyPort}/status/${status}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer stale-client-key",
+          "api-key": "stale-api-key",
+          "x-api-key": "stale-x-api-key",
+        },
         body: "{}",
       });
       assert.equal(response.status, status);
@@ -757,6 +768,14 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     );
     assert.equal(currentHits, statuses.length);
     assert.equal(otherHits, 0);
+    assert.deepEqual(
+      currentHeaders,
+      statuses.map(() => ({
+        authorization: "Bearer ciii-key",
+        apiKey: undefined,
+        xApiKey: undefined,
+      })),
+    );
     assert.deepEqual(state.metrics.status_counts, { "401": 1, "403": 1, "408": 1, "429": 1, "503": 1 });
     assert.equal(state.metrics.upstream_hit_counts.ciii, statuses.length);
     assert.equal(state.metrics.recent_requests[0].upstream, "ciii");
@@ -773,6 +792,194 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     }).catch(() => null);
     await closeServer(current);
     await closeServer(other);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy rereads current profile and overwrites stale client api key", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const inputPort = await reservePort();
+  const ciiiPort = await reservePort();
+  const seen = [];
+
+  const input = createServer((req, res) => {
+    seen.push({ upstream: "input", authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ upstream: "input" }));
+  });
+  const ciii = createServer((req, res) => {
+    seen.push({ upstream: "ciii", authorization: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ upstream: "ciii" }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    const profiles = {
+      input: { baseURL: `http://127.0.0.1:${inputPort}`, apiKey: "input-key" },
+      ciii: { baseURL: `http://127.0.0.1:${ciiiPort}`, apiKey: "ciii-key" },
+    };
+    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "input", ["input", "ciii"]);
+    await listenServer(input, inputPort);
+    await listenServer(ciii, ciiiPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const first = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer stale-client-key",
+      },
+      body: JSON.stringify({ model: "gpt-test" }),
+    });
+    assert.equal(first.status, 200);
+    assert.deepEqual(await first.json(), { upstream: "input" });
+
+    await writeFile(
+      join(stateRoot, "profiles.json"),
+      JSON.stringify({ profiles, current: "ciii", toggle: ["input", "ciii"] }, null, 2),
+      "utf8",
+    );
+
+    const second = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer input-key",
+      },
+      body: JSON.stringify({ model: "gpt-test" }),
+    });
+    assert.equal(second.status, 200);
+    assert.deepEqual(await second.json(), { upstream: "ciii" });
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.total_requests === 2,
+    );
+    assert.deepEqual(seen, [
+      { upstream: "input", authorization: "Bearer input-key" },
+      { upstream: "ciii", authorization: "Bearer ciii-key" },
+    ]);
+    assert.deepEqual(state.metrics.upstream_hit_counts, { input: 1, ciii: 1 });
+    assert.equal(state.metrics.recent_requests[0].upstream, "ciii");
+    assert.equal(state.metrics.recent_requests[1].upstream, "input");
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(input);
+    await closeServer(ciii);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy rejects current profile without api key before upstream request", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let upstreamHits = 0;
+
+  const upstream = createServer((_req, res) => {
+    upstreamHits += 1;
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      proxyPort,
+      { input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" } },
+      "input",
+      ["input"],
+    );
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer stale-client-key",
+      },
+      body: JSON.stringify({ model: "gpt-test" }),
+    });
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: { message: "profiles.current input has no apiKey" } });
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.recent_requests[0]?.path === "/v1/responses",
+    );
+    assert.equal(upstreamHits, 0);
+    assert.equal(state.metrics.recent_requests[0].status, 500);
+    assert.equal(state.metrics.recent_requests[0].upstream, null);
+    assert.equal(state.metrics.recent_requests[0].attempts, 0);
+    assert.equal(state.metrics.recent_requests[0].error, "profiles.current input has no apiKey");
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
     if (previousHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -1896,7 +2103,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
       home,
       stateRoot,
       proxyPort,
-      { input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "" } },
+      { input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "input-key" } },
       "input",
       ["input"],
     );
@@ -2424,7 +2631,7 @@ async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
     stateRoot,
     proxyPort,
     {
-      input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" },
+      input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "input-key" },
     },
     "input",
     ["input"],
@@ -2483,7 +2690,7 @@ async function writeProxyStateFixture(home, stateRoot, proxyPort, metrics = {}) 
     JSON.stringify(
       {
         profiles: {
-          input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "" },
+          input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "input-key" },
         },
         current: "input",
         toggle: ["input"],

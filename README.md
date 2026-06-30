@@ -520,7 +520,7 @@ ccs remove local
 ```
 
 `ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
-When proxy mode is installed, `ccs toggle` switches `profiles.current`, and the proxy uses that current profile as the active upstream for new requests.
+When proxy mode is installed, `ccs toggle` switches `profiles.current`, and the proxy uses that current profile as the active upstream and API key for new requests.
 
 Switching profile:
 
@@ -565,7 +565,7 @@ Behavior:
 - `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` stores proxy state in `~/.config/codex-tools/proxy.json`, backs up the current `~/.codex/config.toml`, rewrites the active provider `base_url` to the proxy URL, and starts the proxy in the background.
 - `ccs proxy restore` restores `~/.codex/config.toml` from the saved backup and removes proxy state.
-- `ccs proxy` reads one active upstream from `profiles.current`. `ccs toggle` owns profile switching.
+- `ccs proxy` reads one active upstream from `profiles.current` for each new request. It overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <current profile apiKey>`, so long-running Codex CLI processes can keep using the proxy URL after `ccs toggle` changes the active profile. `ccs toggle` owns profile switching.
 - Upstream HTTP responses are forwarded as received when the local reasoning guard leaves the response unchanged. This includes `401`, `403`, `408`, `429`, and `5xx`.
 - Transport-level `TypeError: fetch failed` is retried once for the same upstream. Repeated transport failure returns `502` with error type `upstream_error` and code `upstream_fetch_failed`.
 - The reasoning guard checks JSON responses and SSE `data:` JSON payloads for `reasoning_tokens` values `516`, `1034`, and `1552`. Guard matches retry the same upstream request up to three times, then return `502 reasoning_guard_triggered`.

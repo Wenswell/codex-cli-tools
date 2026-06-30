@@ -26,6 +26,7 @@ type Profile = {
 type ProxyUpstream = {
   name: string;
   baseURL: string;
+  apiKey: string;
 };
 
 type ProfilesFile = {
@@ -468,11 +469,15 @@ function resolveProxyUpstream(profiles: ProfilesFile): ProxyUpstream {
   if (!current) {
     throw new Error("profiles.current was not found");
   }
-  const baseURL = profiles.profiles?.[current]?.baseURL;
+  const profile = profiles.profiles?.[current];
+  const baseURL = profile?.baseURL;
   if (!baseURL) {
     throw new Error(`profiles.current ${current} has no baseURL`);
   }
-  return { name: current, baseURL };
+  if (!profile.apiKey) {
+    throw new Error(`profiles.current ${current} has no apiKey`);
+  }
+  return { name: current, baseURL, apiKey: profile.apiKey };
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -1229,7 +1234,7 @@ function shortSessionId(value: string): string {
 
 async function forwardRequest(
   request: IncomingMessage,
-  upstreamBaseUrl: string,
+  upstream: ProxyUpstream,
   body: Buffer,
   signal?: AbortSignal,
 ): Promise<Response> {
@@ -1240,7 +1245,15 @@ async function forwardRequest(
       continue;
     }
     const lower = key.toLowerCase();
-    if (lower === "host" || lower === "content-length" || lower === "connection" || lower === "transfer-encoding") {
+    if (
+      lower === "host"
+      || lower === "content-length"
+      || lower === "connection"
+      || lower === "transfer-encoding"
+      || lower === "authorization"
+      || lower === "api-key"
+      || lower === "x-api-key"
+    ) {
       continue;
     }
     if (Array.isArray(value)) {
@@ -1251,8 +1264,9 @@ async function forwardRequest(
       headers.set(key, value);
     }
   }
+  headers.set("authorization", `Bearer ${upstream.apiKey}`);
 
-  return fetch(rewriteUpstreamUrl(requestUrl, upstreamBaseUrl), {
+  return fetch(rewriteUpstreamUrl(requestUrl, upstream.baseURL), {
     method: request.method,
     headers,
     body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
@@ -1540,7 +1554,7 @@ async function fetchUpstreamWithTransportRetry(
     attemptState.attempts += 1;
     await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
     try {
-      return await forwardRequest(request, upstream.baseURL, body, callbacks.signal);
+      return await forwardRequest(request, upstream, body, callbacks.signal);
     } catch (error) {
       if (isClientAbortError(error, callbacks.signal)) {
         throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);

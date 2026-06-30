@@ -53,6 +53,8 @@ Old state files are normalized at read time. Missing model fields render through
 
 The proxy resolves one active upstream from `profiles.current` for each client request. `ccs toggle` owns profile switching by changing `profiles.current`; the proxy reads that current value when forwarding a new request.
 
+The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, and `x-api-key` headers, then sets `Authorization: Bearer <current profile apiKey>` before the upstream request. This keeps already-running Codex CLI processes on the local proxy URL while new requests use the API key from the latest `profiles.current`. A current profile without `apiKey` is a configuration error and the proxy fails the request before contacting upstream.
+
 Upstream HTTP responses are upstream facts. The proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
 
 Transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`.

@@ -316,11 +316,15 @@ function resolveProxyUpstream(profiles) {
     if (!current) {
         throw new Error("profiles.current was not found");
     }
-    const baseURL = profiles.profiles?.[current]?.baseURL;
+    const profile = profiles.profiles?.[current];
+    const baseURL = profile?.baseURL;
     if (!baseURL) {
         throw new Error(`profiles.current ${current} has no baseURL`);
     }
-    return { name: current, baseURL };
+    if (!profile.apiKey) {
+        throw new Error(`profiles.current ${current} has no apiKey`);
+    }
+    return { name: current, baseURL, apiKey: profile.apiKey };
 }
 function createProxyMetrics() {
     return {
@@ -985,7 +989,7 @@ function findJsonStringField(value, field) {
 function shortSessionId(value) {
     return value.length <= 10 ? value : value.slice(0, 8);
 }
-async function forwardRequest(request, upstreamBaseUrl, body, signal) {
+async function forwardRequest(request, upstream, body, signal) {
     const requestUrl = new URL(request.url || "/", "http://localhost");
     const headers = new Headers();
     for (const [key, value] of Object.entries(request.headers)) {
@@ -993,7 +997,13 @@ async function forwardRequest(request, upstreamBaseUrl, body, signal) {
             continue;
         }
         const lower = key.toLowerCase();
-        if (lower === "host" || lower === "content-length" || lower === "connection" || lower === "transfer-encoding") {
+        if (lower === "host"
+            || lower === "content-length"
+            || lower === "connection"
+            || lower === "transfer-encoding"
+            || lower === "authorization"
+            || lower === "api-key"
+            || lower === "x-api-key") {
             continue;
         }
         if (Array.isArray(value)) {
@@ -1005,7 +1015,8 @@ async function forwardRequest(request, upstreamBaseUrl, body, signal) {
             headers.set(key, value);
         }
     }
-    return fetch(rewriteUpstreamUrl(requestUrl, upstreamBaseUrl), {
+    headers.set("authorization", `Bearer ${upstream.apiKey}`);
+    return fetch(rewriteUpstreamUrl(requestUrl, upstream.baseURL), {
         method: request.method,
         headers,
         body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
@@ -1235,7 +1246,7 @@ async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptS
         attemptState.attempts += 1;
         await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
         try {
-            return await forwardRequest(request, upstream.baseURL, body, callbacks.signal);
+            return await forwardRequest(request, upstream, body, callbacks.signal);
         }
         catch (error) {
             if (isClientAbortError(error, callbacks.signal)) {
