@@ -393,11 +393,13 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.recent_requests[2].status, 200);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
+    assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /state: ~\/\.config\/codex-tools\/proxy\.json/);
     assert.match(output, /log: ~\/\.config\/codex-tools\/proxy\.log/);
     assert.match(output, /config: ~\/\.codex\/config\.toml/);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
+    assert.match(output, /reasoning total=0 max=- 0=0 516=0 1034=0 1552=0 other=0/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
@@ -637,7 +639,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.doesNotMatch(output, /\bnull\b/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.match(output, /active-ou…\s+chat-stre…\s+\/v1\/chat\/c…/);
-    assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
+    assert.match(output, /-\s+-\s+\/responses/);
     assert.match(output, /responses…\s+responses…\s+\/responses/);
     assertProxyRequestColumnsAligned(output, "active");
     assertProxyRequestColumnsAligned(output, "history");
@@ -1389,6 +1391,18 @@ test("proxy status table renders configured columns and compact units", () => {
             reasoning_tokens: 42,
             path: "/active",
           }),
+          proxyHistoryRecord({
+            completed_at: null,
+            started_at: "2026-01-01T00:00:00.000Z",
+            status: null,
+            upstream: "input",
+            latency_ms: 0,
+            request_bytes: 1024,
+            response_bytes: 0,
+            request_model: null,
+            upstream_model: null,
+            path: "/pending",
+          }),
         ],
         status_counts: {},
         reasoning_token_counts: {},
@@ -1464,8 +1478,9 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
   assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+42\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\s+0ms\s+1\.00K\s+-\s+-\s+\/pending/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+42\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
-  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+-\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
+  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+-\s+123ms\s+982K\s+-\s+-\s+\/unknown/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+516\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
   assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+-\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
   assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+-\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
@@ -1519,7 +1534,7 @@ test("proxy status summary renders exact status counts", () => {
   ).join("\n");
 
   assert.match(lines, /status total=12 active=0 200=11 502=1 upstreams=input=12/);
-  assert.match(lines, /reasoning total=12 0=1 516=2 1034=3 1552=1 other=5/);
+  assert.match(lines, /reasoning total=12 max=1552 0=1 516=2 1034=3 1552=1 other=5/);
 });
 
 test("proxy watch uses terminal frame repaint and omits file path lines", async () => {
@@ -1582,7 +1597,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
     assert.match(output, /\u001b\[2Kccs proxy/);
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
-    assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+/);
+    assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /state:|log:|config:/);
   } finally {

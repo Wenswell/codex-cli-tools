@@ -590,7 +590,7 @@ function formatProxyUpstreamHits(profileOrder, metrics) {
 }
 function formatProxyStatusCode(status) {
     if (status === null) {
-        return textDim("");
+        return textDim("-");
     }
     if (status >= 500) {
         return textRed(String(status));
@@ -626,21 +626,21 @@ function formatProxyStatusLine(now, state, runtime) {
         : runtime.healthy
             ? textGreen(String(runtime.pid))
             : textYellow(String(runtime.pid));
+    const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
     return [
         textBold("ccs proxy"),
         `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
         `runtime: ${state ? runtimeLabel : textRed("missing")}`,
         `pid: ${pid}`,
+        `proxy: ${proxy}`,
         `refresh: ${textDim(`${PROXY_STATUS_REFRESH_SECONDS}s`)}`,
     ].join("  ");
 }
-function formatProxyPathsLines(state, options) {
-    const proxyLine = `proxy: ${state ? colorUrl(state.proxy_base_url) : textDim("unset")}`;
+function formatProxyPathsLines(options) {
     if (options.watch) {
-        return [proxyLine];
+        return [];
     }
     return [
-        proxyLine,
         `state: ${colorPath(formatProxyFilePath(statePath(options.stateRoot)))}`,
         `log: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
         `config: ${colorPath(formatProxyFilePath(options.codexConfigPath))}`,
@@ -660,7 +660,7 @@ function formatProxyRequest(record, nowMs) {
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
-        code: record.status === null && !completed ? textDim("…") : formatProxyStatusCode(record.status),
+        code: formatProxyStatusCode(record.status),
         reasoning: formatProxyReasoningTokens(record.reasoning_tokens),
         up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
@@ -705,7 +705,7 @@ function formatThreeSignificant(value) {
 }
 function formatProxyRequestModel(model) {
     if (!model) {
-        return textRed("[unknown]");
+        return textDim("-");
     }
     return colorName(truncateProxyText(model, PROXY_TABLE_MODEL_WIDTH));
 }
@@ -714,7 +714,7 @@ function formatProxyReasoningTokens(reasoningTokens) {
 }
 function formatProxyUpstreamModel(requestModel, upstreamModel) {
     if (!upstreamModel) {
-        return textOrange("[unknown]");
+        return textDim("-");
     }
     if (requestModel && upstreamModel === requestModel) {
         return textDim("[same]");
@@ -1472,6 +1472,7 @@ function formatProxyReasoningSummary(metrics) {
     const reasoningCounts = formatGroupedProxyReasoningTokenCounts(metrics.reasoning_token_counts);
     return [
         `reasoning total=${colorCount(String(totalProxyReasoningTokenCounts(metrics.reasoning_token_counts)))}`,
+        `max=${formatProxyReasoningTokenValue(maxProxyReasoningToken(metrics.reasoning_token_counts))}`,
         ...reasoningCounts,
     ].join(" ");
 }
@@ -1483,6 +1484,25 @@ function totalProxyStatusCounts(counts) {
 }
 function totalProxyReasoningTokenCounts(counts) {
     return Object.values(counts).reduce((sum, count) => sum + count, 0);
+}
+function maxProxyReasoningToken(counts) {
+    const values = Object.entries(counts)
+        .filter(([, count]) => count > 0)
+        .map(([reasoningTokens]) => Number(reasoningTokens))
+        .filter((reasoningTokens) => Number.isInteger(reasoningTokens));
+    return values.length === 0 ? null : Math.max(...values);
+}
+function formatProxyReasoningTokenValue(reasoningTokens) {
+    if (reasoningTokens === null) {
+        return textDim("-");
+    }
+    if (reasoningTokens === 0) {
+        return textOrange(String(reasoningTokens));
+    }
+    if (REASONING_EQUALS.includes(reasoningTokens)) {
+        return textRed(String(reasoningTokens));
+    }
+    return textGreen(String(reasoningTokens));
 }
 function formatExactProxyStatusCounts(counts) {
     return Object.entries(counts)
@@ -1567,7 +1587,7 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
     const metrics = state?.metrics ?? createProxyMetrics();
     return [
         fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
-        ...formatProxyPathsLines(state, options).map(fitProxyTerminalLine),
+        ...formatProxyPathsLines(options).map(fitProxyTerminalLine),
         fitProxyTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
         fitProxyTerminalLine(formatProxyReasoningSummary(metrics)),
         fitProxyTerminalLine(formatProxyLatencySummary(metrics)),
