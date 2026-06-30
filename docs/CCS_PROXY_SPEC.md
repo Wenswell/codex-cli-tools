@@ -8,8 +8,8 @@
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, and error text.
-- Streaming responses stay active while the response body is being written to the client.
+- History records are the completed form of the same request record and include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
 
@@ -24,7 +24,41 @@
 - `upstream_hit_counts`: completed request counts per selected upstream.
 - `latency_ms`: completed request latency with `last`, `count`, `sum`, `min`, and `max`.
 
-Old state files are normalized at read time. Missing model fields render through the current `[unknown]` status display.
+Request records include `guard_actions`, an ordered array of local proxy action records with:
+
+- `at`: action timestamp.
+- `action`: `internal_retry`, `return_status_502`, or `upstream_error`.
+- `upstream`: selected upstream profile name.
+- `attempt`: upstream fetch attempt number for the client request.
+- `status`: upstream HTTP status when an upstream response existed.
+- `reasoning_tokens`: matched reasoning token count when present.
+- `error`: local proxy error text when present.
+
+Old state files are normalized at read time. Missing model fields render through the current `[unknown]` status display. Missing `guard_actions` fields normalize to `[]`.
+
+## Upstream forwarding
+
+The proxy resolves one active upstream from `profiles.current` for each client request. `ccs toggle` owns profile switching by changing `profiles.current`; the proxy reads that current value when forwarding a new request.
+
+Upstream HTTP responses are upstream facts. The proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
+
+Transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`.
+
+`attempts` counts upstream fetch attempts for the client request. It includes the initial fetch, the single transport retry when used, and reasoning-guard retry fetches.
+
+## Reasoning guard
+
+The reasoning guard is always active for supported JSON and SSE response payloads.
+
+- `reasoning_equals`: `516`, `1034`, `1552`.
+- `guard_retry_attempts`: `3`.
+- Non-stream JSON responses are buffered, parsed, and checked before being forwarded.
+- SSE responses are buffered before client response headers are written. SSE `data:` JSON frames are scanned for model metadata and `reasoning_tokens`; accepted SSE bytes are then forwarded unchanged.
+- A guard match records `internal_retry` and retries the same upstream until the retry budget is used.
+- The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
+- Transport errors record `upstream_error`.
+
+The proxy also writes each guard action as one JSON line in `~/.config/codex-tools/proxy.log`.
 
 ## Status view
 
@@ -45,7 +79,7 @@ Request tables use the shared terminal table renderer. Fixed-width columns are r
 session time up code ms size req_model up_model path error
 ```
 
-Active rows show elapsed time for `ms`, known request bytes for `size`, and known upstream, status, and model fields as soon as the proxy observes them. Active rows show `…` for code while no status is known. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `ms`, known request bytes for `size`, and known upstream, status, and model fields as soon as the proxy observes them. Active rows show `…` for code while no status is known. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name; retry attempts use the same active upstream. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -53,6 +87,7 @@ Active rows show elapsed time for `ms`, known request bytes for `size`, and know
 - Active records are normalized through the same request-record normalizer as history records.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
+- Current upstream display is derived from `profiles.current`; historical upstream hit counts remain visible through `upstream_hit_counts`.
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
 
@@ -93,7 +128,7 @@ The proxy does not set its own upstream response deadline. Client settings such 
 - Active request records include `request_model` after the request body is read.
 - History request records include `request_model`, `upstream_model`, and `upstream_model_source`.
 - Non-stream JSON responses are already buffered for inspection, so model extraction runs before response forwarding.
-- Stream responses are forwarded through a transform that preserves bytes and scans SSE `data:` JSON frames for the first model value.
+- SSE responses are fully buffered before client response headers, preserve accepted bytes, and scan SSE `data:` JSON frames for the first model value.
 - Missing model fields are stored as `null`.
 
 ### Status view plan
@@ -118,7 +153,15 @@ Column behavior:
 - Request JSON model is recorded for all four concrete paths.
 - Non-stream JSON responses extract `upstream_model` for all four concrete paths when present.
 - SSE responses extract `upstream_model` for all four concrete paths when present.
-- SSE forwarding preserves the exact client-visible response bytes.
+- SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
+- The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
+- Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body.
+- Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
+- Non-stream JSON reasoning guard matches retry the same upstream and record `internal_retry`.
+- SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
+- Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
+- Client aborts during strict SSE buffering complete history as `499`.
+- Guard actions are persisted in request history and written to `proxy.log`.
 - Missing upstream model fields render as `[unknown]`, equal upstream models render as `[same]`, and differing upstream models render as model names.
 - Status tables right-align fixed columns, left-align the final `error` column without table-side truncation, and format time/size with compact 3-significant-digit units after the base unit.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.

@@ -520,7 +520,7 @@ ccs remove local
 ```
 
 `ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
-When proxy mode is installed, `ccs toggle` still switches the current profile and the proxy keeps using `profiles.toggle` order for upstream priority, with the first item as the primary upstream.
+When proxy mode is installed, `ccs toggle` switches `profiles.current`, and the proxy uses that current profile as the active upstream for new requests.
 
 Switching profile:
 
@@ -562,7 +562,11 @@ Behavior:
 - `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` stores proxy state in `~/.config/codex-tools/proxy.json`, backs up the current `~/.codex/config.toml`, rewrites the active provider `base_url` to the proxy URL, and starts the proxy in the background.
 - `ccs proxy restore` restores `~/.codex/config.toml` from the saved backup and removes proxy state.
-- `ccs proxy` reads `profiles.toggle` for upstream priority, keeps the first profile as the primary upstream, and falls through the remaining profiles in order.
+- `ccs proxy` reads one active upstream from `profiles.current`. `ccs toggle` owns profile switching.
+- Upstream HTTP responses are forwarded as received when the local reasoning guard leaves the response unchanged. This includes `401`, `403`, `408`, `429`, and `5xx`.
+- Transport-level `TypeError: fetch failed` is retried once for the same upstream. Repeated transport failure returns `502` with error type `upstream_error` and code `upstream_fetch_failed`.
+- The reasoning guard checks JSON responses and SSE `data:` JSON payloads for `reasoning_tokens` values `516`, `1034`, and `1552`. Guard matches retry the same upstream request up to three times, then return `502 reasoning_guard_triggered`.
+- Guard actions are recorded in request history under `guard_actions` and as JSON lines in `~/.config/codex-tools/proxy.log`. Actions are `internal_retry`, `return_status_502`, and `upstream_error`.
 - `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
 - Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
 - A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
@@ -571,8 +575,8 @@ Behavior:
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
 - `ccs proxy` forwards request bodies at their original size. Runtime and upstream resources determine practical payload bounds.
 - `ccs proxy` forwards upstream requests without a proxy-owned response deadline. Codex client settings such as `stream_idle_timeout_ms` own stream idle timeout behavior.
-- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy. Completed, failed, and fully streamed responses move to `history`. Active and history records use the same request schema and shared row formatter. Both tables use `session time up code ms size req_model up_model path error` columns and show up to 5 rows. Fixed-width columns are right-aligned; the final `error` column takes remaining width, is left-aligned, and preserves the full error text. Active rows show known upstream, status, and model fields as soon as the proxy observes them.
-- For `/v1/chat/completions`, `/chat/completions`, `/v1/responses`, and `/responses`, proxy metrics record request model and upstream model metadata when the JSON or SSE payload contains it. Missing upstream model fields are stored as `null` and render as orange `[unknown]`; matching request/upstream models render as dim `[same]`; differing upstream models render in red. SSE model extraction stops after the first valid model value and keeps the forwarded response bytes unchanged.
+- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy, including upstream SSE buffering before client headers are written. Completed, failed, and fully streamed responses move to `history`. Active and history records use the same request schema and shared row formatter. Both tables use `session time up code ms size req_model up_model path error` columns and show up to 5 rows. Fixed-width columns are right-aligned; the final `error` column takes remaining width, is left-aligned, and preserves the full error text. Active rows show known upstream, status, and model fields as soon as the proxy observes them.
+- For `/v1/chat/completions`, `/chat/completions`, `/v1/responses`, and `/responses`, proxy metrics record request model and upstream model metadata when the JSON or SSE payload contains it. Missing upstream model fields are stored as `null` and render as orange `[unknown]`; matching request/upstream models render as dim `[same]`; differing upstream models render in red. SSE responses are buffered before client response headers, scanned for model and reasoning metadata, then forwarded unchanged when accepted by the guard.
 - Proxy tables format elapsed time and byte size with compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 - Proxy metrics count completed requests by exact HTTP status code, such as `200`, `404`, `499`, and `502`. `status total` is the sum of those exact counters. Latency shows `last`, `avg`, `min`, and `max`.
 - `ccs proxy help` prints the proxy command summary.

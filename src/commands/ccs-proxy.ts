@@ -80,6 +80,19 @@ type ProxyRequestRecord = {
   request_model: string | null;
   upstream_model: string | null;
   upstream_model_source: string | null;
+  guard_actions: ProxyGuardActionRecord[];
+  error: string | null;
+};
+
+type ProxyGuardAction = "internal_retry" | "return_status_502" | "upstream_error";
+
+type ProxyGuardActionRecord = {
+  at: string;
+  action: ProxyGuardAction;
+  upstream: string | null;
+  attempt: number;
+  status: number | null;
+  reasoning_tokens: number | null;
   error: string | null;
 };
 
@@ -126,7 +139,9 @@ const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const PROXY_STATE_FILE = "proxy.json";
 const NON_STREAM_STATUS_CODE = 502;
-const REASONING_EQUALS = [516];
+const REASONING_EQUALS = [516, 1034, 1552];
+const GUARD_RETRY_ATTEMPTS = 3;
+const FETCH_FAILED_TRANSPORT_RETRIES = 1;
 const PROXY_RECENT_REQUEST_LIMIT = 10;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
@@ -418,22 +433,19 @@ function currentProviderBaseUrl(content: string): string {
 }
 
 function buildProfileOrder(profiles: ProfilesFile): string[] {
-  const names = [
-    ...(profiles.current ? [profiles.current] : []),
-    ...(profiles.toggle ?? []),
-    ...Object.keys(profiles.profiles ?? {}),
-  ];
-  return [...new Set(names.filter(Boolean))];
+  return profiles.current ? [profiles.current] : [];
 }
 
-function buildProxyUpstreams(profiles: ProfilesFile): ProxyUpstream[] {
-  const order = buildProfileOrder(profiles);
-  return order
-    .map((name) => ({
-      name,
-      baseURL: profiles.profiles?.[name]?.baseURL ?? "",
-    }))
-    .filter((upstream): upstream is ProxyUpstream => Boolean(upstream.baseURL));
+function resolveProxyUpstream(profiles: ProfilesFile): ProxyUpstream {
+  const current = profiles.current;
+  if (!current) {
+    throw new Error("profiles.current was not found");
+  }
+  const baseURL = profiles.profiles?.[current]?.baseURL;
+  if (!baseURL) {
+    throw new Error(`profiles.current ${current} has no baseURL`);
+  }
+  return { name: current, baseURL };
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -558,8 +570,32 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
     request_model: nullableStringField(request.request_model),
     upstream_model: nullableStringField(request.upstream_model),
     upstream_model_source: nullableStringField(request.upstream_model_source),
+    guard_actions: normalizeProxyGuardActions(request.guard_actions),
     error: nullableStringField(request.error),
   };
+}
+
+function normalizeProxyGuardActions(value: unknown): ProxyGuardActionRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      at: stringField(item.at) || new Date(0).toISOString(),
+      action: normalizeProxyGuardAction(item.action),
+      upstream: nullableStringField(item.upstream),
+      attempt: Number.isInteger(item.attempt) ? Number(item.attempt) : 0,
+      status: Number.isInteger(item.status) ? Number(item.status) : null,
+      reasoning_tokens: Number.isInteger(item.reasoning_tokens) ? Number(item.reasoning_tokens) : null,
+      error: nullableStringField(item.error),
+    }));
+}
+
+function normalizeProxyGuardAction(value: unknown): ProxyGuardAction {
+  return value === "internal_retry" || value === "return_status_502" || value === "upstream_error"
+    ? value
+    : "upstream_error";
 }
 
 function stringField(value: unknown): string {
@@ -848,6 +884,25 @@ function formatProxyError(error: string | null): string {
   return error ? textRed(error) : textDim("");
 }
 
+function writeProxyProcessLog(event: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
+}
+
+function logProxyGuardAction(request: ProxyRequestRecord, action: ProxyGuardActionRecord): void {
+  writeProxyProcessLog({
+    event: "ccs_proxy_guard_action",
+    request_id: request.id,
+    method: request.method,
+    path: request.path,
+    action: action.action,
+    upstream: action.upstream,
+    attempt: action.attempt,
+    status: action.status,
+    reasoning_tokens: action.reasoning_tokens,
+    error: action.error,
+  });
+}
+
 function formatProxySession(value: string | null): string {
   return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
 }
@@ -1047,6 +1102,7 @@ async function forwardRequest(
   request: IncomingMessage,
   upstreamBaseUrl: string,
   body: Buffer,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const requestUrl = new URL(request.url || "/", "http://localhost");
   const headers = new Headers();
@@ -1071,6 +1127,7 @@ async function forwardRequest(
     method: request.method,
     headers,
     body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
+    signal,
   });
 }
 
@@ -1081,6 +1138,24 @@ type ProxyOutcome = {
   upstreamModel: string | null;
   upstreamModelSource: string | null;
   error: string | null;
+};
+
+type ProxyForwardCallbacks = {
+  signal?: AbortSignal;
+  onAttempt?: (attempts: number, upstream: string) => void | Promise<void>;
+  onResponseStart?: (status: number, upstream: string) => void | Promise<void>;
+  onUpstreamModel?: (extraction: ProxyModelExtraction) => void | Promise<void>;
+  onGuardAction?: (action: ProxyGuardActionRecord) => void | Promise<void>;
+};
+
+type ProxyAttemptState = {
+  attempts: number;
+};
+
+type ProxyPayloadInspection = {
+  upstreamModel: ProxyModelExtraction;
+  reasoningTokens: number | null;
+  guardReasoningTokens: number | null;
 };
 
 class ProxyResponseWriteError extends Error {
@@ -1166,113 +1241,336 @@ function findSseEventSeparator(value: string): { index: number; length: number }
   return match;
 }
 
-async function proxyThroughUpstreamsWithStats(
+async function proxyThroughActiveUpstreamWithStats(
   request: IncomingMessage,
-  upstreams: ProxyUpstream[],
+  upstream: ProxyUpstream,
   body: Buffer,
   endpointClass: ProxyEndpointClass | null,
+  callbacks: ProxyForwardCallbacks = {},
 ): Promise<ProxyOutcome> {
-  const contentType = `${request.headers["content-type"] || ""}`.toLowerCase();
-  let lastStatus = 502;
-  let lastError = "unknown";
-  let attempts = 0;
+  const attemptState: ProxyAttemptState = { attempts: 0 };
+  let guardRetries = 0;
 
-  for (const upstream of upstreams) {
-    attempts += 1;
-    let response: Response;
-    try {
-      response = await forwardRequest(request, upstream.baseURL, body);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      continue;
+  while (true) {
+    const response = await fetchUpstreamWithTransportRetry(request, upstream, body, attemptState, callbacks);
+    if (!(response instanceof Response)) {
+      return response;
     }
 
-    lastStatus = response.status;
-    if (!response.ok && (response.status >= 500 || [401, 403, 408, 429].includes(response.status))) {
-      lastError = `${upstream.baseURL} returned ${response.status}`;
-      continue;
+    const status = response.status;
+    await callbacks.onResponseStart?.(status, upstream.name);
+    const headers = responseHeadersToObject(response.headers);
+    const responseContentType = `${response.headers.get("content-type") || ""}`;
+    const buffer = await readProxyResponseBody(response, responseContentType, endpointClass, callbacks);
+    const inspection = inspectProxyPayload(buffer, responseContentType, endpointClass);
+    const upstreamModel = inspection.upstreamModel;
+    if (upstreamModel.model) {
+      await callbacks.onUpstreamModel?.(upstreamModel);
     }
 
-    if (isStreamContentType(contentType) || isStreamContentType(`${response.headers.get("content-type") || ""}`)) {
-      return { response, upstream: upstream.name, attempts, upstreamModel: null, upstreamModelSource: null, error: null };
-    }
-
-    if (isJsonContentType(`${response.headers.get("content-type") || ""}`)) {
-      const text = await response.text();
-      let upstreamModel: ProxyModelExtraction = { model: null, source: null };
-      try {
-        const parsed = JSON.parse(text) as unknown;
-        upstreamModel = extractUpstreamModelFromJson(parsed, endpointClass);
-        const reasoning = parseReasoningTokens(parsed);
-        if (reasoning !== null && REASONING_EQUALS.includes(reasoning)) {
-          return {
-            response: new Response(
-              JSON.stringify({
-                error: {
-                  message: `codex proxy blocked suspicious reasoning response from ${upstream.baseURL}`,
-                  type: "codex_proxy",
-                  code: "reasoning_guard_triggered",
-                  reasoning_tokens: reasoning,
-                  status_code: NON_STREAM_STATUS_CODE,
-                },
-              }),
-              { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
-            ),
-            upstream: upstream.name,
-            attempts,
-            upstreamModel: upstreamModel.model,
-            upstreamModelSource: upstreamModel.source,
-            error: null,
-          };
-        }
-      } catch {
-        // keep original payload
+    if (inspection.guardReasoningTokens !== null) {
+      if (guardRetries < GUARD_RETRY_ATTEMPTS) {
+        guardRetries += 1;
+        await callbacks.onGuardAction?.(createProxyGuardAction({
+          action: "internal_retry",
+          upstream: upstream.name,
+          attempt: attemptState.attempts,
+          status,
+          reasoningTokens: inspection.guardReasoningTokens,
+          error: null,
+        }));
+        continue;
       }
-      return {
-        response: new Response(text, {
-          status: response.status,
-          headers: responseHeadersToObject(response.headers),
-        }),
+
+      const error = `reasoning_guard_triggered reasoning_tokens=${inspection.guardReasoningTokens}`;
+      await callbacks.onGuardAction?.(createProxyGuardAction({
+        action: "return_status_502",
         upstream: upstream.name,
-        attempts,
+        attempt: attemptState.attempts,
+        status,
+        reasoningTokens: inspection.guardReasoningTokens,
+        error,
+      }));
+      return {
+        response: createReasoningGuardResponse(upstream, inspection.guardReasoningTokens),
+        upstream: upstream.name,
+        attempts: attemptState.attempts,
         upstreamModel: upstreamModel.model,
         upstreamModelSource: upstreamModel.source,
-        error: null,
+        error,
       };
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
     return {
-      response: new Response(buffer, {
-        status: response.status,
-        headers: responseHeadersToObject(response.headers),
-      }),
+      response: createBufferedResponse(buffer, status, headers),
       upstream: upstream.name,
-      attempts,
-      upstreamModel: null,
-      upstreamModelSource: null,
+      attempts: attemptState.attempts,
+      upstreamModel: upstreamModel.model,
+      upstreamModelSource: upstreamModel.source,
       error: null,
     };
   }
+}
 
-  return {
-    response: new Response(
-      JSON.stringify({
-        error: {
-          message: `proxy upstreams failed: ${lastError}`,
-          type: "codex_proxy",
-          code: "upstream_failure",
-          status_code: lastStatus,
-        },
-      }),
-      { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
-    ),
-    upstream: null,
-    attempts,
-    upstreamModel: null,
-    upstreamModelSource: null,
-    error: lastError,
+async function readProxyResponseBody(
+  response: Response,
+  contentType: string,
+  endpointClass: ProxyEndpointClass | null,
+  callbacks: ProxyForwardCallbacks,
+): Promise<Buffer> {
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+  if (!isStreamContentType(contentType)) {
+    try {
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      throw proxyResponseBodyReadError(error, callbacks.signal, 0);
+    }
+  }
+
+  const chunks: Buffer[] = [];
+  const scanner = new ProxySseModelScanner(endpointClass);
+  let responseBytes = 0;
+  let emittedModelKey = "";
+  const emitModelIfChanged = async (extraction: ProxyModelExtraction): Promise<void> => {
+    const key = `${extraction.model ?? ""}\n${extraction.source ?? ""}`;
+    if (!extraction.model || key === emittedModelKey) {
+      return;
+    }
+    emittedModelKey = key;
+    await callbacks.onUpstreamModel?.(extraction);
   };
+
+  try {
+    for await (const chunk of Readable.fromWeb(response.body as never)) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      chunks.push(value);
+      responseBytes += value.length;
+      scanner.push(value);
+      await emitModelIfChanged(scanner.current());
+    }
+    scanner.finish();
+  } catch (error) {
+    throw proxyResponseBodyReadError(error, callbacks.signal, responseBytes);
+  }
+  await emitModelIfChanged(scanner.current());
+  return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+}
+
+function proxyResponseBodyReadError(error: unknown, signal: AbortSignal | undefined, responseBytes: number): ProxyResponseWriteError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (isClientAbortError(error, signal)) {
+    return new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+  }
+  return new ProxyResponseWriteError(message, 502, responseBytes);
+}
+
+async function fetchUpstreamWithTransportRetry(
+  request: IncomingMessage,
+  upstream: ProxyUpstream,
+  body: Buffer,
+  attemptState: ProxyAttemptState,
+  callbacks: ProxyForwardCallbacks,
+): Promise<Response | ProxyOutcome> {
+  let fetchFailedRetries = 0;
+
+  while (true) {
+    if (callbacks.signal?.aborted) {
+      throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+    }
+    attemptState.attempts += 1;
+    await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
+    try {
+      return await forwardRequest(request, upstream.baseURL, body, callbacks.signal);
+    } catch (error) {
+      if (isClientAbortError(error, callbacks.signal)) {
+        throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+      }
+      const fetchFailed = isFetchFailedError(error);
+      const message = error instanceof Error ? error.message : String(error);
+      const code = fetchFailed ? "upstream_fetch_failed" : "upstream_error";
+      await callbacks.onGuardAction?.(createProxyGuardAction({
+        action: "upstream_error",
+        upstream: upstream.name,
+        attempt: attemptState.attempts,
+        status: null,
+        reasoningTokens: null,
+        error: `${code}: ${message}`,
+      }));
+      if (fetchFailed && fetchFailedRetries < FETCH_FAILED_TRANSPORT_RETRIES) {
+        fetchFailedRetries += 1;
+        continue;
+      }
+      return {
+        response: createUpstreamErrorResponse(message, code),
+        upstream: upstream.name,
+        attempts: attemptState.attempts,
+        upstreamModel: null,
+        upstreamModelSource: null,
+        error: `${code}: ${message}`,
+      };
+    }
+  }
+}
+
+function isFetchFailedError(error: unknown): boolean {
+  return error instanceof TypeError && error.message === "fetch failed";
+}
+
+function isClientAbortError(error: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+  return Boolean(error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError");
+}
+
+function inspectProxyPayload(
+  buffer: Buffer,
+  contentType: string,
+  endpointClass: ProxyEndpointClass | null,
+): ProxyPayloadInspection {
+  if (isStreamContentType(contentType)) {
+    return inspectSsePayload(buffer, endpointClass);
+  }
+  if (isJsonContentType(contentType)) {
+    return inspectJsonPayload(buffer, endpointClass);
+  }
+  return {
+    upstreamModel: { model: null, source: null },
+    reasoningTokens: null,
+    guardReasoningTokens: null,
+  };
+}
+
+function inspectJsonPayload(buffer: Buffer, endpointClass: ProxyEndpointClass | null): ProxyPayloadInspection {
+  try {
+    const parsed = JSON.parse(buffer.toString("utf8")) as unknown;
+    const reasoningTokens = parseReasoningTokens(parsed);
+    return {
+      upstreamModel: extractUpstreamModelFromJson(parsed, endpointClass),
+      reasoningTokens,
+      guardReasoningTokens: reasoningTokens !== null && REASONING_EQUALS.includes(reasoningTokens) ? reasoningTokens : null,
+    };
+  } catch {
+    return {
+      upstreamModel: { model: null, source: null },
+      reasoningTokens: null,
+      guardReasoningTokens: null,
+    };
+  }
+}
+
+function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | null): ProxyPayloadInspection {
+  let upstreamModel: ProxyModelExtraction = { model: null, source: null };
+  let reasoningTokens: number | null = null;
+  let guardReasoningTokens: number | null = null;
+
+  for (const event of splitSseEvents(buffer.toString("utf8"))) {
+    const data = sseEventData(event);
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      if (!upstreamModel.model) {
+        upstreamModel = extractUpstreamModelFromSsePayload(parsed, endpointClass);
+      }
+      const eventReasoningTokens = parseReasoningTokens(parsed);
+      if (eventReasoningTokens !== null) {
+        reasoningTokens ??= eventReasoningTokens;
+        if (REASONING_EQUALS.includes(eventReasoningTokens)) {
+          guardReasoningTokens = eventReasoningTokens;
+        }
+      }
+    } catch {
+      // SSE data frames can contain non-JSON control text.
+    }
+  }
+
+  return { upstreamModel, reasoningTokens, guardReasoningTokens };
+}
+
+function splitSseEvents(value: string): string[] {
+  const events: string[] = [];
+  let rest = value;
+  while (rest.length > 0) {
+    const separator = findSseEventSeparator(rest);
+    if (!separator) {
+      if (rest.length > 0) {
+        events.push(rest);
+      }
+      break;
+    }
+    events.push(rest.slice(0, separator.index));
+    rest = rest.slice(separator.index + separator.length);
+  }
+  return events;
+}
+
+function sseEventData(event: string): string {
+  return event
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).replace(/^ /, ""))
+    .join("\n")
+    .trim();
+}
+
+function createProxyGuardAction(input: {
+  action: ProxyGuardAction;
+  upstream: string | null;
+  attempt: number;
+  status: number | null;
+  reasoningTokens: number | null;
+  error: string | null;
+}): ProxyGuardActionRecord {
+  return {
+    at: new Date().toISOString(),
+    action: input.action,
+    upstream: input.upstream,
+    attempt: input.attempt,
+    status: input.status,
+    reasoning_tokens: input.reasoningTokens,
+    error: input.error,
+  };
+}
+
+function createReasoningGuardResponse(upstream: ProxyUpstream, reasoningTokens: number): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `codex proxy blocked suspicious reasoning response from ${upstream.baseURL}`,
+        type: "codex_proxy",
+        code: "reasoning_guard_triggered",
+        reasoning_tokens: reasoningTokens,
+        status_code: NON_STREAM_STATUS_CODE,
+      },
+    }),
+    { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
+  );
+}
+
+function createUpstreamErrorResponse(message: string, code: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `proxy upstream error: ${message}`,
+        type: "upstream_error",
+        code,
+        status_code: NON_STREAM_STATUS_CODE,
+      },
+    }),
+    { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } },
+  );
+}
+
+function createBufferedResponse(buffer: Buffer, status: number, headers: Record<string, string>): Response {
+  return new Response(responseStatusAllowsBody(status) ? buffer : null, { status, headers });
+}
+
+function responseStatusAllowsBody(status: number): boolean {
+  return status !== 101 && status !== 204 && status !== 205 && status !== 304;
 }
 
 async function writeResponse(
@@ -1506,7 +1804,8 @@ async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> 
   const runtime = await ensureProxyRunning(options);
   const state = runtime?.state ?? await readProxyState(options.stateRoot);
   const profiles = await readProfiles();
-  const profileOrder = state?.profile_order?.length ? state.profile_order : buildProfileOrder(profiles);
+  const currentProfileOrder = buildProfileOrder(profiles);
+  const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
   return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options);
 }
 
@@ -1647,6 +1946,16 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           res.end(JSON.stringify({ status: "ok", pid: process.pid }));
           return;
         }
+        const downstreamAbort = new AbortController();
+        let responseFinished = false;
+        res.once("finish", () => {
+          responseFinished = true;
+        });
+        res.once("close", () => {
+          if (!responseFinished) {
+            downstreamAbort.abort();
+          }
+        });
         const requestStartedAt = new Date();
         const requestStartedAtMs = performance.now();
         const activeRecord: ProxyRequestRecord = {
@@ -1665,6 +1974,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           request_model: null,
           upstream_model: null,
           upstream_model_source: null,
+          guard_actions: [],
           error: null,
         };
         await startProxyRequestMetric(state, options.stateRoot, activeRecord);
@@ -1679,13 +1989,39 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         const endpointClass = proxyEndpointClass(url.pathname);
         try {
           const profiles = await readProfiles();
-          const upstreamProfiles = buildProxyUpstreams(profiles);
+          const upstreamProfile = resolveProxyUpstream(profiles);
           const body = await readBody(req);
           activeRecord.request_bytes = body.length;
           activeRecord.session = extractSessionShortId(body);
           activeRecord.request_model = extractRequestModel(body, endpointClass);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-          const outcome = await proxyThroughUpstreamsWithStats(req, upstreamProfiles, body, endpointClass);
+          const outcome = await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, {
+            signal: downstreamAbort.signal,
+            onAttempt: async (attemptCount, upstreamName) => {
+              activeRecord.upstream = upstreamName;
+              activeRecord.attempts = attemptCount;
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
+            onResponseStart: async (responseStatus, upstreamName) => {
+              activeRecord.status = responseStatus;
+              activeRecord.upstream = upstreamName;
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
+            onUpstreamModel: async (extraction) => {
+              if (activeRecord.upstream_model === extraction.model && activeRecord.upstream_model_source === extraction.source) {
+                return;
+              }
+              activeRecord.upstream_model = extraction.model;
+              activeRecord.upstream_model_source = extraction.source;
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
+            onGuardAction: async (action) => {
+              activeRecord.guard_actions.push(action);
+              activeRecord.error = action.error;
+              logProxyGuardAction(activeRecord, action);
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
+          });
           status = outcome.response.status;
           upstream = outcome.upstream;
           attempts = outcome.attempts;
@@ -1720,10 +2056,12 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             status = status ?? 500;
             errorText = error instanceof Error ? error.message : String(error);
           }
-          if (!res.headersSent) {
+          upstream = activeRecord.upstream;
+          attempts = activeRecord.attempts;
+          if (!res.headersSent && status !== 499) {
             const payload = JSON.stringify({ error: { message: errorText } });
             responseBytes = Buffer.byteLength(payload);
-            res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+            res.writeHead(status ?? 500, { "content-type": "application/json; charset=utf-8" });
             res.end(payload);
           }
           upstreamModel = activeRecord.upstream_model;
@@ -1776,9 +2114,9 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
 function usageHelpLines(): string[] {
   return [
     "Usage:",
-    "  ccs proxy                           # print proxy status and upstream order once",
-    "  ccs proxy --once                    # print proxy status and upstream order once",
-    "  ccs proxy watch                     # watch proxy status and upstream order",
+    "  ccs proxy                           # print proxy status and active upstream once",
+    "  ccs proxy --once                    # print proxy status and active upstream once",
+    "  ccs proxy watch                     # watch proxy status and active upstream",
     "  ccs proxy install                   # back up config, install routing, and start background proxy",
     "  ccs proxy restore                   # restore config from the saved backup",
     "  ccs proxy stop                      # stop the healthy background proxy",
