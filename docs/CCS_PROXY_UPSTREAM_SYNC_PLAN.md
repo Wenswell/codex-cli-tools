@@ -63,8 +63,8 @@ The test suite includes dedicated coverage for:
 - SSE reasoning guard retry
 - SSE exhausted guard returning `502 reasoning_guard_triggered`
 - client abort during strict SSE buffering completing as `499`
-- separate status table columns for HTTP code and observed `reasoning_tokens`
-- completed request counts by observed `reasoning_tokens`
+- separate status table columns for HTTP code and observed `reasoning_tokens` as `reas.`
+- grouped completed request counts for `0`, guarded `reasoning_tokens`, and `other`
 - guard action persistence in request history and `proxy.log`
 
 ## Discarded upstream core features
