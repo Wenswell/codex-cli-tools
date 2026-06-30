@@ -17,7 +17,7 @@ The proxy will separate four responsibilities:
 
 ## Status
 
-Planned on 2026-06-30.
+Implemented on 2026-06-30.
 
 The current request is sufficient for implementation. No confirmation blockers remain.
 
@@ -89,42 +89,47 @@ History source selection:
 
 ## Implementation checklist
 
-- [ ] Add `historyCount?: number` to proxy status options.
-- [ ] Parse `--history N` for once and watch status commands.
-- [ ] Reject missing, non-integer, zero, and negative `--history` values.
-- [ ] Add `proxyRequestsPath(stateRoot)` and `proxyRuntimeLogPath(stateRoot)`.
-- [ ] Move background stdout and stderr from `proxy.log` to `proxy-runtime.log`.
-- [ ] Append completed request records to `proxy-requests.jsonl`.
-- [ ] Keep `metrics.recent_requests` limited to the existing compact snapshot size.
-- [ ] Add a JSONL tail reader for newest completed request records.
-- [ ] Build history rows from `proxy.json` by default.
-- [ ] Use the JSONL tail reader only for explicit history counts beyond the snapshot size.
-- [ ] Compute adaptive history count from terminal rows.
-- [ ] Repaint watch on terminal resize.
-- [ ] Update status path output to include `requests`, `events`, and `runtime` paths outside watch mode.
-- [ ] Update `README.md`, `docs/CCS_PROXY_SPEC.md`, and built `dist` files.
+- [x] Add `historyCount?: number` to proxy status options.
+- [x] Parse `--history N` for once and watch status commands.
+- [x] Reject missing, non-integer, zero, and negative `--history` values.
+- [x] Add `proxyRequestsPath(stateRoot)` and `proxyRuntimeLogPath(stateRoot)`.
+- [x] Move background stdout and stderr from `proxy.log` to `proxy-runtime.log`.
+- [x] Append completed request records to `proxy-requests.jsonl`.
+- [x] Keep `metrics.recent_requests` limited to the existing compact snapshot size.
+- [x] Add a JSONL tail reader for newest completed request records.
+- [x] Build history rows from `proxy.json` by default.
+- [x] Use the JSONL tail reader only for explicit history counts beyond the snapshot size.
+- [x] Compute adaptive history count from terminal rows.
+- [x] Repaint watch on terminal resize.
+- [x] Update status path output to include `requests`, `events`, and `runtime` paths outside watch mode.
+- [x] Update `README.md`, `docs/CCS_PROXY_SPEC.md`, and built `dist` files.
 
 ## Tests
 
-- `ccs proxy --history N` renders N history rows when enough completed requests exist.
-- `ccs proxy watch --history N` passes the explicit history count into watch rendering.
-- Invalid `--history` values fail with a clear CLI error.
-- TTY rendering computes history count from `process.stdout.rows`.
-- Non-TTY rendering uses 5 history rows.
-- Watch refresh reacts to terminal resize.
-- Completed requests append to `proxy-requests.jsonl`.
-- `proxy.json.metrics.recent_requests` stays capped at the compact snapshot size.
-- `--history N` uses `proxy-requests.jsonl` when N exceeds snapshot history length.
-- Default watch rendering works from `proxy.json` without reading `proxy-requests.jsonl`.
-- Background process output writes to `proxy-runtime.log`.
-- Guard and error event JSONL writes to `proxy.log`.
+- [x] `ccs proxy --history N` renders N history rows when enough completed requests exist.
+- [x] `ccs proxy watch --history N` passes the explicit history count into watch rendering.
+- [x] Invalid `--history` values fail with a clear CLI error.
+- [x] TTY rendering computes history count from `process.stdout.rows`.
+- [x] Non-TTY rendering uses 5 history rows.
+- [x] Watch refresh reacts to terminal resize.
+- [x] Completed requests append to `proxy-requests.jsonl`.
+- [x] `proxy.json.metrics.recent_requests` stays capped at the compact snapshot size.
+- [x] `--history N` uses `proxy-requests.jsonl` when N exceeds snapshot history length.
+- [x] Default watch rendering works from `proxy.json` without reading `proxy-requests.jsonl`.
+- [x] Background process output writes to `proxy-runtime.log`.
+- [x] Guard and error event JSONL writes to `proxy.log`.
 
 ## Acceptance
 
 Implementation is complete when:
 
-- `pnpm test` passes.
-- `ccs proxy` keeps current compact output and adaptive TTY history.
-- `ccs proxy watch` stays stable during normal refresh and resize.
-- Large history requests do not scan the full JSONL file during every watch refresh.
-- `proxy.json`, `proxy-requests.jsonl`, `proxy.log`, and `proxy-runtime.log` each have one clear responsibility.
+- [x] `pnpm test` passes.
+- [x] `ccs proxy` keeps current compact output and adaptive TTY history.
+- [x] `ccs proxy watch` stays stable during normal refresh and resize.
+- [x] Large history requests do not scan the full JSONL file during every watch refresh.
+- [x] `proxy.json`, `proxy-requests.jsonl`, `proxy.log`, and `proxy-runtime.log` each have one clear responsibility.
+
+## Verification
+
+- `pnpm build && node --test test/ccs-proxy.test.js`
+- `pnpm test`

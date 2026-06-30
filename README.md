@@ -161,7 +161,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [--history N|--once [--history N]|watch [--history N]|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -547,8 +547,11 @@ Proxy commands live under `ccs proxy`:
 
 ```bash
 ccs proxy
+ccs proxy --history N
 ccs proxy --once
+ccs proxy --once --history N
 ccs proxy watch
+ccs proxy watch --history N
 ccs proxy install
 ccs proxy restore
 ccs proxy serve
@@ -568,14 +571,15 @@ Behavior:
 - The reasoning guard checks JSON responses and SSE `data:` JSON payloads for `reasoning_tokens` values `516`, `1034`, and `1552`. Guard matches retry the same upstream request up to three times, then return `502 reasoning_guard_triggered`.
 - Guard actions are recorded in request history under `guard_actions` and as JSON lines in `~/.config/codex-tools/proxy.log`. Actions are `internal_retry`, `return_status_502`, and `upstream_error`.
 - `ccs proxy` starts the background proxy when proxy state exists and no healthy proxy process is running.
-- Background runtime files live beside the proxy state: `~/.config/codex-tools/proxy.pid` and `~/.config/codex-tools/proxy.log`.
+- Proxy runtime files live beside the proxy state: `proxy.pid` stores the background process id, `proxy-runtime.log` stores background stdout/stderr, `proxy.log` stores guard and proxy error events, and `proxy-requests.jsonl` stores every completed request.
 - A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
-- `ccs proxy` without arguments prints runtime state, proxy URL, state/log/config files, request status totals, reasoning token totals, latency summary, upstream hit counts, active requests, and completed history once and exits. `ccs proxy --once` prints the same snapshot. `ccs proxy watch` refreshes the live view in the terminal alternate screen, keeps the proxy URL on the title line, and omits state/log/config path lines.
+- `ccs proxy` without arguments prints runtime state, proxy URL, state/requests/events/runtime/config files, request status totals, reasoning token totals, latency summary, upstream hit counts, active requests, and completed history once and exits. `ccs proxy --once` prints the same snapshot. `ccs proxy watch` refreshes the live view in the terminal alternate screen, keeps the proxy URL on the title line, omits path lines, and repaints immediately when the terminal size changes.
 - `ccs proxy` terminal output displays local file paths under `$HOME` with `~/`.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
 - `ccs proxy` forwards request bodies at their original size. Runtime and upstream resources determine practical payload bounds.
 - `ccs proxy` forwards upstream requests without a proxy-owned response deadline. Codex client settings such as `stream_idle_timeout_ms` own stream idle timeout behavior.
-- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy, including upstream SSE buffering before client headers are written. Completed, failed, and fully streamed responses move to `history`. Active and history records use the same request schema and shared row formatter. Both tables use `session time up code reas. lat. size req_model up_model path error` columns and show up to 5 rows. Fixed-width columns are right-aligned; the final `error` column takes remaining width and renders as a single current-width line. The full error text remains in the request record and appears with more visible content when the terminal becomes wider. Active rows show known upstream, status, reasoning tokens, and model fields as soon as the proxy observes them. A new retry attempt clears attempt-scoped `code`, `reas.`, and `up_model` until that attempt observes fresh values.
+- The live proxy view separates `active` and `history`. `active` contains HTTP requests currently being processed by the proxy, including upstream SSE buffering before client headers are written. Completed, failed, and fully streamed responses move to `history`. `proxy.json.metrics.recent_requests` keeps the newest 10 completed requests as a compact status snapshot; `proxy-requests.jsonl` keeps the complete completed-request stream in completion order. Default status rendering reads history from `proxy.json`. TTY output computes history row count from terminal height, non-TTY output uses 5 history rows, and `--history N` overrides both. When `--history N` exceeds the snapshot length, status rendering reads the tail of `proxy-requests.jsonl`.
+- Active and history records use the same request schema and shared row formatter. Both tables use `session time up code reas. lat. size req_model up_model path error` columns. Fixed-width columns are right-aligned; the final `error` column takes remaining width and renders as a single current-width line. The full error text remains in the request record and appears with more visible content when the terminal becomes wider. Active rows show known upstream, status, reasoning tokens, and model fields as soon as the proxy observes them. A new retry attempt clears attempt-scoped `code`, `reas.`, and `up_model` until that attempt observes fresh values.
 - For `/v1/chat/completions`, `/chat/completions`, `/v1/responses`, and `/responses`, proxy metrics record request model, upstream model, and reasoning token metadata when the JSON or SSE payload contains it. Missing request and upstream model fields are stored as `null` and render as dim `-`; matching request/upstream models render as dim `[same]`; differing upstream models render in red. Missing reasoning tokens render as dim `-`. SSE responses are buffered before client response headers, scanned for model and reasoning metadata, then forwarded unchanged when accepted by the guard.
 - Retry attempts render as a yellow number after the upstream name, such as `input3`. Request rows with guard actions prefix `error` with bracketed local-action values; HTTP status entries are yellow and reasoning-token entries are red, such as `[502 502 506] reasoning_guard_triggered ...`.
 - Proxy tables format elapsed time and byte size with compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
