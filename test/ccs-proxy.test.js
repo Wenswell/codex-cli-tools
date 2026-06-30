@@ -1531,6 +1531,82 @@ test("proxy status table renders configured columns and compact units", () => {
   assertProxyRequestColumnsAligned(lines, "history");
 });
 
+test("proxy status error column stays single-line and expands with terminal width", () => {
+  const stateRoot = "/tmp/codex-tools";
+  const state = {
+    installed_at: "2026-01-01T00:00:00.000Z",
+    codex_config_path: "/home/test/.codex/config.toml",
+    provider_name: "codex",
+    original_base_url: "https://proxy.example.com",
+    proxy_base_url: "http://127.0.0.1:4610",
+    listen_host: "127.0.0.1",
+    listen_port: 4610,
+    profile_order: ["input"],
+    backup_path: "/tmp/backup.toml",
+    metrics: {
+      total_requests: 1,
+      active_requests: [],
+      status_counts: { 502: 1 },
+      reasoning_token_counts: {},
+      upstream_hit_counts: { input: 1 },
+      latency_ms: { last: 100, count: 1, sum: 100, min: 100, max: 100 },
+      recent_requests: [
+        proxyHistoryRecord({
+          session: "019f0dfb",
+          completed_at: "2026-01-01T00:00:01.000Z",
+          upstream: "input",
+          status: 502,
+          latency_ms: 100,
+          response_bytes: 2048,
+          request_model: "gpt-5.5",
+          upstream_model: "gpt-5.5",
+          path: "/retry",
+          error: "upstream_error: fetch failed after retry with diagnostic message",
+        }),
+      ],
+    },
+  };
+
+  const render = (columns) => {
+    const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    try {
+      Object.defineProperty(process.stdout, "columns", {
+        configurable: true,
+        value: columns,
+      });
+      return buildProxyStatusLines(
+        new Date("2026-01-01T00:00:00.000Z"),
+        state,
+        ["input"],
+        { healthy: true, started: false, pid: 1234, state: null },
+        {
+          codexConfigPath: "/home/test/.codex/config.toml",
+          listenHost: "127.0.0.1",
+          listenPort: 4610,
+          stateRoot,
+        },
+      );
+    } finally {
+      if (originalColumns) {
+        Object.defineProperty(process.stdout, "columns", originalColumns);
+      } else {
+        delete process.stdout.columns;
+      }
+    }
+  };
+
+  const narrowLines = render(118).map(stripAnsi);
+  const wideLines = render(150).map(stripAnsi);
+  const narrowRow = narrowLines.find((line) => line.includes("/retry"));
+  const wideRow = wideLines.find((line) => line.includes("/retry"));
+  assert.ok(narrowRow);
+  assert.ok(wideRow);
+  assert.equal(narrowRow.length <= 118, true);
+  assert.equal(wideRow.length <= 150, true);
+  assert.equal(narrowRow.includes("diagnostic"), false);
+  assert.equal(wideRow.includes("diagnostic"), true);
+});
+
 test("proxy status summary renders exact status counts", () => {
   const stateRoot = "/tmp/codex-tools";
   const lines = buildProxyStatusLines(

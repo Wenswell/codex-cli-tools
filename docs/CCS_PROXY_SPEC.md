@@ -87,7 +87,7 @@ Request tables use the shared terminal table renderer. Fixed-width columns are r
 session time up code reas. lat. size req_model up_model path error
 ```
 
-Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. Active rows show `-` for code while no status is known and `-` for missing `reasoning_tokens`. A new retry attempt clears attempt-scoped `code`, `reas.`, and `up_model` until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[502 502 506] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. Active rows show `-` for code while no status is known and `-` for missing `reasoning_tokens`. A new retry attempt clears attempt-scoped `code`, `reas.`, and `up_model` until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[502 502 506] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -158,7 +158,7 @@ Column behavior:
 - History rows show status-normalized model fields.
 - `up`: upstream name plus yellow attempt count when attempts are greater than one.
 - `path`: fixed-width request path.
-- `error`: optional bracketed local-action prefix from `guard_actions`, then request error text, left-aligned in the final remaining-width column and not table-truncated.
+- `error`: optional bracketed local-action prefix from `guard_actions`, then request error text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
 
@@ -178,7 +178,7 @@ Column behavior:
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Guard action prefixes render in the status table `error` column.
 - Missing request and upstream model fields render as `-`, equal upstream models render as `[same]`, and differing upstream models render as model names.
-- Status tables right-align fixed columns, left-align the final `error` column without table-side truncation, and format time/size with compact 3-significant-digit units after the base unit.
+- Status tables right-align fixed columns, left-align the final `error` column as one current-width line, and format time/size with compact 3-significant-digit units after the base unit.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
 ### Decisions
