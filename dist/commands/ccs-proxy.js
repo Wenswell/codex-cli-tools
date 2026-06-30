@@ -38,6 +38,7 @@ const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_REASONING_WIDTH = 5;
 const PROXY_TABLE_MODEL_WIDTH = 10;
 const PROXY_TABLE_PATH_WIDTH = 11;
+const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
 const PROXY_HEALTH_POLL_MS = 100;
@@ -59,7 +60,7 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, align: "right" },
-    { key: "error", title: "error", flex: true, minWidth: 12, align: "left", truncate: false },
+    { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
 ];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
@@ -1573,11 +1574,13 @@ function formatProxyLatencySummary(metrics) {
     ].join(" ");
 }
 function renderProxyRequestTable(rows) {
+    const columns = process.stdout.columns;
+    const maxWidth = columns ? Math.max(1, columns - PROXY_REQUEST_TABLE_INDENT.length) : undefined;
     return renderTable(PROXY_REQUEST_TABLE_COLUMNS, rows, {
         gap: 1,
-        maxWidth: process.stdout.columns,
+        maxWidth,
         boldHeader: false,
-    }).map((line) => `  ${line}`);
+    }).map((line) => `${PROXY_REQUEST_TABLE_INDENT}${line}`);
 }
 function formatProxyActiveRows(metrics, now, count = PROXY_RECENT_RENDER_COUNT) {
     if (metrics.active_requests.length === 0) {
