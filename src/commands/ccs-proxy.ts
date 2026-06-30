@@ -874,7 +874,7 @@ function formatProxyRequest(record: ProxyRequestRecord, nowMs: number): TableRow
     req_model: formatProxyRequestModel(record.request_model),
     up_model: formatProxyUpstreamModel(record.request_model, record.upstream_model),
     path: colorPath(path),
-    error: formatProxyError(record.error),
+    error: formatProxyError(record),
   };
 }
 
@@ -933,8 +933,30 @@ function formatProxyUpstreamModel(requestModel: string | null, upstreamModel: st
   return textRed(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
 }
 
-function formatProxyError(error: string | null): string {
-  return error ? textRed(error) : textDim("");
+function formatProxyError(record: ProxyRequestRecord): string {
+  const prefix = formatProxyGuardActionPrefix(record.guard_actions);
+  const error = record.error ? textRed(record.error) : textDim("");
+  if (prefix && error) {
+    return `${prefix} ${error}`;
+  }
+  return prefix || error;
+}
+
+function formatProxyGuardActionPrefix(actions: ProxyGuardActionRecord[]): string {
+  const values = actions
+    .map(formatProxyGuardActionPrefixValue)
+    .filter((value) => value.length > 0);
+  return values.length === 0 ? "" : `[${values.join(" ")}]`;
+}
+
+function formatProxyGuardActionPrefixValue(action: ProxyGuardActionRecord): string {
+  if (action.reasoning_tokens !== null) {
+    return textRed(String(action.reasoning_tokens));
+  }
+  if (action.status !== null) {
+    return textYellow(String(action.status));
+  }
+  return "";
 }
 
 function writeProxyProcessLog(event: Record<string, unknown>): void {
@@ -964,7 +986,7 @@ function formatProxyUpstream(upstream: string | null, attempts: number): string 
   if (!upstream) {
     return textDim("-");
   }
-  const suffix = attempts > 1 ? textDim(`x${attempts}`) : "";
+  const suffix = attempts > 1 ? textYellow(String(attempts)) : "";
   return `${colorName(truncateProxyText(upstream, PROXY_TABLE_UPSTREAM_WIDTH - visibleLength(suffix)))}${suffix}`;
 }
 

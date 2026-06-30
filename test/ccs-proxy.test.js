@@ -1453,6 +1453,24 @@ test("proxy status table renders configured columns and compact units", () => {
             path: "/large",
           }),
           proxyHistoryRecord({
+            session: "019f0dfb",
+            completed_at: "2026-01-01T00:00:01.500Z",
+            upstream: "input",
+            attempts: 3,
+            status: 502,
+            latency_ms: 300,
+            response_bytes: 2048,
+            request_model: "gpt-5.5",
+            upstream_model: "gpt-5.5",
+            path: "/retry",
+            guard_actions: [
+              { at: "2026-01-01T00:00:00.100Z", action: "upstream_error", upstream: "input", attempt: 1, status: 502, reasoning_tokens: null, error: "upstream_fetch_failed" },
+              { at: "2026-01-01T00:00:00.200Z", action: "upstream_error", upstream: "input", attempt: 2, status: 502, reasoning_tokens: null, error: "upstream_fetch_failed" },
+              { at: "2026-01-01T00:00:00.300Z", action: "internal_retry", upstream: "input", attempt: 3, status: 200, reasoning_tokens: 506, error: null },
+            ],
+            error: "reasoning_guard_triggered reasoning_tokens=506",
+          }),
+          proxyHistoryRecord({
             session: "019f0dfa",
             completed_at: "2026-01-01T00:00:01.000Z",
             upstream: "input",
@@ -1484,7 +1502,7 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+-\s+123ms\s+982K\s+-\s+-\s+\/unknown/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+516\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
   assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+-\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
-  assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+-\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
+  assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+502\s+-\s+300ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/retry\s+\[502 502 506\] reasoning_guard_triggered reasoning_tokens=506/);
   assertProxyRequestColumnsAligned(lines, "active");
   assertProxyRequestColumnsAligned(lines, "history");
 });
