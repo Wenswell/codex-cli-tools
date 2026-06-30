@@ -10,7 +10,11 @@ Align `ccs proxy` with the latest core behavior from `codex-retry-gateway` while
 
 The proxy will use the manually selected current profile only. Profile switching remains owned by `ccs toggle`.
 
-## Planned behavior
+## Status
+
+Completed on 2026-06-30.
+
+## Final behavior
 
 - Use one active upstream from `profiles.current`.
 - Remove automatic upstream fallthrough from proxy request handling.
@@ -28,17 +32,38 @@ The proxy will use the manually selected current profile only. Profile switching
   - `upstream_error`
 - Keep existing request lifecycle metrics: active requests, recent requests, exact status counts, upstream hit counts, latency, byte counts, session id, and model metadata.
 
-## Implementation steps
+## Implementation checklist
 
-1. Update `ccs proxy` upstream selection to resolve only `profiles.current`.
-2. Replace automatic upstream fallthrough with single-upstream forwarding.
-3. Add transport retry handling for `TypeError: fetch failed`.
-4. Add shared reasoning-token extraction for non-stream JSON and SSE payloads.
-5. Add guard retry state per client request.
-6. Add strict SSE buffering before client response headers are written.
-7. Persist guard action and upstream error text in request records.
-8. Update `README.md`, `docs/CCS_PROXY_SPEC.md`, and built `dist` files with the final behavior.
-9. Add tests for single-upstream behavior, HTTP status passthrough, transport retry, non-stream guard retry, stream guard retry, and exhausted guard retry.
+- [x] Update `ccs proxy` upstream selection to resolve only `profiles.current`.
+- [x] Replace automatic upstream fallthrough with single-upstream forwarding.
+- [x] Add transport retry handling for `TypeError: fetch failed`.
+- [x] Add shared reasoning-token extraction for non-stream JSON and SSE payloads.
+- [x] Add guard retry state per client request.
+- [x] Add strict SSE buffering before client response headers are written.
+- [x] Persist guard action and upstream error text in request records.
+- [x] Update `README.md`, `docs/CCS_PROXY_SPEC.md`, and built `dist` files with the final behavior.
+- [x] Add tests for single-upstream behavior, HTTP status passthrough, transport retry, non-stream guard retry, stream guard retry, and exhausted guard retry.
+
+## Acceptance
+
+Verified with:
+
+```bash
+pnpm test
+```
+
+The test suite includes dedicated coverage for:
+
+- current-only upstream selection from `profiles.current`
+- upstream HTTP status/body passthrough for `401`, `403`, `408`, `429`, and `503`
+- one retry for transport-level `fetch failed`
+- repeated transport failure returning `502 upstream_error/upstream_fetch_failed`
+- non-stream JSON reasoning guard retry and exhausted `502 reasoning_guard_triggered`
+- strict SSE buffering before client response headers
+- SSE reasoning guard retry
+- SSE exhausted guard returning `502 reasoning_guard_triggered`
+- client abort during strict SSE buffering completing as `499`
+- guard action persistence in request history and `proxy.log`
 
 ## Discarded upstream core features
 
