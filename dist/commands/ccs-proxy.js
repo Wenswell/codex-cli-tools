@@ -546,7 +546,7 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
         metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
         metrics.total_requests += 1;
         incrementProxyStatusCount(metrics.status_counts, record.status);
-        incrementProxyReasoningTokenCount(metrics.reasoning_token_counts, record.reasoning_tokens);
+        incrementProxyReasoningTokenCountsForRecord(metrics.reasoning_token_counts, record);
         if (record.upstream) {
             metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
         }
@@ -575,6 +575,24 @@ function incrementProxyReasoningTokenCount(counts, reasoningTokens) {
     }
     const key = String(reasoningTokens);
     counts[key] = (counts[key] ?? 0) + 1;
+}
+function incrementProxyReasoningTokenCountsForRecord(counts, record) {
+    for (const action of record.guard_actions) {
+        incrementProxyReasoningTokenCount(counts, action.reasoning_tokens);
+    }
+    if (!finalReasoningTokenDuplicatesGuardFailure(record)) {
+        incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
+    }
+}
+function finalReasoningTokenDuplicatesGuardFailure(record) {
+    if (record.reasoning_tokens === null) {
+        return false;
+    }
+    const lastReasoningAction = [...record.guard_actions]
+        .reverse()
+        .find((action) => action.reasoning_tokens !== null);
+    return lastReasoningAction?.action === "return_status_502"
+        && lastReasoningAction.reasoning_tokens === record.reasoning_tokens;
 }
 function averageLatency(latency) {
     return latency.count > 0 ? latency.sum / latency.count : 0;
