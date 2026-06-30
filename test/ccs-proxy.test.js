@@ -725,6 +725,78 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
   }
 });
 
+test("proxy forwards request bodies larger than the previous proxy cap", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const bodySize = (10 * 1024 * 1024) + 1024;
+  const upstream = createServer(async (req, res) => {
+    let bytes = 0;
+    for await (const chunk of req) {
+      bytes += Buffer.byteLength(chunk);
+    }
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ bytes }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const body = Buffer.alloc(bodySize, "a");
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/large-body`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { bytes: bodySize });
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.recent_requests[0]?.path === "/large-body",
+    );
+    assert.equal(state.metrics.recent_requests[0].status, 200);
+    assert.equal(state.metrics.recent_requests[0].request_bytes, bodySize);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy status table renders configured columns and compact units", () => {
   const stateRoot = "/tmp/codex-tools";
   const lines = buildProxyStatusLines(

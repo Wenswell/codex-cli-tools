@@ -21,7 +21,6 @@ const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const PROXY_STATE_FILE = "proxy.json";
-const REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
 const PROXY_RECENT_REQUEST_LIMIT = 10;
@@ -729,15 +728,10 @@ function rewriteUpstreamUrl(requestUrl, upstreamBaseUrl) {
     upstream.hash = "";
     return upstream.toString();
 }
-async function readBody(request, limitBytes) {
+async function readBody(request) {
     const chunks = [];
-    let size = 0;
     for await (const chunk of request) {
         const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        size += value.length;
-        if (size > limitBytes) {
-            throw new Error("request body too large");
-        }
         chunks.push(value);
     }
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
@@ -1407,7 +1401,7 @@ export async function serveProxy(options) {
                 try {
                     const profiles = await readProfiles();
                     const upstreamProfiles = buildProxyUpstreams(profiles);
-                    const body = await readBody(req, REQUEST_BODY_LIMIT_BYTES);
+                    const body = await readBody(req);
                     activeRecord.request_bytes = body.length;
                     activeRecord.session = extractSessionShortId(body);
                     activeRecord.request_model = extractRequestModel(body, endpointClass);
