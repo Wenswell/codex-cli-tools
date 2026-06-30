@@ -75,6 +75,8 @@ The four paths map to two endpoint classes: `chat/completions` and `responses`.
 
 The proxy forwards requests directly. Model fields are observational metadata only.
 
+The proxy does not set its own upstream response deadline. Client settings such as Codex `stream_idle_timeout_ms` own stream idle timeout behavior.
+
 ### Extraction plan
 
 | Path | Endpoint class | `request_model` | Non-stream `upstream_model` | Stream `upstream_model` |

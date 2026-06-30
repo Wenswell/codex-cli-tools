@@ -22,7 +22,6 @@ const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const PROXY_STATE_FILE = "proxy.json";
 const REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
-const UPSTREAM_TIMEOUT_MS = 60 * 1000;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
 const PROXY_RECENT_REQUEST_LIMIT = 10;
@@ -845,7 +844,7 @@ function findJsonStringField(value, field) {
 function shortSessionId(value) {
     return value.length <= 10 ? value : value.slice(0, 8);
 }
-async function forwardRequest(request, upstreamBaseUrl, body, timeoutMs) {
+async function forwardRequest(request, upstreamBaseUrl, body) {
     const requestUrl = new URL(request.url || "/", "http://localhost");
     const headers = new Headers();
     for (const [key, value] of Object.entries(request.headers)) {
@@ -869,7 +868,6 @@ async function forwardRequest(request, upstreamBaseUrl, body, timeoutMs) {
         method: request.method,
         headers,
         body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
-        signal: AbortSignal.timeout(timeoutMs),
     });
 }
 class ProxyResponseWriteError extends Error {
@@ -963,7 +961,7 @@ async function proxyThroughUpstreamsWithStats(request, upstreams, body, endpoint
         attempts += 1;
         let response;
         try {
-            response = await forwardRequest(request, upstream.baseURL, body, UPSTREAM_TIMEOUT_MS);
+            response = await forwardRequest(request, upstream.baseURL, body);
         }
         catch (error) {
             lastError = error instanceof Error ? error.message : String(error);
