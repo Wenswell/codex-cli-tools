@@ -2175,6 +2175,13 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             onAttempt: async (attemptCount, upstreamName) => {
               activeRecord.upstream = upstreamName;
               activeRecord.attempts = attemptCount;
+              if (attemptCount > 1) {
+                activeRecord.status = null;
+                activeRecord.reasoning_tokens = null;
+                activeRecord.upstream_model = null;
+                activeRecord.upstream_model_source = null;
+                activeRecord.error = null;
+              }
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
             onResponseStart: async (responseStatus, upstreamName) => {

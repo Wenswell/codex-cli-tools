@@ -1031,12 +1031,13 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
   const proxyPort = await reservePort();
   const upstreamPort = await reservePort();
   const firstHold = holdControl();
+  const secondHold = holdControl();
   let hits = 0;
   const successBody = `data: ${JSON.stringify({ ok: true, response: { model: "stream-ok" }, usage: { output_tokens_details: { reasoning_tokens: 42 } } })}\n\ndata: [DONE]\n\n`;
   const upstream = createServer((_req, res) => {
     hits += 1;
-    res.writeHead(200, { "content-type": "text/event-stream" });
     if (hits === 1) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(`data: ${JSON.stringify(reasoningJson("stream-guarded", 1552))}\n\n`);
       firstHold.markStarted();
       void firstHold.release.then(() => {
@@ -1044,6 +1045,15 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
       });
       return;
     }
+    if (hits === 2) {
+      secondHold.markStarted();
+      void secondHold.release.then(() => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(successBody);
+      });
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
     res.end(successBody);
   });
 
@@ -1088,6 +1098,19 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     assert.equal(resolved, false);
 
     firstHold.finish();
+    await secondHold.started;
+    state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests[0]?.attempts === 2,
+    );
+    assert.equal(state.metrics.active_requests[0].status, null);
+    assert.equal(state.metrics.active_requests[0].reasoning_tokens, null);
+    assert.equal(state.metrics.active_requests[0].upstream_model, null);
+    assert.deepEqual(state.metrics.active_requests[0].guard_actions.map((action) => action.reasoning_tokens), [1552]);
+    await delay(100);
+    assert.equal(resolved, false);
+
+    secondHold.finish();
     const response = await streamFetch;
     assert.equal(response.status, 200);
     assert.equal(await response.text(), successBody);
@@ -1106,6 +1129,7 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"internal_retry".*"reasoning_tokens":1552/);
   } finally {
     firstHold.finish();
+    secondHold.finish();
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
