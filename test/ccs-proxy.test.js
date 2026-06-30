@@ -996,10 +996,12 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(successHits, 4);
     assert.equal(record.attempts, 4);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [516, 516, 516]);
     assert.equal(record.error, null);
     assert.equal(record.upstream_model, "json-ok");
     assert.equal(record.reasoning_tokens, 42);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -1020,11 +1022,13 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 4);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1034, 1034, 1034, 1034]);
     assert.match(record.error, /reasoning_guard_triggered reasoning_tokens=1034/);
     assert.equal(record.upstream_model, "json-exhausted");
     assert.equal(record.reasoning_tokens, 1034);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
-    assert.equal(state.metrics.reasoning_token_counts["1034"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
+    assert.equal(state.metrics.reasoning_token_counts["1034"], 4);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1034/);
   } finally {
     await stopProxy({
@@ -1148,8 +1152,10 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     assert.equal(record.attempts, 2);
     assert.equal(record.upstream_model, "stream-ok");
     assert.equal(record.reasoning_tokens, 42);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"internal_retry".*"reasoning_tokens":1552/);
   } finally {
     firstHold.finish();
@@ -1313,8 +1319,9 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
     assert.equal(record.attempts, 4);
     assert.equal(record.upstream_model, "stream-exhausted");
     assert.equal(record.reasoning_tokens, 1552);
-    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 4);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552, 1552, 1552, 1552]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1552/);
   } finally {
     await stopProxy({
