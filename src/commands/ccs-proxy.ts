@@ -126,7 +126,6 @@ const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const PROXY_STATE_FILE = "proxy.json";
 const REQUEST_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
-const UPSTREAM_TIMEOUT_MS = 60 * 1000;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516];
 const PROXY_RECENT_REQUEST_LIMIT = 10;
@@ -1054,7 +1053,6 @@ async function forwardRequest(
   request: IncomingMessage,
   upstreamBaseUrl: string,
   body: Buffer,
-  timeoutMs: number,
 ): Promise<Response> {
   const requestUrl = new URL(request.url || "/", "http://localhost");
   const headers = new Headers();
@@ -1079,7 +1077,6 @@ async function forwardRequest(
     method: request.method,
     headers,
     body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
-    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -1190,7 +1187,7 @@ async function proxyThroughUpstreamsWithStats(
     attempts += 1;
     let response: Response;
     try {
-      response = await forwardRequest(request, upstream.baseURL, body, UPSTREAM_TIMEOUT_MS);
+      response = await forwardRequest(request, upstream.baseURL, body);
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
       continue;
