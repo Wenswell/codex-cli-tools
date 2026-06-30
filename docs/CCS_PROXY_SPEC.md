@@ -70,7 +70,7 @@ The proxy also writes each guard action as one JSON line in `~/.config/codex-too
 - Title line: `ccs proxy`, current time, runtime, pid, proxy URL, and trailing refresh interval.
 - Path lines: state path, log path, and config path.
 - Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
-- Reasoning line: `reasoning total=... max=... 0=... 516=... 1034=... 1552=... other=...`.
+- Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups.
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
 - `history`: up to 5 completed requests rendered by the shared request-row formatter.
@@ -172,7 +172,7 @@ Column behavior:
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
 - Status tables display `code` and `reas.` as separate columns.
-- Reasoning token counts are persisted in `metrics.reasoning_token_counts` and rendered as grouped `reasoning total=... max=... 0=... 516=... 1034=... 1552=... other=...`.
+- Reasoning token counts are persisted in `metrics.reasoning_token_counts` and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Missing request and upstream model fields render as `-`, equal upstream models render as `[same]`, and differing upstream models render as model names.
 - Status tables right-align fixed columns, left-align the final `error` column without table-side truncation, and format time/size with compact 3-significant-digit units after the base unit.
