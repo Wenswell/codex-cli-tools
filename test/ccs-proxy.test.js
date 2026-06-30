@@ -176,6 +176,7 @@ test("proxy state persists request metrics", async () => {
     assert.ok(state);
     assert.equal(state.metrics.total_requests, 2);
     assert.deepEqual(state.metrics.status_counts, { "200": 1, "500": 1 });
+    assert.deepEqual(state.metrics.reasoning_token_counts, {});
     assert.equal(state.metrics.active_requests.length, 1);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
     assert.equal(state.metrics.active_requests[0].completed_at, null);
@@ -187,6 +188,7 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.active_requests[0].request_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model_source, null);
+    assert.equal(state.metrics.active_requests[0].reasoning_tokens, null);
     assert.deepEqual(state.metrics.active_requests[0].guard_actions, []);
     assert.equal(state.metrics.active_requests[0].error, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
@@ -196,6 +198,7 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.recent_requests[0].request_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
+    assert.equal(state.metrics.recent_requests[0].reasoning_tokens, null);
     assert.deepEqual(state.metrics.recent_requests[0].guard_actions, []);
     assert.equal(state.metrics.latency_ms.last, 120);
 
@@ -296,6 +299,7 @@ test("proxy records active and history request lifecycle", async () => {
             total_requests: 0,
             active_requests: [],
             status_counts: {},
+            reasoning_token_counts: {},
             upstream_hit_counts: {},
             latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
             recent_requests: [],
@@ -395,8 +399,8 @@ test("proxy records active and history request lifecycle", async () => {
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
-    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
@@ -629,9 +633,9 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(activeOutputResolved, false);
 
     const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.match(output, /active-ou…\s+chat-stre…\s+\/v1\/chat\/c…/);
     assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
     assert.match(output, /responses…\s+responses…\s+\/responses/);
@@ -967,6 +971,8 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
     assert.equal(record.error, null);
     assert.equal(record.upstream_model, "json-ok");
+    assert.equal(record.reasoning_tokens, 42);
+    assert.equal(state.metrics.reasoning_token_counts["42"], 1);
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -989,6 +995,9 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
     assert.match(record.error, /reasoning_guard_triggered reasoning_tokens=1034/);
     assert.equal(record.upstream_model, "json-exhausted");
+    assert.equal(record.reasoning_tokens, 1034);
+    assert.equal(state.metrics.reasoning_token_counts["42"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["1034"], 1);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1034/);
   } finally {
     await stopProxy({
@@ -1071,6 +1080,7 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     );
     assert.equal(state.metrics.active_requests[0].status, 200);
     assert.equal(state.metrics.active_requests[0].attempts, 1);
+    assert.equal(state.metrics.active_requests[0].reasoning_tokens, 1552);
     await delay(100);
     assert.equal(resolved, false);
 
@@ -1087,6 +1097,8 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     assert.equal(hits, 2);
     assert.equal(record.attempts, 2);
     assert.equal(record.upstream_model, "stream-ok");
+    assert.equal(record.reasoning_tokens, 42);
+    assert.equal(state.metrics.reasoning_token_counts["42"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry"]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"internal_retry".*"reasoning_tokens":1552/);
   } finally {
@@ -1249,6 +1261,8 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 4);
     assert.equal(record.upstream_model, "stream-exhausted");
+    assert.equal(record.reasoning_tokens, 1552);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1552/);
   } finally {
@@ -1372,10 +1386,12 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 0,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5",
+            reasoning_tokens: 42,
             path: "/active",
           }),
         ],
         status_counts: {},
+        reasoning_token_counts: {},
         upstream_hit_counts: { input: 5 },
         latency_ms: { last: 56, count: 5, sum: 123, min: 56, max: 187200 },
         recent_requests: [
@@ -1387,6 +1403,7 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 32 * 1024,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5",
+            reasoning_tokens: 42,
             path: "/same",
           }),
           proxyHistoryRecord({
@@ -1407,6 +1424,7 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 3.41 * 1024 * 1024,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5-mini",
+            reasoning_tokens: 516,
             path: "/seconds",
           }),
           proxyHistoryRecord({
@@ -1442,15 +1460,15 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+  assert.match(lines, /session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
-  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
-  assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
-  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
-  assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
+  assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+42\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+42\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
+  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+-\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
+  assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+516\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
+  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+200\s+-\s+43\.2s\s+76\.3M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/large/);
+  assert.match(lines, /019f0dfa\s+\d\d:\d\d:01\s+input\s+200\s+-\s+3\.12m\s+1\.00K\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/minutes/);
   assertProxyRequestColumnsAligned(lines, "active");
   assertProxyRequestColumnsAligned(lines, "history");
 });
@@ -1473,6 +1491,7 @@ test("proxy status summary renders exact status counts", () => {
         total_requests: 6,
         active_requests: [],
         status_counts: { "200": 5, "502": 1 },
+        reasoning_token_counts: { "42": 5, "1552": 1 },
         upstream_hit_counts: { input: 6 },
         latency_ms: { last: 56, count: 6, sum: 123, min: 56, max: 187200 },
         recent_requests: [
@@ -1500,6 +1519,7 @@ test("proxy status summary renders exact status counts", () => {
   ).join("\n");
 
   assert.match(lines, /status total=6 active=0 200=5 502=1 upstreams=input=6/);
+  assert.match(lines, /reasoning total=6 42=5 1552=1/);
 });
 
 test("proxy startup clears persisted active requests from older processes", async () => {
@@ -1579,6 +1599,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
               }),
             ],
             status_counts: {},
+            reasoning_token_counts: {},
             upstream_hit_counts: { input: 3 },
             latency_ms: { last: 123, count: 3, sum: 456, min: 56, max: 200 },
             recent_requests: [
@@ -1837,6 +1858,7 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
           total_requests: 0,
           active_requests: [],
           status_counts: {},
+          reasoning_token_counts: {},
           upstream_hit_counts: {},
           latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
           recent_requests: [],
@@ -1914,6 +1936,7 @@ function proxyHistoryRecord(overrides) {
     request_model: null,
     upstream_model: null,
     upstream_model_source: null,
+    reasoning_tokens: null,
     guard_actions: [],
     error: null,
     ...overrides,
@@ -1947,11 +1970,14 @@ function assertProxyRequestColumnsAligned(output, section) {
   const emptyText = section === "active" ? "no active requests" : "no historical requests";
   const firstRow = lines.slice(sectionIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes(emptyText));
   assert.ok(firstRow);
-  const columns = ["session", "time", "up", "code", "ms", "size", "req_model", "up_model", "path", "error"];
+  const columns = ["session", "time", "up", "code", "reasoning", "ms", "size", "req_model", "up_model", "path", "error"];
   for (const column of columns) {
     assert.notEqual(header.indexOf(column), -1, column);
   }
   assert.equal(header.indexOf("method"), -1);
+  const codeColumn = header.indexOf("code");
+  const reasoningColumn = header.indexOf("reasoning");
+  const msColumn = header.indexOf("ms");
   const pathColumn = header.indexOf("path");
   const errorColumn = header.indexOf("error");
   const pathStart = errorColumn - pathWidth - 1;
@@ -1961,6 +1987,8 @@ function assertProxyRequestColumnsAligned(output, section) {
     assert.equal(firstRow.indexOf("client closed"), errorColumn);
   }
   assert.equal(header.indexOf("session") < header.indexOf("time"), true);
+  assert.equal(codeColumn < reasoningColumn, true);
+  assert.equal(reasoningColumn < msColumn, true);
   assert.equal(header.indexOf("up_model") < pathColumn, true);
   assert.equal(pathColumn < errorColumn, true);
 }

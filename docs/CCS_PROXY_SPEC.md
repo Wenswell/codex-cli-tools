@@ -8,7 +8,7 @@
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, status code, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- History records are the completed form of the same request record and include completion time, status code, reasoning tokens, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
 - SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
@@ -21,6 +21,7 @@
 - `active_requests`: currently processed HTTP requests.
 - `recent_requests`: completed history, newest first.
 - `status_counts`: completed request counts keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
+- `reasoning_token_counts`: completed request counts keyed by observed `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
 - `upstream_hit_counts`: completed request counts per selected upstream.
 - `latency_ms`: completed request latency with `last`, `count`, `sum`, `min`, and `max`.
 
@@ -34,7 +35,9 @@ Request records include `guard_actions`, an ordered array of local proxy action 
 - `reasoning_tokens`: matched reasoning token count when present.
 - `error`: local proxy error text when present.
 
-Old state files are normalized at read time. Missing model fields render through the current `[unknown]` status display. Missing `guard_actions` fields normalize to `[]`.
+Request records include `reasoning_tokens`, the latest observed upstream reasoning-token count for the client request. Accepted responses store their accepted value. Guarded responses store the matched guard value that caused the latest internal action or final `502`.
+
+Old state files are normalized at read time. Missing model fields render through the current `[unknown]` status display. Missing `reasoning_tokens` fields normalize to `null`. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -67,19 +70,22 @@ The proxy also writes each guard action as one JSON line in `~/.config/codex-too
 - Title line: `ccs proxy`, current time, runtime, pid, and refresh interval.
 - Path lines: proxy URL, state path, log path, and config path.
 - Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
+- Reasoning line: `reasoning total=... 42=... 516=... 1552=...`.
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
 - `history`: up to 5 completed requests rendered by the shared request-row formatter.
 
 `status total` is the sum of all exact status-code counters. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
+`reasoning total` is the sum of completed requests with observed `reasoning_tokens`. Reasoning counters render exact token values in ascending numeric order and omit missing values. Requests with no observed reasoning token do not increment `reasoning_token_counts`.
+
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
 ```text
-session time up code ms size req_model up_model path error
+session time up code reasoning ms size req_model up_model path error
 ```
 
-Active rows show elapsed time for `ms`, known request bytes for `size`, and known upstream, status, and model fields as soon as the proxy observes them. Active rows show `…` for code while no status is known. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name; retry attempts use the same active upstream. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `ms`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. Active rows show `…` for code while no status is known and `-` for missing `reasoning_tokens`. History rows show completed response bytes for `size`. Attempts greater than one are shown as `xN` after the upstream name; retry attempts use the same active upstream. Missing upstream model fields render as `[unknown]`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width, and request error text renders in the final left-aligned `error` column without table-side truncation. Truncated table cells use the shared single-character ellipsis `…`. Time and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -136,13 +142,14 @@ The proxy does not set its own upstream response deadline. Client settings such 
 The status table adds compact model visibility without expanding the command surface:
 
 ```text
-session time up code ms size req_model up_model path error
+session time up code reasoning ms size req_model up_model path error
 ```
 
 Column behavior:
 
 - `req_model`: `request_model`, truncated for terminal width.
 - `up_model`: orange `[unknown]` when missing, dim `[same]` when it equals `req_model`, and the red truncated upstream model name when different.
+- `reasoning`: observed `reasoning_tokens`, dim `-` when missing.
 - Active rows follow the shared `up_model` rendering rules; SSE streams update active rows after the first model frame is observed.
 - History rows show status-normalized model fields.
 - `path`: fixed-width request path.
@@ -161,6 +168,8 @@ Column behavior:
 - SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
+- Status tables display `code` and `reasoning` as separate columns.
+- Reasoning token counts are persisted in `metrics.reasoning_token_counts` and rendered as `reasoning total=...`.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Missing upstream model fields render as `[unknown]`, equal upstream models render as `[same]`, and differing upstream models render as model names.
 - Status tables right-align fixed columns, left-align the final `error` column without table-side truncation, and format time/size with compact 3-significant-digit units after the base unit.

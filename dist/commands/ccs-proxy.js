@@ -35,6 +35,7 @@ const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
+const PROXY_TABLE_REASONING_WIDTH = 9;
 const PROXY_TABLE_MODEL_WIDTH = 10;
 const PROXY_TABLE_PATH_WIDTH = 11;
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -52,6 +53,7 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
     { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
+    { key: "reasoning", title: "reasoning", width: PROXY_TABLE_REASONING_WIDTH, align: "right" },
     { key: "ms", title: "ms", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
     { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
@@ -309,6 +311,7 @@ function createProxyMetrics() {
         total_requests: 0,
         active_requests: [],
         status_counts: createProxyStatusCounts(),
+        reasoning_token_counts: createProxyReasoningTokenCounts(),
         upstream_hit_counts: {},
         latency_ms: {
             last: null,
@@ -321,6 +324,9 @@ function createProxyMetrics() {
     };
 }
 function createProxyStatusCounts() {
+    return {};
+}
+function createProxyReasoningTokenCounts() {
     return {};
 }
 function normalizeProxyMetrics(value) {
@@ -339,6 +345,7 @@ function normalizeProxyMetrics(value) {
                 .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
             : [],
         status_counts: statusCounts,
+        reasoning_token_counts: normalizeProxyReasoningTokenCounts(raw.reasoning_token_counts, recentRequests),
         upstream_hit_counts: raw.upstream_hit_counts && typeof raw.upstream_hit_counts === "object" && !Array.isArray(raw.upstream_hit_counts)
             ? Object.fromEntries(Object.entries(raw.upstream_hit_counts)
                 .filter(([, count]) => Number.isInteger(count))
@@ -355,6 +362,24 @@ function normalizeProxyMetrics(value) {
         },
         recent_requests: recentRequests,
     };
+}
+function normalizeProxyReasoningTokenCounts(value, recentRequests) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        const exactCounts = Object.fromEntries(Object.entries(value)
+            .filter(([reasoningTokens, count]) => /^\d+$/.test(reasoningTokens) && Number.isInteger(count))
+            .map(([reasoningTokens, count]) => [reasoningTokens, Number(count)]));
+        if (Object.keys(exactCounts).length > 0 || recentRequests.length === 0) {
+            return exactCounts;
+        }
+    }
+    return buildProxyReasoningTokenCounts(recentRequests);
+}
+function buildProxyReasoningTokenCounts(recentRequests) {
+    const counts = createProxyReasoningTokenCounts();
+    for (const request of recentRequests) {
+        incrementProxyReasoningTokenCount(counts, request.reasoning_tokens);
+    }
+    return counts;
 }
 function normalizeProxyStatusCounts(value, recentRequests, rawMetrics) {
     const successfulRequests = Number.isInteger(rawMetrics.successful_requests) ? Number(rawMetrics.successful_requests) : 0;
@@ -414,6 +439,7 @@ function normalizeProxyRequestRecord(request, collection) {
         request_model: nullableStringField(request.request_model),
         upstream_model: nullableStringField(request.upstream_model),
         upstream_model_source: nullableStringField(request.upstream_model_source),
+        reasoning_tokens: Number.isInteger(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
         guard_actions: normalizeProxyGuardActions(request.guard_actions),
         error: nullableStringField(request.error),
     };
@@ -503,6 +529,7 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
         metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
         metrics.total_requests += 1;
         incrementProxyStatusCount(metrics.status_counts, record.status);
+        incrementProxyReasoningTokenCount(metrics.reasoning_token_counts, record.reasoning_tokens);
         if (record.upstream) {
             metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
         }
@@ -522,6 +549,13 @@ async function resetProxyActiveRequestsOnStart(state, stateRoot) {
 }
 function incrementProxyStatusCount(counts, status) {
     const key = String(status ?? 500);
+    counts[key] = (counts[key] ?? 0) + 1;
+}
+function incrementProxyReasoningTokenCount(counts, reasoningTokens) {
+    if (reasoningTokens === null) {
+        return;
+    }
+    const key = String(reasoningTokens);
     counts[key] = (counts[key] ?? 0) + 1;
 }
 function averageLatency(latency) {
@@ -623,6 +657,7 @@ function formatProxyRequest(record, nowMs) {
     return {
         time: textDim(time),
         code: record.status === null && !completed ? textDim("…") : formatProxyStatusCode(record.status),
+        reasoning: formatProxyReasoningTokens(record.reasoning_tokens),
         up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
@@ -669,6 +704,9 @@ function formatProxyRequestModel(model) {
         return textRed("[unknown]");
     }
     return colorName(truncateProxyText(model, PROXY_TABLE_MODEL_WIDTH));
+}
+function formatProxyReasoningTokens(reasoningTokens) {
+    return reasoningTokens === null ? textDim("-") : textYellow(String(reasoningTokens));
 }
 function formatProxyUpstreamModel(requestModel, upstreamModel) {
     if (!upstreamModel) {
@@ -919,11 +957,14 @@ class ProxySseModelScanner {
     buffer = "";
     modelValue = null;
     modelSource = null;
+    reasoningTokensValue = null;
     constructor(endpointClass) {
         this.endpointClass = endpointClass;
     }
     push(chunk) {
-        if (!this.endpointClass || this.modelValue) {
+        const needsModel = Boolean(this.endpointClass && !this.modelValue);
+        const needsReasoningTokens = this.reasoningTokensValue === null;
+        if (!needsModel && !needsReasoningTokens) {
             return;
         }
         this.buffer += this.decoder.decode(chunk, { stream: true });
@@ -940,8 +981,11 @@ class ProxySseModelScanner {
     current() {
         return { model: this.modelValue, source: this.modelSource };
     }
+    currentReasoningTokens() {
+        return this.reasoningTokensValue;
+    }
     consumeCompleteEvents() {
-        while (!this.modelValue) {
+        while (!this.modelValue || this.reasoningTokensValue === null) {
             const separator = findSseEventSeparator(this.buffer);
             if (!separator) {
                 return;
@@ -963,10 +1007,15 @@ class ProxySseModelScanner {
         }
         try {
             const parsed = JSON.parse(data);
-            const extraction = extractUpstreamModelFromSsePayload(parsed, this.endpointClass);
-            if (extraction.model) {
-                this.modelValue = extraction.model;
-                this.modelSource = extraction.source;
+            if (this.endpointClass && !this.modelValue) {
+                const extraction = extractUpstreamModelFromSsePayload(parsed, this.endpointClass);
+                if (extraction.model) {
+                    this.modelValue = extraction.model;
+                    this.modelSource = extraction.source;
+                }
+            }
+            if (this.reasoningTokensValue === null) {
+                this.reasoningTokensValue = parseReasoningTokens(parsed);
             }
         }
         catch {
@@ -1003,6 +1052,9 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         if (upstreamModel.model) {
             await callbacks.onUpstreamModel?.(upstreamModel);
         }
+        if (inspection.reasoningTokens !== null) {
+            await callbacks.onReasoningTokens?.(inspection.reasoningTokens);
+        }
         if (inspection.guardReasoningTokens !== null) {
             if (guardRetries < GUARD_RETRY_ATTEMPTS) {
                 guardRetries += 1;
@@ -1031,6 +1083,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 attempts: attemptState.attempts,
                 upstreamModel: upstreamModel.model,
                 upstreamModelSource: upstreamModel.source,
+                reasoningTokens: inspection.guardReasoningTokens,
                 error,
             };
         }
@@ -1040,6 +1093,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
             attempts: attemptState.attempts,
             upstreamModel: upstreamModel.model,
             upstreamModelSource: upstreamModel.source,
+            reasoningTokens: inspection.reasoningTokens,
             error: null,
         };
     }
@@ -1060,6 +1114,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
     const scanner = new ProxySseModelScanner(endpointClass);
     let responseBytes = 0;
     let emittedModelKey = "";
+    let emittedReasoningTokens = null;
     const emitModelIfChanged = async (extraction) => {
         const key = `${extraction.model ?? ""}\n${extraction.source ?? ""}`;
         if (!extraction.model || key === emittedModelKey) {
@@ -1068,6 +1123,13 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
         emittedModelKey = key;
         await callbacks.onUpstreamModel?.(extraction);
     };
+    const emitReasoningIfChanged = async (reasoningTokens) => {
+        if (reasoningTokens === null || reasoningTokens === emittedReasoningTokens) {
+            return;
+        }
+        emittedReasoningTokens = reasoningTokens;
+        await callbacks.onReasoningTokens?.(reasoningTokens);
+    };
     try {
         for await (const chunk of Readable.fromWeb(response.body)) {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -1075,6 +1137,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
             responseBytes += value.length;
             scanner.push(value);
             await emitModelIfChanged(scanner.current());
+            await emitReasoningIfChanged(scanner.currentReasoningTokens());
         }
         scanner.finish();
     }
@@ -1082,6 +1145,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
         throw proxyResponseBodyReadError(error, callbacks.signal, responseBytes);
     }
     await emitModelIfChanged(scanner.current());
+    await emitReasoningIfChanged(scanner.currentReasoningTokens());
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
 function proxyResponseBodyReadError(error, signal, responseBytes) {
@@ -1127,6 +1191,7 @@ async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptS
                 attempts: attemptState.attempts,
                 upstreamModel: null,
                 upstreamModelSource: null,
+                reasoningTokens: null,
                 error: `${code}: ${message}`,
             };
         }
@@ -1399,10 +1464,23 @@ function formatProxyRequestsSummary(metrics, profileOrder) {
         `upstreams=${formatProxyUpstreamHits(profileOrder, metrics)}`,
     ].join(" ");
 }
+function formatProxyReasoningSummary(metrics) {
+    const reasoningCounts = formatExactProxyReasoningTokenCounts(metrics.reasoning_token_counts);
+    return [
+        `reasoning total=${colorCount(String(totalProxyReasoningTokenCounts(metrics.reasoning_token_counts)))}`,
+        ...reasoningCounts,
+    ].join(" ");
+}
 function formatProxyStatusCount(value, color) {
     return value === 0 ? textDim("0") : color(String(value));
 }
+function formatProxyReasoningTokenCount(value) {
+    return value === 0 ? textDim("0") : textYellow(String(value));
+}
 function totalProxyStatusCounts(counts) {
+    return Object.values(counts).reduce((sum, count) => sum + count, 0);
+}
+function totalProxyReasoningTokenCounts(counts) {
     return Object.values(counts).reduce((sum, count) => sum + count, 0);
 }
 function formatExactProxyStatusCounts(counts) {
@@ -1410,6 +1488,12 @@ function formatExactProxyStatusCounts(counts) {
         .filter(([, count]) => count > 0)
         .sort(([left], [right]) => Number(left) - Number(right))
         .map(([status, count]) => `${status}=${formatProxyStatusCount(count, proxyStatusCountColor(Number(status)))}`);
+}
+function formatExactProxyReasoningTokenCounts(counts) {
+    return Object.entries(counts)
+        .filter(([, count]) => count > 0)
+        .sort(([left], [right]) => Number(left) - Number(right))
+        .map(([reasoningTokens, count]) => `${reasoningTokens}=${formatProxyReasoningTokenCount(count)}`);
 }
 function proxyStatusCountColor(status) {
     if (status >= 500) {
@@ -1474,6 +1558,7 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
         ...formatProxyPathsLines(state, options).map(fitProxyTerminalLine),
         fitProxyTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
+        fitProxyTerminalLine(formatProxyReasoningSummary(metrics)),
         fitProxyTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
         ...formatProxyActiveRows(metrics, now),
@@ -1621,6 +1706,7 @@ export async function serveProxy(options) {
                     request_model: null,
                     upstream_model: null,
                     upstream_model_source: null,
+                    reasoning_tokens: null,
                     guard_actions: [],
                     error: null,
                 };
@@ -1631,6 +1717,7 @@ export async function serveProxy(options) {
                 let responseBytes = 0;
                 let upstreamModel = null;
                 let upstreamModelSource = null;
+                let reasoningTokens = null;
                 let errorText = null;
                 const endpointClass = proxyEndpointClass(url.pathname);
                 try {
@@ -1661,7 +1748,15 @@ export async function serveProxy(options) {
                             activeRecord.upstream_model_source = extraction.source;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
+                        onReasoningTokens: async (tokens) => {
+                            if (activeRecord.reasoning_tokens === tokens) {
+                                return;
+                            }
+                            activeRecord.reasoning_tokens = tokens;
+                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                        },
                         onGuardAction: async (action) => {
+                            activeRecord.reasoning_tokens = action.reasoning_tokens;
                             activeRecord.guard_actions.push(action);
                             activeRecord.error = action.error;
                             logProxyGuardAction(activeRecord, action);
@@ -1673,12 +1768,14 @@ export async function serveProxy(options) {
                     attempts = outcome.attempts;
                     upstreamModel = outcome.upstreamModel;
                     upstreamModelSource = outcome.upstreamModelSource;
+                    reasoningTokens = outcome.reasoningTokens;
                     errorText = outcome.error;
                     activeRecord.status = status;
                     activeRecord.upstream = upstream;
                     activeRecord.attempts = attempts;
                     activeRecord.upstream_model = upstreamModel;
                     activeRecord.upstream_model_source = upstreamModelSource;
+                    activeRecord.reasoning_tokens = reasoningTokens;
                     activeRecord.error = errorText;
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                     const streamModelObserver = {
@@ -1714,6 +1811,7 @@ export async function serveProxy(options) {
                     }
                     upstreamModel = activeRecord.upstream_model;
                     upstreamModelSource = activeRecord.upstream_model_source;
+                    reasoningTokens = activeRecord.reasoning_tokens;
                     activeRecord.status = status;
                     activeRecord.response_bytes = responseBytes;
                     activeRecord.error = errorText;
@@ -1731,6 +1829,7 @@ export async function serveProxy(options) {
                     request_model: activeRecord.request_model,
                     upstream_model: upstreamModel,
                     upstream_model_source: upstreamModelSource,
+                    reasoning_tokens: reasoningTokens,
                     error: errorText,
                 });
             }
