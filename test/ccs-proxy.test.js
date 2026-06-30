@@ -399,8 +399,8 @@ test("proxy records active and history request lifecycle", async () => {
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
-    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
@@ -633,9 +633,9 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(activeOutputResolved, false);
 
     const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
     assert.match(output, /active-ou…\s+chat-stre…\s+\/v1\/chat\/c…/);
     assert.match(output, /\[unknown\]\s+\[unknown\]\s+\/responses/);
     assert.match(output, /responses…\s+responses…\s+\/responses/);
@@ -1460,10 +1460,10 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error/);
+  assert.match(lines, /session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+reasoning\s+ms\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+42\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
+  assert.match(lines, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+200\s+42\s+0ms\s+2\.00K\s+gpt-5\.5\s+\[same\]\s+\/active/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+200\s+42\s+56ms\s+32\.0K\s+gpt-5\.5\s+\[same\]\s+\/same/);
   assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+200\s+-\s+123ms\s+982K\s+\[unknown\]\s+\[unknown\]\s+\/unknown/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+200\s+516\s+2\.34s\s+3\.41M\s+gpt-5\.5\s+gpt-5\.5-m…\s+\/seconds/);
@@ -1488,12 +1488,12 @@ test("proxy status summary renders exact status counts", () => {
       profile_order: ["input"],
       backup_path: "/tmp/backup.toml",
       metrics: {
-        total_requests: 6,
+        total_requests: 12,
         active_requests: [],
-        status_counts: { "200": 5, "502": 1 },
-        reasoning_token_counts: { "42": 5, "1552": 1 },
-        upstream_hit_counts: { input: 6 },
-        latency_ms: { last: 56, count: 6, sum: 123, min: 56, max: 187200 },
+        status_counts: { "200": 11, "502": 1 },
+        reasoning_token_counts: { "0": 1, "42": 5, "516": 2, "1034": 3, "1552": 1 },
+        upstream_hit_counts: { input: 12 },
+        latency_ms: { last: 56, count: 12, sum: 123, min: 56, max: 187200 },
         recent_requests: [
           proxyHistoryRecord({
             session: "019f0df6",
@@ -1518,8 +1518,87 @@ test("proxy status summary renders exact status counts", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /status total=6 active=0 200=5 502=1 upstreams=input=6/);
-  assert.match(lines, /reasoning total=6 42=5 1552=1/);
+  assert.match(lines, /status total=12 active=0 200=11 502=1 upstreams=input=12/);
+  assert.match(lines, /reasoning total=12 0=1 516=2 1034=3 1552=1 other=5/);
+});
+
+test("proxy watch uses terminal frame repaint and omits file path lines", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const health = createServer((req, res) => {
+    if (req.url === "/__codex_proxy/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", pid: 1234 }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      health.once("error", reject);
+      health.listen(0, "127.0.0.1", resolve);
+    });
+    const address = health.address();
+    assert.ok(address && typeof address === "object");
+    const proxyPort = address.port;
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      proxyPort,
+      { input: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "" } },
+      "input",
+      ["input"],
+    );
+
+    const output = await captureStdout(
+      () => runProxyCommand(
+        ["watch"],
+        {
+          codexConfigPath: join(home, ".codex", "config.toml"),
+          listenHost: "127.0.0.1",
+          listenPort: proxyPort,
+          stateRoot,
+        },
+      ),
+      {
+        isTTY: true,
+        columns: 120,
+        onWrite: (output) => {
+          if (output.includes("\u001b[J")) {
+            setImmediate(() => process.emit("SIGINT"));
+          }
+        },
+      },
+    );
+
+    assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
+    assert.match(output, /\u001b\[2Kccs proxy/);
+    assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
+    assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+/);
+    assert.match(output, /session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);
+    assert.doesNotMatch(output, /state:|log:|config:/);
+  } finally {
+    await closeServer(health);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("proxy startup clears persisted active requests from older processes", async () => {
@@ -1905,6 +1984,48 @@ async function captureConsole(run) {
   return `${lines.join("\n")}\n`;
 }
 
+async function captureStdout(run, options = {}) {
+  const originalWrite = process.stdout.write;
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+  let output = "";
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: options.isTTY ?? process.stdout.isTTY,
+  });
+  Object.defineProperty(process.stdout, "columns", {
+    configurable: true,
+    value: options.columns ?? process.stdout.columns,
+  });
+  process.stdout.write = (chunk, encoding, callback) => {
+    output += Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === "string" ? encoding : "utf8") : String(chunk);
+    options.onWrite?.(output);
+    if (typeof encoding === "function") {
+      encoding();
+    }
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
+  try {
+    await run();
+  } finally {
+    process.stdout.write = originalWrite;
+    if (originalIsTTY) {
+      Object.defineProperty(process.stdout, "isTTY", originalIsTTY);
+    } else {
+      delete process.stdout.isTTY;
+    }
+    if (originalColumns) {
+      Object.defineProperty(process.stdout, "columns", originalColumns);
+    } else {
+      delete process.stdout.columns;
+    }
+  }
+  return output;
+}
+
 function holdControl() {
   let markStarted;
   const started = new Promise((resolve) => {
@@ -1970,14 +2091,14 @@ function assertProxyRequestColumnsAligned(output, section) {
   const emptyText = section === "active" ? "no active requests" : "no historical requests";
   const firstRow = lines.slice(sectionIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes(emptyText));
   assert.ok(firstRow);
-  const columns = ["session", "time", "up", "code", "reasoning", "ms", "size", "req_model", "up_model", "path", "error"];
+  const columns = ["session", "time", "up", "code", "reas.", "lat.", "size", "req_model", "up_model", "path", "error"];
   for (const column of columns) {
     assert.notEqual(header.indexOf(column), -1, column);
   }
   assert.equal(header.indexOf("method"), -1);
   const codeColumn = header.indexOf("code");
-  const reasoningColumn = header.indexOf("reasoning");
-  const msColumn = header.indexOf("ms");
+  const reasoningColumn = header.indexOf("reas.");
+  const msColumn = header.indexOf("lat.");
   const pathColumn = header.indexOf("path");
   const errorColumn = header.indexOf("error");
   const pathStart = errorColumn - pathWidth - 1;

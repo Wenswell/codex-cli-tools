@@ -124,6 +124,7 @@ type ProxyOptions = {
   listenPort: number;
   stateRoot: string;
   once?: boolean;
+  watch?: boolean;
 };
 
 type ProxyEndpointClass = "chat/completions" | "responses";
@@ -143,19 +144,19 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const PROXY_STATE_FILE = "proxy.json";
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516, 1034, 1552];
+const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
 const GUARD_RETRY_ATTEMPTS = 3;
 const FETCH_FAILED_TRANSPORT_RETRIES = 1;
 const PROXY_RECENT_REQUEST_LIMIT = 10;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
-const PROXY_STATUS_RENDER_LINES = 11 + (PROXY_RECENT_RENDER_COUNT * 2);
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_CODE_WIDTH = 4;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
-const PROXY_TABLE_REASONING_WIDTH = 9;
+const PROXY_TABLE_REASONING_WIDTH = 5;
 const PROXY_TABLE_MODEL_WIDTH = 10;
 const PROXY_TABLE_PATH_WIDTH = 11;
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -174,8 +175,8 @@ const PROXY_REQUEST_TABLE_COLUMNS: TableColumn[] = [
   { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
   { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
   { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
-  { key: "reasoning", title: "reasoning", width: PROXY_TABLE_REASONING_WIDTH, align: "right" },
-  { key: "ms", title: "ms", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
+  { key: "reasoning", title: "reas.", width: PROXY_TABLE_REASONING_WIDTH, align: "right" },
+  { key: "ms", title: "lat.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
   { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
   { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
   { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
@@ -837,8 +838,12 @@ function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: Pro
 }
 
 function formatProxyPathsLines(state: ProxyState | null, options: ProxyOptions): string[] {
+  const proxyLine = `proxy: ${state ? colorUrl(state.proxy_base_url) : textDim("unset")}`;
+  if (options.watch) {
+    return [proxyLine];
+  }
   return [
-    `proxy: ${state ? colorUrl(state.proxy_base_url) : textDim("unset")}`,
+    proxyLine,
     `state: ${colorPath(formatProxyFilePath(statePath(options.stateRoot)))}`,
     `log: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
     `config: ${colorPath(formatProxyFilePath(options.codexConfigPath))}`,
@@ -1810,7 +1815,7 @@ function formatProxyRequestsSummary(metrics: ProxyMetrics, profileOrder: string[
 }
 
 function formatProxyReasoningSummary(metrics: ProxyMetrics): string {
-  const reasoningCounts = formatExactProxyReasoningTokenCounts(metrics.reasoning_token_counts);
+  const reasoningCounts = formatGroupedProxyReasoningTokenCounts(metrics.reasoning_token_counts);
   return [
     `reasoning total=${colorCount(String(totalProxyReasoningTokenCounts(metrics.reasoning_token_counts)))}`,
     ...reasoningCounts,
@@ -1819,10 +1824,6 @@ function formatProxyReasoningSummary(metrics: ProxyMetrics): string {
 
 function formatProxyStatusCount(value: number, color: (text: string) => string): string {
   return value === 0 ? textDim("0") : color(String(value));
-}
-
-function formatProxyReasoningTokenCount(value: number): string {
-  return value === 0 ? textDim("0") : textYellow(String(value));
 }
 
 function totalProxyStatusCounts(counts: ProxyStatusCounts): number {
@@ -1840,11 +1841,22 @@ function formatExactProxyStatusCounts(counts: ProxyStatusCounts): string[] {
     .map(([status, count]) => `${status}=${formatProxyStatusCount(count, proxyStatusCountColor(Number(status)))}`);
 }
 
-function formatExactProxyReasoningTokenCounts(counts: ProxyReasoningTokenCounts): string[] {
+function formatGroupedProxyReasoningTokenCounts(counts: ProxyReasoningTokenCounts): string[] {
+  const grouped = REASONING_SUMMARY_VALUES.map((value) => [String(value), counts[String(value)] ?? 0] as const);
+  return [
+    ...grouped.map(([reasoningTokens, count]) => {
+      const color = reasoningTokens === "0" ? textOrange : textRed;
+      return `${reasoningTokens}=${color(String(count))}`;
+    }),
+    `other=${textGreen(String(totalOtherProxyReasoningTokenCounts(counts)))}`,
+  ];
+}
+
+function totalOtherProxyReasoningTokenCounts(counts: ProxyReasoningTokenCounts): number {
+  const fixedKeys = new Set(REASONING_SUMMARY_VALUES.map(String));
   return Object.entries(counts)
-    .filter(([, count]) => count > 0)
-    .sort(([left], [right]) => Number(left) - Number(right))
-    .map(([reasoningTokens, count]) => `${reasoningTokens}=${formatProxyReasoningTokenCount(count)}`);
+    .filter(([reasoningTokens]) => !fixedKeys.has(reasoningTokens))
+    .reduce((sum, [, count]) => sum + count, 0);
 }
 
 function proxyStatusCountColor(status: number): (text: string) => string {
@@ -1940,8 +1952,12 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let refreshing = false;
-  let firstFrame = true;
-  const renderLineCount = PROXY_STATUS_RENDER_LINES;
+  const useAlternateScreen = Boolean(process.stdout.isTTY);
+  const restoreTerminal = (): void => {
+    if (useAlternateScreen) {
+      process.stdout.write("\u001b[?25h\u001b[?1049l");
+    }
+  };
 
   const render = async (): Promise<void> => {
     if (refreshing || stopped) {
@@ -1949,44 +1965,52 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
     }
     refreshing = true;
     try {
-      const lines = await renderProxyStatusLines(options);
-      if (firstFrame) {
-        process.stdout.write(lines.join("\n"));
-        firstFrame = false;
+      const lines = await renderProxyStatusLines({ ...options, watch: true });
+      if (useAlternateScreen) {
+        process.stdout.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
       } else {
-        process.stdout.write(`\u001b[${Math.max(0, renderLineCount - 1)}A\r${lines.map((line) => `\u001b[2K${line}`).join("\n")}`);
+        process.stdout.write(`${lines.join("\n")}\n`);
       }
     } finally {
       refreshing = false;
     }
   };
 
-  await render();
-  if (!process.stdout.isTTY) {
-    process.stdout.write("\n");
-    return;
+  if (useAlternateScreen) {
+    process.stdout.write("\u001b[?1049h\u001b[?25l");
   }
+  try {
+    await render();
+    if (!useAlternateScreen) {
+      return;
+    }
 
-  await new Promise<void>((resolve) => {
-    const cleanup = (): void => {
-      if (stopped) {
-        return;
-      }
-      stopped = true;
-      if (timer) {
-        clearInterval(timer);
-      }
-      process.stdout.write("\n");
-      resolve();
-    };
+    await new Promise<void>((resolve) => {
+      const cleanup = (): void => {
+        if (stopped) {
+          return;
+        }
+        stopped = true;
+        if (timer) {
+          clearInterval(timer);
+        }
+        process.off("SIGINT", cleanup);
+        process.off("SIGTERM", cleanup);
+        restoreTerminal();
+        resolve();
+      };
 
-    timer = setInterval(() => {
-      void render();
-    }, 1000);
+      timer = setInterval(() => {
+        void render();
+      }, PROXY_STATUS_REFRESH_SECONDS * 1000);
 
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
-  });
+      process.once("SIGINT", cleanup);
+      process.once("SIGTERM", cleanup);
+    });
+  } catch (error) {
+    restoreTerminal();
+    throw error;
+  }
 }
 
 export async function stopProxy(options: ProxyOptions): Promise<string> {
