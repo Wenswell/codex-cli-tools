@@ -399,7 +399,8 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /config: ~\/\.codex\/config\.toml/);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
-    assert.match(output, /reasoning total=0 max=- 0=0 516=0 1034=0 1552=0 other=0/);
+    assert.match(output, /reasoning total=0 max=-/);
+    assert.doesNotMatch(output, /0=0|516=0|1034=0|1552=0|other=0/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+code\s+reas\.\s+lat\.\s+size\s+req_model\s+up_model\s+path\s+error/);

@@ -79,7 +79,7 @@ The proxy also writes each guard action as one JSON line in `~/.config/codex-too
 
 `status total` is the sum of all exact status-code counters. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
-`reasoning total` is the sum of completed requests with observed `reasoning_tokens`. `max` is the largest observed `reasoning_tokens` value across completed requests and renders `-` when none have been observed. Reasoning counters render fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with no observed reasoning token do not increment `reasoning_token_counts`.
+`reasoning total` is the sum of completed requests with observed `reasoning_tokens`. `max` is the largest observed `reasoning_tokens` value across completed requests and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with no observed reasoning token do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 

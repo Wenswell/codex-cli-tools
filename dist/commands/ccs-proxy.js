@@ -1512,12 +1512,15 @@ function formatExactProxyStatusCounts(counts) {
 }
 function formatGroupedProxyReasoningTokenCounts(counts) {
     const grouped = REASONING_SUMMARY_VALUES.map((value) => [String(value), counts[String(value)] ?? 0]);
+    const otherCount = totalOtherProxyReasoningTokenCounts(counts);
     return [
-        ...grouped.map(([reasoningTokens, count]) => {
+        ...grouped
+            .filter(([, count]) => count > 0)
+            .map(([reasoningTokens, count]) => {
             const color = reasoningTokens === "0" ? textOrange : textRed;
             return `${reasoningTokens}=${color(String(count))}`;
         }),
-        `other=${textGreen(String(totalOtherProxyReasoningTokenCounts(counts)))}`,
+        ...(otherCount > 0 ? [`other=${textGreen(String(otherCount))}`] : []),
     ];
 }
 function totalOtherProxyReasoningTokenCounts(counts) {
