@@ -599,6 +599,13 @@ Config lives at:
 ~/.config/codex-tools/clvm.json
 ```
 
+Runtime records live at:
+
+```text
+~/.cache/codex-tools/clvm-state.json
+~/.cache/codex-tools/clvm-history.jsonl
+```
+
 Default template lives at:
 
 ```text
@@ -611,7 +618,7 @@ Default status:
 clvm
 ```
 
-The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, and prints a compact command line at the bottom. Narrow terminals use a shorter command footer.
+The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, writes the latest state and history record, and prints a compact command line at the bottom. Narrow terminals use a shorter command footer.
 
 Commands:
 
@@ -662,7 +669,9 @@ clvm monitor --json
 clvm monitor --no-clear
 ```
 
-Monitor tables read the active terminal width. Status, endpoint, age, zero time, and speed columns stay visible; narrower terminals omit traffic total and chain columns before truncating long text. The final `rule` column takes remaining width and uses the shared ANSI/wide-character-aware table truncation.
+Monitor tables read the active terminal width. Status, endpoint, age, zero time, and speed columns stay visible; narrower terminals omit traffic total and chain columns before truncating long text. The final `rule` column takes remaining width and uses the shared ANSI/wide-character-aware table truncation. Traffic totals and speeds use compact 3-significant-digit units such as `160K`, `43.2M`, `160K/s`, and `43.2M/s`.
+
+Every successful `clvm` status sample and `clvm monitor` refresh writes `~/.cache/codex-tools/clvm-state.json` and appends one JSON line to `~/.cache/codex-tools/clvm-history.jsonl`. Each record stores the active non-secret config summary, computed summary counts, normalized matched/closed connection data, and the raw `/connections` response.
 
 Domain matching:
 
@@ -677,7 +686,7 @@ clvm setup --close-zero-for-seconds 300
 clvm monitor
 ```
 
-`closeZeroForSeconds` enables automatic close in `clvm monitor`. `clvm` status remains read-only and shows `autoClose=configured` when the threshold is configured.
+`closeZeroForSeconds` enables automatic close in `clvm monitor`. `clvm` status does not close connections and shows `autoClose=configured` when the threshold is configured.
 
 ## senv
 

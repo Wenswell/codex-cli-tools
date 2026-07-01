@@ -1,10 +1,11 @@
 import { createTwoFilesPatch } from "diff";
+import { appendFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
-import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
-import { clvmConfigPath, codexToolsConfigDir } from "../lib/paths.js";
+import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
 import { renderTable, type TableColumn } from "../lib/table.js";
 import {
   maskSecret,
@@ -36,6 +37,7 @@ const durationUnits = new Map([
 ]);
 
 const closedHistoryLimit = 5;
+const clvmStateVersion = 1;
 const commandsLine = "commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
 const compactCommandsLine = "commands: clvm | monitor | config | setup | sync | help";
 const setupFields = new Set([
@@ -49,6 +51,14 @@ const setupFields = new Set([
 
 function clvmTemplatePath(): string {
   return fileURLToPath(new URL("../../config/clvm.json", import.meta.url));
+}
+
+function clvmStatePath(): string {
+  return join(codexToolsCacheDir(), "clvm-state.json");
+}
+
+function clvmHistoryPath(): string {
+  return join(codexToolsCacheDir(), "clvm-history.jsonl");
 }
 
 type CommandName = "status" | "monitor" | "config" | "setup" | "sync" | "help";
@@ -161,6 +171,37 @@ type MonitorResult = {
   closedConnections?: ConnectionEntry[];
   closedHistory?: ClosedConnectionEntry[];
   closedTotal?: number;
+};
+
+type SampleSource = "status" | "monitor";
+
+type ClvmSampleRecord = {
+  version: number;
+  recorded_at: string;
+  source: SampleSource;
+  config: {
+    baseUrl: string;
+    domains: string[];
+    intervalMs: number;
+    zeroSpeedThreshold: number;
+    closeZeroForSeconds: number | null;
+    autoCloseEnabled: boolean;
+  };
+  summary: {
+    totalConnections: number;
+    matchedConnections: number;
+    activeConnections: number;
+    zeroConnections: number;
+    unknownConnections: number;
+    closedNow: number;
+    closedTotal: number;
+    uploadBytesPerSecond: number;
+    downloadBytesPerSecond: number;
+    uploadBytes: number;
+    downloadBytes: number;
+  };
+  result: Record<string, unknown>;
+  raw: unknown;
 };
 
 type Layout = {
@@ -733,7 +774,9 @@ function formatTimestamp(date: Date): string {
 function printConfigStatus(runtimeConfig: RuntimeConfig, { includeCommands }: { includeCommands: boolean }): void {
   const style = createStyle(runtimeConfig);
   console.log(style.bold("clvm config"));
-  printKeyValue("path:", style.blue(clvmConfigPath()), 12);
+  printKeyValue("config:", style.blue(formatHomePath(clvmConfigPath())), 12);
+  printKeyValue("state:", style.blue(formatHomePath(clvmStatePath())), 12);
+  printKeyValue("history:", style.blue(formatHomePath(clvmHistoryPath())), 12);
   printConfigValues(runtimeConfig, style);
   if (includeCommands) {
     printCommands(style);
@@ -745,7 +788,7 @@ function printConfigValues(config: RuntimeConfig, style = createStyle(config)): 
   printKeyValue("secret:", config.secret ? style.green(maskSecret(config.secret)) : style.dim("empty"), 12);
   printKeyValue("domains:", config.domains.length > 0 ? config.domains.join(",") : style.yellow("missing"), 12);
   printKeyValue("interval:", formatDuration(config.intervalMs), 12);
-  printKeyValue("zero speed:", `${config.zeroSpeedThreshold}B/s`, 12);
+  printKeyValue("zero speed:", formatSpeed(config.zeroSpeedThreshold), 12);
   printKeyValue("auto close:", config.closeZeroForSeconds === null ? style.dim("off") : style.red(`${formatSeconds(config.closeZeroForSeconds)}`), 12);
 }
 
@@ -869,6 +912,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
 
     result.closedHistory = closedHistory;
     result.closedTotal = closedTotal;
+    await recordClvmSample("monitor", config, result, payload);
     printMonitorResult(result, config);
 
     if (config.once) {
@@ -893,7 +937,53 @@ async function sampleOnce(config: RuntimeConfig): Promise<MonitorResult> {
   result.closedConnections = [];
   result.closedHistory = [];
   result.closedTotal = 0;
+  await recordClvmSample("status", config, result, payload);
   return result;
+}
+
+async function recordClvmSample(source: SampleSource, config: RuntimeConfig, result: MonitorResult, raw: unknown): Promise<void> {
+  const record = buildClvmSampleRecord(source, config, result, raw);
+  await writeTextFileAtomic(clvmStatePath(), `${JSON.stringify(record, null, 2)}\n`, 0o600);
+  await appendFile(clvmHistoryPath(), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+function buildClvmSampleRecord(source: SampleSource, config: RuntimeConfig, result: MonitorResult, raw: unknown): ClvmSampleRecord {
+  const matched = result.matchedConnections;
+  return {
+    version: clvmStateVersion,
+    recorded_at: new Date().toISOString(),
+    source,
+    config: {
+      baseUrl: config.baseUrl,
+      domains: config.domains,
+      intervalMs: config.intervalMs,
+      zeroSpeedThreshold: config.zeroSpeedThreshold,
+      closeZeroForSeconds: config.closeZeroForSeconds,
+      autoCloseEnabled: config.autoCloseEnabled,
+    },
+    summary: {
+      totalConnections: result.totalConnections,
+      matchedConnections: matched.length,
+      activeConnections: matched.filter((connection) => connection.status === "active").length,
+      zeroConnections: matched.filter((connection) => connection.status === "zero").length,
+      unknownConnections: matched.filter((connection) => connection.status === "unknown").length,
+      closedNow: result.closedConnections?.length ?? 0,
+      closedTotal: result.closedTotal ?? 0,
+      uploadBytesPerSecond: sumConnectionNumber(matched, "uploadBytesPerSecond"),
+      downloadBytesPerSecond: sumConnectionNumber(matched, "downloadBytesPerSecond"),
+      uploadBytes: sumConnectionNumber(matched, "uploadTotal"),
+      downloadBytes: sumConnectionNumber(matched, "downloadTotal"),
+    },
+    result: toJsonResult(result),
+    raw,
+  };
+}
+
+function sumConnectionNumber(connections: ConnectionEntry[], field: keyof ConnectionEntry): number {
+  return connections.reduce((sum, connection) => {
+    const value = connection[field];
+    return typeof value === "number" && Number.isFinite(value) ? sum + value : sum;
+  }, 0);
 }
 
 function recordClosedConnections(closedHistory: ClosedConnectionEntry[], closedConnections: ConnectionEntry[]): void {
@@ -1376,10 +1466,20 @@ function numberOrZero(value: unknown): number {
 }
 
 function formatNumber(value: number): string {
-  if (Number.isInteger(value)) {
-    return String(value);
+  return formatThreeSignificant(value);
+}
+
+function formatThreeSignificant(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
   }
-  return value.toFixed(1).replace(/\.0$/u, "");
+  if (value >= 100) {
+    return Math.round(value).toString();
+  }
+  if (value >= 10) {
+    return value.toFixed(1);
+  }
+  return value.toFixed(2);
 }
 
 function formatSeconds(seconds: number): string {
@@ -1492,29 +1592,26 @@ function formatSpeed(bytesPerSecond: number | null): string {
   if (bytesPerSecond === null) {
     return "[unknown]";
   }
-  if (bytesPerSecond < 1024) {
-    return `${Math.round(bytesPerSecond)}B/s`;
-  }
-  if (bytesPerSecond < 1024 * 1024) {
-    return `${(bytesPerSecond / 1024).toFixed(1)}KB/s`;
-  }
-  return `${(bytesPerSecond / 1024 / 1024).toFixed(1)}MB/s`;
+  return `${formatByteQuantity(bytesPerSecond)}/s`;
 }
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) {
     return "[unknown]";
   }
-  if (bytes < 1024) {
-    return `${Math.round(bytes)}B`;
+  return formatByteQuantity(bytes);
+}
+
+function formatByteQuantity(bytes: number): string {
+  const value = Math.max(0, bytes);
+  const units = ["B", "K", "M", "G", "T"];
+  let scaled = value;
+  let unitIndex = 0;
+  while (scaled >= 1024 && unitIndex < units.length - 1) {
+    scaled /= 1024;
+    unitIndex += 1;
   }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)}KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
-  }
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+  return `${unitIndex === 0 ? Math.round(scaled).toString() : formatThreeSignificant(scaled)}${units[unitIndex]}`;
 }
 
 function formatLocalTimestamp(value: string): string {

@@ -264,6 +264,158 @@ test("pads unknown speed columns", async () => {
   }
 });
 
+test("formats traffic numbers with three significant digits", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        connections: [
+          {
+            id: "abc",
+            metadata: { host: "api.example.com", destinationPort: 443 },
+            upload: 160 * 1024,
+            download: 43.2 * 1024 * 1024,
+            uploadSpeed: 160 * 1024,
+            downloadSpeed: 43.2 * 1024 * 1024,
+            start: "2026-06-10T00:00:00.000Z",
+            chains: ["Proxy", "HK-01"],
+            rule: "DOMAIN-SUFFIX",
+            rulePayload: "example.com",
+          },
+        ],
+      }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        zeroSpeedThreshold: 160 * 1024,
+      }, null, 2)}\n`,
+    );
+
+    const stdout = await new Promise((resolve, reject) => {
+      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }, (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+
+    assert.match(stdout, /zero speed:\s+160K\/s/);
+    assert.match(stdout, /zero<=160K\/s/);
+    assert.match(stdout, /\b160K\/s\b/);
+    assert.match(stdout, /\b43\.2M\/s\b/);
+    assert.match(stdout, /\b160K\b/);
+    assert.match(stdout, /\b43\.2M\b/);
+    assert.doesNotMatch(stdout, /\bKB|MB|GB\b/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("records clvm status state and history", async () => {
+  const rawPayload = {
+    connections: [
+      {
+        id: "abc",
+        metadata: { host: "api.example.com", destinationPort: 443 },
+        upload: 100,
+        download: 200,
+        uploadSpeed: 10,
+        downloadSpeed: 20,
+        start: "2026-06-10T00:00:00.000Z",
+        chains: ["Proxy", "HK-01"],
+        rule: "DOMAIN-SUFFIX",
+        rulePayload: "example.com",
+      },
+    ],
+  };
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(rawPayload));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+      }, null, 2)}\n`,
+    );
+
+    await new Promise((resolve, reject) => {
+      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
+    assert.equal(state.version, 1);
+    assert.equal(state.source, "status");
+    assert.equal(state.config.baseUrl, `http://127.0.0.1:${address.port}`);
+    assert.deepEqual(state.config.domains, ["example.com"]);
+    assert.equal(state.summary.totalConnections, 1);
+    assert.equal(state.summary.matchedConnections, 1);
+    assert.equal(state.summary.activeConnections, 1);
+    assert.equal(state.summary.uploadBytesPerSecond, 10);
+    assert.equal(state.summary.downloadBytesPerSecond, 20);
+    assert.equal(state.result.matchedConnections[0].id, "abc");
+    assert.deepEqual(state.raw, rawPayload);
+
+    const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(history.length, 1);
+    assert.equal(history[0].result.matchedConnections[0].id, "abc");
+    assert.deepEqual(history[0].raw, rawPayload);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("fits connection tables to terminal width", async () => {
   const server = createServer((req, res) => {
     if (req.url === "/connections" && req.method === "GET") {
