@@ -6,7 +6,7 @@ import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsConfigDir } from "../lib/paths.js";
 import { renderTable } from "../lib/table.js";
-import { maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, } from "../lib/text.js";
+import { maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength, } from "../lib/text.js";
 const domainFields = [
     "host",
     "destinationHost",
@@ -21,6 +21,8 @@ const durationUnits = new Map([
     ["h", 3_600_000],
 ]);
 const closedHistoryLimit = 5;
+const commandsLine = "commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
+const compactCommandsLine = "commands: clvm | monitor | config | setup | sync | help";
 const setupFields = new Set([
     "baseUrl",
     "secret",
@@ -487,7 +489,11 @@ function printConfigValues(config, style = createStyle(config)) {
     printKeyValue("auto close:", config.closeZeroForSeconds === null ? style.dim("off") : style.red(`${formatSeconds(config.closeZeroForSeconds)}`), 12);
 }
 function printCommands(style) {
-    console.log(style.dim("commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help"));
+    console.log(style.dim(fitCommandsLine(terminalColumns(process.stdout))));
+}
+function fitCommandsLine(columns) {
+    const line = visibleLength(commandsLine) <= columns ? commandsLine : compactCommandsLine;
+    return visibleLength(line) <= columns ? line : truncateVisible(line, columns);
 }
 function printConfigDiff(configPath, currentText, nextText) {
     if (currentText === nextText) {
@@ -1066,7 +1072,7 @@ function printCurrentConnections(shownConnections, layout, style, stream) {
         chain: style.magenta(connection.chains.join(" > ")),
         rule: style.dim(connection.rule),
     }));
-    stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
+    stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 function printClosedHistory(closedHistory, layout, style, stream) {
     if (closedHistory.length === 0) {
@@ -1082,7 +1088,7 @@ function printClosedHistory(closedHistory, layout, style, stream) {
         chain: style.magenta(connection.chains.join(" > ")),
         rule: style.dim(connection.rule),
     }));
-    stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
+    stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 function toJsonResult(result) {
     return {
@@ -1150,29 +1156,37 @@ function statusRank(status) {
     }[status] ?? 4;
 }
 function currentConnectionColumns(layout) {
-    return [
+    const columns = [
         { key: "status", title: "status", width: layout.status },
         { key: "endpoint", title: "endpoint", width: layout.endpoint },
         { key: "age", title: "age", width: layout.age },
         { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
         { key: "up", title: "up/s", width: layout.up, align: "right" },
         { key: "down", title: "down/s", width: layout.down, align: "right" },
-        { key: "upload", title: "upload", width: layout.upload, align: "right" },
-        { key: "download", title: "download", width: layout.download, align: "right" },
-        { key: "chain", title: "chain", width: layout.chain },
-        { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
     ];
+    if (layout.showTrafficTotals) {
+        columns.push({ key: "upload", title: "upload", width: layout.upload, align: "right" }, { key: "download", title: "download", width: layout.download, align: "right" });
+    }
+    if (layout.showChain) {
+        columns.push({ key: "chain", title: "chain", width: layout.chain });
+    }
+    columns.push({ key: "rule", title: "rule", flex: true, minWidth: layout.ruleMin });
+    return columns;
 }
 function closedConnectionColumns(layout) {
-    return [
+    const columns = [
         { key: "closedAt", title: "closedAt", width: 19 },
         { key: "endpoint", title: "endpoint", width: layout.endpoint },
         { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
-        { key: "upload", title: "upload", width: layout.upload, align: "right" },
-        { key: "download", title: "download", width: layout.download, align: "right" },
-        { key: "chain", title: "chain", width: layout.chain },
-        { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
     ];
+    if (layout.showTrafficTotals) {
+        columns.push({ key: "upload", title: "upload", width: layout.upload, align: "right" }, { key: "download", title: "download", width: layout.download, align: "right" });
+    }
+    if (layout.showChain) {
+        columns.push({ key: "chain", title: "chain", width: layout.chain });
+    }
+    columns.push({ key: "rule", title: "rule", flex: true, minWidth: layout.ruleMin });
+    return columns;
 }
 function statusCell(status, style) {
     const text = formatStatus(status);
@@ -1199,36 +1213,29 @@ function bytesCell(bytes, style) {
     return text;
 }
 function buildLayout(stream) {
-    const columns = Number.isFinite(stream.columns) ? stream.columns : (process.stdout.columns ?? 120);
+    const maxWidth = terminalColumns(stream);
     const fixed = {
         status: 9,
+        endpoint: maxWidth >= 120 ? 28 : 22,
         age: 7,
         zeroFor: 7,
         up: 10,
         down: 10,
         upload: 8,
         download: 8,
+        chain: maxWidth >= 120 ? 20 : 14,
     };
-    const separators = 9;
-    const fixedWidth = fixed.status +
-        fixed.age +
-        fixed.zeroFor +
-        fixed.up +
-        fixed.down +
-        fixed.upload +
-        fixed.download +
-        separators;
-    const flexibleWidth = Math.max(54, columns - fixedWidth);
-    const rule = clamp(Math.round(flexibleWidth * 0.34), 18, 36);
-    const remainingWidth = flexibleWidth - rule;
-    const endpoint = clamp(Math.round(remainingWidth * 0.64), 22, 44);
-    const chain = Math.max(14, remainingWidth - endpoint);
     return {
+        maxWidth,
+        showTrafficTotals: maxWidth >= 96,
+        showChain: maxWidth >= 72,
         ...fixed,
-        endpoint,
-        chain,
-        rule,
+        ruleMin: maxWidth >= 72 ? 12 : 4,
     };
+}
+function terminalColumns(stream) {
+    const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
+    return columns && columns > 0 ? Math.floor(columns) : 120;
 }
 function formatStatus(status) {
     return status === "unknown" ? "[unknown]" : status;

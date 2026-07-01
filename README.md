@@ -611,7 +611,7 @@ Default status:
 clvm
 ```
 
-The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, and prints a compact command line at the bottom.
+The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, and prints a compact command line at the bottom. Narrow terminals use a shorter command footer.
 
 Commands:
 
@@ -661,6 +661,8 @@ clvm monitor --domain example.com --interval 1s
 clvm monitor --json
 clvm monitor --no-clear
 ```
+
+Monitor tables read the active terminal width. Status, endpoint, age, zero time, and speed columns stay visible; narrower terminals omit traffic total and chain columns before truncating long text. The final `rule` column takes remaining width and uses the shared ANSI/wide-character-aware table truncation.
 
 Domain matching:
 
