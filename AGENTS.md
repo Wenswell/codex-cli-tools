@@ -12,6 +12,7 @@
 - Logs must preserve complete original information. Store raw input/events/responses first; summaries, previews, or rendered/transformed forms may be additional fields, but must not replace the original facts.
 - Status and monitor commands that sample external runtime state should write a latest JSON state file and append normalized JSONL history under `~/.cache/codex-tools`.
 - Dense terminal byte, speed, duration, and compact counter values should use three significant digits after the base unit, such as `160K`, `43.2M`, `160K/s`, `56ms`, and `2.34s`.
+- Each commit updates `package.json` version. Use a patch version increment by default.
 - When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
 - For config under this toolset, use `~/.config/codex-tools` unless there is a strong reason not to.
 - Do not add package-directory secret fallbacks. Secrets belong in environment variables or `~/.config/codex-tools/*`.
