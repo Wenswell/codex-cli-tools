@@ -26,19 +26,18 @@ const REASONING_EQUALS = [516, 1034, 1552];
 const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
 const GUARD_RETRY_ATTEMPTS = 3;
 const FETCH_FAILED_TRANSPORT_RETRIES = 1;
-const PROXY_RECENT_REQUEST_LIMIT = 10;
+const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
 const PROXY_JSONL_TAIL_BLOCK_BYTES = 64 * 1024;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
-const PROXY_TABLE_CODE_WIDTH = 4;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
-const PROXY_TABLE_REASONING_WIDTH = 5;
+const PROXY_TABLE_REASONING_STATUS_WIDTH = 10;
 const PROXY_TABLE_MODEL_WIDTH = 10;
-const PROXY_TABLE_PATH_WIDTH = 11;
+const PROXY_TABLE_MODELS_WIDTH = (PROXY_TABLE_MODEL_WIDTH * 2) + 1;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
@@ -54,13 +53,10 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
-    { key: "code", title: "code", width: PROXY_TABLE_CODE_WIDTH, align: "right" },
-    { key: "reasoning", title: "reas.", width: PROXY_TABLE_REASONING_WIDTH, align: "right" },
+    { key: "reasoning_status", title: "reas./code", width: PROXY_TABLE_REASONING_STATUS_WIDTH, align: "right" },
     { key: "ms", title: "lat.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-    { key: "req_model", title: "req_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
-    { key: "up_model", title: "up_model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
-    { key: "path", title: "path", width: PROXY_TABLE_PATH_WIDTH, align: "right" },
+    { key: "model", title: "model", width: PROXY_TABLE_MODELS_WIDTH, align: "right" },
     { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
 ];
 function statePath(stateRoot) {
@@ -349,93 +345,53 @@ function createProxyStatusCounts() {
 function createProxyReasoningTokenCounts() {
     return {};
 }
+function proxyMetricsFromRecentRequests(recentRequests) {
+    const statusCounts = createProxyStatusCounts();
+    const reasoningTokenCounts = createProxyReasoningTokenCounts();
+    const upstreamHitCounts = {};
+    const latency = {
+        last: recentRequests[0]?.latency_ms ?? null,
+        count: recentRequests.length,
+        sum: 0,
+        min: null,
+        max: null,
+    };
+    for (const record of recentRequests) {
+        incrementProxyStatusCount(statusCounts, record.status);
+        incrementProxyReasoningTokenCountsForRecord(reasoningTokenCounts, record);
+        if (record.upstream) {
+            upstreamHitCounts[record.upstream] = (upstreamHitCounts[record.upstream] ?? 0) + 1;
+        }
+        latency.sum += record.latency_ms;
+        latency.min = latency.min === null ? record.latency_ms : Math.min(latency.min, record.latency_ms);
+        latency.max = latency.max === null ? record.latency_ms : Math.max(latency.max, record.latency_ms);
+    }
+    return {
+        total_requests: recentRequests.length,
+        status_counts: statusCounts,
+        reasoning_token_counts: reasoningTokenCounts,
+        upstream_hit_counts: upstreamHitCounts,
+        latency_ms: latency,
+    };
+}
 function normalizeProxyMetrics(value) {
     const raw = value && typeof value === "object" ? value : {};
-    const latency = raw.latency_ms && typeof raw.latency_ms === "object" ? raw.latency_ms : {};
     const recentRequests = Array.isArray(raw.recent_requests)
         ? raw.recent_requests.filter((item) => Boolean(item) && typeof item === "object")
             .map(normalizeProxyHistoryRecord)
             .slice(0, PROXY_RECENT_REQUEST_LIMIT)
         : [];
-    const statusCounts = normalizeProxyStatusCounts(raw.status_counts, recentRequests, raw);
+    const activeRequests = Array.isArray(raw.active_requests)
+        ? raw.active_requests.filter((item) => Boolean(item) && typeof item === "object")
+            .map((request) => normalizeProxyRequestRecord(request, "active"))
+            .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
+        : [];
+    const windowMetrics = proxyMetricsFromRecentRequests(recentRequests);
     return {
-        total_requests: Number.isInteger(raw.total_requests) ? Number(raw.total_requests) : 0,
-        active_requests: Array.isArray(raw.active_requests)
-            ? raw.active_requests.filter((item) => Boolean(item) && typeof item === "object")
-                .map((request) => normalizeProxyRequestRecord(request, "active"))
-                .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
-            : [],
-        status_counts: statusCounts,
-        reasoning_token_counts: normalizeProxyReasoningTokenCounts(raw.reasoning_token_counts, recentRequests),
-        upstream_hit_counts: raw.upstream_hit_counts && typeof raw.upstream_hit_counts === "object" && !Array.isArray(raw.upstream_hit_counts)
-            ? Object.fromEntries(Object.entries(raw.upstream_hit_counts)
-                .filter(([, count]) => Number.isInteger(count))
-                .map(([name, count]) => [name, Number(count)]))
-            : {},
-        latency_ms: {
-            last: typeof latency.last === "number" && Number.isFinite(latency.last)
-                ? latency.last
-                : recentRequests[0]?.latency_ms ?? null,
-            count: Number.isInteger(latency.count) ? Number(latency.count) : 0,
-            sum: typeof latency.sum === "number" ? latency.sum : 0,
-            min: typeof latency.min === "number" ? latency.min : null,
-            max: typeof latency.max === "number" ? latency.max : null,
-        },
+        ...windowMetrics,
+        active_requests: activeRequests,
         recent_requests: recentRequests,
     };
-}
-function normalizeProxyReasoningTokenCounts(value, recentRequests) {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-        const exactCounts = Object.fromEntries(Object.entries(value)
-            .filter(([reasoningTokens, count]) => /^\d+$/.test(reasoningTokens) && Number.isInteger(count))
-            .map(([reasoningTokens, count]) => [reasoningTokens, Number(count)]));
-        if (Object.keys(exactCounts).length > 0 || recentRequests.length === 0) {
-            return exactCounts;
-        }
-    }
-    return buildProxyReasoningTokenCounts(recentRequests);
-}
-function buildProxyReasoningTokenCounts(recentRequests) {
-    const counts = createProxyReasoningTokenCounts();
-    for (const request of recentRequests) {
-        incrementProxyReasoningTokenCount(counts, request.reasoning_tokens);
-    }
-    return counts;
-}
-function normalizeProxyStatusCounts(value, recentRequests, rawMetrics) {
-    const successfulRequests = Number.isInteger(rawMetrics.successful_requests) ? Number(rawMetrics.successful_requests) : 0;
-    const failedRequests = Number.isInteger(rawMetrics.failed_requests) ? Number(rawMetrics.failed_requests) : 0;
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-        const raw = value;
-        const exactCounts = Object.fromEntries(Object.entries(raw)
-            .filter(([status, count]) => /^\d{3}$/.test(status) && Number.isInteger(count))
-            .map(([status, count]) => [status, Number(count)]));
-        if (Object.keys(exactCounts).length > 0) {
-            return exactCounts;
-        }
-        if (recentRequests.length > 0) {
-            return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
-        }
-        return exactCounts;
-    }
-    return buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests);
-}
-function buildProxyStatusCounts(recentRequests, successfulRequests, failedRequests) {
-    if (successfulRequests > 0 || failedRequests > 0) {
-        const counts = createProxyStatusCounts();
-        if (successfulRequests > 0) {
-            counts["200"] = successfulRequests;
-        }
-        if (failedRequests > 0) {
-            counts["500"] = failedRequests;
-        }
-        return counts;
-    }
-    const counts = createProxyStatusCounts();
-    for (const request of recentRequests) {
-        incrementProxyStatusCount(counts, request.status);
-    }
-    return counts;
 }
 function normalizeProxyHistoryRecord(request) {
     return normalizeProxyRequestRecord(request, "history");
@@ -525,13 +481,6 @@ async function mutateProxyMetrics(state, stateRoot, mutate) {
     proxyStateMutationQueue = mutation.then(() => undefined, () => undefined);
     await mutation;
 }
-function updateProxyLatencyStats(latency, latencyMs) {
-    latency.last = latencyMs;
-    latency.count += 1;
-    latency.sum += latencyMs;
-    latency.min = latency.min === null ? latencyMs : Math.min(latency.min, latencyMs);
-    latency.max = latency.max === null ? latencyMs : Math.max(latency.max, latencyMs);
-}
 async function startProxyRequestMetric(state, stateRoot, record) {
     await mutateProxyMetrics(state, stateRoot, (metrics) => {
         metrics.active_requests = [
@@ -548,15 +497,14 @@ async function updateProxyActiveRequestMetric(state, stateRoot, record) {
 async function completeProxyRequestMetric(state, stateRoot, record) {
     await mutateProxyMetrics(state, stateRoot, async (metrics) => {
         metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
-        metrics.total_requests += 1;
-        incrementProxyStatusCount(metrics.status_counts, record.status);
-        incrementProxyReasoningTokenCountsForRecord(metrics.reasoning_token_counts, record);
-        if (record.upstream) {
-            metrics.upstream_hit_counts[record.upstream] = (metrics.upstream_hit_counts[record.upstream] ?? 0) + 1;
-        }
-        updateProxyLatencyStats(metrics.latency_ms, record.latency_ms);
         metrics.recent_requests.unshift(record);
         metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
+        const windowMetrics = proxyMetricsFromRecentRequests(metrics.recent_requests);
+        metrics.total_requests = windowMetrics.total_requests;
+        metrics.status_counts = windowMetrics.status_counts;
+        metrics.reasoning_token_counts = windowMetrics.reasoning_token_counts;
+        metrics.upstream_hit_counts = windowMetrics.upstream_hit_counts;
+        metrics.latency_ms = windowMetrics.latency_ms;
         await appendProxyRequestRecord(stateRoot, record);
     });
 }
@@ -646,9 +594,6 @@ function formatProxyStatusCode(status) {
     }
     return textDim("");
 }
-function truncateProxyPath(value, max = 40) {
-    return truncateVisible(value, max);
-}
 function truncateProxyText(value, max = 40) {
     return truncateVisible(value, max);
 }
@@ -698,19 +643,15 @@ function formatProxyRequest(record, nowMs) {
     const time = formatProxyTime(record.completed_at ?? record.started_at);
     const latencyMs = completed ? record.latency_ms : elapsedMs;
     const size = completed ? record.response_bytes : record.request_bytes;
-    const path = truncateProxyPath(record.path || "-", PROXY_TABLE_PATH_WIDTH);
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
-        code: formatProxyStatusCode(record.status),
-        reasoning: formatProxyReasoningTokens(record.reasoning_tokens),
+        reasoning_status: formatProxyReasoningStatus(record.reasoning_tokens, record.status),
         up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
         session: formatProxySession(record.session),
-        req_model: formatProxyRequestModel(record.request_model),
-        up_model: formatProxyUpstreamModel(record.request_model, record.upstream_model),
-        path: colorPath(path),
+        model: formatProxyModels(record.request_model, record.upstream_model),
         error: formatProxyError(record),
     };
 }
@@ -753,6 +694,12 @@ function formatProxyRequestModel(model) {
 }
 function formatProxyReasoningTokens(reasoningTokens) {
     return reasoningTokens === null ? textDim("-") : textYellow(String(reasoningTokens));
+}
+function formatProxyReasoningStatus(reasoningTokens, status) {
+    return `${formatProxyReasoningTokens(reasoningTokens)}${textDim("/")}${formatProxyStatusCode(status)}`;
+}
+function formatProxyModels(requestModel, upstreamModel) {
+    return `${formatProxyRequestModel(requestModel)}${textDim("/")}${formatProxyUpstreamModel(requestModel, upstreamModel)}`;
 }
 function formatProxyUpstreamModel(requestModel, upstreamModel) {
     if (!upstreamModel) {
@@ -1756,7 +1703,9 @@ async function renderProxyStatusLines(options) {
     return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords);
 }
 export function buildProxyStatusLines(now, state, profileOrder, runtime, options, historyRecords) {
-    const metrics = state?.metrics ?? createProxyMetrics();
+    const metrics = state?.metrics
+        ? { ...state.metrics, ...proxyMetricsFromRecentRequests(state.metrics.recent_requests) }
+        : createProxyMetrics();
     const historyCount = resolveProxyHistoryRenderCount(metrics, options);
     const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
     return [

@@ -25,15 +25,15 @@ Proxy state lives under `~/.config/codex-tools`:
 
 ## Metrics schema
 
-`metrics` keeps compact operational counters:
+`metrics` keeps compact operational counters for the state-file window:
 
-- `total_requests`: completed request count.
+- `total_requests`: completed request count inside `recent_requests`.
 - `active_requests`: currently processed HTTP requests.
-- `recent_requests`: newest completed-request snapshot, capped at 10 records and ordered newest first.
-- `status_counts`: completed request counts keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
-- `reasoning_token_counts`: observed reasoning-token event counts keyed by `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
-- `upstream_hit_counts`: completed request counts per selected upstream.
-- `latency_ms`: completed request latency with `last`, `count`, `sum`, `min`, and `max`.
+- `recent_requests`: newest completed-request snapshot, capped at 100 records and ordered newest first.
+- `status_counts`: completed request counts inside `recent_requests`, keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
+- `reasoning_token_counts`: observed reasoning-token event counts inside `recent_requests`, keyed by `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
+- `upstream_hit_counts`: completed request counts per selected upstream inside `recent_requests`.
+- `latency_ms`: completed request latency inside `recent_requests` with `last`, `count`, `sum`, `min`, and `max`.
 
 Request records include `guard_actions`, an ordered array of local proxy action records with:
 
@@ -100,17 +100,17 @@ History row count follows these rules:
 
 `ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize.
 
-`status total` is the sum of all exact status-code counters. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
+`status total` is the sum of exact status-code counters from `proxy.json.metrics.recent_requests`. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
-`reasoning total` is the sum of observed reasoning-token events from completed requests. Guard actions with `reasoning_tokens` each count once, and accepted final response `reasoning_tokens` values also count once when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with no observed reasoning token events do not increment `reasoning_token_counts`.
+`reasoning total` is the sum of observed reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Guard actions with `reasoning_tokens` each count once, and accepted final response `reasoning_tokens` values also count once when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with no observed reasoning token events do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
 ```text
-session time up code reas. lat. size req_model up_model path error
+session time up reas./code lat. size model error
 ```
 
-Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. Active rows show `-` for code while no status is known and `-` for missing `reasoning_tokens`. A new retry attempt clears attempt-scoped `code`, `reas.`, and `up_model` until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. `path` is fixed-width. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[502 502 506] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. `reas./code` renders `reasoning_tokens/status`, with `-` for missing values, such as `516/200` and `-/-`. A new retry attempt clears attempt-scoped status, reasoning token, and upstream model until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. `model` renders `request_model/upstream_model`. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. Examples include `gpt-5.5/-`, `gpt-5.5/[same]`, and `gpt-5.5/gpt-5.5-mini`. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[502 502 506] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -118,8 +118,9 @@ Active rows show elapsed time for `lat.`, known request bytes for `size`, and kn
 - Active records are normalized through the same request-record normalizer as history records.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
-- Current upstream display is derived from `profiles.current`; historical upstream hit counts remain visible through `upstream_hit_counts`.
+- Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
 - Completed requests append to `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
+- State-file counters are recomputed from `metrics.recent_requests` after every completed request and when old state files are read.
 - Status rendering reads JSONL through a reverse block tail reader only for explicit history counts that exceed the compact snapshot.
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
@@ -169,20 +170,18 @@ The proxy does not set its own upstream response deadline. Client settings such 
 The status table adds compact model visibility without expanding the command surface:
 
 ```text
-session time up code reas. lat. size req_model up_model path error
+session time up reas./code lat. size model error
 ```
 
 Column behavior:
 
-- `req_model`: `request_model`, truncated for terminal width, dim `-` when missing.
-- `up_model`: dim `-` when missing, dim `[same]` when it equals `req_model`, and the red truncated upstream model name when different.
-- `reas.`: observed `reasoning_tokens`, dim `-` when missing.
+- `model`: `request_model/upstream_model`, with each side truncated for terminal width. Missing values render dim `-`, matching upstream model renders dim `[same]`, and differing upstream model renders red.
+- `reas./code`: observed `reasoning_tokens` and HTTP status code. Missing values render dim `-`; HTTP status keeps the existing status color.
 - `lat.`: elapsed time for active rows and completed latency for history rows.
-- Active rows follow the shared `up_model` rendering rules; SSE streams update active rows after the first model frame is observed.
-- Retry attempts clear active-row `code`, `reas.`, and `up_model` before the new attempt observes response metadata.
+- Active rows follow the shared `model` rendering rules; SSE streams update active rows after the first model frame is observed.
+- Retry attempts clear active-row `reas./code` and upstream model before the new attempt observes response metadata.
 - History rows show status-normalized model fields.
 - `up`: upstream name plus yellow attempt count when attempts are greater than one.
-- `path`: fixed-width request path.
 - `error`: optional bracketed local-action prefix from `guard_actions`, then request error text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
@@ -198,10 +197,10 @@ Column behavior:
 - SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
-- Status tables display `code` and `reas.` as separate columns.
+- Status tables display `reas./code` as one combined column.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
-- Completed requests are appended to `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 10.
+- Completed requests are appended to `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
 - Background stdout/stderr are written to `proxy-runtime.log`.
 - Status history count follows TTY rows, non-TTY fixed 5, and explicit `--history N`.
 - Watch repaints on terminal resize.
@@ -212,5 +211,5 @@ Column behavior:
 
 ### Decisions
 
-- Status table column names are `req_model` and `up_model`.
+- Status table model column name is `model`.
 - Stream model extraction stops at the first valid model value.
