@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import {
   domainMatches,
   mergeClvmConfig,
   nextAlignedDelay,
+  nextClvmRetryInterval,
   normalizeDomains,
   parseClvmConfig,
   parseDuration,
@@ -196,6 +197,15 @@ test("samples matched idle connections and closes expired entries in monitor mod
 test("parses duration and aligned delay", () => {
   assert.equal(parseDuration("1.5s"), 1500);
   assert.equal(nextAlignedDelay(1000, 1200), 800);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((attempt) => nextClvmRetryInterval(1000, attempt)), [
+    1000,
+    2000,
+    5000,
+    10000,
+    30000,
+    60000,
+    300000,
+  ]);
 });
 
 test("pads unknown speed columns", async () => {
@@ -394,7 +404,9 @@ test("records clvm status state and history", async () => {
     });
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
-    assert.equal(state.version, 1);
+    assert.equal(state.version, 2);
+    assert.equal(state.ok, true);
+    assert.equal(state.status, "ok");
     assert.equal(state.source, "status");
     assert.equal(state.config.baseUrl, `http://127.0.0.1:${address.port}`);
     assert.deepEqual(state.config.domains, ["example.com"]);
@@ -410,6 +422,162 @@ test("records clvm status state and history", async () => {
     assert.equal(history.length, 1);
     assert.equal(history[0].result.matchedConnections[0].id, "abc");
     assert.deepEqual(history[0].raw, rawPayload);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("records unavailable status when connections payload is invalid", async () => {
+  const rawPayload = { error: "controller disabled" };
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(rawPayload));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+      }, null, 2)}\n`,
+    );
+
+    const stdout = await new Promise((resolve, reject) => {
+      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      }, (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+
+    assert.match(stdout, /status:\s+unavailable invalid_connections_payload/);
+    assert.match(stdout, /\/connections response must contain a connections array/);
+
+    const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
+    assert.equal(state.version, 2);
+    assert.equal(state.ok, false);
+    assert.equal(state.status, "unavailable");
+    assert.equal(state.error.code, "invalid_connections_payload");
+    assert.deepEqual(state.raw, rawPayload);
+    assert.equal(state.retry, undefined);
+
+    const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(history.length, 1);
+    assert.equal(history[0].ok, false);
+    assert.deepEqual(history[0].raw, rawPayload);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("monitor retries unavailable connections with backoff", async () => {
+  let requestCount = 0;
+  const validPayload = {
+    connections: [
+      {
+        id: "abc",
+        metadata: { host: "api.example.com", destinationPort: 443 },
+        upload: 100,
+        download: 200,
+        start: "2026-06-10T00:00:00.000Z",
+        chains: ["Proxy", "HK-01"],
+        rule: "DOMAIN-SUFFIX",
+        rulePayload: "example.com",
+      },
+    ],
+  };
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      requestCount += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(requestCount <= 2 ? { unavailable: true } : validPayload));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        interval: "1ms",
+      }, null, 2)}\n`,
+    );
+
+    const child = spawn("node", ["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.includes("current=1")) {
+        child.kill("SIGINT");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    const watchdog = setTimeout(() => child.kill("SIGINT"), 5000);
+    const exit = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    clearTimeout(watchdog);
+
+    assert.deepEqual(exit, { code: 0, signal: null });
+    assert.equal(stderr, "");
+    assert.ok(requestCount >= 3);
+    assert.match(stdout, /status=unavailable .*attempt=1 retry=1ms/);
+    assert.match(stdout, /status=unavailable .*attempt=2 retry=2ms/);
+    assert.match(stdout, /current=1/);
+
+    const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
+    assert.equal(state.ok, true);
+    assert.equal(state.status, "ok");
+
+    const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(history[0].ok, false);
+    assert.equal(history[0].retry.intervalMs, 1);
+    assert.equal(history[1].ok, false);
+    assert.equal(history[1].retry.intervalMs, 2);
+    assert.ok(history.some((record) => record.ok === true));
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });

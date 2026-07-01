@@ -22,7 +22,9 @@ const durationUnits = new Map([
     ["h", 3_600_000],
 ]);
 const closedHistoryLimit = 5;
-const clvmStateVersion = 1;
+const clvmStateVersion = 2;
+const clvmRetryMaxIntervalMs = 300_000;
+const clvmRetryMultipliers = [1, 2, 5, 10, 30, 60];
 const commandsLine = "commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
 const compactCommandsLine = "commands: clvm | monitor | config | setup | sync | help";
 const setupFields = new Set([
@@ -42,6 +44,24 @@ function clvmStatePath() {
 function clvmHistoryPath() {
     return join(codexToolsCacheDir(), "clvm-history.jsonl");
 }
+class ClvmRuntimeError extends Error {
+    code;
+    status;
+    statusText;
+    body;
+    raw;
+    causeDetail;
+    constructor(code, message, options = {}) {
+        super(message);
+        this.name = "ClvmRuntimeError";
+        this.code = code;
+        this.status = options.status;
+        this.statusText = options.statusText;
+        this.body = options.body;
+        this.raw = options.raw;
+        this.causeDetail = options.cause === undefined ? undefined : errorCauseDetail(options.cause);
+    }
+}
 export class ClashApi {
     #baseUrl;
     #secret;
@@ -59,20 +79,42 @@ export class ClashApi {
     }
     async getConnections() {
         const response = await this.#request("/connections", "GET");
-        return response.json();
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        }
+        catch (error) {
+            throw new ClvmRuntimeError("invalid_connections_payload", "/connections response must be valid JSON", {
+                raw: text,
+                cause: error,
+            });
+        }
     }
     async closeConnection(id) {
         await this.#request(`/connections/${encodeURIComponent(id)}`, "DELETE");
     }
     async #request(pathname, method) {
-        const response = await this.#fetch(new URL(pathname, this.#baseUrl), {
-            method,
-            headers: this.#headers(),
-        });
+        let response;
+        try {
+            response = await this.#fetch(new URL(pathname, this.#baseUrl), {
+                method,
+                headers: this.#headers(),
+            });
+        }
+        catch (error) {
+            throw new ClvmRuntimeError("fetch_failed", `${method} ${pathname} fetch failed`, {
+                cause: error,
+            });
+        }
         if (!response.ok) {
             const text = await response.text();
             const suffix = text ? `: ${text}` : "";
-            throw new Error(`${method} ${pathname} failed with ${response.status} ${response.statusText}${suffix}`);
+            throw new ClvmRuntimeError("http_error", `${method} ${pathname} failed with ${response.status} ${response.statusText}${suffix}`, {
+                status: response.status,
+                statusText: response.statusText,
+                body: text,
+                raw: text,
+            });
         }
         return response;
     }
@@ -553,7 +595,14 @@ async function runStatus(config) {
         if (config.domains.length === 0) {
             throw new Error("domains are required for JSON status; run clvm setup --domain DOMAIN or use --domain DOMAIN");
         }
-        printMonitorResult(await sampleOnce(config), config);
+        try {
+            printMonitorResult(await sampleOnce(config), config);
+        }
+        catch (error) {
+            const failure = buildMonitorFailure(error);
+            await recordClvmFailure("status", config, failure);
+            printMonitorFailure(failure, config);
+        }
         return;
     }
     printConfigStatus(config, { includeCommands: false });
@@ -562,10 +611,17 @@ async function runStatus(config) {
         printCommands(style);
         return;
     }
-    const result = await sampleOnce(config);
-    printKeyValue("status:", `${style.green("ok")} total=${style.green(String(result.totalConnections))} current=${style.green(String(result.matchedConnections.length))}`, 12);
-    console.log("");
-    printMonitorResult(result, config);
+    try {
+        const result = await sampleOnce(config);
+        printKeyValue("status:", `${style.green("ok")} total=${style.green(String(result.totalConnections))} current=${style.green(String(result.matchedConnections.length))}`, 12);
+        console.log("");
+        printMonitorResult(result, config);
+    }
+    catch (error) {
+        const failure = buildMonitorFailure(error);
+        await recordClvmFailure("status", config, failure);
+        printKeyValue("status:", formatUnavailableStatus(failure, style), 12);
+    }
     printCommands(style);
 }
 async function runMonitor(config) {
@@ -581,28 +637,55 @@ async function runMonitor(config) {
     const closedHistory = [];
     let closedTotal = 0;
     let stopped = false;
+    let retryAttempt = 0;
+    let stopDelay = null;
     process.once("SIGINT", () => {
         stopped = true;
+        stopDelay?.();
     });
-    while (!stopped) {
-        const payload = await api.getConnections();
-        const result = sampler.sample(payload, {
-            domains: config.domains,
-            zeroSpeedThreshold: config.zeroSpeedThreshold,
+    const wait = async (milliseconds) => {
+        await new Promise((resolve) => {
+            const timeout = setTimeout(resolve, milliseconds);
+            stopDelay = () => {
+                clearTimeout(timeout);
+                resolve();
+            };
         });
-        const closedConnections = await closeExpiredConnections(api, result, config, closedIds);
-        if (closedConnections.length > 0) {
-            closedTotal += closedConnections.length;
-            recordClosedConnections(closedHistory, closedConnections);
+        stopDelay = null;
+    };
+    while (!stopped) {
+        try {
+            const payload = await api.getConnections();
+            const result = sampler.sample(payload, {
+                domains: config.domains,
+                zeroSpeedThreshold: config.zeroSpeedThreshold,
+            });
+            const closedConnections = await closeExpiredConnections(api, result, config, closedIds);
+            if (closedConnections.length > 0) {
+                closedTotal += closedConnections.length;
+                recordClosedConnections(closedHistory, closedConnections);
+            }
+            result.closedHistory = closedHistory;
+            result.closedTotal = closedTotal;
+            await recordClvmSample("monitor", config, result, payload);
+            printMonitorResult(result, config);
+            retryAttempt = 0;
+            if (config.once) {
+                break;
+            }
+            await wait(nextAlignedDelay(config.intervalMs));
         }
-        result.closedHistory = closedHistory;
-        result.closedTotal = closedTotal;
-        await recordClvmSample("monitor", config, result, payload);
-        printMonitorResult(result, config);
-        if (config.once) {
-            break;
+        catch (error) {
+            retryAttempt += 1;
+            const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
+            const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs));
+            await recordClvmFailure("monitor", config, failure);
+            printMonitorFailure(failure, config);
+            if (config.once) {
+                break;
+            }
+            await wait(retryIntervalMs);
         }
-        await delay(nextAlignedDelay(config.intervalMs));
     }
 }
 async function sampleOnce(config) {
@@ -624,6 +707,13 @@ async function sampleOnce(config) {
 }
 async function recordClvmSample(source, config, result, raw) {
     const record = buildClvmSampleRecord(source, config, result, raw);
+    await writeClvmRuntimeRecord(record);
+}
+async function recordClvmFailure(source, config, failure) {
+    const record = buildClvmFailureRecord(source, config, failure);
+    await writeClvmRuntimeRecord(record);
+}
+async function writeClvmRuntimeRecord(record) {
     await writeTextFileAtomic(clvmStatePath(), `${JSON.stringify(record, null, 2)}\n`, 0o600);
     await appendFile(clvmHistoryPath(), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
 }
@@ -631,16 +721,11 @@ function buildClvmSampleRecord(source, config, result, raw) {
     const matched = result.matchedConnections;
     return {
         version: clvmStateVersion,
+        ok: true,
+        status: "ok",
         recorded_at: new Date().toISOString(),
         source,
-        config: {
-            baseUrl: config.baseUrl,
-            domains: config.domains,
-            intervalMs: config.intervalMs,
-            zeroSpeedThreshold: config.zeroSpeedThreshold,
-            closeZeroForSeconds: config.closeZeroForSeconds,
-            autoCloseEnabled: config.autoCloseEnabled,
-        },
+        config: clvmRecordConfig(config),
         summary: {
             totalConnections: result.totalConnections,
             matchedConnections: matched.length,
@@ -658,6 +743,95 @@ function buildClvmSampleRecord(source, config, result, raw) {
         raw,
     };
 }
+function buildClvmFailureRecord(source, config, failure) {
+    return {
+        version: clvmStateVersion,
+        ok: false,
+        status: "unavailable",
+        recorded_at: failure.timestamp,
+        source,
+        config: clvmRecordConfig(config),
+        error: failure.error,
+        retry: failure.retry,
+        raw: failure.raw,
+    };
+}
+function clvmRecordConfig(config) {
+    return {
+        baseUrl: config.baseUrl,
+        domains: config.domains,
+        intervalMs: config.intervalMs,
+        zeroSpeedThreshold: config.zeroSpeedThreshold,
+        closeZeroForSeconds: config.closeZeroForSeconds,
+        autoCloseEnabled: config.autoCloseEnabled,
+    };
+}
+function buildMonitorFailure(error, retry) {
+    return {
+        timestamp: new Date().toISOString(),
+        error: clvmErrorDetail(error),
+        retry,
+        raw: clvmErrorRaw(error),
+    };
+}
+function buildRetryState(attempt, intervalMs, now = Date.now()) {
+    return {
+        attempt,
+        intervalMs,
+        nextAt: new Date(now + intervalMs).toISOString(),
+    };
+}
+export function nextClvmRetryInterval(baseIntervalMs, attempt) {
+    if (!Number.isFinite(baseIntervalMs) || baseIntervalMs <= 0) {
+        throw new Error("base interval must be a positive finite number");
+    }
+    if (!Number.isFinite(attempt) || attempt <= 0) {
+        throw new Error("retry attempt must be a positive finite number");
+    }
+    const multiplier = clvmRetryMultipliers[attempt - 1] ?? Number.POSITIVE_INFINITY;
+    const interval = multiplier === Number.POSITIVE_INFINITY
+        ? clvmRetryMaxIntervalMs
+        : Math.round(baseIntervalMs * multiplier);
+    return Math.min(clvmRetryMaxIntervalMs, Math.max(1, interval));
+}
+function clvmErrorDetail(error) {
+    if (error instanceof ClvmRuntimeError) {
+        return {
+            code: error.code,
+            message: error.message,
+            status: error.status,
+            statusText: error.statusText,
+            body: error.body,
+            cause: error.causeDetail,
+        };
+    }
+    return {
+        code: "unknown_error",
+        message: errorMessage(error),
+        cause: errorCauseDetail(error),
+    };
+}
+function clvmErrorRaw(error) {
+    if (error instanceof ClvmRuntimeError) {
+        return error.raw ?? null;
+    }
+    return null;
+}
+function errorCauseDetail(error) {
+    if (error instanceof Error) {
+        return {
+            name: error.name,
+            message: error.message,
+        };
+    }
+    return {
+        name: typeof error,
+        message: String(error),
+    };
+}
+function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
 function sumConnectionNumber(connections, field) {
     return connections.reduce((sum, connection) => {
         const value = connection[field];
@@ -673,11 +847,6 @@ function recordClosedConnections(closedHistory, closedConnections) {
         });
     }
     closedHistory.length = Math.min(closedHistory.length, closedHistoryLimit);
-}
-function delay(milliseconds) {
-    return new Promise((resolve) => {
-        setTimeout(resolve, milliseconds);
-    });
 }
 export async function closeExpiredConnections(api, result, config, closedIds = new Set()) {
     result.closedConnections = [];
@@ -864,7 +1033,9 @@ function renderConfigJson(config) {
 }
 function readConnections(payload) {
     if (!isPlainObject(payload) || !Array.isArray(payload.connections)) {
-        throw new Error("/connections response must contain a connections array");
+        throw new ClvmRuntimeError("invalid_connections_payload", "/connections response must contain a connections array", {
+            raw: payload,
+        });
     }
     return payload.connections.filter(isPlainObject);
 }
@@ -1122,6 +1293,29 @@ function printMonitorResult(result, config, stream = process.stdout) {
     }
     printClosedHistory(closedHistory, layout, style, stream);
 }
+function printMonitorFailure(failure, config, stream = process.stdout) {
+    if (config.json) {
+        stream.write(`${JSON.stringify(toJsonFailure(failure))}\n`);
+        return;
+    }
+    if (config.clear) {
+        stream.write("\x1B[2J\x1B[H");
+    }
+    const style = createStyle(config);
+    const header = [
+        style.dim(formatLocalTimestamp(failure.timestamp)),
+        style.cyan(`domains=${config.domains.join(",")}`),
+        style.red("status=unavailable"),
+        style.dim(`error=${failure.error.code}`),
+    ];
+    if (failure.retry) {
+        header.push(style.dim(`attempt=${failure.retry.attempt}`));
+        header.push(style.dim(`retry=${formatDuration(failure.retry.intervalMs)}`));
+        header.push(style.dim(`next=${formatLocalTimestamp(failure.retry.nextAt)}`));
+    }
+    stream.write(`${header.join(" ")}\n`);
+    stream.write(`${style.red("error:")} ${failure.error.message}\n`);
+}
 function printCurrentConnections(shownConnections, layout, style, stream) {
     const rows = shownConnections.map((connection) => ({
         status: statusCell(connection.status, style),
@@ -1155,6 +1349,8 @@ function printClosedHistory(closedHistory, layout, style, stream) {
 }
 function toJsonResult(result) {
     return {
+        ok: true,
+        status: "ok",
         timestamp: result.timestamp,
         totalConnections: result.totalConnections,
         matchedConnections: result.matchedConnections,
@@ -1162,6 +1358,18 @@ function toJsonResult(result) {
         closedHistory: result.closedHistory ?? [],
         closedTotal: result.closedTotal ?? 0,
     };
+}
+function toJsonFailure(failure) {
+    return {
+        ok: false,
+        status: "unavailable",
+        timestamp: failure.timestamp,
+        error: failure.error,
+        retry: failure.retry ?? null,
+    };
+}
+function formatUnavailableStatus(failure, style) {
+    return `${style.red("unavailable")} ${style.dim(failure.error.code)} ${failure.error.message}`;
 }
 function formatSpeed(bytesPerSecond) {
     if (bytesPerSecond === null) {

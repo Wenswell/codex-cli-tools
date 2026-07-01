@@ -674,7 +674,9 @@ clvm monitor --no-clear
 
 Monitor tables read the active terminal width. Status, endpoint, age, zero time, and speed columns stay visible; narrower terminals omit traffic total and chain columns before truncating long text. The final `rule` column takes remaining width and uses the shared ANSI/wide-character-aware table truncation. Traffic totals and speeds use compact 3-significant-digit units such as `160K`, `43.2M`, `160K/s`, and `43.2M/s`.
 
-Every successful `clvm` status sample and `clvm monitor` refresh writes `~/.cache/codex-tools/clvm-state.json` and appends one JSON line to `~/.cache/codex-tools/clvm-history.jsonl`. Each record stores the active non-secret config summary, computed summary counts, normalized matched/closed connection data, and the raw `/connections` response.
+When Clash Verge Rev / mihomo is unavailable, `clvm` writes an unavailable runtime record instead of discarding the error. `clvm` status prints one unavailable result and exits. Long-running `clvm monitor` keeps running and retries with backoff from the configured interval through `2x`, `5x`, `10x`, `30x`, `60x`, then `5m`. A successful refresh resets retry state to the configured interval.
+
+Every `clvm` status sample and `clvm monitor` refresh writes `~/.cache/codex-tools/clvm-state.json` and appends one JSON line to `~/.cache/codex-tools/clvm-history.jsonl`. Successful records store `ok: true`, the active non-secret config summary, computed summary counts, normalized matched/closed connection data, and the raw `/connections` response. Unavailable records store `ok: false`, error code/message details, retry metadata when monitor mode will retry, and the raw response body or payload when one exists.
 
 Domain matching:
 
