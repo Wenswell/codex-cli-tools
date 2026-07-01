@@ -3393,6 +3393,8 @@ async function runCcsStatus(profiles, args) {
 function usageLines() {
     return [
         "  ccs                                  # show current profile and usage",
+        "  ccs version                          # print package version",
+        "  ccs -v                               # print package version",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
         "  ccs proxy [--once|watch|install|restore|stop|serve] # manage proxy state and runtime",
@@ -3433,8 +3435,23 @@ function printHelp() {
         ...usageLines(),
     ].join("\n"));
 }
+async function readPackageVersion() {
+    const path = fileURLToPath(new URL("../../package.json", import.meta.url));
+    const raw = parseJsonObject(await readFile(path, "utf8"));
+    const version = raw.version;
+    if (typeof version !== "string" || version.trim() === "") {
+        throw new Error("package.json version must be a non-empty string");
+    }
+    return version;
+}
+async function printCcsVersion() {
+    console.log(`ccs ${await readPackageVersion()}`);
+}
 function isHelpArgument(value) {
     return value === "help" || value === "--help" || value === "-h";
+}
+function isVersionArgument(value) {
+    return value === "version" || value === "-v";
 }
 function parseWeztermArgs(args) {
     rejectRemovedYesFlags(args, "ccs s wezterm");
@@ -4893,7 +4910,7 @@ function roundCostUSD(value) {
     return Math.round(value * 1_000_000) / 1_000_000;
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | PROFILE | run PROFILE [ARGS] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
@@ -4903,6 +4920,11 @@ export async function runCcs(argv) {
     const args = argv.slice(1);
     if (isHelpArgument(command)) {
         printHelp();
+        return;
+    }
+    if (isVersionArgument(command)) {
+        assertExactArgs(args, command, 0);
+        await printCcsVersion();
         return;
     }
     if (command === "config") {
