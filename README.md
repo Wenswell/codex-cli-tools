@@ -54,6 +54,7 @@ codex-rename
 
 ## Design Specs
 
+- [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 
@@ -68,6 +69,8 @@ codex-rename
 - Write/apply commands first print the same plan as preview, then ask for confirmation and print the actual result.
 - Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
 - Logs preserve complete original input, event, and response data. Summaries or previews can be added, but cannot replace the raw facts.
+- Status and monitor commands that sample external runtime state write a latest JSON state file and append normalized JSONL history under `~/.cache/codex-tools`.
+- Dense terminal byte, speed, duration, and compact counter values use three significant digits after the base unit, such as `160K`, `43.2M`, `160K/s`, `56ms`, and `2.34s`.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
 - Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
