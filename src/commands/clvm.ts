@@ -16,6 +16,8 @@ import {
   textMagenta,
   textRed,
   textYellow,
+  truncateVisible,
+  visibleLength,
 } from "../lib/text.js";
 
 const domainFields = [
@@ -34,6 +36,8 @@ const durationUnits = new Map([
 ]);
 
 const closedHistoryLimit = 5;
+const commandsLine = "commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
+const compactCommandsLine = "commands: clvm | monitor | config | setup | sync | help";
 const setupFields = new Set([
   "baseUrl",
   "secret",
@@ -160,6 +164,9 @@ type MonitorResult = {
 };
 
 type Layout = {
+  maxWidth: number;
+  showTrafficTotals: boolean;
+  showChain: boolean;
   status: number;
   endpoint: number;
   age: number;
@@ -169,7 +176,7 @@ type Layout = {
   upload: number;
   download: number;
   chain: number;
-  rule: number;
+  ruleMin: number;
 };
 
 type Style = {
@@ -743,7 +750,12 @@ function printConfigValues(config: RuntimeConfig, style = createStyle(config)): 
 }
 
 function printCommands(style: Style): void {
-  console.log(style.dim("commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help"));
+  console.log(style.dim(fitCommandsLine(terminalColumns(process.stdout))));
+}
+
+function fitCommandsLine(columns: number): string {
+  const line = visibleLength(commandsLine) <= columns ? commandsLine : compactCommandsLine;
+  return visibleLength(line) <= columns ? line : truncateVisible(line, columns);
 }
 
 function printConfigDiff(configPath: string, currentText: string, nextText: string): void {
@@ -1444,7 +1456,7 @@ function printCurrentConnections(shownConnections: ConnectionEntry[], layout: La
     chain: style.magenta(connection.chains.join(" > ")),
     rule: style.dim(connection.rule),
   }));
-  stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
+  stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 
 function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
@@ -1462,7 +1474,7 @@ function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layo
     chain: style.magenta(connection.chains.join(" > ")),
     rule: style.dim(connection.rule),
   }));
-  stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1 }).join("\n")}\n`);
+  stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 
 function toJsonResult(result: MonitorResult): Record<string, unknown> {
@@ -1538,30 +1550,48 @@ function statusRank(status: ConnectionEntry["status"]): number {
 }
 
 function currentConnectionColumns(layout: Layout): TableColumn[] {
-  return [
+  const columns: TableColumn[] = [
     { key: "status", title: "status", width: layout.status },
     { key: "endpoint", title: "endpoint", width: layout.endpoint },
     { key: "age", title: "age", width: layout.age },
     { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
     { key: "up", title: "up/s", width: layout.up, align: "right" },
     { key: "down", title: "down/s", width: layout.down, align: "right" },
-    { key: "upload", title: "upload", width: layout.upload, align: "right" },
-    { key: "download", title: "download", width: layout.download, align: "right" },
-    { key: "chain", title: "chain", width: layout.chain },
-    { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
   ];
+
+  if (layout.showTrafficTotals) {
+    columns.push(
+      { key: "upload", title: "upload", width: layout.upload, align: "right" },
+      { key: "download", title: "download", width: layout.download, align: "right" },
+    );
+  }
+  if (layout.showChain) {
+    columns.push({ key: "chain", title: "chain", width: layout.chain });
+  }
+  columns.push({ key: "rule", title: "rule", flex: true, minWidth: layout.ruleMin });
+
+  return columns;
 }
 
 function closedConnectionColumns(layout: Layout): TableColumn[] {
-  return [
+  const columns: TableColumn[] = [
     { key: "closedAt", title: "closedAt", width: 19 },
     { key: "endpoint", title: "endpoint", width: layout.endpoint },
     { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
-    { key: "upload", title: "upload", width: layout.upload, align: "right" },
-    { key: "download", title: "download", width: layout.download, align: "right" },
-    { key: "chain", title: "chain", width: layout.chain },
-    { key: "rule", title: "rule", width: layout.rule, flex: true, minWidth: 18 },
   ];
+
+  if (layout.showTrafficTotals) {
+    columns.push(
+      { key: "upload", title: "upload", width: layout.upload, align: "right" },
+      { key: "download", title: "download", width: layout.download, align: "right" },
+    );
+  }
+  if (layout.showChain) {
+    columns.push({ key: "chain", title: "chain", width: layout.chain });
+  }
+  columns.push({ key: "rule", title: "rule", flex: true, minWidth: layout.ruleMin });
+
+  return columns;
 }
 
 function statusCell(status: ConnectionEntry["status"], style: Style): string {
@@ -1592,38 +1622,31 @@ function bytesCell(bytes: number | null, style: Style): string {
 }
 
 function buildLayout(stream: NodeJS.WriteStream): Layout {
-  const columns = Number.isFinite(stream.columns) ? stream.columns : (process.stdout.columns ?? 120);
+  const maxWidth = terminalColumns(stream);
   const fixed = {
     status: 9,
+    endpoint: maxWidth >= 120 ? 28 : 22,
     age: 7,
     zeroFor: 7,
     up: 10,
     down: 10,
     upload: 8,
     download: 8,
+    chain: maxWidth >= 120 ? 20 : 14,
   };
-  const separators = 9;
-  const fixedWidth =
-    fixed.status +
-    fixed.age +
-    fixed.zeroFor +
-    fixed.up +
-    fixed.down +
-    fixed.upload +
-    fixed.download +
-    separators;
-  const flexibleWidth = Math.max(54, columns - fixedWidth);
-  const rule = clamp(Math.round(flexibleWidth * 0.34), 18, 36);
-  const remainingWidth = flexibleWidth - rule;
-  const endpoint = clamp(Math.round(remainingWidth * 0.64), 22, 44);
-  const chain = Math.max(14, remainingWidth - endpoint);
 
   return {
+    maxWidth,
+    showTrafficTotals: maxWidth >= 96,
+    showChain: maxWidth >= 72,
     ...fixed,
-    endpoint,
-    chain,
-    rule,
+    ruleMin: maxWidth >= 72 ? 12 : 4,
   };
+}
+
+function terminalColumns(stream: NodeJS.WriteStream): number {
+  const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
+  return columns && columns > 0 ? Math.floor(columns) : 120;
 }
 
 function formatStatus(status: ConnectionEntry["status"]): string {
