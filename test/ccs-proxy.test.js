@@ -189,6 +189,9 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.active_requests[0].upstream_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model_source, null);
     assert.equal(state.metrics.active_requests[0].reasoning_tokens, null);
+    assert.equal(state.metrics.active_requests[0].reasoning_tokens_source, null);
+    assert.equal(state.metrics.active_requests[0].reasoning_text_observed, false);
+    assert.equal(state.metrics.active_requests[0].reasoning_text_source, null);
     assert.deepEqual(state.metrics.active_requests[0].guard_actions, []);
     assert.equal(state.metrics.active_requests[0].error, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
@@ -199,6 +202,9 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
     assert.equal(state.metrics.recent_requests[0].reasoning_tokens, null);
+    assert.equal(state.metrics.recent_requests[0].reasoning_tokens_source, null);
+    assert.equal(state.metrics.recent_requests[0].reasoning_text_observed, false);
+    assert.equal(state.metrics.recent_requests[0].reasoning_text_source, null);
     assert.deepEqual(state.metrics.recent_requests[0].guard_actions, []);
     assert.equal(state.metrics.latency_ms.last, 120);
 
@@ -1707,6 +1713,132 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
   }
 });
 
+test("proxy records reasoning token sources and reasoning text observations separately", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const upstream = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const mode = url.searchParams.get("case");
+    if (mode === "json-plus") {
+      res.writeHead(200, { "content-type": "application/problem+json; charset=utf-8" });
+      res.end(JSON.stringify({
+        response: { model: "json-plus" },
+        usage: { output_tokens_details: { reasoning_tokens: 42 } },
+      }));
+      return;
+    }
+    if (mode === "json-text") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        response: { model: "json-text" },
+        delta: { reasoning_content: "visible thinking" },
+        usage: { output_tokens_details: { reasoning_tokens: -1 } },
+      }));
+      return;
+    }
+    if (mode === "sse-latest") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ response: { model: "sse-latest" }, usage: { output_tokens_details: { reasoning_tokens: 41 } } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ usage: { output_tokens_details: { reasoning_tokens: 42 } } })}\n\n`);
+      res.end("data: [DONE]\n\n");
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ response: { model: "glm-5.2" }, choices: [{ delta: { reasoning_content: "plan" } }] })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    for (const mode of ["json-plus", "json-text", "sse-latest", "glm-text"]) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=${mode}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: mode }),
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+    }
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.total_requests === 4,
+    );
+    const byModel = new Map(state.metrics.recent_requests.map((record) => [record.request_model, record]));
+
+    const jsonPlus = byModel.get("json-plus");
+    assert.ok(jsonPlus);
+    assert.equal(jsonPlus.reasoning_tokens, 42);
+    assert.equal(jsonPlus.reasoning_tokens_source, "/usage/output_tokens_details/reasoning_tokens");
+    assert.equal(jsonPlus.reasoning_text_observed, false);
+    assert.equal(jsonPlus.reasoning_text_source, null);
+
+    const jsonText = byModel.get("json-text");
+    assert.ok(jsonText);
+    assert.equal(jsonText.reasoning_tokens, null);
+    assert.equal(jsonText.reasoning_tokens_source, null);
+    assert.equal(jsonText.reasoning_text_observed, true);
+    assert.equal(jsonText.reasoning_text_source, "/delta/reasoning_content");
+
+    const sseLatest = byModel.get("sse-latest");
+    assert.ok(sseLatest);
+    assert.equal(sseLatest.reasoning_tokens, 42);
+    assert.equal(sseLatest.reasoning_tokens_source, "sse.data/usage/output_tokens_details/reasoning_tokens");
+    assert.equal(state.metrics.reasoning_token_counts["41"], undefined);
+    assert.equal(state.metrics.reasoning_token_counts["42"], 2);
+
+    const glmText = byModel.get("glm-text");
+    assert.ok(glmText);
+    assert.equal(glmText.upstream_model, "glm-5.2");
+    assert.equal(glmText.reasoning_tokens, null);
+    assert.equal(glmText.reasoning_text_observed, true);
+    assert.equal(glmText.reasoning_text_source, "sse.data/choices/0/delta/reasoning_content");
+
+    const output = await captureConsole(() => runProxyCommand(["--once", "--history", "4"], proxyOptions));
+    assert.match(output, /glm-text\s*\/glm-5\.2/);
+    assert.match(output, /text\/200/);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy forwards request bodies larger than the previous proxy cap", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -1867,6 +1999,8 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 76.3 * 1024 * 1024,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5-mini",
+            reasoning_text_observed: true,
+            reasoning_text_source: "sse.data/choices/0/delta/reasoning_content",
             path: "/large",
           }),
           proxyHistoryRecord({
@@ -1918,7 +2052,7 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+42\/200\s+56ms\s+32\.0K\s+gpt-5\.5\/\[same\]/);
   assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+-\/200\s+123ms\s+982K\s+-\/-/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+516\/200\s+2\.34s\s+3\.41M\s+gpt-5\.5\/gpt-5\.5-m…/);
-  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+-\/200\s+43\.2s\s+76\.3M\s+gpt-5\.5\/gpt-5\.5-m…/);
+  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+text\/200\s+43\.2s\s+76\.3M\s+gpt-5\.5\/gpt-5\.5-m…/);
   assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+-\/502\s+300ms\s+2\.00K\s+gpt-5\.5\/\[same\]\s+\[502 502 506\] reasoning_guard_triggered reasoning_tokens=506/);
   assertProxyRequestColumnsAligned(lines, "active");
   assertProxyRequestColumnsAligned(lines, "history");
@@ -3012,6 +3146,9 @@ function proxyHistoryRecord(overrides) {
     upstream_model: null,
     upstream_model_source: null,
     reasoning_tokens: null,
+    reasoning_tokens_source: null,
+    reasoning_text_observed: false,
+    reasoning_text_source: null,
     guard_actions: [],
     error: null,
     ...overrides,

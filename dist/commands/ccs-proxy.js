@@ -50,6 +50,18 @@ const REASONING_POINTERS = [
     "/response/usage/output_tokens_details/reasoning_tokens",
     "/response/usage/completion_tokens_details/reasoning_tokens",
 ];
+const REASONING_TEXT_POINTERS = [
+    "/choices/0/delta/reasoning_content",
+    "/choices/0/message/reasoning_content",
+    "/choices/0/delta/reasoning",
+    "/choices/0/message/reasoning",
+    "/delta/reasoning_content",
+    "/message/reasoning_content",
+    "/delta/reasoning",
+    "/message/reasoning",
+    "/output/0/content/0/reasoning",
+    "/response/output/0/content/0/reasoning",
+];
 const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
@@ -417,7 +429,10 @@ function normalizeProxyRequestRecord(request, collection) {
         request_model: nullableStringField(request.request_model),
         upstream_model: nullableStringField(request.upstream_model),
         upstream_model_source: nullableStringField(request.upstream_model_source),
-        reasoning_tokens: Number.isInteger(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
+        reasoning_tokens: isReasoningTokenCount(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
+        reasoning_tokens_source: nullableStringField(request.reasoning_tokens_source),
+        reasoning_text_observed: request.reasoning_text_observed === true,
+        reasoning_text_source: nullableStringField(request.reasoning_text_source),
         guard_actions: normalizeProxyGuardActions(request.guard_actions),
         error: nullableStringField(request.error),
     };
@@ -434,7 +449,7 @@ function normalizeProxyGuardActions(value) {
         upstream: nullableStringField(item.upstream),
         attempt: Number.isInteger(item.attempt) ? Number(item.attempt) : 0,
         status: Number.isInteger(item.status) ? Number(item.status) : null,
-        reasoning_tokens: Number.isInteger(item.reasoning_tokens) ? Number(item.reasoning_tokens) : null,
+        reasoning_tokens: isReasoningTokenCount(item.reasoning_tokens) ? Number(item.reasoning_tokens) : null,
         error: nullableStringField(item.error),
     }));
 }
@@ -647,7 +662,7 @@ function formatProxyRequest(record, nowMs) {
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
-        reasoning_status: formatProxyReasoningStatus(record.reasoning_tokens, record.status),
+        reasoning_status: formatProxyReasoningStatus(record.reasoning_tokens, record.reasoning_text_observed, record.status),
         up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
@@ -696,8 +711,11 @@ function formatProxyRequestModel(model) {
 function formatProxyReasoningTokens(reasoningTokens) {
     return reasoningTokens === null ? textDim("-") : textYellow(String(reasoningTokens));
 }
-function formatProxyReasoningStatus(reasoningTokens, status) {
-    return `${formatProxyReasoningTokens(reasoningTokens)}${textDim("/")}${formatProxyStatusCode(status)}`;
+function formatProxyReasoningStatus(reasoningTokens, reasoningTextObserved, status) {
+    const reasoning = reasoningTokens === null && reasoningTextObserved
+        ? textBlue("text")
+        : formatProxyReasoningTokens(reasoningTokens);
+    return `${reasoning}${textDim("/")}${formatProxyStatusCode(status)}`;
 }
 function formatProxyModels(requestModel, upstreamModel) {
     return `${formatProxyRequestModel(requestModel)}${textDim("/")}${formatProxyUpstreamModel(requestModel, upstreamModel)}`;
@@ -792,20 +810,73 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, listenHost, list
         metrics: createProxyMetrics(),
     };
 }
-function parseReasoningTokens(payload) {
+function createEmptyReasoningMetadata() {
+    return {
+        reasoningTokens: null,
+        reasoningTokensSource: null,
+        reasoningTextObserved: false,
+        reasoningTextSource: null,
+    };
+}
+function parseReasoningMetadata(payload, sourcePrefix = "") {
+    const metadata = createEmptyReasoningMetadata();
     if (!payload || typeof payload !== "object") {
-        return null;
+        return metadata;
     }
     for (const pointer of REASONING_POINTERS) {
-        const value = pointer
-            .slice(1)
-            .split("/")
-            .reduce((current, segment) => (current && typeof current === "object" ? current[segment] : undefined), payload);
-        if (Number.isInteger(value)) {
-            return value;
+        const value = jsonPointerGet(payload, pointer);
+        if (isReasoningTokenCount(value)) {
+            metadata.reasoningTokens = value;
+            metadata.reasoningTokensSource = reasoningSource(sourcePrefix, pointer);
+            break;
         }
     }
-    return null;
+    for (const pointer of REASONING_TEXT_POINTERS) {
+        const value = jsonPointerGet(payload, pointer);
+        if (typeof value === "string" && value.length > 0) {
+            metadata.reasoningTextObserved = true;
+            metadata.reasoningTextSource = reasoningSource(sourcePrefix, pointer);
+            break;
+        }
+    }
+    return metadata;
+}
+function jsonPointerGet(value, pointer) {
+    if (!pointer.startsWith("/")) {
+        return undefined;
+    }
+    return pointer
+        .slice(1)
+        .split("/")
+        .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"))
+        .reduce((current, segment) => {
+        if (current === null || current === undefined || typeof current !== "object") {
+            return undefined;
+        }
+        return current[segment];
+    }, value);
+}
+function isReasoningTokenCount(value) {
+    return Number.isInteger(value) && typeof value === "number" && value >= 0;
+}
+function reasoningSource(sourcePrefix, pointer) {
+    return sourcePrefix ? `${sourcePrefix}${pointer}` : pointer;
+}
+function mergeReasoningMetadata(current, next) {
+    return {
+        reasoningTokens: next.reasoningTokens ?? current.reasoningTokens,
+        reasoningTokensSource: next.reasoningTokens !== null ? next.reasoningTokensSource : current.reasoningTokensSource,
+        reasoningTextObserved: current.reasoningTextObserved || next.reasoningTextObserved,
+        reasoningTextSource: current.reasoningTextSource ?? next.reasoningTextSource,
+    };
+}
+function reasoningMetadataKey(metadata) {
+    return [
+        metadata.reasoningTokens ?? "",
+        metadata.reasoningTokensSource ?? "",
+        metadata.reasoningTextObserved ? "1" : "0",
+        metadata.reasoningTextSource ?? "",
+    ].join("\n");
 }
 function responseHeadersToObject(headers) {
     const result = {};
@@ -818,7 +889,9 @@ function isStreamContentType(contentType) {
     return contentType.toLowerCase().includes("text/event-stream");
 }
 function isJsonContentType(contentType) {
-    return contentType.toLowerCase().includes("application/json");
+    const mediaType = contentType.toLowerCase().split(";")[0]?.trim() ?? "";
+    return mediaType === "application/json"
+        || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 function isUpstreamCapacityError(status, body) {
     if (status < 400 || body.length === 0) {
@@ -996,35 +1069,28 @@ class ProxySseModelScanner {
     buffer = "";
     modelValue = null;
     modelSource = null;
-    reasoningTokensValue = null;
+    reasoning = createEmptyReasoningMetadata();
     constructor(endpointClass) {
         this.endpointClass = endpointClass;
     }
     push(chunk) {
-        const needsModel = Boolean(this.endpointClass && !this.modelValue);
-        const needsReasoningTokens = this.reasoningTokensValue === null;
-        if (!needsModel && !needsReasoningTokens) {
-            return;
-        }
         this.buffer += this.decoder.decode(chunk, { stream: true });
         this.consumeCompleteEvents();
     }
     finish() {
-        if (this.endpointClass && !this.modelValue) {
-            this.buffer += this.decoder.decode();
-            this.consumeEvent(this.buffer);
-            this.buffer = "";
-        }
+        this.buffer += this.decoder.decode();
+        this.consumeEvent(this.buffer);
+        this.buffer = "";
         return { model: this.modelValue, source: this.modelSource };
     }
     current() {
         return { model: this.modelValue, source: this.modelSource };
     }
-    currentReasoningTokens() {
-        return this.reasoningTokensValue;
+    currentReasoningMetadata() {
+        return { ...this.reasoning };
     }
     consumeCompleteEvents() {
-        while (!this.modelValue || this.reasoningTokensValue === null) {
+        while (true) {
             const separator = findSseEventSeparator(this.buffer);
             if (!separator) {
                 return;
@@ -1053,9 +1119,7 @@ class ProxySseModelScanner {
                     this.modelSource = extraction.source;
                 }
             }
-            if (this.reasoningTokensValue === null) {
-                this.reasoningTokensValue = parseReasoningTokens(parsed);
-            }
+            this.reasoning = mergeReasoningMetadata(this.reasoning, parseReasoningMetadata(parsed, "sse.data"));
         }
         catch {
             // SSE data frames can contain non-JSON control text.
@@ -1091,9 +1155,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         if (upstreamModel.model) {
             await callbacks.onUpstreamModel?.(upstreamModel);
         }
-        if (inspection.reasoningTokens !== null) {
-            await callbacks.onReasoningTokens?.(inspection.reasoningTokens);
-        }
+        await callbacks.onReasoningMetadata?.(inspection.reasoning);
         if (isUpstreamCapacityError(status, buffer)) {
             if (guardRetries < GUARD_RETRY_ATTEMPTS) {
                 guardRetries += 1;
@@ -1113,7 +1175,10 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 attempts: attemptState.attempts,
                 upstreamModel: upstreamModel.model,
                 upstreamModelSource: upstreamModel.source,
-                reasoningTokens: inspection.reasoningTokens,
+                reasoningTokens: inspection.reasoning.reasoningTokens,
+                reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
+                reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
+                reasoningTextSource: inspection.reasoning.reasoningTextSource,
                 error: null,
             };
         }
@@ -1146,6 +1211,9 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 upstreamModel: upstreamModel.model,
                 upstreamModelSource: upstreamModel.source,
                 reasoningTokens: inspection.guardReasoningTokens,
+                reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
+                reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
+                reasoningTextSource: inspection.reasoning.reasoningTextSource,
                 error,
             };
         }
@@ -1155,7 +1223,10 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
             attempts: attemptState.attempts,
             upstreamModel: upstreamModel.model,
             upstreamModelSource: upstreamModel.source,
-            reasoningTokens: inspection.reasoningTokens,
+            reasoningTokens: inspection.reasoning.reasoningTokens,
+            reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
+            reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
+            reasoningTextSource: inspection.reasoning.reasoningTextSource,
             error: null,
         };
     }
@@ -1176,7 +1247,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
     const scanner = new ProxySseModelScanner(endpointClass);
     let responseBytes = 0;
     let emittedModelKey = "";
-    let emittedReasoningTokens = null;
+    let emittedReasoningKey = reasoningMetadataKey(createEmptyReasoningMetadata());
     const emitModelIfChanged = async (extraction) => {
         const key = `${extraction.model ?? ""}\n${extraction.source ?? ""}`;
         if (!extraction.model || key === emittedModelKey) {
@@ -1185,12 +1256,13 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
         emittedModelKey = key;
         await callbacks.onUpstreamModel?.(extraction);
     };
-    const emitReasoningIfChanged = async (reasoningTokens) => {
-        if (reasoningTokens === null || reasoningTokens === emittedReasoningTokens) {
+    const emitReasoningIfChanged = async (metadata) => {
+        const key = reasoningMetadataKey(metadata);
+        if (key === emittedReasoningKey) {
             return;
         }
-        emittedReasoningTokens = reasoningTokens;
-        await callbacks.onReasoningTokens?.(reasoningTokens);
+        emittedReasoningKey = key;
+        await callbacks.onReasoningMetadata?.(metadata);
     };
     try {
         for await (const chunk of Readable.fromWeb(response.body)) {
@@ -1199,7 +1271,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
             responseBytes += value.length;
             scanner.push(value);
             await emitModelIfChanged(scanner.current());
-            await emitReasoningIfChanged(scanner.currentReasoningTokens());
+            await emitReasoningIfChanged(scanner.currentReasoningMetadata());
         }
         scanner.finish();
     }
@@ -1207,7 +1279,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, callb
         throw proxyResponseBodyReadError(error, callbacks.signal, responseBytes);
     }
     await emitModelIfChanged(scanner.current());
-    await emitReasoningIfChanged(scanner.currentReasoningTokens());
+    await emitReasoningIfChanged(scanner.currentReasoningMetadata());
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
 function proxyResponseBodyReadError(error, signal, responseBytes) {
@@ -1254,6 +1326,9 @@ async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptS
                 upstreamModel: null,
                 upstreamModelSource: null,
                 reasoningTokens: null,
+                reasoningTokensSource: null,
+                reasoningTextObserved: false,
+                reasoningTextSource: null,
                 error: `${code}: ${message}`,
             };
         }
@@ -1277,31 +1352,31 @@ function inspectProxyPayload(buffer, contentType, endpointClass) {
     }
     return {
         upstreamModel: { model: null, source: null },
-        reasoningTokens: null,
+        reasoning: createEmptyReasoningMetadata(),
         guardReasoningTokens: null,
     };
 }
 function inspectJsonPayload(buffer, endpointClass) {
     try {
         const parsed = JSON.parse(buffer.toString("utf8"));
-        const reasoningTokens = parseReasoningTokens(parsed);
+        const reasoning = parseReasoningMetadata(parsed);
         return {
             upstreamModel: extractUpstreamModelFromJson(parsed, endpointClass),
-            reasoningTokens,
-            guardReasoningTokens: reasoningTokens !== null && REASONING_EQUALS.includes(reasoningTokens) ? reasoningTokens : null,
+            reasoning,
+            guardReasoningTokens: reasoning.reasoningTokens !== null && REASONING_EQUALS.includes(reasoning.reasoningTokens) ? reasoning.reasoningTokens : null,
         };
     }
     catch {
         return {
             upstreamModel: { model: null, source: null },
-            reasoningTokens: null,
+            reasoning: createEmptyReasoningMetadata(),
             guardReasoningTokens: null,
         };
     }
 }
 function inspectSsePayload(buffer, endpointClass) {
     let upstreamModel = { model: null, source: null };
-    let reasoningTokens = null;
+    let reasoning = createEmptyReasoningMetadata();
     let guardReasoningTokens = null;
     for (const event of splitSseEvents(buffer.toString("utf8"))) {
         const data = sseEventData(event);
@@ -1313,11 +1388,11 @@ function inspectSsePayload(buffer, endpointClass) {
             if (!upstreamModel.model) {
                 upstreamModel = extractUpstreamModelFromSsePayload(parsed, endpointClass);
             }
-            const eventReasoningTokens = parseReasoningTokens(parsed);
-            if (eventReasoningTokens !== null) {
-                reasoningTokens ??= eventReasoningTokens;
-                if (REASONING_EQUALS.includes(eventReasoningTokens)) {
-                    guardReasoningTokens = eventReasoningTokens;
+            const eventReasoning = parseReasoningMetadata(parsed, "sse.data");
+            reasoning = mergeReasoningMetadata(reasoning, eventReasoning);
+            if (eventReasoning.reasoningTokens !== null) {
+                if (REASONING_EQUALS.includes(eventReasoning.reasoningTokens)) {
+                    guardReasoningTokens = eventReasoning.reasoningTokens;
                 }
             }
         }
@@ -1325,7 +1400,7 @@ function inspectSsePayload(buffer, endpointClass) {
             // SSE data frames can contain non-JSON control text.
         }
     }
-    return { upstreamModel, reasoningTokens, guardReasoningTokens };
+    return { upstreamModel, reasoning, guardReasoningTokens };
 }
 function splitSseEvents(value) {
     const events = [];
@@ -1916,6 +1991,9 @@ export async function serveProxy(options) {
                     upstream_model: null,
                     upstream_model_source: null,
                     reasoning_tokens: null,
+                    reasoning_tokens_source: null,
+                    reasoning_text_observed: false,
+                    reasoning_text_source: null,
                     guard_actions: [],
                     error: null,
                 };
@@ -1927,6 +2005,9 @@ export async function serveProxy(options) {
                 let upstreamModel = null;
                 let upstreamModelSource = null;
                 let reasoningTokens = null;
+                let reasoningTokensSource = null;
+                let reasoningTextObserved = false;
+                let reasoningTextSource = null;
                 let errorText = null;
                 const endpointClass = proxyEndpointClass(url.pathname);
                 try {
@@ -1945,6 +2026,9 @@ export async function serveProxy(options) {
                             if (attemptCount > 1) {
                                 activeRecord.status = null;
                                 activeRecord.reasoning_tokens = null;
+                                activeRecord.reasoning_tokens_source = null;
+                                activeRecord.reasoning_text_observed = false;
+                                activeRecord.reasoning_text_source = null;
                                 activeRecord.upstream_model = null;
                                 activeRecord.upstream_model_source = null;
                                 activeRecord.error = null;
@@ -1964,15 +2048,22 @@ export async function serveProxy(options) {
                             activeRecord.upstream_model_source = extraction.source;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
-                        onReasoningTokens: async (tokens) => {
-                            if (activeRecord.reasoning_tokens === tokens) {
+                        onReasoningMetadata: async (metadata) => {
+                            if (activeRecord.reasoning_tokens === metadata.reasoningTokens
+                                && activeRecord.reasoning_tokens_source === metadata.reasoningTokensSource
+                                && activeRecord.reasoning_text_observed === metadata.reasoningTextObserved
+                                && activeRecord.reasoning_text_source === metadata.reasoningTextSource) {
                                 return;
                             }
-                            activeRecord.reasoning_tokens = tokens;
+                            activeRecord.reasoning_tokens = metadata.reasoningTokens;
+                            activeRecord.reasoning_tokens_source = metadata.reasoningTokensSource;
+                            activeRecord.reasoning_text_observed = metadata.reasoningTextObserved;
+                            activeRecord.reasoning_text_source = metadata.reasoningTextSource;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                         onGuardAction: async (action) => {
                             activeRecord.reasoning_tokens = action.reasoning_tokens;
+                            activeRecord.reasoning_tokens_source = action.reasoning_tokens === null ? null : activeRecord.reasoning_tokens_source;
                             activeRecord.guard_actions.push(action);
                             activeRecord.error = action.error;
                             await logProxyGuardAction(options.stateRoot, activeRecord, action);
@@ -1985,6 +2076,9 @@ export async function serveProxy(options) {
                     upstreamModel = outcome.upstreamModel;
                     upstreamModelSource = outcome.upstreamModelSource;
                     reasoningTokens = outcome.reasoningTokens;
+                    reasoningTokensSource = outcome.reasoningTokensSource;
+                    reasoningTextObserved = outcome.reasoningTextObserved;
+                    reasoningTextSource = outcome.reasoningTextSource;
                     errorText = outcome.error;
                     activeRecord.status = status;
                     activeRecord.upstream = upstream;
@@ -1992,6 +2086,9 @@ export async function serveProxy(options) {
                     activeRecord.upstream_model = upstreamModel;
                     activeRecord.upstream_model_source = upstreamModelSource;
                     activeRecord.reasoning_tokens = reasoningTokens;
+                    activeRecord.reasoning_tokens_source = reasoningTokensSource;
+                    activeRecord.reasoning_text_observed = reasoningTextObserved;
+                    activeRecord.reasoning_text_source = reasoningTextSource;
                     activeRecord.error = errorText;
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                     const streamModelObserver = {
@@ -2028,6 +2125,9 @@ export async function serveProxy(options) {
                     upstreamModel = activeRecord.upstream_model;
                     upstreamModelSource = activeRecord.upstream_model_source;
                     reasoningTokens = activeRecord.reasoning_tokens;
+                    reasoningTokensSource = activeRecord.reasoning_tokens_source;
+                    reasoningTextObserved = activeRecord.reasoning_text_observed;
+                    reasoningTextSource = activeRecord.reasoning_text_source;
                     activeRecord.status = status;
                     activeRecord.response_bytes = responseBytes;
                     activeRecord.error = errorText;
@@ -2047,6 +2147,9 @@ export async function serveProxy(options) {
                     upstream_model: upstreamModel,
                     upstream_model_source: upstreamModelSource,
                     reasoning_tokens: reasoningTokens,
+                    reasoning_tokens_source: reasoningTokensSource,
+                    reasoning_text_observed: reasoningTextObserved,
+                    reasoning_text_source: reasoningTextSource,
                     error: errorText,
                 });
             }
