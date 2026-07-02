@@ -8,6 +8,7 @@ import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
 import { renderTable } from "../lib/table.js";
 import { maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength, } from "../lib/text.js";
+import { printToolVersionIfRequested } from "../lib/version.js";
 const domainFields = [
     "host",
     "destinationHost",
@@ -25,8 +26,8 @@ const closedHistoryLimit = 5;
 const clvmStateVersion = 2;
 const clvmRetryMaxIntervalMs = 300_000;
 const clvmRetryMultipliers = [1, 2, 5, 10, 30, 60];
-const commandsLine = "commands: clvm | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
-const compactCommandsLine = "commands: clvm | monitor | config | setup | sync | help";
+const commandsLine = "commands: clvm | clvm version | clvm -v | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
+const compactCommandsLine = "commands: clvm | version|-v | monitor | config | setup | sync | help";
 const setupFields = new Set([
     "baseUrl",
     "secret",
@@ -200,6 +201,9 @@ export class ConnectionSampler {
     }
 }
 export async function runClvm(argv) {
+    if (printToolVersionIfRequested("clvm", argv)) {
+        return;
+    }
     const parsed = parseArgs(argv);
     if (parsed.command === "help") {
         printHelp();
@@ -375,6 +379,8 @@ function printHelp() {
     console.log([
         "Usage:",
         "  clvm                                      # print active config and one matched-connections status",
+        "  clvm version                              # print package version",
+        "  clvm -v                                   # print package version",
         "  clvm monitor                              # refresh matched connections from mihomo /connections",
         "  clvm config                               # print active config",
         "  clvm setup --domain DOMAIN [OPTIONS]      # preview, confirm, and write config",

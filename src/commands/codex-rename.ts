@@ -7,6 +7,7 @@ import { codexDir } from "../lib/paths.js";
 import { colorPath, printKeyValue } from "../lib/output.js";
 import { sqliteJson, sqliteRun, sqlString } from "../lib/sqlite.js";
 import { textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
+import { printToolVersionIfRequested } from "../lib/version.js";
 
 type Args = {
   oldPath: string;
@@ -95,6 +96,8 @@ function normalizeInputPath(path: string): string {
 function printHelp(): void {
   console.log([
     "Usage:",
+    "  codex-rename version                                  # print package version",
+    "  codex-rename -v                                       # print package version",
     "  codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update",
     "  codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates",
     "  codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed",
@@ -477,6 +480,10 @@ function printPlan(args: Args, directoryPlan: DirectoryPlan, dbPath: string, row
 }
 
 export async function runCodexRename(argv: string[]): Promise<void> {
+  if (printToolVersionIfRequested("codex-rename", argv)) {
+    return;
+  }
+
   const args = parseArgs(argv);
   const directoryPlan = await planDirectoryRename(args);
   const dbPath = await findStateDb();

@@ -86,6 +86,7 @@ import {
   updateTopLevelTomlString,
 } from "../lib/toml.js";
 import { printTable, renderTable, type TableColumn, type TableRow } from "../lib/table.js";
+import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
 
 type Profile = {
   baseURL: string;
@@ -4211,26 +4212,8 @@ function printHelp(): void {
   ].join("\n"));
 }
 
-async function readPackageVersion(): Promise<string> {
-  const path = fileURLToPath(new URL("../../package.json", import.meta.url));
-  const raw = parseJsonObject(await readFile(path, "utf8"));
-  const version = raw.version;
-  if (typeof version !== "string" || version.trim() === "") {
-    throw new Error("package.json version must be a non-empty string");
-  }
-  return version;
-}
-
-async function printCcsVersion(): Promise<void> {
-  console.log(`ccs ${await readPackageVersion()}`);
-}
-
 function isHelpArgument(value: string | undefined): boolean {
   return value === "help" || value === "--help" || value === "-h";
-}
-
-function isVersionArgument(value: string | undefined): boolean {
-  return value === "version" || value === "-v";
 }
 
 function parseWeztermArgs(args: string[]): WeztermOptions {
@@ -6058,8 +6041,7 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (isVersionArgument(command)) {
-    assertExactArgs(args, command, 0);
-    await printCcsVersion();
+    printToolVersionIfRequested("ccs", argv);
     return;
   }
 

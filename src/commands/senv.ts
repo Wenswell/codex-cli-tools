@@ -6,6 +6,7 @@ import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { colorCount, colorPath, printKeyValue } from "../lib/output.js";
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
+import { printToolVersionIfRequested } from "../lib/version.js";
 
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
@@ -88,6 +89,8 @@ function printHelp(): void {
   console.log([
     "Usage:",
     "  senv                                      # preview, confirm, and update .env from .env.example",
+    "  senv version                              # print package version",
+    "  senv -v                                   # print package version",
     "  senv --source FILE --target FILE         # preview, confirm, and update a target env file",
     "  senv -b                                  # back up target before writing after confirmation",
     "  senv help                                # show this help",
@@ -321,6 +324,10 @@ async function createBackup(target: string): Promise<string> {
 }
 
 export async function runEnvsync(argv: string[]): Promise<void> {
+  if (printToolVersionIfRequested("senv", argv)) {
+    return;
+  }
+
   const args = parseArgs(argv);
   const exampleText = await readTextIfExists(args.source);
   if (exampleText === null) {
