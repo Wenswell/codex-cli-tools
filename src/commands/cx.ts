@@ -1,7 +1,19 @@
 import { spawn } from "node:child_process";
 import { textRed } from "../lib/text.js";
+import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
 
 export function runCodexSearch(args: string[], options: { bypassSandbox?: boolean; resume?: boolean } = {}): void {
+  const toolName = toolNameFromArgv();
+  if (isVersionArgument(args[0])) {
+    if (args.length !== 1) {
+      console.error(`${textRed("error:")} usage: ${toolName} ${args[0]}`);
+      process.exitCode = 1;
+      return;
+    }
+    printToolVersion(toolName);
+    return;
+  }
+
   const codexArgs = ["--search"];
   if (options.bypassSandbox) {
     codexArgs.push("--dangerously-bypass-approvals-and-sandbox");

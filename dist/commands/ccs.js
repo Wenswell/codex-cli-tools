@@ -21,6 +21,7 @@ import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, co
 import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable, renderTable } from "../lib/table.js";
+import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
 const usageTopStepIntervalMs = 30_000;
@@ -3435,23 +3436,8 @@ function printHelp() {
         ...usageLines(),
     ].join("\n"));
 }
-async function readPackageVersion() {
-    const path = fileURLToPath(new URL("../../package.json", import.meta.url));
-    const raw = parseJsonObject(await readFile(path, "utf8"));
-    const version = raw.version;
-    if (typeof version !== "string" || version.trim() === "") {
-        throw new Error("package.json version must be a non-empty string");
-    }
-    return version;
-}
-async function printCcsVersion() {
-    console.log(`ccs ${await readPackageVersion()}`);
-}
 function isHelpArgument(value) {
     return value === "help" || value === "--help" || value === "-h";
-}
-function isVersionArgument(value) {
-    return value === "version" || value === "-v";
 }
 function parseWeztermArgs(args) {
     rejectRemovedYesFlags(args, "ccs s wezterm");
@@ -4923,8 +4909,7 @@ export async function runCcs(argv) {
         return;
     }
     if (isVersionArgument(command)) {
-        assertExactArgs(args, command, 0);
-        await printCcsVersion();
+        printToolVersionIfRequested("ccs", argv);
         return;
     }
     if (command === "config") {

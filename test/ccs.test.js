@@ -8,16 +8,19 @@ import test from "node:test";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
-test("ccs prints package version", async () => {
+test("tools print package version", async () => {
   const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-  assert.equal(await runCcs(["version"]), `ccs ${packageJson.version}\n`);
-  assert.equal(await runCcs(["-v"]), `ccs ${packageJson.version}\n`);
+  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxx", "cxxs", "senv", "codex-rename"];
+  for (const tool of tools) {
+    assert.equal(await runTool(tool, ["version"]), `${tool} ${packageJson.version}\n`);
+    assert.equal(await runTool(tool, ["-v"]), `${tool} ${packageJson.version}\n`);
+  }
 });
 
-async function runCcs(args) {
+async function runTool(tool, args) {
   const home = await mkdtemp(join(tmpdir(), "ccs-version-home-"));
   try {
-    return await execNode(["dist/bin/ccs.js", ...args], {
+    return await execNode([`dist/bin/${tool}.js`, ...args], {
       ...process.env,
       HOME: home,
       NO_COLOR: "1",

@@ -4,6 +4,7 @@
 - For status/no-argument commands, print the actual active configuration values, not just where to find them. Example: `codex-notice` prints the active webhook URL plus config/log paths.
 - No-argument output should combine compact status with a compact command/help line when the tool has user-facing commands.
 - At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. Print one command per line and include a short comment for every command.
+- Public tool entrypoints support `version` and `-v`, and read the shared `package.json` version.
 - Usage/help/commands text is lower-value than state and results. When it appears alongside status or command output, place it at the bottom.
 - Apply/write modes must first print the same plan/details as preview, ask for explicit typed confirmation, then print the actual write/backup/verification result.
 - Any command that modifies files must default to preview and require typing exact `yes` at the prompt to write. Do not add `-y`, `--yes`, or separate dry-run flags.

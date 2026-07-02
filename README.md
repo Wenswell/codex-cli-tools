@@ -74,6 +74,7 @@ codex-rename
 - Each commit updates `package.json` version. Use a patch version increment by default.
 - Secrets live in environment variables or `~/.config/codex-tools`, not package files.
 - Command surfaces stay small; legacy modes are removed when contracts change.
+- Public tools support `version` and `-v`, and every tool reads the shared `package.json` version.
 - Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
 
 ## cx / cxx / cxxs
@@ -82,6 +83,8 @@ codex-rename
 
 ```bash
 cx ARGS...
+cx version
+cx -v
 ```
 
 Equivalent to:
@@ -94,6 +97,8 @@ codex --search ARGS...
 
 ```bash
 cxx ARGS...
+cxx version
+cxx -v
 ```
 
 Equivalent to:
@@ -106,6 +111,8 @@ codex --search --dangerously-bypass-approvals-and-sandbox ARGS...
 
 ```bash
 cxxs ARGS...
+cxxs version
+cxxs -v
 ```
 
 Equivalent to:
@@ -122,6 +129,8 @@ Use `cxx` and `cxxs` only in directories and tasks you trust.
 
 ```bash
 ccx ARGS...
+ccx version
+ccx -v
 ```
 
 Equivalent to:
@@ -134,6 +143,8 @@ claude --dangerously-skip-permissions ARGS...
 
 ```bash
 ccxs ARGS...
+ccxs version
+ccxs -v
 ```
 
 Equivalent to:
@@ -601,6 +612,8 @@ Behavior:
 
 `clvm` monitors Clash Verge Rev / mihomo `/connections` data for configured domains.
 
+`clvm version` and `clvm -v` print the shared package version.
+
 Config lives at:
 
 ```text
@@ -632,6 +645,8 @@ Commands:
 
 ```bash
 clvm
+clvm version
+clvm -v
 clvm monitor
 clvm config
 clvm setup --domain example.com --base-url http://127.0.0.1:9090 --secret SECRET
@@ -702,6 +717,8 @@ clvm monitor
 
 `senv` regenerates a target env file from an example env file while preserving existing values.
 
+`senv version` and `senv -v` print the shared package version.
+
 Default:
 
 ```bash
@@ -721,6 +738,8 @@ Options:
 
 ```bash
 senv
+senv version
+senv -v
 senv --source .env.example --target .env.local
 senv -b
 ```
@@ -756,6 +775,8 @@ CLI output includes the target file and counts/lists for added, filled defaults,
 
 `codex-rename` renames a project folder and updates local Codex session directory associations in the same command.
 
+`codex-rename version` and `codex-rename -v` print the shared package version.
+
 Codex stores the directory association in:
 
 ```text
@@ -769,6 +790,8 @@ Codex stores the directory association in:
 Usage:
 
 ```bash
+codex-rename version                                  # print package version
+codex-rename -v                                       # print package version
 codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update
 codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates
 codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed
@@ -847,6 +870,14 @@ Run commands locally from `dist` after building:
 ```bash
 node dist/bin/ccs.js --help
 node dist/bin/ccs.js -v
+node dist/bin/ccx.js -v
+node dist/bin/ccxs.js -v
+node dist/bin/clvm.js -v
+node dist/bin/cx.js -v
+node dist/bin/cxx.js -v
+node dist/bin/cxxs.js -v
+node dist/bin/senv.js -v
+node dist/bin/codex-rename.js -v
 node dist/bin/clvm.js --help
 node dist/bin/clvm.js sync --help
 node dist/bin/senv.js --help
@@ -868,6 +899,14 @@ pnpm build
 git diff --check
 node dist/bin/ccs.js --help
 node dist/bin/ccs.js -v
+node dist/bin/ccx.js -v
+node dist/bin/ccxs.js -v
+node dist/bin/clvm.js -v
+node dist/bin/cx.js -v
+node dist/bin/cxx.js -v
+node dist/bin/cxxs.js -v
+node dist/bin/senv.js -v
+node dist/bin/codex-rename.js -v
 node dist/bin/clvm.js --help
 node dist/bin/clvm.js sync --help
 node dist/bin/senv.js --help
