@@ -18,7 +18,7 @@ Proxy state lives under `~/.config/codex-tools`:
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, status code, reasoning tokens, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- History records are the completed form of the same request record and include completion time, status code, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
 - SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
@@ -35,7 +35,31 @@ Proxy state lives under `~/.config/codex-tools`:
 - `upstream_hit_counts`: completed request counts per selected upstream inside `recent_requests`.
 - `latency_ms`: completed request latency inside `recent_requests` with `last`, `count`, `sum`, `min`, and `max`.
 
-Request records include `guard_actions`, an ordered array of local proxy action records with:
+Request records include:
+
+- `id`: local request id.
+- `started_at`: request start timestamp.
+- `completed_at`: completion timestamp for history records; `null` for active records.
+- `method`: HTTP method.
+- `path`: request pathname.
+- `status`: observed upstream or local response status.
+- `upstream`: selected profile name.
+- `attempts`: upstream fetch attempt count.
+- `latency_ms`: completed request latency.
+- `request_bytes`: request body byte count.
+- `response_bytes`: completed response body byte count.
+- `session`: short Codex session id when present.
+- `request_model`: model string from the request body.
+- `upstream_model`: model string from the accepted upstream payload.
+- `upstream_model_source`: source path for `upstream_model`.
+- `reasoning_tokens`: latest explicit upstream reasoning token count.
+- `reasoning_tokens_source`: source path for `reasoning_tokens`.
+- `reasoning_text_observed`: true when a supported reasoning text field is present and non-empty.
+- `reasoning_text_source`: source path for the first observed reasoning text field.
+- `guard_actions`: ordered local proxy action records.
+- `error`: local proxy error text.
+
+`guard_actions` entries include:
 
 - `at`: action timestamp.
 - `action`: `internal_retry`, `return_status_502`, or `upstream_error`.
@@ -45,9 +69,11 @@ Request records include `guard_actions`, an ordered array of local proxy action 
 - `reasoning_tokens`: matched reasoning token count when present.
 - `error`: local proxy error text when present.
 
-Request records include `reasoning_tokens`, the latest observed upstream reasoning-token count for the client request. Accepted responses store their accepted value. Guarded responses store the matched guard value that caused the latest internal action or final `502`.
+`reasoning_tokens` stores only explicit non-negative integer token counts from upstream usage fields. Accepted responses store the latest accepted value. Guarded responses store the matched guard value that caused the latest internal action or final `502`.
 
-Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `reasoning_tokens` fields normalize to `null`. Missing `guard_actions` fields normalize to `[]`.
+`reasoning_text_observed` records reasoning text fields such as `delta.reasoning_content`, `message.reasoning_content`, and `delta.reasoning`. Text observations stay separate from token-count metrics and guard matching.
+
+Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `reasoning_tokens`, `reasoning_tokens_source`, and `reasoning_text_source` fields normalize to `null`. Missing `reasoning_text_observed` normalizes to `false`. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -69,8 +95,8 @@ The reasoning guard is always active for supported JSON and SSE response payload
 
 - `reasoning_equals`: `516`, `1034`, `1552`.
 - `guard_retry_attempts`: `3`.
-- Non-stream JSON responses are buffered, parsed, and checked before being forwarded.
-- SSE responses are buffered before client response headers are written. SSE `data:` JSON frames are scanned for model metadata and `reasoning_tokens`; accepted SSE bytes are then forwarded unchanged.
+- Non-stream JSON and `application/*+json` responses are buffered, parsed, and checked before being forwarded.
+- SSE responses are buffered before client response headers are written. SSE `data:` JSON frames are scanned for model metadata, explicit `reasoning_tokens`, and reasoning text observations; accepted SSE bytes are then forwarded unchanged.
 - A guard match records `internal_retry` and retries the same upstream until the retry budget is used.
 - The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
 - Transport errors record `upstream_error`.
@@ -104,7 +130,7 @@ History row count follows these rules:
 
 `status total` is the sum of exact status-code counters from `proxy.json.metrics.recent_requests`. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
-`reasoning total` is the sum of observed reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Guard actions with `reasoning_tokens` each count once, and accepted final response `reasoning_tokens` values also count once when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with no observed reasoning token events do not increment `reasoning_token_counts`.
+`reasoning total` is the sum of observed explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Guard actions with `reasoning_tokens` each count once, and accepted final response `reasoning_tokens` values also count once when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
@@ -112,7 +138,7 @@ Request tables use the shared terminal table renderer. Fixed-width columns are r
 session time up reas./code lat. size model error
 ```
 
-Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning token, and model fields as soon as the proxy observes them. `reas./code` renders `reasoning_tokens/status`, with `-` for missing values, such as `516/200` and `-/-`. A new retry attempt clears attempt-scoped status, reasoning token, and upstream model until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. `model` renders `request_model/upstream_model`. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. Examples include `gpt-5.5/-`, `gpt-5.5/[same]`, and `gpt-5.5/gpt-5.5-mini`. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[502 502 506] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning metadata, and model fields as soon as the proxy observes them. `reas./code` renders `reasoning_tokens/status` when an explicit token count is present, `text/status` when reasoning text is observed with absent explicit token count, and `-/status` when reasoning metadata is absent. Examples include `516/200`, `text/200`, and `-/-`. A new retry attempt clears attempt-scoped status, reasoning metadata, and upstream model until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. `model` renders `request_model/upstream_model`. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. Examples include `gpt-5.5/-`, `gpt-5.5/[same]`, and `gpt-5.5/gpt-5.5-mini`. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries use yellow HTTP status codes when no reasoning token is present and red reasoning-token values when present, such as `[516 516 516] reasoning_guard_triggered ...`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -127,9 +153,9 @@ Active rows show elapsed time for `lat.`, known request bytes for `size`, and kn
 
 Local file paths in terminal output render relative to `$HOME` with `~/`.
 
-## Model field plan
+## Model and reasoning metadata
 
-First version scope covers four concrete OpenAI-style paths:
+Metadata extraction covers four concrete OpenAI-style paths:
 
 - `/v1/chat/completions`
 - `/v1/responses`
@@ -143,6 +169,10 @@ The four paths map to two endpoint classes: `chat/completions` and `responses`.
 - `request_model`: model string read from the incoming request JSON body.
 - `upstream_model`: model string read from the upstream response payload.
 - `upstream_model_source`: extraction source for `upstream_model`, such as `json.model`, `json.response.model`, or `sse.data.model`.
+- `reasoning_tokens`: latest explicit upstream reasoning token count.
+- `reasoning_tokens_source`: JSON Pointer or SSE JSON Pointer that produced `reasoning_tokens`.
+- `reasoning_text_observed`: boolean marker for observed reasoning text.
+- `reasoning_text_source`: JSON Pointer or SSE JSON Pointer that produced the first observed reasoning text field.
 
 The proxy forwards requests directly. Model fields are observational metadata only.
 
@@ -150,7 +180,7 @@ The proxy forwards request bodies at their original size. Runtime and upstream r
 
 The proxy does not set its own upstream response deadline. Client settings such as Codex `stream_idle_timeout_ms` own stream idle timeout behavior.
 
-### Extraction plan
+### Model extraction
 
 | Path | Endpoint class | `request_model` | Non-stream `upstream_model` | Stream `upstream_model` |
 | --- | --- | --- | --- | --- |
@@ -159,26 +189,46 @@ The proxy does not set its own upstream response deadline. Client settings such 
 | `/v1/responses` | `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
 | `/responses` | `responses` | request JSON `model` | response JSON `response.model`, then response JSON `model` | SSE `response.model`, then SSE `model` |
 
+### Reasoning extraction
+
+Explicit token count paths:
+
+- `/usage/output_tokens_details/reasoning_tokens`
+- `/usage/completion_tokens_details/reasoning_tokens`
+- `/response/usage/output_tokens_details/reasoning_tokens`
+- `/response/usage/completion_tokens_details/reasoning_tokens`
+
+Reasoning text observation paths:
+
+- `/choices/0/delta/reasoning_content`
+- `/choices/0/message/reasoning_content`
+- `/choices/0/delta/reasoning`
+- `/choices/0/message/reasoning`
+- `/delta/reasoning_content`
+- `/message/reasoning_content`
+- `/delta/reasoning`
+- `/message/reasoning`
+- `/output/0/content/0/reasoning`
+- `/response/output/0/content/0/reasoning`
+
 ### Lifecycle integration
 
 - Active request records include `request_model` after the request body is read.
-- History request records include `request_model`, `upstream_model`, and `upstream_model_source`.
-- Non-stream JSON responses are already buffered for inspection, so model extraction runs before response forwarding.
-- SSE responses are fully buffered before client response headers, preserve accepted bytes, and scan SSE `data:` JSON frames for the first model value.
+- History request records include model metadata and reasoning metadata.
+- Non-stream JSON responses are already buffered for inspection, so metadata extraction runs before response forwarding.
+- SSE responses are fully buffered before client response headers, preserve accepted bytes, and scan SSE `data:` JSON frames for the first model value, latest explicit reasoning token count, and first reasoning text observation.
 - Missing model fields are stored as `null`.
 
-### Status view plan
+### Status view
 
-The status table adds compact model visibility without expanding the command surface:
+The status table adds compact model visibility and preserves the command surface:
 
 ```text
 session time up reas./code lat. size model error
 ```
 
-Column behavior:
-
 - `model`: `request_model/upstream_model`, with each side truncated for terminal width. Missing values render dim `-`, matching upstream model renders dim `[same]`, and differing upstream model renders red.
-- `reas./code`: observed `reasoning_tokens` and HTTP status code. Missing values render dim `-`; HTTP status keeps the existing status color.
+- `reas./code`: explicit `reasoning_tokens`, `text` for observed reasoning text with absent token count, and HTTP status code. Missing reasoning metadata renders dim `-`; HTTP status keeps the existing status color.
 - `lat.`: elapsed time for active rows and completed latency for history rows.
 - Active rows follow the shared `model` rendering rules; SSE streams update active rows after the first model frame is observed.
 - Retry attempts clear active-row `reas./code` and upstream model before the new attempt observes response metadata.
@@ -191,6 +241,9 @@ Column behavior:
 - Request JSON model is recorded for all four concrete paths.
 - Non-stream JSON responses extract `upstream_model` for all four concrete paths when present.
 - SSE responses extract `upstream_model` for all four concrete paths when present.
+- Non-stream JSON and `application/*+json` responses extract explicit `reasoning_tokens` and `reasoning_tokens_source`.
+- SSE responses keep the latest explicit `reasoning_tokens` value.
+- GLM-style reasoning text fields render as `text/status` and leave token counters unchanged.
 - SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
 - The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body.
@@ -216,3 +269,5 @@ Column behavior:
 
 - Status table model column name is `model`.
 - Stream model extraction stops at the first valid model value.
+- Stream reasoning token extraction stores the latest explicit count.
+- Reasoning text observations stay separate from token-count metrics.

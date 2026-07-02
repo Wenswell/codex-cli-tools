@@ -28,7 +28,7 @@ GLM-style responses can stream reasoning text through fields such as `delta.reas
 ## Update principles
 
 - Use one current schema and one current extraction path.
-- Remove the current first-SSE-token behavior and store the latest explicit token count.
+- Replace the current first observed SSE token count behavior with the latest explicit token count.
 - Record upstream facts directly.
 - Keep token counts and reasoning text observations as separate concepts.
 - Add tests for every supported response shape.
@@ -143,3 +143,14 @@ Recommended defaults are listed below. Confirm only if a different behavior is p
 - Explicit token-count metrics remain numerically clean.
 - SSE records store the latest observed explicit token count.
 - Documentation states the difference between token counts and reasoning text observations.
+
+## Completion record
+
+Implemented on 2026-07-02.
+
+- Added `reasoning_tokens_source`, `reasoning_text_observed`, and `reasoning_text_source` to proxy request records.
+- Added JSON Pointer based extraction for explicit token counts and reasoning text observations.
+- Updated SSE scanning to keep the latest explicit token count and the first reasoning text observation.
+- Kept guard matching and `reasoning_token_counts` tied to explicit numeric token counts.
+- Rendered reasoning text observations as `text/status` in `reas./code`.
+- Added tests for `application/*+json`, source fields, latest SSE token count, GLM-style text observation, and old-state normalization.
