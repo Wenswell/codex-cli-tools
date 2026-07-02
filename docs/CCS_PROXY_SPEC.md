@@ -57,9 +57,11 @@ The proxy owns upstream authentication in proxy mode. It removes incoming `Autho
 
 Upstream HTTP responses are upstream facts. The proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
 
+Upstream capacity errors are a narrow retryable HTTP-response case. When an upstream error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively, the proxy records `internal_retry` with `error: upstream_capacity`, retries the same upstream, and uses the same retry budget as the reasoning guard. Ordinary `429`, `502`, and `5xx` responses without that text stay upstream facts and pass through unchanged. If every capacity retry is exhausted, the final upstream status and body pass through unchanged.
+
 Transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`.
 
-`attempts` counts upstream fetch attempts for the client request. It includes the initial fetch, the single transport retry when used, and reasoning-guard retry fetches.
+`attempts` counts upstream fetch attempts for the client request. It includes the initial fetch, the single transport retry when used, upstream capacity retries, and reasoning-guard retry fetches.
 
 ## Reasoning guard
 
@@ -192,6 +194,7 @@ Column behavior:
 - SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
 - The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body.
+- Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
 - Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
 - Non-stream JSON reasoning guard matches retry the same upstream and record `internal_retry`.
 - SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
