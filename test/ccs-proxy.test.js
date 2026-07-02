@@ -809,6 +809,158 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
   }
 });
 
+test("proxy retries upstream capacity error text and passes through ordinary 429", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let capacityHits = 0;
+  let exhaustedCapacityHits = 0;
+  let plain429Hits = 0;
+
+  const upstream = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.searchParams.get("case") === "capacity") {
+      capacityHits += 1;
+      if (capacityHits <= 3) {
+        res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          error: {
+            code: "model_at_capacity",
+            message: "Selected model is at capacity. Please try a different model.",
+          },
+        }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, capacityHits }));
+      return;
+    }
+
+    if (url.searchParams.get("case") === "exhausted-capacity") {
+      exhaustedCapacityHits += 1;
+      res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        error: {
+          code: "model_at_capacity",
+          message: "Selected model is at capacity. Please try a different model.",
+        },
+      }));
+      return;
+    }
+
+    plain429Hits += 1;
+    res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: { code: "rate_limit", message: "ordinary rate limit" } }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const capacity = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=capacity`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "capacity-model" }),
+    });
+    assert.equal(capacity.status, 200);
+    assert.deepEqual(await capacity.json(), { ok: true, capacityHits: 4 });
+
+    let state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "capacity-model",
+    );
+    let record = state.metrics.recent_requests[0];
+    assert.equal(capacityHits, 4);
+    assert.equal(record.status, 200);
+    assert.equal(record.attempts, 4);
+    assert.equal(record.error, null);
+    assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.status), [429, 429, 429]);
+    assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [null, null, null]);
+    assert.match(record.guard_actions[0].error, /upstream_capacity: Selected model is at capacity/);
+    await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"internal_retry".*"status":429.*"error":"upstream_capacity: Selected model is at capacity/);
+
+    const exhaustedCapacity = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=exhausted-capacity`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "exhausted-capacity-model" }),
+    });
+    assert.equal(exhaustedCapacity.status, 429);
+    assert.deepEqual(await exhaustedCapacity.json(), {
+      error: {
+        code: "model_at_capacity",
+        message: "Selected model is at capacity. Please try a different model.",
+      },
+    });
+
+    state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "exhausted-capacity-model",
+    );
+    record = state.metrics.recent_requests[0];
+    assert.equal(exhaustedCapacityHits, 4);
+    assert.equal(record.status, 429);
+    assert.equal(record.attempts, 4);
+    assert.equal(record.error, null);
+    assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.status), [429, 429, 429]);
+
+    const plain429 = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=plain-429`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "plain-429-model" }),
+    });
+    assert.equal(plain429.status, 429);
+    assert.deepEqual(await plain429.json(), { error: { code: "rate_limit", message: "ordinary rate limit" } });
+
+    state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "plain-429-model",
+    );
+    record = state.metrics.recent_requests[0];
+    assert.equal(plain429Hits, 1);
+    assert.equal(record.status, 429);
+    assert.equal(record.attempts, 1);
+    assert.equal(record.error, null);
+    assert.deepEqual(record.guard_actions, []);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy rereads current profile and overwrites stale client api key", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;

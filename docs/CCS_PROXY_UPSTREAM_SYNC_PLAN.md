@@ -19,12 +19,14 @@ Completed on 2026-06-30.
 - Use one active upstream from `profiles.current`.
 - Remove automatic upstream fallthrough from proxy request handling.
 - Treat upstream HTTP responses as upstream facts. `401`, `403`, `408`, `429`, and `5xx` are returned to Codex with their original status and body when the local reasoning guard leaves the response unchanged.
+- Retry upstream capacity error responses only when the upstream error body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively. Plain `429` and `5xx` responses still pass through.
 - Retry transport-level `fetch failed` once inside the proxy. Return `502 upstream_error/upstream_fetch_failed` after repeated transport failure.
 - Check non-stream JSON responses for `reasoning_tokens`.
 - Check stream SSE responses for `reasoning_tokens` in strict mode by buffering upstream chunks before sending them to the client.
 - Use `reasoning_equals = [516, 1034, 1552]`.
 - Use `guard_retry_attempts = 3`.
 - When a local reasoning guard matches, retry the same upstream request inside the proxy until the guard retry budget is exhausted.
+- When a capacity error match occurs, retry the same upstream request inside the proxy using the same guard retry budget. Pass through the final upstream status and body if the budget is exhausted.
 - Return `502 reasoning_guard_triggered` only after the guard retry budget is exhausted.
 - Record each guard match action in request history and process logs:
   - `internal_retry`
@@ -36,6 +38,7 @@ Completed on 2026-06-30.
 
 - [x] Update `ccs proxy` upstream selection to resolve only `profiles.current`.
 - [x] Replace automatic upstream fallthrough with single-upstream forwarding.
+- [x] Add upstream capacity error internal retry for the exact capacity text.
 - [x] Add transport retry handling for `TypeError: fetch failed`.
 - [x] Add shared reasoning-token extraction for non-stream JSON and SSE payloads.
 - [x] Add guard retry state per client request.
@@ -56,6 +59,7 @@ The test suite includes dedicated coverage for:
 
 - current-only upstream selection from `profiles.current`
 - upstream HTTP status/body passthrough for `401`, `403`, `408`, `429`, and `503`
+- upstream capacity error retry for the exact capacity text and ordinary `429` passthrough
 - one retry for transport-level `fetch failed`
 - repeated transport failure returning `502 upstream_error/upstream_fetch_failed`
 - non-stream JSON reasoning guard retry and exhausted `502 reasoning_guard_triggered`

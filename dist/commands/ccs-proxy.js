@@ -26,6 +26,7 @@ const REASONING_EQUALS = [516, 1034, 1552];
 const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
 const GUARD_RETRY_ATTEMPTS = 3;
 const FETCH_FAILED_TRANSPORT_RETRIES = 1;
+const UPSTREAM_CAPACITY_ERROR_MESSAGE = "Selected model is at capacity. Please try a different model.";
 const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
@@ -819,6 +820,15 @@ function isStreamContentType(contentType) {
 function isJsonContentType(contentType) {
     return contentType.toLowerCase().includes("application/json");
 }
+function isUpstreamCapacityError(status, body) {
+    if (status < 400 || body.length === 0) {
+        return false;
+    }
+    const text = body.toString("utf8").toLowerCase();
+    const exactMessage = UPSTREAM_CAPACITY_ERROR_MESSAGE.toLowerCase();
+    return text.includes(exactMessage)
+        || (text.includes("selected model is at capacity") && text.includes("try a different model"));
+}
 function rewriteUpstreamUrl(requestUrl, upstreamBaseUrl) {
     const upstream = new URL(upstreamBaseUrl);
     upstream.pathname = requestUrl.pathname.replace(/\/+$/, "") || "/";
@@ -1083,6 +1093,29 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         }
         if (inspection.reasoningTokens !== null) {
             await callbacks.onReasoningTokens?.(inspection.reasoningTokens);
+        }
+        if (isUpstreamCapacityError(status, buffer)) {
+            if (guardRetries < GUARD_RETRY_ATTEMPTS) {
+                guardRetries += 1;
+                await callbacks.onGuardAction?.(createProxyGuardAction({
+                    action: "internal_retry",
+                    upstream: upstream.name,
+                    attempt: attemptState.attempts,
+                    status,
+                    reasoningTokens: null,
+                    error: `upstream_capacity: ${UPSTREAM_CAPACITY_ERROR_MESSAGE}`,
+                }));
+                continue;
+            }
+            return {
+                response: createBufferedResponse(buffer, status, headers),
+                upstream: upstream.name,
+                attempts: attemptState.attempts,
+                upstreamModel: upstreamModel.model,
+                upstreamModelSource: upstreamModel.source,
+                reasoningTokens: inspection.reasoningTokens,
+                error: null,
+            };
         }
         if (inspection.guardReasoningTokens !== null) {
             if (guardRetries < GUARD_RETRY_ATTEMPTS) {
