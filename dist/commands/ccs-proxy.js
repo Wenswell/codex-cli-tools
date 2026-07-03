@@ -545,22 +545,7 @@ function incrementProxyReasoningTokenCount(counts, reasoningTokens) {
     counts[key] = (counts[key] ?? 0) + 1;
 }
 function incrementProxyReasoningTokenCountsForRecord(counts, record) {
-    for (const action of record.guard_actions) {
-        incrementProxyReasoningTokenCount(counts, action.reasoning_tokens);
-    }
-    if (!finalReasoningTokenDuplicatesGuardFailure(record)) {
-        incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
-    }
-}
-function finalReasoningTokenDuplicatesGuardFailure(record) {
-    if (record.reasoning_tokens === null) {
-        return false;
-    }
-    const lastReasoningAction = [...record.guard_actions]
-        .reverse()
-        .find((action) => action.reasoning_tokens !== null);
-    return lastReasoningAction?.action === "return_status_502"
-        && lastReasoningAction.reasoning_tokens === record.reasoning_tokens;
+    incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
 }
 function averageLatency(latency) {
     return latency.count > 0 ? latency.sum / latency.count : 0;

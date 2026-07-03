@@ -1369,7 +1369,7 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(record.upstream_model, "json-ok");
     assert.equal(record.reasoning_tokens, 42);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
-    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
+    assert.equal(state.metrics.reasoning_token_counts["516"], undefined);
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -1395,8 +1395,8 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(record.upstream_model, "json-exhausted");
     assert.equal(record.reasoning_tokens, 1034);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
-    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
-    assert.equal(state.metrics.reasoning_token_counts["1034"], 4);
+    assert.equal(state.metrics.reasoning_token_counts["516"], undefined);
+    assert.equal(state.metrics.reasoning_token_counts["1034"], 1);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1034/);
   } finally {
     await stopProxy({
@@ -1520,7 +1520,7 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     assert.equal(record.attempts, 2);
     assert.equal(record.upstream_model, "stream-ok");
     assert.equal(record.reasoning_tokens, 42);
-    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], undefined);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry"]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552]);
@@ -1687,7 +1687,7 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
     assert.equal(record.attempts, 4);
     assert.equal(record.upstream_model, "stream-exhausted");
     assert.equal(record.reasoning_tokens, 1552);
-    assert.equal(state.metrics.reasoning_token_counts["1552"], 4);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552, 1552, 1552, 1552]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1552/);
@@ -2181,6 +2181,61 @@ test("proxy status summary renders exact status counts", () => {
 
   assert.match(lines, /status total=1 active=0 200=1 upstreams=input=1/);
   assert.match(lines, /reasoning total=0 max=-/);
+});
+
+test("proxy reasoning summary uses completed request counts", () => {
+  const stateRoot = "/tmp/codex-tools";
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    proxyStateFixture(stateRoot, {
+      recent_requests: [
+        proxyHistoryRecord({
+          id: "retry-success",
+          completed_at: "2026-01-01T00:00:02.000Z",
+          attempts: 4,
+          reasoning_tokens: 42,
+          guard_actions: [
+            proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 516 }),
+            proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 516 }),
+            proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 516 }),
+          ],
+        }),
+        proxyHistoryRecord({
+          id: "guard-exhausted",
+          completed_at: "2026-01-01T00:00:01.000Z",
+          status: 502,
+          attempts: 4,
+          reasoning_tokens: 1034,
+          guard_actions: [
+            proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 1034 }),
+            proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 1034 }),
+            proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 1034 }),
+            proxyGuardAction({ action: "return_status_502", attempt: 4, status: 502, reasoning_tokens: 1034 }),
+          ],
+        }),
+        proxyHistoryRecord({
+          id: "text-only",
+          completed_at: "2026-01-01T00:00:00.000Z",
+          reasoning_text_observed: true,
+          reasoning_text_source: "/delta/reasoning_content",
+        }),
+      ],
+    }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot,
+    },
+  ).join("\n");
+
+  assert.match(lines, /status total=3 active=0 200=2 502=1 upstreams=input=3/);
+  assert.match(lines, /reasoning total=2 max=1034/);
+  assert.match(lines, /1034=1/);
+  assert.doesNotMatch(lines, /516=/);
+  assert.doesNotMatch(lines, /other=3/);
 });
 
 test("proxy status history count follows TTY rows, non-TTY default, and explicit override", () => {
@@ -3150,6 +3205,19 @@ function proxyHistoryRecord(overrides) {
     reasoning_text_observed: false,
     reasoning_text_source: null,
     guard_actions: [],
+    error: null,
+    ...overrides,
+  };
+}
+
+function proxyGuardAction(overrides) {
+  return {
+    at: "2026-01-01T00:00:00.000Z",
+    action: "internal_retry",
+    upstream: "input",
+    attempt: 1,
+    status: 200,
+    reasoning_tokens: null,
     error: null,
     ...overrides,
   };
