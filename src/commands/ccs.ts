@@ -139,6 +139,15 @@ type ModelsResult = {
   error: string | null;
 };
 
+type ModelsOptions = {
+  json: boolean;
+};
+
+type ModelsProfileResult = {
+  name: string;
+  result: ModelsResult;
+};
+
 type UsageTopTarget = {
   name: string;
   profile: Profile;
@@ -1907,11 +1916,15 @@ async function printModels(profiles: ProfilesFile, args: string[]): Promise<void
     printHelp();
     return;
   }
-  assertExactArgs(args, "models", 0);
+  const options = parseModelsArgs(args);
 
   const entries = Object.entries(profiles.profiles ?? {});
   if (entries.length === 0) {
-    console.log(textDim("no profiles"));
+    if (options.json) {
+      console.log(stringifyJson(buildModelsJson([])).trimEnd());
+    } else {
+      console.log(textDim("no profiles"));
+    }
     return;
   }
 
@@ -1919,6 +1932,12 @@ async function printModels(profiles: ProfilesFile, args: string[]): Promise<void
     name,
     result: await fetchModels(assertProfile(profile, name)),
   })));
+
+  if (options.json) {
+    console.log(stringifyJson(buildModelsJson(results)).trimEnd());
+    return;
+  }
+
   const rowCount = Math.max(1, ...results.map(({ result }) => result.models.length || 1));
   const rows = Array.from({ length: rowCount }, (_value, index) => (
     Object.fromEntries(results.map(({ name, result }) => {
@@ -1931,6 +1950,30 @@ async function printModels(profiles: ProfilesFile, args: string[]): Promise<void
     results.map(({ name }) => ({ key: name, title: name })),
     rows,
   );
+}
+
+function parseModelsArgs(args: string[]): ModelsOptions {
+  let json = false;
+  for (const arg of args) {
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    throw new Error(`unknown argument for ccs models: ${arg}`);
+  }
+  return { json };
+}
+
+function buildModelsJson(results: ModelsProfileResult[]): unknown {
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    profiles: results.map(({ name, result }) => ({
+      name,
+      models: result.models,
+      error: result.error,
+    })),
+  };
 }
 
 function formatModelsStatus(result: ModelsResult): string {
@@ -4286,7 +4329,7 @@ function usageLines(): string[] {
     "  ccs -v                               # print package version",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
-    "  ccs models                           # list profile models from /v1/models",
+    "  ccs models [--json]                  # list profile models from /v1/models",
     "  ccs proxy [--once|watch|install|restore|stop|serve] # manage proxy state and runtime",
     "  ccs cost                             # show cost data source and commands",
     "  ccs cost daily                       # show Codex session daily cost totals",
@@ -6139,7 +6182,7 @@ function roundCostUSD(value: number): number {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 
 function printStatusUsageHelp(): void {
