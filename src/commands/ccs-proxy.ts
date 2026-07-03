@@ -538,7 +538,7 @@ function proxyMetricsFromRecentRequests(recentRequests: ProxyRequestRecord[]): O
   };
 
   for (const record of recentRequests) {
-    incrementProxyStatusCount(statusCounts, record.status);
+    incrementProxyStatusCountsForRecord(statusCounts, record);
     incrementProxyReasoningTokenCountsForRecord(reasoningTokenCounts, record);
     if (record.upstream) {
       upstreamHitCounts[record.upstream] = (upstreamHitCounts[record.upstream] ?? 0) + 1;
@@ -736,6 +736,15 @@ function incrementProxyStatusCount(counts: ProxyStatusCounts, status: number | n
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
+function incrementProxyStatusCountsForRecord(counts: ProxyStatusCounts, record: ProxyRequestRecord): void {
+  for (const action of record.guard_actions) {
+    incrementProxyStatusCount(counts, action.status);
+  }
+  if (!finalStatusDuplicatesGuardFailure(record)) {
+    incrementProxyStatusCount(counts, record.status);
+  }
+}
+
 function incrementProxyReasoningTokenCount(counts: ProxyReasoningTokenCounts, reasoningTokens: number | null): void {
   if (reasoningTokens === null) {
     return;
@@ -745,7 +754,31 @@ function incrementProxyReasoningTokenCount(counts: ProxyReasoningTokenCounts, re
 }
 
 function incrementProxyReasoningTokenCountsForRecord(counts: ProxyReasoningTokenCounts, record: ProxyRequestRecord): void {
-  incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
+  for (const action of record.guard_actions) {
+    incrementProxyReasoningTokenCount(counts, action.reasoning_tokens);
+  }
+  if (!finalReasoningTokenDuplicatesGuardFailure(record)) {
+    incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
+  }
+}
+
+function finalStatusDuplicatesGuardFailure(record: ProxyRequestRecord): boolean {
+  const lastStatusAction = [...record.guard_actions]
+    .reverse()
+    .find((action) => action.status !== null);
+  return lastStatusAction?.action === "return_status_502"
+    && lastStatusAction.status === record.status;
+}
+
+function finalReasoningTokenDuplicatesGuardFailure(record: ProxyRequestRecord): boolean {
+  if (record.reasoning_tokens === null) {
+    return false;
+  }
+  const lastReasoningAction = [...record.guard_actions]
+    .reverse()
+    .find((action) => action.reasoning_tokens !== null);
+  return lastReasoningAction?.action === "return_status_502"
+    && lastReasoningAction.reasoning_tokens === record.reasoning_tokens;
 }
 
 function averageLatency(latency: ProxyMetrics["latency_ms"]): number {
@@ -1489,7 +1522,7 @@ async function proxyThroughActiveUpstreamWithStats(
         action: "return_status_502",
         upstream: upstream.name,
         attempt: attemptState.attempts,
-        status,
+        status: NON_STREAM_STATUS_CODE,
         reasoningTokens: inspection.guardReasoningTokens,
         error,
       }));

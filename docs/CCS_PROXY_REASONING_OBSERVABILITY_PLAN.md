@@ -83,7 +83,7 @@ Render `reas./code` as:
 - `text/200` when `reasoning_text_observed=true` and `reasoning_tokens=null`.
 - `-/200` when reasoning metadata is absent.
 
-Reasoning summary counts completed requests with final explicit `reasoning_tokens` only. Text observations and guard retry actions stay separate from `reasoning total`, `max`, and grouped counts.
+Reasoning summary counts explicit `reasoning_tokens` events only. Text observations stay separate from `reasoning total`, `max`, and grouped counts.
 
 ## Implementation steps
 
@@ -135,7 +135,7 @@ Recommended defaults are listed below. Confirm only if a different behavior is p
 | Status text marker | Use `text` in `reas./code` for reasoning text with absent token count. |
 | Text source paths | Support the listed GLM/OpenAI-compatible paths only. |
 | Guard scope | Keep guard tied to explicit numeric `reasoning_tokens` only. |
-| Metrics scope | Keep `reasoning total` on the same completed-request basis as `status total`. |
+| Metrics scope | Keep `reasoning total` and `status total` on the same event basis. |
 
 ## Completion criteria
 
@@ -151,6 +151,6 @@ Implemented on 2026-07-02.
 - Added `reasoning_tokens_source`, `reasoning_text_observed`, and `reasoning_text_source` to proxy request records.
 - Added JSON Pointer based extraction for explicit token counts and reasoning text observations.
 - Updated SSE scanning to keep the latest explicit token count and the first reasoning text observation.
-- Kept guard matching tied to explicit numeric token counts, and kept `reasoning_token_counts` on completed requests with final explicit token counts.
+- Kept guard matching and `reasoning_token_counts` tied to explicit numeric token count events.
 - Rendered reasoning text observations as `text/status` in `reas./code`.
 - Added tests for `application/*+json`, source fields, latest SSE token count, GLM-style text observation, and old-state normalization.

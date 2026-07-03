@@ -30,8 +30,8 @@ Proxy state lives under `~/.config/codex-tools`:
 - `total_requests`: completed request count inside `recent_requests`.
 - `active_requests`: currently processed HTTP requests.
 - `recent_requests`: newest completed-request snapshot, capped at 100 records and ordered newest first.
-- `status_counts`: completed request counts inside `recent_requests`, keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
-- `reasoning_token_counts`: completed request counts with explicit final `reasoning_tokens` inside `recent_requests`, keyed by `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
+- `status_counts`: observed status-code event counts inside `recent_requests`, keyed by exact HTTP status code string, such as `200`, `404`, and `502`.
+- `reasoning_token_counts`: observed reasoning-token event counts inside `recent_requests`, keyed by `reasoning_tokens` value string, such as `42`, `516`, and `1552`.
 - `upstream_hit_counts`: completed request counts per selected upstream inside `recent_requests`.
 - `latency_ms`: completed request latency inside `recent_requests` with `last`, `count`, `sum`, `min`, and `max`.
 
@@ -128,9 +128,9 @@ History row count follows these rules:
 
 `ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize.
 
-`status total` is the sum of exact status-code counters from `proxy.json.metrics.recent_requests`. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
+`status total` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values.
 
-`reasoning total` is the number of completed requests in `proxy.json.metrics.recent_requests` whose final request record has explicit `reasoning_tokens`. This matches the `status total` completed-request basis. Guard actions keep per-attempt `reasoning_tokens` for audit and row diagnostics, and they do not increment `metrics.reasoning_token_counts`. `max` is the largest final request `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
+`reasoning total` is the sum of explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
@@ -254,7 +254,7 @@ session time up reas./code lat. size model error
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
 - Status tables display `reas./code` as one combined column.
-- Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the completed-request basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
+- Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Completed requests are appended to `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
 - Background stdout/stderr are written to `proxy-runtime.log`.
