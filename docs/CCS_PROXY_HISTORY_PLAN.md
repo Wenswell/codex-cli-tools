@@ -11,7 +11,7 @@ Scale `ccs proxy` request history while keeping live refresh stable.
 The proxy will separate four responsibilities:
 
 - `proxy.json`: lightweight runtime state snapshot.
-- `proxy-requests.jsonl`: complete completed-request history.
+- `proxy-requests.jsonl`: complete completed model API request history.
 - `proxy.log`: guard and error event JSONL.
 - `proxy-runtime.log`: background process stdout and stderr.
 
@@ -35,7 +35,7 @@ The current request is sufficient for implementation. No confirmation blockers r
 - Default rendering reads completed history from `proxy.json`.
 - Explicit `--history N` reads `proxy-requests.jsonl` only when `N` exceeds `metrics.recent_requests.length`.
 - `proxy.json.metrics.recent_requests` remains a small newest-first snapshot.
-- `proxy-requests.jsonl` stores every completed request as one JSON line.
+- `proxy-requests.jsonl` stores every completed model API request as one JSON line.
 - `proxy.log` stores guard and error events only.
 - Background process output moves to `proxy-runtime.log`.
 
@@ -52,12 +52,12 @@ The current request is sufficient for implementation. No confirmation blockers r
 - latency summary
 - recent completed requests
 
-`proxy-requests.jsonl` is the complete completed-request source:
+`proxy-requests.jsonl` is the complete completed model API request source:
 
 - path: `~/.config/codex-tools/proxy-requests.jsonl`
 - format: one normalized `ProxyRequestRecord` JSON object per line
 - order: append in completion order
-- fields: all request table, metric, model, guard action, byte, latency, session, status, and error fields
+- fields: all model API request table, metric, model, guard action, byte, latency, session, status, and error fields
 
 `proxy.log` is the event log:
 

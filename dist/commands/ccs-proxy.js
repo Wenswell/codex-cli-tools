@@ -17,9 +17,11 @@ import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../li
 import { textBlue, textBold, textDim, textGreen, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable } from "../lib/table.js";
+import { packageVersion } from "../lib/version.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
+const PROXY_HEALTH_PROTOCOL = 1;
 const PROXY_STATE_FILE = "proxy.json";
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516, 1034, 1552];
@@ -132,16 +134,27 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!response.ok) {
-            return { healthy: false, pid: null };
+            return { healthy: false, pid: null, version: null, protocol: null };
         }
         const payload = await response.json().catch(() => null);
         return {
             healthy: payload?.status === "ok",
             pid: payload && Number.isInteger(payload.pid) ? Number(payload.pid) : null,
+            version: typeof payload?.version === "string" ? payload.version : null,
+            protocol: payload && Number.isInteger(payload.protocol) ? Number(payload.protocol) : null,
         };
     }
     catch {
-        return { healthy: false, pid: null };
+        return { healthy: false, pid: null, version: null, protocol: null };
+    }
+}
+function assertProxyHealthProtocol(health) {
+    if (!health.healthy) {
+        return;
+    }
+    if (health.protocol !== PROXY_HEALTH_PROTOCOL) {
+        const current = health.protocol === null ? "unknown" : String(health.protocol);
+        throw new Error(`proxy protocol mismatch: server=${current} client=${PROXY_HEALTH_PROTOCOL}; restart ccs proxy`);
     }
 }
 async function isProxyHealthy(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
@@ -252,6 +265,7 @@ export async function ensureProxyRunning(options) {
     const initialPid = await readProxyPid(options.stateRoot);
     const initialHealth = await readProxyHealth(initialState);
     if (initialHealth.healthy) {
+        assertProxyHealthProtocol(initialHealth);
         const state = await readProxyState(options.stateRoot) ?? initialState;
         return {
             state,
@@ -259,6 +273,8 @@ export async function ensureProxyRunning(options) {
             healthy: true,
             started: false,
             logPath,
+            version: initialHealth.version,
+            protocol: initialHealth.protocol,
         };
     }
     const lockFd = await acquireProxyStartLock(options.stateRoot);
@@ -272,12 +288,15 @@ export async function ensureProxyRunning(options) {
         if (!health.healthy) {
             return ensureProxyRunning(options);
         }
+        assertProxyHealthProtocol(health);
         return {
             state,
             pid: health.pid ?? pid.pid,
             healthy: true,
             started: false,
             logPath,
+            version: health.version,
+            protocol: health.protocol,
         };
     }
     try {
@@ -287,6 +306,7 @@ export async function ensureProxyRunning(options) {
         }
         const health = await readProxyHealth(state);
         if (health.healthy) {
+            assertProxyHealthProtocol(health);
             const pid = await readProxyPid(options.stateRoot);
             return {
                 state,
@@ -294,17 +314,23 @@ export async function ensureProxyRunning(options) {
                 healthy: true,
                 started: false,
                 logPath,
+                version: health.version,
+                protocol: health.protocol,
             };
         }
         await rm(pidPath(options.stateRoot), { force: true });
         const pid = startProxyBackgroundProcess(options, state);
         await waitForProxyHealth(state, options.stateRoot);
+        const startedHealth = await readProxyHealth(state);
+        assertProxyHealthProtocol(startedHealth);
         return {
             state,
             pid,
             healthy: true,
             started: true,
             logPath,
+            version: startedHealth.version,
+            protocol: startedHealth.protocol,
         };
     }
     finally {
@@ -642,12 +668,18 @@ function formatProxyStatusLine(now, state, runtime) {
         : runtime.healthy
             ? textGreen(String(runtime.pid))
             : textYellow(String(runtime.pid));
+    const version = runtime?.version ? colorName(runtime.version) : textDim("none");
+    const protocol = runtime?.protocol === null || runtime?.protocol === undefined
+        ? textDim("none")
+        : colorCount(String(runtime.protocol));
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
     return [
         textBold("ccs proxy"),
         `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
         `runtime: ${state ? runtimeLabel : textRed("missing")}`,
         `pid: ${pid}`,
+        `server: ${version}`,
+        `protocol: ${protocol}`,
         `proxy: ${proxy}`,
         `refresh: ${textDim(`${PROXY_STATUS_REFRESH_SECONDS}s`)}`,
     ].join("  ");
@@ -791,6 +823,14 @@ async function logProxyRequestError(stateRoot, request, status, error) {
         attempts: request.attempts,
         status,
         error,
+    });
+}
+async function logProxyUnsupportedPath(stateRoot, method, path) {
+    await appendProxyJsonLine(proxyLogPath(stateRoot), {
+        event: "ccs_proxy_unsupported_path",
+        method,
+        path,
+        status: 404,
     });
 }
 function formatProxySession(value) {
@@ -953,6 +993,13 @@ function proxyEndpointClass(pathname) {
         return "responses";
     }
     return null;
+}
+function classifyProxyRoute(method, pathname) {
+    if (method === "GET" && pathname === HEALTH_PATH) {
+        return { kind: "control", endpoint: "health" };
+    }
+    const endpointClass = proxyEndpointClass(pathname);
+    return endpointClass ? { kind: "model_api", endpointClass } : { kind: "invalid" };
 }
 function parseJsonBody(body) {
     if (body.length === 0) {
@@ -1920,7 +1967,7 @@ async function runProxyStatusWatch(options) {
 }
 export async function stopProxy(options) {
     const state = await readProxyState(options.stateRoot);
-    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null };
+    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null };
     const file = pidPath(options.stateRoot);
     if (!fs.existsSync(file)) {
         if (state && health.healthy && health.pid !== null) {
@@ -1972,9 +2019,23 @@ export async function serveProxy(options) {
         void (async () => {
             try {
                 const url = new URL(req.url || "/", "http://localhost");
-                if (req.method === "GET" && url.pathname === HEALTH_PATH) {
+                const method = req.method || "GET";
+                const route = classifyProxyRoute(method, url.pathname);
+                if (route.kind === "control") {
                     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-                    res.end(JSON.stringify({ status: "ok", pid: process.pid }));
+                    res.end(JSON.stringify({
+                        status: "ok",
+                        pid: process.pid,
+                        version: packageVersion(),
+                        protocol: PROXY_HEALTH_PROTOCOL,
+                    }));
+                    return;
+                }
+                if (route.kind === "invalid") {
+                    await logProxyUnsupportedPath(options.stateRoot, method, url.pathname);
+                    const payload = JSON.stringify({ error: { code: "unsupported_proxy_path", message: "unsupported proxy path" } });
+                    res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+                    res.end(payload);
                     return;
                 }
                 const downstreamAbort = new AbortController();
@@ -1993,7 +2054,7 @@ export async function serveProxy(options) {
                     id: randomUUID(),
                     started_at: requestStartedAt.toISOString(),
                     completed_at: null,
-                    method: req.method || "GET",
+                    method,
                     path: url.pathname,
                     status: null,
                     upstream: null,
@@ -2024,7 +2085,7 @@ export async function serveProxy(options) {
                 let reasoningTextObserved = false;
                 let reasoningTextSource = null;
                 let errorText = null;
-                const endpointClass = proxyEndpointClass(url.pathname);
+                const endpointClass = route.endpointClass;
                 try {
                     const profiles = await readProfiles();
                     const upstreamProfile = resolveProxyUpstream(profiles);
@@ -2279,6 +2340,8 @@ export async function runProxyCommand(args, options) {
         printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
         printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
         printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
+        printKeyValue("server:", runtime?.version ? textGreen(runtime.version) : textDim("none"), 8);
+        printKeyValue("protocol:", runtime?.protocol === null || runtime?.protocol === undefined ? textDim("none") : textGreen(String(runtime.protocol)), 9);
         printKeyValue("requests:", textBlue(formatProxyFilePath(proxyRequestsPath(options.stateRoot))), 9);
         printKeyValue("events:", textBlue(formatProxyFilePath(proxyLogPath(options.stateRoot))), 7);
         printKeyValue("runtime_log:", textBlue(formatProxyFilePath(proxyRuntimeLogPath(options.stateRoot))), 12);
