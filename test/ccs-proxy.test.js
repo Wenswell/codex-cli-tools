@@ -1368,8 +1368,9 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(record.error, null);
     assert.equal(record.upstream_model, "json-ok");
     assert.equal(record.reasoning_tokens, 42);
+    assert.equal(state.metrics.status_counts["200"], 4);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
-    assert.equal(state.metrics.reasoning_token_counts["516"], undefined);
+    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -1390,13 +1391,16 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 4);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.status), [200, 200, 200, 502]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1034, 1034, 1034, 1034]);
     assert.match(record.error, /reasoning_guard_triggered reasoning_tokens=1034/);
     assert.equal(record.upstream_model, "json-exhausted");
     assert.equal(record.reasoning_tokens, 1034);
+    assert.equal(state.metrics.status_counts["200"], 7);
+    assert.equal(state.metrics.status_counts["502"], 1);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
-    assert.equal(state.metrics.reasoning_token_counts["516"], undefined);
-    assert.equal(state.metrics.reasoning_token_counts["1034"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["516"], 3);
+    assert.equal(state.metrics.reasoning_token_counts["1034"], 4);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1034/);
   } finally {
     await stopProxy({
@@ -1520,7 +1524,8 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
     assert.equal(record.attempts, 2);
     assert.equal(record.upstream_model, "stream-ok");
     assert.equal(record.reasoning_tokens, 42);
-    assert.equal(state.metrics.reasoning_token_counts["1552"], undefined);
+    assert.equal(state.metrics.status_counts["200"], 2);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry"]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552]);
@@ -1685,9 +1690,12 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
     assert.equal(hits, 4);
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 4);
+    assert.deepEqual(record.guard_actions.map((action) => action.status), [200, 200, 200, 502]);
     assert.equal(record.upstream_model, "stream-exhausted");
     assert.equal(record.reasoning_tokens, 1552);
-    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
+    assert.equal(state.metrics.status_counts["200"], 3);
+    assert.equal(state.metrics.status_counts["502"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 4);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552, 1552, 1552, 1552]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1552/);
@@ -2183,7 +2191,7 @@ test("proxy status summary renders exact status counts", () => {
   assert.match(lines, /reasoning total=0 max=-/);
 });
 
-test("proxy reasoning summary uses completed request counts", () => {
+test("proxy status and reasoning summaries use event counts", () => {
   const stateRoot = "/tmp/codex-tools";
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
@@ -2231,11 +2239,11 @@ test("proxy reasoning summary uses completed request counts", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /status total=3 active=0 200=2 502=1 upstreams=input=3/);
-  assert.match(lines, /reasoning total=2 max=1034/);
-  assert.match(lines, /1034=1/);
-  assert.doesNotMatch(lines, /516=/);
-  assert.doesNotMatch(lines, /other=3/);
+  assert.match(lines, /status total=9 active=0 200=8 502=1 upstreams=input=3/);
+  assert.match(lines, /reasoning total=8 max=1034/);
+  assert.match(lines, /516=3/);
+  assert.match(lines, /1034=4/);
+  assert.match(lines, /other=1/);
 });
 
 test("proxy status history count follows TTY rows, non-TTY default, and explicit override", () => {
