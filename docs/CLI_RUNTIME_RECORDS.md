@@ -11,7 +11,7 @@ The command surface should stay small. Prefer existing status or monitor command
 ## Files
 
 - Config lives under `~/.config/codex-tools`.
-- Runtime state and history live under `~/.cache/codex-tools`.
+- Runtime state and history live under `${XDG_CACHE_HOME:-~/.cache}/codex-tools`.
 - The live state file uses JSON and stores the latest complete snapshot.
 - The history file uses JSONL and appends one normalized record per successful sample or completed request.
 - File names should identify the tool and purpose, such as `clvm-state.json`, `clvm-history.jsonl`, `ccs-top-state.json`, or `proxy-requests.jsonl`.
@@ -26,9 +26,18 @@ Each runtime record should include:
 - `config`: active non-secret configuration summary.
 - `summary`: compact counters and totals used by status output.
 - `result`: normalized records used by the terminal renderer or JSON output.
-- `raw`: original external input, event, or response when available.
+- `raw`: original external input, event, or response when the module's privacy boundary allows it.
+- `raw_ref`: reference to a raw archive file when the complete raw payload is stored outside the history line.
 
-Secrets must not be written to runtime records. Store raw facts first, then add summaries or rendered forms as derived fields.
+Secrets must not be written to runtime records. Modules that handle prompts, responses, API keys, environment files, or other private payloads should store normalized facts and document the raw boundary. Modules that handle operational state, such as local network connection snapshots, can store raw external responses when those facts are needed for debugging.
+
+Large raw payloads should use content-addressed archives:
+
+- Keep the latest state file complete for direct inspection.
+- Keep append-only history compact enough for long-running monitors.
+- Store raw payload files under the same runtime cache root, `${XDG_CACHE_HOME:-~/.cache}/codex-tools`.
+- Reference raw payloads by SHA-256, byte count, and path.
+- Store identical raw payloads once and let multiple history records point to the same archive file.
 
 ## Counters
 
@@ -70,6 +79,7 @@ Use short unit names in dense status tables, such as `K`, `M`, `G`, `K/s`, and `
 
 - Write the live JSON state atomically.
 - Append history records as JSON lines.
+- Write referenced raw payloads before writing state and history records.
 - Preserve completion or sample order in JSONL.
 - Keep table columns stable and let the final detail column absorb remaining terminal width.
 - Reuse shared formatters and table rendering helpers when available.

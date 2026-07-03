@@ -3029,9 +3029,10 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     const health = await fetch(`http://127.0.0.1:${listenPort}/__codex_proxy/health`);
     assert.equal(health.status, 200);
     const healthPayload = await health.json();
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
-    assert.equal(healthPayload.version, "0.1.12");
+    assert.equal(healthPayload.version, packageJson.version);
     assert.equal(healthPayload.protocol, 1);
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");

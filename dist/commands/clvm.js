@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
-import { appendFile } from "node:fs/promises";
+import { appendFile, chmod } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
@@ -23,7 +24,7 @@ const durationUnits = new Map([
     ["h", 3_600_000],
 ]);
 const closedHistoryLimit = 5;
-const clvmStateVersion = 2;
+const clvmStateVersion = 3;
 const clvmRetryMaxIntervalMs = 300_000;
 const clvmRetryMultipliers = [1, 2, 5, 10, 30, 60];
 const commandsLine = "commands: clvm | clvm version | clvm -v | clvm monitor | clvm config | clvm setup --domain DOMAIN | clvm sync | clvm help";
@@ -44,6 +45,9 @@ function clvmStatePath() {
 }
 function clvmHistoryPath() {
     return join(codexToolsCacheDir(), "clvm-history.jsonl");
+}
+function clvmRawDir() {
+    return join(codexToolsCacheDir(), "clvm-raw");
 }
 class ClvmRuntimeError extends Error {
     code;
@@ -81,12 +85,16 @@ export class ClashApi {
     async getConnections() {
         const response = await this.#request("/connections", "GET");
         const text = await response.text();
+        const raw = buildClvmRawHttpResponse("GET", "/connections", response, text);
         try {
-            return JSON.parse(text);
+            return {
+                payload: JSON.parse(text),
+                raw,
+            };
         }
         catch (error) {
             throw new ClvmRuntimeError("invalid_connections_payload", "/connections response must be valid JSON", {
-                raw: text,
+                raw,
                 cause: error,
             });
         }
@@ -114,7 +122,7 @@ export class ClashApi {
                 status: response.status,
                 statusText: response.statusText,
                 body: text,
-                raw: text,
+                raw: buildClvmRawHttpResponse(method, pathname, response, text),
             });
         }
         return response;
@@ -533,6 +541,7 @@ function printConfigStatus(runtimeConfig, { includeCommands }) {
     printKeyValue("config:", style.blue(formatHomePath(clvmConfigPath())), 12);
     printKeyValue("state:", style.blue(formatHomePath(clvmStatePath())), 12);
     printKeyValue("history:", style.blue(formatHomePath(clvmHistoryPath())), 12);
+    printKeyValue("raw:", style.blue(formatHomePath(clvmRawDir())), 12);
     printConfigValues(runtimeConfig, style);
     if (includeCommands) {
         printCommands(style);
@@ -662,10 +671,7 @@ async function runMonitor(config) {
     while (!stopped) {
         try {
             const payload = await api.getConnections();
-            const result = sampler.sample(payload, {
-                domains: config.domains,
-                zeroSpeedThreshold: config.zeroSpeedThreshold,
-            });
+            const result = sampleConnections(sampler, payload, config);
             const closedConnections = await closeExpiredConnections(api, result, config, closedIds);
             if (closedConnections.length > 0) {
                 closedTotal += closedConnections.length;
@@ -673,7 +679,7 @@ async function runMonitor(config) {
             }
             result.closedHistory = closedHistory;
             result.closedTotal = closedTotal;
-            await recordClvmSample("monitor", config, result, payload);
+            await recordClvmSample("monitor", config, result, payload.raw);
             printMonitorResult(result, config);
             retryAttempt = 0;
             if (config.once) {
@@ -700,16 +706,31 @@ async function sampleOnce(config) {
         secret: config.secret,
     });
     const sampler = new ConnectionSampler();
-    const payload = await api.getConnections();
-    const result = sampler.sample(payload, {
-        domains: config.domains,
-        zeroSpeedThreshold: config.zeroSpeedThreshold,
-    });
+    const response = await api.getConnections();
+    const result = sampleConnections(sampler, response, config);
     result.closedConnections = [];
+    result.closeFailures = [];
     result.closedHistory = [];
     result.closedTotal = 0;
-    await recordClvmSample("status", config, result, payload);
+    await recordClvmSample("status", config, result, response.raw);
     return result;
+}
+function sampleConnections(sampler, response, config) {
+    try {
+        return sampler.sample(response.payload, {
+            domains: config.domains,
+            zeroSpeedThreshold: config.zeroSpeedThreshold,
+        });
+    }
+    catch (error) {
+        if (error instanceof ClvmRuntimeError && error.code === "invalid_connections_payload") {
+            throw new ClvmRuntimeError(error.code, error.message, {
+                raw: response.raw,
+                cause: error,
+            });
+        }
+        throw error;
+    }
 }
 async function recordClvmSample(source, config, result, raw) {
     const record = buildClvmSampleRecord(source, config, result, raw);
@@ -720,8 +741,37 @@ async function recordClvmFailure(source, config, failure) {
     await writeClvmRuntimeRecord(record);
 }
 async function writeClvmRuntimeRecord(record) {
-    await writeTextFileAtomic(clvmStatePath(), `${JSON.stringify(record, null, 2)}\n`, 0o600);
-    await appendFile(clvmHistoryPath(), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    const recordWithRawRef = {
+        ...record,
+        raw_ref: await writeClvmRawPayload(record.raw),
+    };
+    await writeTextFileAtomic(clvmStatePath(), `${JSON.stringify(recordWithRawRef, null, 2)}\n`, 0o600);
+    await appendClvmHistoryRecord(toClvmHistoryRecord(recordWithRawRef));
+}
+async function appendClvmHistoryRecord(record) {
+    const path = clvmHistoryPath();
+    await appendFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(path, 0o600);
+}
+async function writeClvmRawPayload(raw) {
+    if (raw === null || raw === undefined) {
+        return null;
+    }
+    const text = JSON.stringify(raw);
+    const sha256 = createHash("sha256").update(text).digest("hex");
+    const path = join(clvmRawDir(), `${sha256}.json`);
+    if (await readTextIfExists(path) === null) {
+        await writeTextFileAtomic(path, `${text}\n`, 0o600);
+    }
+    return {
+        sha256,
+        bytes: Buffer.byteLength(text, "utf8"),
+        path,
+    };
+}
+function toClvmHistoryRecord(record) {
+    const { raw: _raw, ...history } = record;
+    return history;
 }
 function buildClvmSampleRecord(source, config, result, raw) {
     const matched = result.matchedConnections;
@@ -739,6 +789,7 @@ function buildClvmSampleRecord(source, config, result, raw) {
             zeroConnections: matched.filter((connection) => connection.status === "zero").length,
             unknownConnections: matched.filter((connection) => connection.status === "unknown").length,
             closedNow: result.closedConnections?.length ?? 0,
+            closeFailed: result.closeFailures?.length ?? 0,
             closedTotal: result.closedTotal ?? 0,
             uploadBytesPerSecond: sumConnectionNumber(matched, "uploadBytesPerSecond"),
             downloadBytesPerSecond: sumConnectionNumber(matched, "downloadBytesPerSecond"),
@@ -746,6 +797,7 @@ function buildClvmSampleRecord(source, config, result, raw) {
             downloadBytes: sumConnectionNumber(matched, "downloadTotal"),
         },
         result: toJsonResult(result),
+        raw_ref: null,
         raw,
     };
 }
@@ -759,6 +811,7 @@ function buildClvmFailureRecord(source, config, failure) {
         config: clvmRecordConfig(config),
         error: failure.error,
         retry: failure.retry,
+        raw_ref: null,
         raw: failure.raw,
     };
 }
@@ -854,8 +907,20 @@ function recordClosedConnections(closedHistory, closedConnections) {
     }
     closedHistory.length = Math.min(closedHistory.length, closedHistoryLimit);
 }
+function buildClvmRawHttpResponse(method, path, response, body) {
+    return {
+        method,
+        path,
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers),
+        body,
+        bodyBytes: Buffer.byteLength(body, "utf8"),
+    };
+}
 export async function closeExpiredConnections(api, result, config, closedIds = new Set()) {
     result.closedConnections = [];
+    result.closeFailures = [];
     if (!config.autoCloseEnabled || config.closeZeroForMs === null) {
         return result.closedConnections;
     }
@@ -867,9 +932,19 @@ export async function closeExpiredConnections(api, result, config, closedIds = n
     }
     const targets = result.matchedConnections.filter((connection) => connection.isIdle && connection.observedIdleMs > config.closeZeroForMs && !closedIds.has(connection.id));
     for (const connection of targets) {
-        await api.closeConnection(connection.id);
-        closedIds.add(connection.id);
-        result.closedConnections.push(connection);
+        try {
+            await api.closeConnection(connection.id);
+            closedIds.add(connection.id);
+            result.closedConnections.push(connection);
+        }
+        catch (error) {
+            result.closeFailures.push({
+                ...connection,
+                failedAt: new Date().toISOString(),
+                error: clvmErrorDetail(error),
+                raw: clvmErrorRaw(error),
+            });
+        }
     }
     return result.closedConnections;
 }
@@ -1260,6 +1335,7 @@ function printMonitorResult(result, config, stream = process.stdout) {
         stream.write("\x1B[2J\x1B[H");
     }
     const closed = result.closedConnections ?? [];
+    const closeFailures = result.closeFailures ?? [];
     const closedHistory = result.closedHistory ?? [];
     const closedTotal = result.closedTotal ?? 0;
     const shownConnections = sortConnections(result.matchedConnections);
@@ -1284,6 +1360,9 @@ function printMonitorResult(result, config, stream = process.stdout) {
     if (config.autoCloseEnabled && config.closeZeroForSeconds !== null) {
         if (closed.length > 0) {
             header.push(style.red(style.bold(`closedNow=${closed.length}`)));
+        }
+        if (closeFailures.length > 0) {
+            header.push(style.red(style.bold(`closeFailed=${closeFailures.length}`)));
         }
         if (closedTotal > 0) {
             header.push(style.dim(`closedTotal=${closedTotal}`));
@@ -1361,6 +1440,7 @@ function toJsonResult(result) {
         totalConnections: result.totalConnections,
         matchedConnections: result.matchedConnections,
         closedConnections: result.closedConnections ?? [],
+        closeFailures: result.closeFailures ?? [],
         closedHistory: result.closedHistory ?? [],
         closedTotal: result.closedTotal ?? 0,
     };

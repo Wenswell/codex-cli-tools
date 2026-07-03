@@ -1,11 +1,8 @@
 {
-  "baseUrl": "http://127.0.0.1:9097",
-  "secret": "SSH-ravvss@10.126.126.1",
-  "domains": [
-    "input.im",
-    "ciii.club"
-  ],
+  "baseUrl": "http://127.0.0.1:9090",
+  "secret": "",
+  "domains": [],
   "interval": "1s",
   "zeroSpeedThreshold": 0,
-  "closeZeroForSeconds": 194
+  "closeZeroForSeconds": null
 }

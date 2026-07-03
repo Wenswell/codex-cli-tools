@@ -192,6 +192,26 @@ test("samples matched idle connections and closes expired entries in monitor mod
 
   assert.deepEqual(closed, ["abc"]);
   assert.equal(closedConnections.length, 1);
+
+  const failedResult = {
+    ...result,
+    closedConnections: undefined,
+    closeFailures: undefined,
+  };
+  const failedClosed = await closeExpiredConnections(
+    {
+      closeConnection: async () => {
+        throw new Error("close failed");
+      },
+    },
+    failedResult,
+    config,
+  );
+
+  assert.deepEqual(failedClosed, []);
+  assert.equal(failedResult.closeFailures.length, 1);
+  assert.equal(failedResult.closeFailures[0].id, "abc");
+  assert.equal(failedResult.closeFailures[0].error.code, "unknown_error");
 });
 
 test("parses duration and aligned delay", () => {
@@ -404,7 +424,7 @@ test("records clvm status state and history", async () => {
     });
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
-    assert.equal(state.version, 2);
+    assert.equal(state.version, 3);
     assert.equal(state.ok, true);
     assert.equal(state.status, "ok");
     assert.equal(state.source, "status");
@@ -416,12 +436,22 @@ test("records clvm status state and history", async () => {
     assert.equal(state.summary.uploadBytesPerSecond, 10);
     assert.equal(state.summary.downloadBytesPerSecond, 20);
     assert.equal(state.result.matchedConnections[0].id, "abc");
-    assert.deepEqual(state.raw, rawPayload);
+    assert.equal(state.raw.method, "GET");
+    assert.equal(state.raw.path, "/connections");
+    assert.equal(state.raw.status, 200);
+    assert.equal(state.raw.body, JSON.stringify(rawPayload));
+    assert.equal(state.raw.bodyBytes, Buffer.byteLength(JSON.stringify(rawPayload), "utf8"));
+    assert.deepEqual(JSON.parse(state.raw.body), rawPayload);
+    assert.equal(typeof state.raw_ref.sha256, "string");
+    assert.equal(state.raw_ref.bytes, Buffer.byteLength(JSON.stringify(state.raw), "utf8"));
+    assert.match(state.raw_ref.path, /clvm-raw\/[a-f0-9]{64}\.json$/);
 
     const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(history.length, 1);
     assert.equal(history[0].result.matchedConnections[0].id, "abc");
-    assert.deepEqual(history[0].raw, rawPayload);
+    assert.equal(history[0].raw, undefined);
+    assert.deepEqual(history[0].raw_ref, state.raw_ref);
+    assert.deepEqual(JSON.parse(await readFile(history[0].raw_ref.path, "utf8")), state.raw);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });
@@ -475,17 +505,24 @@ test("records unavailable status when connections payload is invalid", async () 
     assert.match(stdout, /\/connections response must contain a connections array/);
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
-    assert.equal(state.version, 2);
+    assert.equal(state.version, 3);
     assert.equal(state.ok, false);
     assert.equal(state.status, "unavailable");
     assert.equal(state.error.code, "invalid_connections_payload");
-    assert.deepEqual(state.raw, rawPayload);
+    assert.equal(state.raw.method, "GET");
+    assert.equal(state.raw.path, "/connections");
+    assert.equal(state.raw.status, 200);
+    assert.equal(state.raw.body, JSON.stringify(rawPayload));
+    assert.deepEqual(JSON.parse(state.raw.body), rawPayload);
+    assert.equal(typeof state.raw_ref.sha256, "string");
     assert.equal(state.retry, undefined);
 
     const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(history.length, 1);
     assert.equal(history[0].ok, false);
-    assert.deepEqual(history[0].raw, rawPayload);
+    assert.equal(history[0].raw, undefined);
+    assert.deepEqual(history[0].raw_ref, state.raw_ref);
+    assert.deepEqual(JSON.parse(await readFile(history[0].raw_ref.path, "utf8")), state.raw);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });
@@ -544,9 +581,11 @@ test("monitor retries unavailable connections with backoff", async () => {
     });
     let stdout = "";
     let stderr = "";
+    let sigintSent = false;
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
-      if (stdout.includes("current=1")) {
+      if (!sigintSent && stdout.includes("current=1")) {
+        sigintSent = true;
         child.kill("SIGINT");
       }
     });

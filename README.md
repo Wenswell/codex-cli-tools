@@ -55,6 +55,7 @@ codex-rename
 ## Design Specs
 
 - [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
+- [runtime logging review](docs/RUNTIME_LOGGING_REVIEW.md)
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 
@@ -625,11 +626,12 @@ Config lives at:
 ~/.config/codex-tools/clvm.json
 ```
 
-Runtime records live at:
+Runtime records live under `${XDG_CACHE_HOME:-~/.cache}/codex-tools`:
 
 ```text
 ~/.cache/codex-tools/clvm-state.json
 ~/.cache/codex-tools/clvm-history.jsonl
+~/.cache/codex-tools/clvm-raw/
 ```
 
 Default template lives at:
@@ -638,13 +640,15 @@ Default template lives at:
 config/clvm.json
 ```
 
+The bundled template contains no API secret or domains. Use `clvm setup` to write machine-specific values under `~/.config/codex-tools/clvm.json`.
+
 Default status:
 
 ```bash
 clvm
 ```
 
-The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, writes the latest state and history record, and prints a compact command line at the bottom. Narrow terminals use a shorter command footer.
+The no-argument command prints the active config values, masks the API secret, fetches one `/connections` snapshot when domains are configured, writes the latest state, appends one compact history record, archives the raw HTTP response under `clvm-raw`, and prints a compact command line at the bottom. Narrow terminals use a shorter command footer.
 
 Commands:
 
@@ -701,7 +705,7 @@ Monitor tables read the active terminal width. Status, endpoint, age, zero time,
 
 When Clash Verge Rev / mihomo is unavailable, `clvm` writes an unavailable runtime record instead of discarding the error. `clvm` status prints one unavailable result and exits. Long-running `clvm monitor` keeps running and retries with backoff from the configured interval through `2x`, `5x`, `10x`, `30x`, `60x`, then `5m`. A successful refresh resets retry state to the configured interval.
 
-Every `clvm` status sample and `clvm monitor` refresh writes `~/.cache/codex-tools/clvm-state.json` and appends one JSON line to `~/.cache/codex-tools/clvm-history.jsonl`. Successful records store `ok: true`, the active non-secret config summary, computed summary counts, normalized matched/closed connection data, and the raw `/connections` response. Unavailable records store `ok: false`, error code/message details, retry metadata when monitor mode will retry, and the raw response body or payload when one exists.
+Every `clvm` status sample and `clvm monitor` refresh writes `~/.cache/codex-tools/clvm-state.json` and appends one JSON line to `~/.cache/codex-tools/clvm-history.jsonl`. Successful state records store `ok: true`, the active non-secret config summary, computed summary counts, normalized matched/closed connection data, the raw HTTP `/connections` response body and headers, and a `raw_ref`. History records keep the same normalized fields and `raw_ref`, while raw response records are stored once by SHA-256 under `~/.cache/codex-tools/clvm-raw/`. Unavailable records store `ok: false`, error code/message details, retry metadata when monitor mode will retry, and a `raw_ref` when a raw response body exists. Automatic close failures keep the sample as `ok: true` and record `summary.closeFailed` plus per-connection failure details.
 
 Domain matching:
 
