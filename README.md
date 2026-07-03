@@ -178,7 +178,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | proxy [--history N|--once [--history N]|watch [--history N]|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models | proxy [--history N|--once [--history N]|watch [--history N]|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -189,6 +189,7 @@ ccs version
 ccs -v
 ccs PROFILE
 ccs run PROFILE [CODEX_ARGS...]
+ccs models
 ccs cost
 ccs cost daily
 ccs cost weekly
@@ -225,6 +226,8 @@ ccs sync
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
+
+`ccs models` requests `GET BASE_URL/v1/models` for every configured switching profile in `profiles.profiles`, using each profile API key as a Bearer token. Output is a horizontal table with one provider per column. A provider request failure is shown in that provider column, and successful provider columns still show their model ids.
 
 `ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
 

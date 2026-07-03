@@ -134,6 +134,11 @@ type UsageResult = {
   requests: number;
 };
 
+type ModelsResult = {
+  models: string[];
+  error: string | null;
+};
+
 type UsageTopTarget = {
   name: string;
   profile: Profile;
@@ -360,6 +365,7 @@ const usageTopHistoryOtherName = "other";
 const weztermStatusUpdateIntervalMs = 250;
 const weztermStatusStaleAfterSeconds = 2;
 const usageHttpTimeoutMs = 5_000;
+const modelsHttpTimeoutMs = 5_000;
 const usageTopHttpTimeoutMs = 5_000;
 const usageTopHistoryHttpTimeoutMs = 5_000;
 const ccsCostReportHttpTimeoutMs = 30_000;
@@ -1502,6 +1508,24 @@ function buildUsageUrl(baseURL: string): string | null {
   }
 }
 
+function buildModelsUrl(baseURL: string): string | null {
+  const value = baseURL.trim();
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, "");
+    url.pathname = path === "" ? "/v1/models" : path.endsWith("/v1") ? `${path}/models` : `${path}/v1/models`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function readNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -1518,6 +1542,24 @@ function parseUsageResponse(value: unknown): UsageResult {
     cacheReadTokens: readNumber(today.cache_read_tokens),
     requests: readNumber(today.requests),
   };
+}
+
+function parseModelsResponse(value: unknown): string[] | null {
+  const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  if (!Array.isArray(root.data)) {
+    return null;
+  }
+
+  const models: string[] = [];
+  for (const item of root.data) {
+    const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    const id = record.id;
+    if (typeof id !== "string" || !id.trim()) {
+      return null;
+    }
+    models.push(id);
+  }
+  return models;
 }
 
 async function fetchUsage(profile: Profile): Promise<UsageResult | null> {
@@ -1545,6 +1587,42 @@ async function fetchUsage(profile: Profile): Promise<UsageResult | null> {
     return parseUsageResponse(await response.json());
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchModels(profile: Profile): Promise<ModelsResult> {
+  if (!profile.apiKey) {
+    return { models: [], error: "missing apiKey" };
+  }
+  const url = buildModelsUrl(profile.baseURL);
+  if (!url) {
+    return { models: [], error: "invalid baseURL" };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), modelsHttpTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${profile.apiKey}`,
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return { models: [], error: `http ${response.status}` };
+    }
+    try {
+      const models = parseModelsResponse(await response.json());
+      return models ? { models, error: null } : { models: [], error: "invalid response" };
+    } catch {
+      return { models: [], error: "invalid response" };
+    }
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    return { models: [], error: name === "AbortError" ? "timeout" : "fetch failed" };
   } finally {
     clearTimeout(timeout);
   }
@@ -1821,6 +1899,42 @@ async function printUsageTargets(profiles: ProfilesFile): Promise<void> {
     key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
     ...usageTableValues(row.usage),
   })), { header: false });
+}
+
+async function printModels(profiles: ProfilesFile, args: string[]): Promise<void> {
+  if (isHelpArgument(args[0])) {
+    assertExactArgs(args.slice(1), "models help", 0);
+    printHelp();
+    return;
+  }
+  assertExactArgs(args, "models", 0);
+
+  const entries = Object.entries(profiles.profiles ?? {});
+  if (entries.length === 0) {
+    console.log(textDim("no profiles"));
+    return;
+  }
+
+  const results = await Promise.all(entries.map(async ([name, profile]) => ({
+    name,
+    result: await fetchModels(assertProfile(profile, name)),
+  })));
+  const rowCount = Math.max(1, ...results.map(({ result }) => result.models.length || 1));
+  const rows = Array.from({ length: rowCount }, (_value, index) => (
+    Object.fromEntries(results.map(({ name, result }) => {
+      const value = result.models[index] ?? (index === 0 ? formatModelsStatus(result) : "");
+      return [name, value];
+    }))
+  ));
+
+  printTable(
+    results.map(({ name }) => ({ key: name, title: name })),
+    rows,
+  );
+}
+
+function formatModelsStatus(result: ModelsResult): string {
+  return result.error ? textRed(result.error) : textDim("(none)");
 }
 
 function usageTableColumns(): TableColumn[] {
@@ -4172,6 +4286,7 @@ function usageLines(): string[] {
     "  ccs -v                               # print package version",
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
+    "  ccs models                           # list profile models from /v1/models",
     "  ccs proxy [--once|watch|install|restore|stop|serve] # manage proxy state and runtime",
     "  ccs cost                             # show cost data source and commands",
     "  ccs cost daily                       # show Codex session daily cost totals",
@@ -6024,7 +6139,7 @@ function roundCostUSD(value: number): number {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 
 function printStatusUsageHelp(): void {
@@ -6054,6 +6169,11 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (command === "cost") {
     await runCcsCost(args, profiles);
+    return;
+  }
+
+  if (command === "models") {
+    await printModels(profiles, args);
     return;
   }
 
