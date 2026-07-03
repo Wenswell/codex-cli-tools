@@ -1425,22 +1425,53 @@ async function printModels(profiles, args) {
         printHelp();
         return;
     }
-    assertExactArgs(args, "models", 0);
+    const options = parseModelsArgs(args);
     const entries = Object.entries(profiles.profiles ?? {});
     if (entries.length === 0) {
-        console.log(textDim("no profiles"));
+        if (options.json) {
+            console.log(stringifyJson(buildModelsJson([])).trimEnd());
+        }
+        else {
+            console.log(textDim("no profiles"));
+        }
         return;
     }
     const results = await Promise.all(entries.map(async ([name, profile]) => ({
         name,
         result: await fetchModels(assertProfile(profile, name)),
     })));
+    if (options.json) {
+        console.log(stringifyJson(buildModelsJson(results)).trimEnd());
+        return;
+    }
     const rowCount = Math.max(1, ...results.map(({ result }) => result.models.length || 1));
     const rows = Array.from({ length: rowCount }, (_value, index) => (Object.fromEntries(results.map(({ name, result }) => {
         const value = result.models[index] ?? (index === 0 ? formatModelsStatus(result) : "");
         return [name, value];
     }))));
     printTable(results.map(({ name }) => ({ key: name, title: name })), rows);
+}
+function parseModelsArgs(args) {
+    let json = false;
+    for (const arg of args) {
+        if (arg === "--json") {
+            json = true;
+            continue;
+        }
+        throw new Error(`unknown argument for ccs models: ${arg}`);
+    }
+    return { json };
+}
+function buildModelsJson(results) {
+    return {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        profiles: results.map(({ name, result }) => ({
+            name,
+            models: result.models,
+            error: result.error,
+        })),
+    };
 }
 function formatModelsStatus(result) {
     return result.error ? textRed(result.error) : textDim("(none)");
@@ -3495,7 +3526,7 @@ function usageLines() {
         "  ccs -v                               # print package version",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
-        "  ccs models                           # list profile models from /v1/models",
+        "  ccs models [--json]                  # list profile models from /v1/models",
         "  ccs proxy [--once|watch|install|restore|stop|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
@@ -4994,7 +5025,7 @@ function roundCostUSD(value) {
     return Math.round(value * 1_000_000) / 1_000_000;
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));

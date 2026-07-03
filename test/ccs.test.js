@@ -97,6 +97,47 @@ test("ccs models keeps successful provider columns when another provider fails",
   }
 });
 
+test("ccs models --json prints provider model results", async () => {
+  let home;
+  const { server, baseUrl } = await startJsonServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.headers.authorization === "Bearer ok-key") {
+      res.end(JSON.stringify({ object: "list", data: [{ id: "gpt-5.5" }] }));
+      return;
+    }
+    res.statusCode = 403;
+    res.end(JSON.stringify({ error: { message: "forbidden" } }));
+  });
+
+  try {
+    home = await writeProfiles({
+      profiles: {
+        ok: { baseURL: baseUrl, apiKey: "ok-key" },
+        forbidden: { baseURL: baseUrl, apiKey: "forbidden-key" },
+      },
+      current: "ok",
+    });
+    const output = await execNode(["dist/bin/ccs.js", "models", "--json"], {
+      ...process.env,
+      HOME: home,
+      NO_COLOR: "1",
+    });
+    const payload = JSON.parse(output);
+
+    assert.equal(payload.version, 1);
+    assert.match(payload.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.deepEqual(payload.profiles, [
+      { name: "ok", models: ["gpt-5.5"], error: null },
+      { name: "forbidden", models: [], error: "http 403" },
+    ]);
+  } finally {
+    await closeServer(server);
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("ccs models shows per-provider configuration and response errors", async () => {
   let home;
   const { server, baseUrl } = await startJsonServer((_req, res) => {
@@ -126,6 +167,27 @@ test("ccs models shows per-provider configuration and response errors", async ()
     if (home) {
       await rm(home, { recursive: true, force: true });
     }
+  }
+});
+
+test("ccs models rejects unknown arguments", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      ok: { baseURL: "http://127.0.0.1:1", apiKey: "ok-key" },
+    },
+    current: "ok",
+  });
+  try {
+    await assert.rejects(
+      execNode(["dist/bin/ccs.js", "models", "--raw"], {
+        ...process.env,
+        HOME: home,
+        NO_COLOR: "1",
+      }),
+      /unknown argument for ccs models: --raw/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 
