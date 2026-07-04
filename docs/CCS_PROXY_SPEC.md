@@ -39,7 +39,8 @@ Status and watch commands validate the health `protocol` from `/__codex_proxy/he
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, status code, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- History records are the completed form of the same request record and include completion time, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- `proxy-requests.jsonl` records include JSONL-only `attempt_records` with complete upstream attempt facts. `proxy.json.metrics.recent_requests` keeps compact records without `attempt_records`.
 - SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
@@ -70,6 +71,7 @@ Request records include:
 - `request_bytes`: request body byte count.
 - `response_bytes`: completed response body byte count.
 - `session`: short Codex session id when present.
+- `request_kind`: `normal` or `context_compaction`.
 - `request_model`: model string from the request body.
 - `upstream_model`: model string from the accepted upstream payload.
 - `upstream_model_source`: source path for `upstream_model`.
@@ -83,7 +85,7 @@ Request records include:
 `guard_actions` entries include:
 
 - `at`: action timestamp.
-- `action`: `internal_retry`, `return_status_502`, or `upstream_error`.
+- `action`: `internal_retry`, `continuation_recovery`, `return_status_502`, or `upstream_error`.
 - `upstream`: selected upstream profile name.
 - `attempt`: upstream fetch attempt number for the client request.
 - `status`: upstream HTTP status when an upstream response existed.
@@ -94,7 +96,9 @@ Request records include:
 
 `reasoning_text_observed` records reasoning text fields such as `delta.reasoning_content`, `message.reasoning_content`, and `delta.reasoning`. Text observations stay separate from token-count metrics and guard matching.
 
-Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `reasoning_tokens`, `reasoning_tokens_source`, and `reasoning_text_source` fields normalize to `null`. Missing `reasoning_text_observed` normalizes to `false`. Missing `guard_actions` fields normalize to `[]`.
+`attempt_records` entries include `attempt`, `started_at`, `headers_at`, `completed_at`, `duration_ms`, `upstream`, `upstream_status`, upstream model fields, reasoning metadata, per-attempt `final_action`, `failure_summary`, and `remaining_retries`.
+
+Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing `reasoning_tokens`, `reasoning_tokens_source`, and `reasoning_text_source` fields normalize to `null`. Missing `reasoning_text_observed` normalizes to `false`. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -118,6 +122,10 @@ The reasoning guard is always active for supported JSON and SSE response payload
 - `guard_retry_attempts`: `3`.
 - Non-stream JSON and `application/*+json` responses are buffered, parsed, and checked before being forwarded.
 - SSE responses are buffered before client response headers are written. SSE `data:` JSON frames are scanned for model metadata, explicit `reasoning_tokens`, and reasoning text observations; accepted SSE bytes are then forwarded unchanged.
+- Streaming Responses requests with `request_kind=normal` automatically request `reasoning.encrypted_content` when the client request does not include it.
+- A guarded streaming Responses match with collected encrypted reasoning items records `continuation_recovery` and retries with a continuation request before ordinary guard retry.
+- `context_compaction` requests use ordinary guard retry and skip continuation recovery.
+- Accepted SSE or JSON responses remove `encrypted_content` fields only when the proxy added `reasoning.encrypted_content` automatically.
 - A guard match records `internal_retry` and retries the same upstream until the retry budget is used.
 - The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
 - Transport errors record `upstream_error`.
@@ -266,6 +274,10 @@ session time up reas./code lat. size model error
 - SSE responses keep the latest explicit `reasoning_tokens` value.
 - GLM-style reasoning text fields render as `text/status` and leave token counters unchanged.
 - SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
+- Streaming Responses guard matches can recover through continuation when encrypted reasoning items are available.
+- Continuation recovery uses the guard retry budget and returns `502 reasoning_guard_triggered` when the budget is exhausted.
+- Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
+- Completed JSONL request records include `attempt_records`; compact state history omits them.
 - The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
