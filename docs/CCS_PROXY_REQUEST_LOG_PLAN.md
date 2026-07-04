@@ -80,6 +80,7 @@ Add these request record fields:
 | `upstream_status` | `number \| null` | Last observed upstream HTTP status. |
 | `client_status` | `number \| null` | Status returned to the local Codex client. |
 | `failure_summary` | `object \| null` | Structured failure details. |
+| `request_kind` | `string` | Request classification: `normal` or `context_compaction`. |
 | `request_body_sha256` | `string \| null` | SHA-256 of the incoming request body. |
 | `request_headers` | `object \| null` | Whitelisted and sanitized request headers. JSONL only. |
 | `upstream_wait_ms` | `number \| null` | Time from upstream fetch start to upstream headers. |
@@ -107,6 +108,7 @@ Keep existing fields that serve terminal display:
 `proxy-requests.jsonl` stores complete completed records:
 
 - all display fields
+- request kind
 - new status and failure fields
 - request body hash
 - whitelisted request headers
@@ -117,6 +119,7 @@ Keep existing fields that serve terminal display:
 `proxy.json.metrics.recent_requests` stores lightweight completed records for live status:
 
 - all display fields
+- `request_kind`
 - `schema_version`
 - `final_action`
 - `upstream_status`
@@ -213,6 +216,8 @@ Use one entry per upstream fetch attempt:
 ```
 
 `guard_actions` stays as the compact display/event list. `attempt_records` stores complete attempt facts for analysis.
+
+Attempt `final_action` values include `passed`, `internal_retry`, `continuation_recovery`, `upstream_capacity_internal_retry`, `transport_retry`, `blocked`, `upstream_fetch_failed`, `upstream_error`, `client_aborted`, and `gateway_error`.
 
 ## Header Sanitization
 

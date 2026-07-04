@@ -67,6 +67,7 @@ type ProxyMetrics = {
 
 type ProxyStatusCounts = Record<string, number>;
 type ProxyReasoningTokenCounts = Record<string, number>;
+type ProxyRequestKind = "normal" | "context_compaction";
 
 type ProxyRequestRecord = {
   id: string;
@@ -81,6 +82,7 @@ type ProxyRequestRecord = {
   request_bytes: number;
   response_bytes: number;
   session: string | null;
+  request_kind: ProxyRequestKind;
   request_model: string | null;
   upstream_model: string | null;
   upstream_model_source: string | null;
@@ -92,7 +94,36 @@ type ProxyRequestRecord = {
   error: string | null;
 };
 
-type ProxyGuardAction = "internal_retry" | "return_status_502" | "upstream_error";
+type ProxyFailureSummary = {
+  type: string | null;
+  code: string | null;
+  message: string | null;
+};
+
+type ProxyAttemptRecord = {
+  attempt: number;
+  started_at: string;
+  headers_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  upstream: string | null;
+  upstream_status: number | null;
+  upstream_model: string | null;
+  upstream_model_source: string | null;
+  reasoning_tokens: number | null;
+  reasoning_tokens_source: string | null;
+  reasoning_text_observed: boolean;
+  reasoning_text_source: string | null;
+  final_action: string;
+  failure_summary: ProxyFailureSummary | null;
+  remaining_retries: number | null;
+};
+
+type ProxyCompleteRequestRecord = ProxyRequestRecord & {
+  attempt_records: ProxyAttemptRecord[];
+};
+
+type ProxyGuardAction = "internal_retry" | "continuation_recovery" | "return_status_502" | "upstream_error";
 
 type ProxyGuardActionRecord = {
   at: string;
@@ -156,6 +187,8 @@ type ProxyReasoningMetadata = {
   reasoningTextSource: string | null;
 };
 
+type ProxyContinuationReasoningItem = Record<string, unknown>;
+
 type ProxyWriteModelObserver = ProxyModelExtraction & {
   update?: (extraction: ProxyModelExtraction) => void | Promise<void>;
 };
@@ -171,6 +204,11 @@ const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
 const GUARD_RETRY_ATTEMPTS = 3;
 const FETCH_FAILED_TRANSPORT_RETRIES = 1;
 const UPSTREAM_CAPACITY_ERROR_MESSAGE = "Selected model is at capacity. Please try a different model.";
+const REQUEST_KIND_NORMAL: ProxyRequestKind = "normal";
+const REQUEST_KIND_CONTEXT_COMPACTION: ProxyRequestKind = "context_compaction";
+const CONTEXT_COMPACTION_MARKERS = ["remote_compaction", "context_compaction"];
+const CONTINUATION_ENCRYPTED_INCLUDE = "reasoning.encrypted_content";
+const CONTINUATION_MARKER_TEXT = "Continue thinking...";
 const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
@@ -266,7 +304,7 @@ async function appendProxyJsonLine(filePath: string, value: Record<string, unkno
   await appendFile(filePath, `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-async function appendProxyRequestRecord(stateRoot: string, record: ProxyRequestRecord): Promise<void> {
+async function appendProxyRequestRecord(stateRoot: string, record: ProxyCompleteRequestRecord): Promise<void> {
   await mkdir(stateRoot, { recursive: true });
   await appendFile(proxyRequestsPath(stateRoot), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
 }
@@ -634,6 +672,7 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
     request_bytes: numberField(request.request_bytes),
     response_bytes: numberField(request.response_bytes),
     session: nullableStringField(request.session),
+    request_kind: normalizeProxyRequestKind(request.request_kind),
     request_model: nullableStringField(request.request_model),
     upstream_model: nullableStringField(request.upstream_model),
     upstream_model_source: nullableStringField(request.upstream_model_source),
@@ -664,9 +703,13 @@ function normalizeProxyGuardActions(value: unknown): ProxyGuardActionRecord[] {
 }
 
 function normalizeProxyGuardAction(value: unknown): ProxyGuardAction {
-  return value === "internal_retry" || value === "return_status_502" || value === "upstream_error"
+  return value === "internal_retry" || value === "continuation_recovery" || value === "return_status_502" || value === "upstream_error"
     ? value
     : "upstream_error";
+}
+
+function normalizeProxyRequestKind(value: unknown): ProxyRequestKind {
+  return value === REQUEST_KIND_CONTEXT_COMPACTION ? REQUEST_KIND_CONTEXT_COMPACTION : REQUEST_KIND_NORMAL;
 }
 
 function stringField(value: unknown): string {
@@ -742,10 +785,11 @@ async function updateProxyActiveRequestMetric(
   });
 }
 
-async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, record: ProxyRequestRecord): Promise<void> {
+async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, record: ProxyCompleteRequestRecord): Promise<void> {
   await mutateProxyMetrics(state, stateRoot, async (metrics) => {
+    const compactRecord = compactProxyRequestRecord(record);
     metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
-    metrics.recent_requests.unshift(record);
+    metrics.recent_requests.unshift(compactRecord);
     metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
     const windowMetrics = proxyMetricsFromRecentRequests(metrics.recent_requests);
     metrics.total_requests = windowMetrics.total_requests;
@@ -755,6 +799,11 @@ async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, 
     metrics.latency_ms = windowMetrics.latency_ms;
     await appendProxyRequestRecord(stateRoot, record);
   });
+}
+
+function compactProxyRequestRecord(record: ProxyCompleteRequestRecord): ProxyRequestRecord {
+  const { attempt_records: _attemptRecords, ...compactRecord } = record;
+  return compactRecord;
 }
 
 async function resetProxyActiveRequestsOnStart(state: ProxyState, stateRoot: string): Promise<void> {
@@ -1183,6 +1232,205 @@ function reasoningMetadataKey(metadata: ProxyReasoningMetadata): string {
   ].join("\n");
 }
 
+function cloneJsonValue<T>(value: T): T {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value)) as T;
+}
+
+function cloneContinuationReasoningItem(item: unknown): ProxyContinuationReasoningItem | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return null;
+  }
+  const raw = item as Record<string, unknown>;
+  return raw.type === "reasoning"
+    && typeof raw.encrypted_content === "string"
+    && raw.encrypted_content.trim().length > 0
+    ? cloneJsonValue(raw)
+    : null;
+}
+
+function collectContinuationReasoningItems(payload: unknown): ProxyContinuationReasoningItem[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return [];
+  }
+  const raw = payload as Record<string, unknown>;
+  const items: ProxyContinuationReasoningItem[] = [];
+  const directItem = cloneContinuationReasoningItem(raw.item);
+  if (directItem) {
+    items.push(directItem);
+  }
+  for (const outputItems of [raw.output, jsonObjectField(raw.response)?.output]) {
+    if (!Array.isArray(outputItems)) {
+      continue;
+    }
+    for (const item of outputItems) {
+      const reasoningItem = cloneContinuationReasoningItem(item);
+      if (reasoningItem) {
+        items.push(reasoningItem);
+      }
+    }
+  }
+  return items;
+}
+
+function jsonObjectField(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function mergeContinuationInclude(include: unknown): string[] {
+  const items = Array.isArray(include) ? include.map((item) => `${item}`) : [];
+  if (!items.includes(CONTINUATION_ENCRYPTED_INCLUDE)) {
+    items.push(CONTINUATION_ENCRYPTED_INCLUDE);
+  }
+  return items;
+}
+
+function requestIncludesEncryptedReasoning(requestJson: unknown): boolean {
+  const raw = jsonObjectField(requestJson);
+  return Array.isArray(raw?.include)
+    && raw.include.some((item) => `${item}` === CONTINUATION_ENCRYPTED_INCLUDE);
+}
+
+function prepareContinuationRecoveryRequestBody(input: {
+  endpointClass: ProxyEndpointClass | null;
+  requestKind: ProxyRequestKind;
+  requestJson: unknown;
+  requestBody: Buffer;
+}): { requestJson: unknown; requestBody: Buffer; autoAddedEncryptedReasoning: boolean } {
+  const raw = jsonObjectField(input.requestJson);
+  const shouldAutoInclude = input.endpointClass === "responses"
+    && input.requestKind !== REQUEST_KIND_CONTEXT_COMPACTION
+    && raw?.stream === true
+    && !requestIncludesEncryptedReasoning(raw);
+  if (!shouldAutoInclude) {
+    return {
+      requestJson: input.requestJson,
+      requestBody: input.requestBody,
+      autoAddedEncryptedReasoning: false,
+    };
+  }
+  const nextBody = cloneJsonValue(raw) as Record<string, unknown>;
+  nextBody.include = mergeContinuationInclude(nextBody.include);
+  return {
+    requestJson: nextBody,
+    requestBody: Buffer.from(JSON.stringify(nextBody), "utf8"),
+    autoAddedEncryptedReasoning: true,
+  };
+}
+
+function normalizeResponsesInputItemForContinuation(item: unknown): unknown {
+  if (typeof item === "string") {
+    return {
+      type: "message",
+      role: "user",
+      content: item,
+    };
+  }
+  return cloneJsonValue(item);
+}
+
+function normalizeResponsesInputForContinuation(input: unknown): unknown[] {
+  if (Array.isArray(input)) {
+    return input.map(normalizeResponsesInputItemForContinuation);
+  }
+  if (input === undefined || input === null) {
+    return [];
+  }
+  return [normalizeResponsesInputItemForContinuation(input)];
+}
+
+function buildContinuationMarkerItem(): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    phase: "commentary",
+    content: [
+      {
+        type: "output_text",
+        text: CONTINUATION_MARKER_TEXT,
+      },
+    ],
+  };
+}
+
+function buildContinuationRecoveryRequestBody(
+  baseRequestJson: unknown,
+  continuationReasoningItems: ProxyContinuationReasoningItem[],
+): { requestJson: Record<string, unknown>; requestBody: Buffer } {
+  const base = cloneJsonValue(jsonObjectField(baseRequestJson) ?? {}) as Record<string, unknown>;
+  base.stream = true;
+  base.include = mergeContinuationInclude(base.include);
+  base.input = [
+    ...normalizeResponsesInputForContinuation(base.input),
+    ...continuationReasoningItems.map(cloneJsonValue),
+    buildContinuationMarkerItem(),
+  ];
+  return {
+    requestJson: base,
+    requestBody: Buffer.from(JSON.stringify(base), "utf8"),
+  };
+}
+
+function stripEncryptedContent(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripEncryptedContent);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const stripped: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key !== "encrypted_content") {
+      stripped[key] = stripEncryptedContent(entry);
+    }
+  }
+  return stripped;
+}
+
+function stripEncryptedContentFromJsonBuffer(buffer: Buffer): Buffer {
+  if (!buffer.toString("utf8").includes("encrypted_content")) {
+    return buffer;
+  }
+  try {
+    return Buffer.from(JSON.stringify(stripEncryptedContent(JSON.parse(buffer.toString("utf8")))), "utf8");
+  } catch {
+    return buffer;
+  }
+}
+
+function stripEncryptedContentFromSseBody(buffer: Buffer): Buffer {
+  const text = buffer.toString("utf8");
+  if (!text.includes("encrypted_content")) {
+    return buffer;
+  }
+  const transformed = text.split(/\r?\n\r?\n/).map((block) => {
+    if (!block) {
+      return block;
+    }
+    const lines = block.split(/\r?\n/);
+    const dataLines = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""));
+    if (dataLines.length === 0) {
+      return block;
+    }
+    const payloadText = dataLines.join("\n").trim();
+    if (!payloadText || payloadText === "[DONE]") {
+      return block;
+    }
+    try {
+      return [
+        ...lines.filter((line) => !line.startsWith("data:")),
+        `data: ${JSON.stringify(stripEncryptedContent(JSON.parse(payloadText)))}`,
+      ].join("\n");
+    } catch {
+      return block;
+    }
+  }).join("\n\n");
+  return Buffer.from(transformed, "utf8");
+}
+
 function responseHeadersToObject(headers: Headers): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of headers.entries()) {
@@ -1275,9 +1523,56 @@ function extractRequestModel(body: Buffer, endpointClass: ProxyEndpointClass | n
     return null;
   }
   const parsed = parseJsonBody(body);
+  return extractRequestModelFromJson(parsed, endpointClass);
+}
+
+function extractRequestModelFromJson(parsed: unknown, endpointClass: ProxyEndpointClass | null): string | null {
   return parsed && typeof parsed === "object" && !Array.isArray(parsed)
     ? jsonStringAt(parsed, ["model"])
     : null;
+}
+
+function detectProxyRequestKind(headers: IncomingMessage["headers"], requestJson: unknown): ProxyRequestKind {
+  const headerSignals = [
+    headerSignal(headers, "x-codex-request-kind"),
+    headerSignal(headers, "x-codex-purpose"),
+    headerSignal(headers, "x-codex-turn-metadata"),
+  ].join(" ");
+  if (includesContextCompactionMarker(headerSignals)) {
+    return REQUEST_KIND_CONTEXT_COMPACTION;
+  }
+  const raw = requestJson && typeof requestJson === "object" && !Array.isArray(requestJson)
+    ? requestJson as Record<string, unknown>
+    : {};
+  const metadataSignals = [
+    raw.metadata,
+    raw.codex_request_kind,
+    raw.request_kind,
+    raw.purpose,
+  ].map(stringifyRequestKindSignal).join(" ");
+  return includesContextCompactionMarker(metadataSignals)
+    ? REQUEST_KIND_CONTEXT_COMPACTION
+    : REQUEST_KIND_NORMAL;
+}
+
+function headerSignal(headers: IncomingMessage["headers"], key: string): string {
+  const value = headers[key.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value.join(" ");
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function stringifyRequestKindSignal(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return typeof value === "object" ? JSON.stringify(value) : `${value}`;
+}
+
+function includesContextCompactionMarker(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 && CONTEXT_COMPACTION_MARKERS.some((marker) => normalized.includes(marker));
 }
 
 function extractUpstreamModelFromJson(payload: unknown, endpointClass: ProxyEndpointClass | null): ProxyModelExtraction {
@@ -1392,6 +1687,7 @@ type ProxyOutcome = {
   response: Response;
   upstream: string | null;
   attempts: number;
+  attemptRecords: ProxyAttemptRecord[];
   upstreamModel: string | null;
   upstreamModelSource: string | null;
   reasoningTokens: number | null;
@@ -1412,12 +1708,14 @@ type ProxyForwardCallbacks = {
 
 type ProxyAttemptState = {
   attempts: number;
+  attemptRecords: ProxyAttemptRecord[];
 };
 
 type ProxyPayloadInspection = {
   upstreamModel: ProxyModelExtraction;
   reasoning: ProxyReasoningMetadata;
   guardReasoningTokens: number | null;
+  continuationReasoningItems: ProxyContinuationReasoningItem[];
 };
 
 class ProxyResponseWriteError extends Error {
@@ -1511,13 +1809,25 @@ async function proxyThroughActiveUpstreamWithStats(
   upstream: ProxyUpstream,
   body: Buffer,
   endpointClass: ProxyEndpointClass | null,
+  requestKind: ProxyRequestKind,
+  requestJson: unknown,
+  attemptRecords: ProxyAttemptRecord[],
   callbacks: ProxyForwardCallbacks = {},
 ): Promise<ProxyOutcome> {
-  const attemptState: ProxyAttemptState = { attempts: 0 };
+  const preparedRequest = prepareContinuationRecoveryRequestBody({
+    endpointClass,
+    requestKind,
+    requestJson,
+    requestBody: body,
+  });
+  const attemptState: ProxyAttemptState = { attempts: 0, attemptRecords };
   let guardRetries = 0;
+  let currentBody = preparedRequest.requestBody;
+  let currentRequestJson = preparedRequest.requestJson;
+  const stripAutoEncryptedReasoning = preparedRequest.autoAddedEncryptedReasoning;
 
   while (true) {
-    const response = await fetchUpstreamWithTransportRetry(request, upstream, body, attemptState, callbacks);
+    const response = await fetchUpstreamWithTransportRetry(request, upstream, currentBody, attemptState, callbacks);
     if (!(response instanceof Response)) {
       return response;
     }
@@ -1528,6 +1838,7 @@ async function proxyThroughActiveUpstreamWithStats(
     const responseContentType = `${response.headers.get("content-type") || ""}`;
     const buffer = await readProxyResponseBody(response, responseContentType, endpointClass, callbacks);
     const inspection = inspectProxyPayload(buffer, responseContentType, endpointClass);
+    updateProxyAttemptInspection(attemptState, inspection);
     const upstreamModel = inspection.upstreamModel;
     if (upstreamModel.model) {
       await callbacks.onUpstreamModel?.(upstreamModel);
@@ -1537,6 +1848,10 @@ async function proxyThroughActiveUpstreamWithStats(
     if (isUpstreamCapacityError(status, buffer)) {
       if (guardRetries < GUARD_RETRY_ATTEMPTS) {
         guardRetries += 1;
+        completeProxyAttemptRecord(attemptState, "upstream_capacity_internal_retry", {
+          failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
+          remainingRetries: Math.max(0, GUARD_RETRY_ATTEMPTS - guardRetries),
+        });
         await callbacks.onGuardAction?.(createProxyGuardAction({
           action: "internal_retry",
           upstream: upstream.name,
@@ -1548,10 +1863,14 @@ async function proxyThroughActiveUpstreamWithStats(
         continue;
       }
 
+      completeProxyAttemptRecord(attemptState, "passed", {
+        failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
+      });
       return {
-        response: createBufferedResponse(buffer, status, headers),
+        response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
         upstream: upstream.name,
         attempts: attemptState.attempts,
+        attemptRecords: attemptState.attemptRecords,
         upstreamModel: upstreamModel.model,
         upstreamModelSource: upstreamModel.source,
         reasoningTokens: inspection.reasoning.reasoningTokens,
@@ -1563,8 +1882,37 @@ async function proxyThroughActiveUpstreamWithStats(
     }
 
     if (inspection.guardReasoningTokens !== null) {
+      const canContinuationRecover = isStreamContentType(responseContentType)
+        && endpointClass === "responses"
+        && requestKind !== REQUEST_KIND_CONTEXT_COMPACTION
+        && inspection.continuationReasoningItems.length > 0
+        && guardRetries < GUARD_RETRY_ATTEMPTS;
+      if (canContinuationRecover) {
+        guardRetries += 1;
+        completeProxyAttemptRecord(attemptState, "continuation_recovery", {
+          remainingRetries: Math.max(0, GUARD_RETRY_ATTEMPTS - guardRetries),
+        });
+        await callbacks.onGuardAction?.(createProxyGuardAction({
+          action: "continuation_recovery",
+          upstream: upstream.name,
+          attempt: attemptState.attempts,
+          status,
+          reasoningTokens: inspection.guardReasoningTokens,
+          error: null,
+        }));
+        const continuationRequest = buildContinuationRecoveryRequestBody(
+          currentRequestJson,
+          inspection.continuationReasoningItems,
+        );
+        currentBody = continuationRequest.requestBody;
+        currentRequestJson = continuationRequest.requestJson;
+        continue;
+      }
       if (guardRetries < GUARD_RETRY_ATTEMPTS) {
         guardRetries += 1;
+        completeProxyAttemptRecord(attemptState, "internal_retry", {
+          remainingRetries: Math.max(0, GUARD_RETRY_ATTEMPTS - guardRetries),
+        });
         await callbacks.onGuardAction?.(createProxyGuardAction({
           action: "internal_retry",
           upstream: upstream.name,
@@ -1577,6 +1925,10 @@ async function proxyThroughActiveUpstreamWithStats(
       }
 
       const error = `reasoning_guard_triggered reasoning_tokens=${inspection.guardReasoningTokens}`;
+      completeProxyAttemptRecord(attemptState, "blocked", {
+        failureSummary: proxyFailureSummary("codex_proxy", "reasoning_guard_triggered", error),
+        remainingRetries: 0,
+      });
       await callbacks.onGuardAction?.(createProxyGuardAction({
         action: "return_status_502",
         upstream: upstream.name,
@@ -1589,6 +1941,7 @@ async function proxyThroughActiveUpstreamWithStats(
         response: createReasoningGuardResponse(upstream, inspection.guardReasoningTokens),
         upstream: upstream.name,
         attempts: attemptState.attempts,
+        attemptRecords: attemptState.attemptRecords,
         upstreamModel: upstreamModel.model,
         upstreamModelSource: upstreamModel.source,
         reasoningTokens: inspection.guardReasoningTokens,
@@ -1599,10 +1952,12 @@ async function proxyThroughActiveUpstreamWithStats(
       };
     }
 
+    completeProxyAttemptRecord(attemptState, "passed");
     return {
-      response: createBufferedResponse(buffer, status, headers),
+      response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
       upstream: upstream.name,
       attempts: attemptState.attempts,
+      attemptRecords: attemptState.attemptRecords,
       upstreamModel: upstreamModel.model,
       upstreamModelSource: upstreamModel.source,
       reasoningTokens: inspection.reasoning.reasoningTokens,
@@ -1693,9 +2048,12 @@ async function fetchUpstreamWithTransportRetry(
       throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
     }
     attemptState.attempts += 1;
+    attemptState.attemptRecords.push(createProxyAttemptRecord(attemptState.attempts, upstream.name));
     await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
     try {
-      return await forwardRequest(request, upstream, body, callbacks.signal);
+      const response = await forwardRequest(request, upstream, body, callbacks.signal);
+      markProxyAttemptHeaders(attemptState, response.status);
+      return response;
     } catch (error) {
       if (isClientAbortError(error, callbacks.signal)) {
         throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
@@ -1703,6 +2061,7 @@ async function fetchUpstreamWithTransportRetry(
       const fetchFailed = isFetchFailedError(error);
       const message = error instanceof Error ? error.message : String(error);
       const code = fetchFailed ? "upstream_fetch_failed" : "upstream_error";
+      const failureSummary = proxyFailureSummaryFromError(code, error);
       await callbacks.onGuardAction?.(createProxyGuardAction({
         action: "upstream_error",
         upstream: upstream.name,
@@ -1713,12 +2072,21 @@ async function fetchUpstreamWithTransportRetry(
       }));
       if (fetchFailed && fetchFailedRetries < FETCH_FAILED_TRANSPORT_RETRIES) {
         fetchFailedRetries += 1;
+        completeProxyAttemptRecord(attemptState, "transport_retry", {
+          failureSummary,
+          remainingRetries: Math.max(0, FETCH_FAILED_TRANSPORT_RETRIES - fetchFailedRetries),
+        });
         continue;
       }
+      completeProxyAttemptRecord(attemptState, code, {
+        failureSummary,
+        remainingRetries: 0,
+      });
       return {
         response: createUpstreamErrorResponse(message, code),
         upstream: upstream.name,
         attempts: attemptState.attempts,
+        attemptRecords: attemptState.attemptRecords,
         upstreamModel: null,
         upstreamModelSource: null,
         reasoningTokens: null,
@@ -1757,6 +2125,7 @@ function inspectProxyPayload(
     upstreamModel: { model: null, source: null },
     reasoning: createEmptyReasoningMetadata(),
     guardReasoningTokens: null,
+    continuationReasoningItems: [],
   };
 }
 
@@ -1768,12 +2137,14 @@ function inspectJsonPayload(buffer: Buffer, endpointClass: ProxyEndpointClass | 
       upstreamModel: extractUpstreamModelFromJson(parsed, endpointClass),
       reasoning,
       guardReasoningTokens: reasoning.reasoningTokens !== null && REASONING_EQUALS.includes(reasoning.reasoningTokens) ? reasoning.reasoningTokens : null,
+      continuationReasoningItems: [],
     };
   } catch {
     return {
       upstreamModel: { model: null, source: null },
       reasoning: createEmptyReasoningMetadata(),
       guardReasoningTokens: null,
+      continuationReasoningItems: [],
     };
   }
 }
@@ -1782,6 +2153,7 @@ function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | n
   let upstreamModel: ProxyModelExtraction = { model: null, source: null };
   let reasoning = createEmptyReasoningMetadata();
   let guardReasoningTokens: number | null = null;
+  const continuationReasoningItems: ProxyContinuationReasoningItem[] = [];
 
   for (const event of splitSseEvents(buffer.toString("utf8"))) {
     const data = sseEventData(event);
@@ -1795,6 +2167,7 @@ function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | n
       }
       const eventReasoning = parseReasoningMetadata(parsed, "sse.data");
       reasoning = mergeReasoningMetadata(reasoning, eventReasoning);
+      continuationReasoningItems.push(...collectContinuationReasoningItems(parsed));
       if (eventReasoning.reasoningTokens !== null) {
         if (REASONING_EQUALS.includes(eventReasoning.reasoningTokens)) {
           guardReasoningTokens = eventReasoning.reasoningTokens;
@@ -1805,7 +2178,7 @@ function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | n
     }
   }
 
-  return { upstreamModel, reasoning, guardReasoningTokens };
+  return { upstreamModel, reasoning, guardReasoningTokens, continuationReasoningItems };
 }
 
 function splitSseEvents(value: string): string[] {
@@ -1832,6 +2205,96 @@ function sseEventData(event: string): string {
     .map((line) => line.slice(5).replace(/^ /, ""))
     .join("\n")
     .trim();
+}
+
+function createProxyAttemptRecord(attempt: number, upstream: string | null): ProxyAttemptRecord {
+  return {
+    attempt,
+    started_at: new Date().toISOString(),
+    headers_at: null,
+    completed_at: null,
+    duration_ms: null,
+    upstream,
+    upstream_status: null,
+    upstream_model: null,
+    upstream_model_source: null,
+    reasoning_tokens: null,
+    reasoning_tokens_source: null,
+    reasoning_text_observed: false,
+    reasoning_text_source: null,
+    final_action: "pending",
+    failure_summary: null,
+    remaining_retries: null,
+  };
+}
+
+function currentProxyAttemptRecord(attemptState: ProxyAttemptState): ProxyAttemptRecord | null {
+  return attemptState.attemptRecords.at(-1) ?? null;
+}
+
+function markProxyAttemptHeaders(attemptState: ProxyAttemptState, status: number): void {
+  const attempt = currentProxyAttemptRecord(attemptState);
+  if (!attempt) {
+    return;
+  }
+  attempt.headers_at = new Date().toISOString();
+  attempt.upstream_status = status;
+}
+
+function updateProxyAttemptInspection(attemptState: ProxyAttemptState, inspection: ProxyPayloadInspection): void {
+  const attempt = currentProxyAttemptRecord(attemptState);
+  if (!attempt) {
+    return;
+  }
+  attempt.upstream_model = inspection.upstreamModel.model;
+  attempt.upstream_model_source = inspection.upstreamModel.source;
+  attempt.reasoning_tokens = inspection.reasoning.reasoningTokens;
+  attempt.reasoning_tokens_source = inspection.reasoning.reasoningTokensSource;
+  attempt.reasoning_text_observed = inspection.reasoning.reasoningTextObserved;
+  attempt.reasoning_text_source = inspection.reasoning.reasoningTextSource;
+}
+
+function completeProxyAttemptRecord(
+  attemptState: ProxyAttemptState,
+  finalAction: string,
+  input: {
+    failureSummary?: ProxyFailureSummary | null;
+    remainingRetries?: number | null;
+  } = {},
+): void {
+  const attempt = currentProxyAttemptRecord(attemptState);
+  if (!attempt || attempt.final_action !== "pending") {
+    return;
+  }
+  const completedAt = new Date();
+  attempt.completed_at = completedAt.toISOString();
+  const startedAtMs = Date.parse(attempt.started_at);
+  attempt.duration_ms = Number.isFinite(startedAtMs)
+    ? Math.max(0, completedAt.getTime() - startedAtMs)
+    : null;
+  attempt.final_action = finalAction;
+  attempt.failure_summary = input.failureSummary ?? attempt.failure_summary;
+  attempt.remaining_retries = input.remainingRetries ?? attempt.remaining_retries;
+}
+
+function completeLastPendingProxyAttemptRecord(
+  attemptRecords: ProxyAttemptRecord[],
+  finalAction: string,
+  input: {
+    failureSummary?: ProxyFailureSummary | null;
+    remainingRetries?: number | null;
+  } = {},
+): void {
+  completeProxyAttemptRecord({ attempts: attemptRecords.length, attemptRecords }, finalAction, input);
+}
+
+function proxyFailureSummary(type: string | null, code: string | null, message: string | null): ProxyFailureSummary {
+  return { type, code, message };
+}
+
+function proxyFailureSummaryFromError(code: string, error: unknown): ProxyFailureSummary {
+  const message = error instanceof Error ? error.message : String(error);
+  return proxyFailureSummary("upstream_error", code, message);
 }
 
 function createProxyGuardAction(input: {
@@ -1882,8 +2345,26 @@ function createUpstreamErrorResponse(message: string, code: string): Response {
   );
 }
 
-function createBufferedResponse(buffer: Buffer, status: number, headers: Record<string, string>): Response {
-  return new Response(responseStatusAllowsBody(status) ? buffer : null, { status, headers });
+function createBufferedResponse(
+  buffer: Buffer,
+  status: number,
+  headers: Record<string, string>,
+  contentType = "",
+  stripAutoEncryptedReasoning = false,
+): Response {
+  const responseHeaders = { ...headers };
+  let responseBuffer = buffer;
+  if (stripAutoEncryptedReasoning) {
+    if (isStreamContentType(contentType)) {
+      responseBuffer = stripEncryptedContentFromSseBody(buffer);
+    } else if (isJsonContentType(contentType)) {
+      responseBuffer = stripEncryptedContentFromJsonBuffer(buffer);
+    }
+    if (responseBuffer !== buffer) {
+      delete responseHeaders["content-length"];
+    }
+  }
+  return new Response(responseStatusAllowsBody(status) ? responseBuffer : null, { status, headers: responseHeaders });
 }
 
 function responseStatusAllowsBody(status: number): boolean {
@@ -2481,6 +2962,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           request_bytes: 0,
           response_bytes: 0,
           session: null,
+          request_kind: REQUEST_KIND_NORMAL,
           request_model: null,
           upstream_model: null,
           upstream_model_source: null,
@@ -2504,16 +2986,27 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         let reasoningTextObserved = false;
         let reasoningTextSource: string | null = null;
         let errorText: string | null = null;
+        const attemptRecords: ProxyAttemptRecord[] = [];
         const endpointClass = route.endpointClass;
         try {
           const profiles = await readProfiles();
           const upstreamProfile = resolveProxyUpstream(profiles);
           const body = await readBody(req);
+          const requestJson = parseJsonBody(body);
           activeRecord.request_bytes = body.length;
           activeRecord.session = extractSessionShortId(body);
-          activeRecord.request_model = extractRequestModel(body, endpointClass);
+          activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
+          activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-          const outcome = await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, {
+          const outcome = await proxyThroughActiveUpstreamWithStats(
+            req,
+            upstreamProfile,
+            body,
+            endpointClass,
+            activeRecord.request_kind,
+            requestJson,
+            attemptRecords,
+            {
             signal: downstreamAbort.signal,
             onAttempt: async (attemptCount, upstreamName) => {
               activeRecord.upstream = upstreamName;
@@ -2600,17 +3093,28 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
           upstreamModel = streamModelObserver.model;
           upstreamModelSource = streamModelObserver.source;
-        } catch (error) {
-          if (error instanceof ProxyResponseWriteError) {
-            status = error.status;
-            responseBytes = error.responseBytes;
-            errorText = error.message;
+	        } catch (error) {
+	          if (error instanceof ProxyResponseWriteError) {
+	            status = error.status;
+	            responseBytes = error.responseBytes;
+	            errorText = error.message;
           } else {
-            status = status ?? 500;
-            errorText = error instanceof Error ? error.message : String(error);
-          }
-          upstream = activeRecord.upstream;
-          attempts = activeRecord.attempts;
+	            status = status ?? 500;
+	            errorText = error instanceof Error ? error.message : String(error);
+	          }
+	          completeLastPendingProxyAttemptRecord(
+	            attemptRecords,
+	            status === 499 ? "client_aborted" : "gateway_error",
+	            {
+	              failureSummary: proxyFailureSummary(
+	                status === 499 ? "client_error" : "gateway_error",
+	                status === 499 ? "client_aborted" : "gateway_error",
+	                errorText,
+	              ),
+	            },
+	          );
+	          upstream = activeRecord.upstream;
+	          attempts = activeRecord.attempts;
           if (!res.headersSent && status !== 499) {
             const payload = JSON.stringify({ error: { message: errorText } });
             responseBytes = Buffer.byteLength(payload);
@@ -2647,6 +3151,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           reasoning_text_observed: reasoningTextObserved,
           reasoning_text_source: reasoningTextSource,
           error: errorText,
+          attempt_records: attemptRecords,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

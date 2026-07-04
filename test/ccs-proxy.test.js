@@ -1640,6 +1640,304 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
   }
 });
 
+test("proxy recovers guarded Responses streams with continuation", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const requestBodies = [];
+  let hits = 0;
+  const upstream = createServer((req, res) => {
+    void (async () => {
+      requestBodies.push(JSON.parse(await readServerRequestBody(req)));
+      hits += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (hits === 1) {
+        res.end(`data: ${JSON.stringify({
+          type: "response.output_item.done",
+          item: { type: "reasoning", encrypted_content: "encrypted-one" },
+          response: { model: "stream-guarded" },
+          usage: { output_tokens_details: { reasoning_tokens: 1552 } },
+        })}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+      res.end(`data: ${JSON.stringify({
+        response: { model: "stream-ok" },
+        output: [{ type: "reasoning", encrypted_content: "encrypted-final" }],
+        usage: { output_tokens_details: { reasoning_tokens: 42 } },
+      })}\n\ndata: [DONE]\n\n`);
+    })().catch((error) => {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=continuation-success`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "stream-continuation", stream: true, input: "hello" }),
+    });
+    assert.equal(response.status, 200);
+    const responseText = await response.text();
+    assert.doesNotMatch(responseText, /encrypted_content|encrypted-final/);
+    assert.match(responseText, /"reasoning"/);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "stream-continuation",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 2);
+    assert.equal(requestBodies[0].include.includes("reasoning.encrypted_content"), true);
+    assert.equal(requestBodies[1].include.includes("reasoning.encrypted_content"), true);
+    assert.equal(requestBodies[1].input[0].content, "hello");
+    assert.equal(requestBodies[1].input[1].encrypted_content, "encrypted-one");
+    assert.equal(requestBodies[1].input.at(-1).content[0].text, "Continue thinking...");
+    assert.equal(record.request_kind, "normal");
+    assert.equal(record.attempts, 2);
+    assert.equal(record.reasoning_tokens, 42);
+    assert.deepEqual(record.guard_actions.map((action) => action.action), ["continuation_recovery"]);
+    assert.equal(Object.hasOwn(record, "attempt_records"), false);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const fullRecord = jsonl.at(-1);
+    assert.equal(fullRecord.request_kind, "normal");
+    assert.equal(fullRecord.attempt_records.length, 2);
+    assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), ["continuation_recovery", "passed"]);
+    assert.equal(fullRecord.attempt_records[0].reasoning_tokens, 1552);
+    assert.equal(fullRecord.attempt_records[1].reasoning_tokens, 42);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy exhausts Responses continuation recovery before guard response", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let hits = 0;
+  const upstream = createServer((_req, res) => {
+    hits += 1;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(`data: ${JSON.stringify({
+      type: "response.output_item.done",
+      item: { type: "reasoning", encrypted_content: `encrypted-${hits}` },
+      response: { model: "stream-exhausted" },
+      usage: { output_tokens_details: { reasoning_tokens: 1552 } },
+    })}\n\ndata: [DONE]\n\n`);
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=continuation-exhausted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "stream-continuation-exhausted", stream: true, input: "hello" }),
+    });
+    assert.equal(response.status, 502);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "reasoning_guard_triggered");
+    assert.equal(payload.error.reasoning_tokens, 1552);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "stream-continuation-exhausted",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 4);
+    assert.equal(record.attempts, 4);
+    assert.deepEqual(record.guard_actions.map((action) => action.action), [
+      "continuation_recovery",
+      "continuation_recovery",
+      "continuation_recovery",
+      "return_status_502",
+    ]);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const fullRecord = jsonl.at(-1);
+    assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), [
+      "continuation_recovery",
+      "continuation_recovery",
+      "continuation_recovery",
+      "blocked",
+    ]);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy excludes context compaction from Responses continuation recovery", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const requestBodies = [];
+  let hits = 0;
+  const upstream = createServer((req, res) => {
+    void (async () => {
+      requestBodies.push(JSON.parse(await readServerRequestBody(req)));
+      hits += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "reasoning", encrypted_content: `encrypted-${hits}` },
+        response: { model: "stream-compaction" },
+        usage: { output_tokens_details: { reasoning_tokens: 1552 } },
+      })}\n\ndata: [DONE]\n\n`);
+    })().catch((error) => {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=context-compaction`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "stream-context-compaction",
+        stream: true,
+        input: "compact",
+        metadata: { purpose: "remote_compaction" },
+      }),
+    });
+    assert.equal(response.status, 502);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "stream-context-compaction",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 4);
+    assert.equal(requestBodies.every((body) => body.include === undefined), true);
+    assert.equal(record.request_kind, "context_compaction");
+    assert.deepEqual(record.guard_actions.map((action) => action.action), [
+      "internal_retry",
+      "internal_retry",
+      "internal_retry",
+      "return_status_502",
+    ]);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const fullRecord = jsonl.at(-1);
+    assert.equal(fullRecord.request_kind, "context_compaction");
+    assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), [
+      "internal_retry",
+      "internal_retry",
+      "internal_retry",
+      "blocked",
+    ]);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy records client abort while buffering SSE before response headers", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -3123,6 +3421,14 @@ async function readTextOrEmpty(filePath) {
   }
 }
 
+async function readServerRequestBody(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
   await writeProxyTestStateWithProfiles(
     home,
@@ -3353,6 +3659,7 @@ function proxyHistoryRecord(overrides) {
     request_bytes: 0,
     response_bytes: 0,
     session: "019f0df6",
+    request_kind: "normal",
     request_model: null,
     upstream_model: null,
     upstream_model_source: null,
