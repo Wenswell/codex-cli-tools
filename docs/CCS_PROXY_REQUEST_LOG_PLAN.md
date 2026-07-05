@@ -6,7 +6,9 @@ Upgrade `ccs proxy` request history from compact operational records to complete
 
 ## Status
 
-This document is a future schema plan. Current runtime records remain compact operational records; bounded request history, event logging, runtime logging, and status rendering are implemented in the current CLI. The target schema below is not the current request-record contract.
+Confirmed implementation plan. Current runtime records remain compact operational records; bounded request history, event logging, runtime logging, and status rendering are implemented in the current CLI. This plan defines the next request-record contract.
+
+Implementation starts with documentation and tests, then updates the runtime schema. The command surface stays unchanged.
 
 The plan keeps one source of truth for completed model API requests:
 
@@ -16,12 +18,17 @@ The plan keeps one source of truth for completed model API requests:
 
 ## Decisions
 
+- Use one current schema for completed proxy request records.
+- Preserve observable facts from the proxy boundary. Hidden client state belongs to a separate design.
 - Store request headers through an explicit whitelist and redact secret-bearing values.
 - Store complete request samples only in bounded `proxy-requests.jsonl`.
 - Keep `proxy.json.metrics.recent_requests` as the lightweight live status view.
 - Use `final_action` only for the final client-visible result.
 - Store retry process details in `retry_summary`, `attempt_records`, and existing `guard_actions`.
-- Store request body hash and size. Do not store request body text or prompt excerpts.
+- Store request body hash and size. Prompt text and response text stay absent from records.
+- Store upstream self-reported metadata when it appears in JSON or SSE payloads.
+- Store response-shape booleans as normalized facts for anomaly analysis.
+- Defer local Codex config model fields to a separate design because proxy request handling currently observes request bodies, active profile, and upstream responses.
 
 ## Scope
 
@@ -34,6 +41,8 @@ Included:
 - Timing facts for upstream wait and streaming.
 - Request body hash and sanitized header summary.
 - Token usage facts when upstream returns explicit usage fields.
+- Upstream self-reported model, fingerprint, and service-tier facts.
+- Response structure facts for accepted, retried, and blocked responses.
 - Documentation and tests for the new request record schema.
 
 Excluded:
@@ -44,6 +53,7 @@ Excluded:
 - Active probes.
 - Experimental intercept rules such as `final_answer_only_high_xhigh`.
 - Request body excerpt storage unless explicitly approved.
+- Local Codex config model inference such as `local_config_model` and `effective_local_model`.
 
 ## Current State
 
@@ -85,14 +95,25 @@ Add these request record fields:
 | `client_status` | `number \| null` | Status returned to the local Codex client. |
 | `failure_summary` | `object \| null` | Structured failure details. |
 | `request_kind` | `string` | Request classification: `normal` or `context_compaction`. |
+| `request_reasoning_effort` | `string \| null` | Reasoning effort requested in the incoming JSON body when present. |
 | `request_body_sha256` | `string \| null` | SHA-256 of the incoming request body. |
 | `request_headers` | `object \| null` | Whitelisted and sanitized request headers. JSONL only. |
+| `stream_model` | `string \| null` | Upstream model observed from SSE payloads when present. |
+| `final_response_model` | `string \| null` | Upstream model on the accepted or final response payload. |
+| `system_fingerprint` | `string \| null` | Upstream self-reported system fingerprint when present. |
+| `service_tier` | `string \| null` | Upstream self-reported service tier when present. |
 | `upstream_wait_ms` | `number \| null` | Time from upstream fetch start to upstream headers. |
 | `time_to_first_chunk_ms` | `number \| null` | Streaming time from upstream fetch start to first chunk. |
 | `stream_duration_ms` | `number \| null` | Streaming time from first chunk to final chunk. |
 | `input_tokens` | `number \| null` | Explicit upstream input token count. |
+| `reasoning_tokens` | `number \| null` | Explicit upstream reasoning token count. Existing field retained. |
 | `output_tokens` | `number \| null` | Explicit upstream output token count. |
 | `total_tokens` | `number \| null` | Explicit upstream total token count. |
+| `has_commentary` | `boolean` | Upstream payload contains commentary-phase output. |
+| `has_final_answer` | `boolean` | Upstream payload contains final-answer output. |
+| `final_answer_only` | `boolean` | Upstream payload contains only final-answer output. |
+| `has_tool_call` | `boolean` | Upstream payload contains tool-call output. |
+| `has_reasoning_item` | `boolean` | Upstream payload contains a reasoning item. |
 | `retry_summary` | `object` | Retry counters by retry reason. |
 | `attempt_records` | `array` | Ordered upstream attempt facts. JSONL only. |
 
@@ -117,6 +138,9 @@ Keep existing fields that serve terminal display:
 - request body hash
 - whitelisted request headers
 - usage token fields
+- upstream self-reported metadata fields
+- response shape fields
+- timing fields
 - retry summary
 - attempt records
 
@@ -130,6 +154,8 @@ Keep existing fields that serve terminal display:
 - `client_status`
 - `failure_summary`
 - `request_body_sha256`
+- upstream self-reported metadata fields
+- response shape fields
 - timing fields
 - usage token fields
 - `retry_summary`
@@ -195,6 +221,52 @@ Extraction rules:
 - Keep `message` concise.
 - Keep the full request record in bounded `proxy-requests.jsonl`; terminal display still uses `error`.
 
+## Upstream Metadata
+
+Record self-reported upstream metadata from JSON responses and SSE `data:` JSON payloads:
+
+- `upstream_model`: current display model field, kept for status rendering.
+- `stream_model`: first model observed from SSE stream payloads.
+- `final_response_model`: model on the accepted or final response payload.
+- `system_fingerprint`: string from `system_fingerprint`.
+- `service_tier`: string from `service_tier`.
+
+For Responses payloads, model extraction keeps the existing priority: `response.model`, then top-level `model`. For chat completion payloads, model extraction reads top-level `model`.
+
+## Usage Tokens
+
+Store explicit non-negative integer token fields only:
+
+- `input_tokens`
+- `reasoning_tokens`
+- `output_tokens`
+- `total_tokens`
+
+Supported source shapes include OpenAI-compatible `usage` fields for Responses and chat completions:
+
+- `usage.input_tokens`
+- `usage.prompt_tokens`
+- `usage.output_tokens`
+- `usage.completion_tokens`
+- `usage.total_tokens`
+- `usage.output_tokens_details.reasoning_tokens`
+- `usage.completion_tokens_details.reasoning_tokens`
+- the same fields under `response.usage`
+
+Status reasoning counters continue to use explicit `reasoning_tokens` events only.
+
+## Response Shape
+
+Store response shape booleans for accepted, retried, and blocked attempts:
+
+- `has_commentary`
+- `has_final_answer`
+- `final_answer_only`
+- `has_tool_call`
+- `has_reasoning_item`
+
+Shape extraction reads structured output items, chat messages, tool call arrays, and Responses event payloads. It stores booleans only. Response text and prompt text stay absent from logs.
+
 ## attempt_records
 
 Use one entry per upstream fetch attempt:
@@ -206,10 +278,23 @@ Use one entry per upstream fetch attempt:
   "started_at": "2026-07-03T00:00:00.000Z",
   "headers_at": "2026-07-03T00:00:00.120Z",
   "upstream_status": 429,
+  "upstream_wait_ms": 120,
+  "time_to_first_chunk_ms": null,
+  "stream_duration_ms": null,
+  "input_tokens": null,
   "reasoning_tokens": null,
+  "output_tokens": null,
+  "total_tokens": null,
   "reasoning_tokens_source": null,
   "reasoning_text_observed": false,
   "upstream_model": null,
+  "system_fingerprint": null,
+  "service_tier": null,
+  "has_commentary": false,
+  "has_final_answer": false,
+  "final_answer_only": false,
+  "has_tool_call": false,
+  "has_reasoning_item": false,
   "guard_action": "internal_retry",
   "failure_summary": {
     "type": "upstream_error",
@@ -222,6 +307,8 @@ Use one entry per upstream fetch attempt:
 `guard_actions` stays as the compact display/event list. `attempt_records` stores complete attempt facts for analysis.
 
 Attempt `final_action` values include `passed`, `internal_retry`, `continuation_recovery`, `upstream_capacity_internal_retry`, `transport_retry`, `blocked`, `upstream_fetch_failed`, `upstream_error`, `client_aborted`, and `gateway_error`.
+
+Attempt records store the same upstream metadata, usage token, response shape, and timing fields as the request record when those facts are observed during that attempt.
 
 ## Header Sanitization
 
@@ -280,19 +367,30 @@ These fields help distinguish:
 
 ## Implementation Plan
 
-1. Update request record types and normalization.
+1. Update docs for the confirmed schema.
+   - Mark this plan as active.
+   - Update `CCS_PROXY_SPEC.md`.
+   - Update `README.md`.
+
+2. Add tests for the v2 record contract.
+   - Request record fixture fields.
+   - Attempt record fixture fields.
+   - Compact state record excludes JSONL-only fields.
+   - Prompt and response text stay absent.
+
+3. Update request record types and normalization.
    - Add schema version and new nullable fields.
    - Define complete JSONL records and compact state records.
    - Keep one direct normalizer path for each record shape.
 
-2. Add request summary helpers.
+4. Add request summary helpers.
    - `hashRequestBody(body)`.
    - `sanitizeWhitelistedRequestHeaders(headers)`.
    - `buildFailureSummary(error, upstreamPayload)`.
    - `createAttemptRecord(...)`.
    - `createRetrySummary(...)`.
 
-3. Add lifecycle timestamps.
+5. Add lifecycle timestamps.
    - Request start.
    - Upstream fetch start per attempt.
    - Upstream headers observed.
@@ -300,7 +398,23 @@ These fields help distinguish:
    - Final stream chunk.
    - Completion.
 
-4. Fill `final_action`.
+6. Add upstream metadata extraction.
+   - Model facts.
+   - `system_fingerprint`.
+   - `service_tier`.
+
+7. Add usage token extraction.
+   - Responses usage shape.
+   - Chat completions usage shape.
+   - SSE `data:` usage shape.
+
+8. Add response shape extraction.
+   - Commentary output.
+   - Final-answer output.
+   - Tool calls.
+   - Reasoning items.
+
+9. Fill `final_action`.
    - Accepted response without retry: `passed`.
    - Accepted response after retry: `passed`.
    - Exhausted guard: `blocked`.
@@ -308,29 +422,25 @@ These fields help distinguish:
    - Client abort: `client_aborted`.
    - Local unclassified error: `gateway_error`.
 
-5. Fill `retry_summary`.
+10. Fill `retry_summary`.
    - Increment reasoning guard retry count when a guard match triggers retry.
    - Increment upstream capacity retry count when a capacity response triggers retry.
    - Increment transport retry count when fetch failed is retried.
    - Keep `total` equal to the sum of retry counters.
 
-6. Fill `attempt_records`.
+11. Fill `attempt_records`.
    - Append at attempt start.
    - Update on upstream response status.
    - Update on observed model and reasoning metadata.
+   - Update on observed usage tokens, upstream metadata, response shape, and timing.
    - Update on guard action or transport failure.
    - Persist only in bounded `proxy-requests.jsonl`.
 
-7. Keep display stable.
+12. Keep display stable.
    - Existing status table continues using `status`, `error`, `guard_actions`, model fields, reasoning fields, bytes, and latency.
    - New fields are stored for analysis and JSON inspection.
 
-8. Update docs.
-   - Update `CCS_PROXY_SPEC.md` request record schema.
-   - Update `README.md` proxy section.
-   - Keep this plan with completion notes.
-
-9. Add tests.
+13. Add behavior tests.
    - Accepted upstream response records `final_action=passed`.
    - Capacity retry then success records `final_action=passed` and `retry_summary.upstream_capacity > 0`.
    - Reasoning guard retry then success records `final_action=passed` and `retry_summary.reasoning_guard > 0`.
@@ -340,6 +450,14 @@ These fields help distinguish:
    - Plain upstream `429` passthrough records upstream/client status correctly.
    - Header sanitization redacts secrets and preserves useful headers.
    - Request body hash is stable and prompt text is absent.
+   - Usage token fields parse from JSON and SSE usage payloads.
+   - Response shape booleans parse from Responses and chat completion payloads.
+   - Timing fields are present with numeric values when observable.
+
+14. Build and verify.
+   - `pnpm build`
+   - `pnpm test`
+   - Inspect representative `proxy-requests.jsonl` fixture output through tests.
 
 ## Acceptance Criteria
 
@@ -348,6 +466,10 @@ These fields help distinguish:
 - Each completed record has `schema_version=2`.
 - Each completed record has a non-pending `final_action`.
 - `upstream_status` and `client_status` are explicit.
+- Upstream self-reported `system_fingerprint` and `service_tier` are stored when present.
+- Usage token fields are stored when upstream returns explicit usage values.
+- Response shape booleans are present on completed request records and attempt records.
+- Timing fields are present on completed request records and attempt records.
 - Local failure records have `failure_summary`.
 - Upstream JSON errors are preserved in `failure_summary`.
 - Secret headers are redacted.
@@ -358,8 +480,17 @@ These fields help distinguish:
 - Complete attempt facts are available in JSONL records.
 - Existing status rendering remains compact.
 
+## Confirmation Points
+
+- Blocking confirmation: none.
+- Local config model fields stay out of v2.
+- Raw request or response payload archives stay out of v2.
+- Terminal output remains compact; new fields are stored for JSON inspection.
+
 ## Ready To Start
 
-No confirmation blockers remain.
-
 Implementation should begin with record type/schema changes and tests for the final-action and retry-summary contract.
+
+## Kickoff Record
+
+Confirmed on 2026-07-05 after comparing the reference application evidence fields with current `ccs proxy` behavior.
