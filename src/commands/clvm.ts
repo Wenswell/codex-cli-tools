@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { readTextIfExists, writeTextFile } from "../lib/fs.js";
+import { formatCompactBytes, formatCompactRate, formatDurationMs, formatThreeSignificant } from "../lib/format.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive, type RuntimeRawArchiveOptions, type RuntimeRawReference, type RuntimeRawWriteResult } from "../lib/runtime-log.js";
@@ -1852,18 +1853,7 @@ export function nextAlignedDelay(intervalMs: number, nowMs = Date.now()): number
 }
 
 export function formatDuration(milliseconds: number): string {
-  const value = Math.max(0, Math.round(milliseconds));
-
-  if (value < 1000) {
-    return `${value}ms`;
-  }
-  if (value < 60_000) {
-    return `${formatNumber(value / 1000)}s`;
-  }
-  if (value < 3_600_000) {
-    return `${formatNumber(value / 60_000)}m`;
-  }
-  return `${formatNumber(value / 3_600_000)}h`;
+  return formatDurationMs(milliseconds);
 }
 
 function parseCloseZeroForSeconds(value: string): number | null {
@@ -2013,28 +2003,11 @@ function numberOrZero(value: unknown): number {
   return numberOrNull(value) ?? 0;
 }
 
-function formatNumber(value: number): string {
-  return formatThreeSignificant(value);
-}
-
-function formatThreeSignificant(value: number): string {
-  if (!Number.isFinite(value)) {
-    return "-";
-  }
-  if (value >= 100) {
-    return Math.round(value).toString();
-  }
-  if (value >= 10) {
-    return value.toFixed(1);
-  }
-  return value.toFixed(2);
-}
-
 function formatSeconds(seconds: number): string {
   if (seconds < 60) {
-    return `${formatNumber(seconds)}s`;
+    return `${formatThreeSignificant(seconds)}s`;
   }
-  return `${formatNumber(seconds / 60)}m`;
+  return `${formatThreeSignificant(seconds / 60)}m`;
 }
 
 function printMonitorResult(result: MonitorResult, config: RuntimeConfig, stream: NodeJS.WriteStream = process.stdout): void {
@@ -2220,26 +2193,14 @@ function formatSpeed(bytesPerSecond: number | null): string {
   if (bytesPerSecond === null) {
     return "-";
   }
-  return `${formatByteQuantity(bytesPerSecond)}/s`;
+  return formatCompactRate(bytesPerSecond);
 }
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) {
     return "-";
   }
-  return formatByteQuantity(bytes);
-}
-
-function formatByteQuantity(bytes: number): string {
-  const value = Math.max(0, bytes);
-  const units = ["B", "K", "M", "G", "T"];
-  let scaled = value;
-  let unitIndex = 0;
-  while (scaled >= 1024 && unitIndex < units.length - 1) {
-    scaled /= 1024;
-    unitIndex += 1;
-  }
-  return `${unitIndex === 0 ? Math.round(scaled).toString() : formatThreeSignificant(scaled)}${units[unitIndex]}`;
+  return formatCompactBytes(bytes);
 }
 
 function formatLocalTimestamp(value: string): string {
@@ -2323,7 +2284,7 @@ function zeroForCell(milliseconds: number, style: Style): string {
 }
 
 function speedCell(bytesPerSecond: number | null, style: Style): string {
-  const text = bytesPerSecond === null ? "-" : formatByteQuantity(bytesPerSecond);
+  const text = bytesPerSecond === null ? "-" : formatCompactBytes(bytesPerSecond);
   if (bytesPerSecond === null || bytesPerSecond === 0) {
     return style.dim(text);
   }
