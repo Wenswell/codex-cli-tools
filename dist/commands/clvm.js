@@ -9,7 +9,8 @@ import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive } from "../lib/runtime-log.js";
 import { createLiveViewController } from "../lib/live-view.js";
 import { renderTable } from "../lib/table.js";
-import { bgDarkBlue, maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, } from "../lib/text.js";
+import { createTextStyle } from "../lib/style.js";
+import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, } from "../lib/text.js";
 import { fitCommandsLine as fitTerminalCommandsLine, terminalColumns } from "../lib/terminal.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 const domainFields = [
@@ -560,7 +561,7 @@ function formatTimestamp(date) {
     ].join("");
 }
 function printConfigStatus(runtimeConfig, { includeCommands }) {
-    const style = createStyle(runtimeConfig);
+    const style = createTextStyle(runtimeConfig.color);
     console.log(style.bold("clvm config"));
     printKeyValue("config:", style.blue(formatHomePath(clvmConfigPath())), 12);
     printKeyValue("state:", style.blue(formatHomePath(clvmStatePath())), 12);
@@ -571,7 +572,7 @@ function printConfigStatus(runtimeConfig, { includeCommands }) {
         printCommands(style);
     }
 }
-function printConfigValues(config, style = createStyle(config)) {
+function printConfigValues(config, style = createTextStyle(config.color)) {
     printKeyValue("base URL:", style.cyan(config.baseUrl), 12);
     printKeyValue("secret:", config.secret ? style.green(maskSecret(config.secret)) : style.dim("empty"), 12);
     printKeyValue("domains:", config.domains.length > 0 ? config.domains.join(",") : style.yellow("missing"), 12);
@@ -626,7 +627,7 @@ function redactConfigText(text) {
     });
 }
 async function runStatus(config) {
-    const style = createStyle(config);
+    const style = createTextStyle(config.color);
     if (config.json) {
         if (config.domains.length === 0) {
             throw new Error("domains are required for JSON status; run clvm setup --domain DOMAIN or use --domain DOMAIN");
@@ -1480,7 +1481,7 @@ function printMonitorResult(result, config, stream = process.stdout) {
     const closedHistory = result.closedHistory ?? [];
     const closedTotal = result.closedTotal ?? 0;
     const shownConnections = sortConnections(result.matchedConnections);
-    const style = createStyle(config);
+    const style = createTextStyle(config.color);
     const header = [
         ...clvmMonitorTitle(config),
         style.dim(formatLocalTimestamp(result.timestamp)),
@@ -1528,7 +1529,7 @@ function printMonitorFailure(failure, config, stream = process.stdout) {
     if (config.clear) {
         stream.write("\x1B[2J\x1B[H");
     }
-    const style = createStyle(config);
+    const style = createTextStyle(config.color);
     const header = [
         ...clvmMonitorTitle(config),
         style.dim(formatLocalTimestamp(failure.timestamp)),
@@ -1734,33 +1735,6 @@ function buildLayout(stream) {
         ...fixed,
         ruleMin: maxWidth >= 72 ? 12 : 4,
     };
-}
-function createStyle(config) {
-    if (config.color === false) {
-        return {
-            bold: identity,
-            blue: identity,
-            cyan: identity,
-            dim: identity,
-            green: identity,
-            magenta: identity,
-            red: identity,
-            yellow: identity,
-        };
-    }
-    return {
-        bold: textBold,
-        blue: textBlue,
-        cyan: textCyan,
-        dim: textDim,
-        green: textGreen,
-        magenta: textMagenta,
-        red: textRed,
-        yellow: textYellow,
-    };
-}
-function identity(value) {
-    return value;
 }
 function padNumber(value) {
     return String(value).padStart(2, "0");
