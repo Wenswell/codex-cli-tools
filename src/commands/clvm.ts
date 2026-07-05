@@ -9,17 +9,15 @@ import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive, type RuntimeRawArchiveOptions, type RuntimeRawReference, type RuntimeRawWriteResult } from "../lib/runtime-log.js";
 import { createLiveViewController } from "../lib/live-view.js";
 import { renderTable, type TableColumn } from "../lib/table.js";
+import { createTextStyle, type TextStyle } from "../lib/style.js";
 import {
   bgDarkBlue,
   maskSecret,
   textBlue,
   textBold,
-  textCyan,
   textDim,
   textGreen,
-  textMagenta,
   textRed,
-  textYellow,
 } from "../lib/text.js";
 import { fitCommandsLine as fitTerminalCommandsLine, terminalColumns } from "../lib/terminal.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
@@ -335,17 +333,6 @@ type Layout = {
   download: number;
   chain: number;
   ruleMin: number;
-};
-
-type Style = {
-  bold: (value: string) => string;
-  blue: (value: string) => string;
-  cyan: (value: string) => string;
-  dim: (value: string) => string;
-  green: (value: string) => string;
-  magenta: (value: string) => string;
-  red: (value: string) => string;
-  yellow: (value: string) => string;
 };
 
 class ClvmRuntimeError extends Error {
@@ -957,7 +944,7 @@ function formatTimestamp(date: Date): string {
 }
 
 function printConfigStatus(runtimeConfig: RuntimeConfig, { includeCommands }: { includeCommands: boolean }): void {
-  const style = createStyle(runtimeConfig);
+  const style = createTextStyle(runtimeConfig.color);
   console.log(style.bold("clvm config"));
   printKeyValue("config:", style.blue(formatHomePath(clvmConfigPath())), 12);
   printKeyValue("state:", style.blue(formatHomePath(clvmStatePath())), 12);
@@ -969,7 +956,7 @@ function printConfigStatus(runtimeConfig: RuntimeConfig, { includeCommands }: { 
   }
 }
 
-function printConfigValues(config: RuntimeConfig, style = createStyle(config)): void {
+function printConfigValues(config: RuntimeConfig, style = createTextStyle(config.color)): void {
   printKeyValue("base URL:", style.cyan(config.baseUrl), 12);
   printKeyValue("secret:", config.secret ? style.green(maskSecret(config.secret)) : style.dim("empty"), 12);
   printKeyValue("domains:", config.domains.length > 0 ? config.domains.join(",") : style.yellow("missing"), 12);
@@ -979,7 +966,7 @@ function printConfigValues(config: RuntimeConfig, style = createStyle(config)): 
   printKeyValue("raw archive:", config.rawArchive ? style.yellow("on") : style.dim("off"), 12);
 }
 
-function printCommands(style: Style): void {
+function printCommands(style: TextStyle): void {
   console.log(style.dim(fitTerminalCommandsLine(commandsLine, compactCommandsLine, terminalColumns(process.stdout))));
 }
 
@@ -1037,7 +1024,7 @@ function redactConfigText(text: string): string {
 }
 
 async function runStatus(config: RuntimeConfig): Promise<void> {
-  const style = createStyle(config);
+  const style = createTextStyle(config.color);
   if (config.json) {
     if (config.domains.length === 0) {
       throw new Error("domains are required for JSON status; run clvm setup --domain DOMAIN or use --domain DOMAIN");
@@ -2025,7 +2012,7 @@ function printMonitorResult(result: MonitorResult, config: RuntimeConfig, stream
   const closedHistory = result.closedHistory ?? [];
   const closedTotal = result.closedTotal ?? 0;
   const shownConnections = sortConnections(result.matchedConnections);
-  const style = createStyle(config);
+  const style = createTextStyle(config.color);
   const header = [
     ...clvmMonitorTitle(config),
     style.dim(formatLocalTimestamp(result.timestamp)),
@@ -2079,7 +2066,7 @@ function printMonitorFailure(failure: MonitorFailure, config: RuntimeConfig, str
     stream.write("\x1B[2J\x1B[H");
   }
 
-  const style = createStyle(config);
+  const style = createTextStyle(config.color);
   const header = [
     ...clvmMonitorTitle(config),
     style.dim(formatLocalTimestamp(failure.timestamp)),
@@ -2129,7 +2116,7 @@ function clvmMonitorTitle(config: RuntimeConfig): string[] {
   return [bgDarkBlue(" clvm monitor ")];
 }
 
-function printCurrentConnections(shownConnections: ConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
+function printCurrentConnections(shownConnections: ConnectionEntry[], layout: Layout, style: TextStyle, stream: NodeJS.WriteStream): void {
   const rows = shownConnections.map((connection) => ({
     endpoint: style.cyan(connection.endpoint),
     ageZeroFor: ageZeroForCell(connection.ageMs, connection.observedIdleMs, style),
@@ -2143,7 +2130,7 @@ function printCurrentConnections(shownConnections: ConnectionEntry[], layout: La
   stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 
-function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
+function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layout, style: TextStyle, stream: NodeJS.WriteStream): void {
   if (closedHistory.length === 0) {
     return;
   }
@@ -2185,7 +2172,7 @@ function toJsonFailure(failure: MonitorFailure): Record<string, unknown> {
   };
 }
 
-function formatUnavailableStatus(failure: MonitorFailure, style: Style): string {
+function formatUnavailableStatus(failure: MonitorFailure, style: TextStyle): string {
   return `${style.red("unavailable")} ${style.dim(failure.error.code)} ${failure.error.message}`;
 }
 
@@ -2274,16 +2261,16 @@ function closedConnectionColumns(layout: Layout): TableColumn[] {
   return columns;
 }
 
-function ageZeroForCell(ageMs: number, zeroForMs: number, style: Style): string {
+function ageZeroForCell(ageMs: number, zeroForMs: number, style: TextStyle): string {
   return `${formatDuration(ageMs)}/${zeroForCell(zeroForMs, style)}`;
 }
 
-function zeroForCell(milliseconds: number, style: Style): string {
+function zeroForCell(milliseconds: number, style: TextStyle): string {
   const text = formatDuration(milliseconds);
   return milliseconds === 0 ? style.green(text) : style.yellow(text);
 }
 
-function speedCell(bytesPerSecond: number | null, style: Style): string {
+function speedCell(bytesPerSecond: number | null, style: TextStyle): string {
   const text = bytesPerSecond === null ? "-" : formatCompactBytes(bytesPerSecond);
   if (bytesPerSecond === null || bytesPerSecond === 0) {
     return style.dim(text);
@@ -2291,7 +2278,7 @@ function speedCell(bytesPerSecond: number | null, style: Style): string {
   return style.green(text);
 }
 
-function bytesCell(bytes: number | null, style: Style): string {
+function bytesCell(bytes: number | null, style: TextStyle): string {
   const text = formatBytes(bytes);
   if (bytes === null || bytes === 0) {
     return style.dim(text);
@@ -2320,36 +2307,6 @@ function buildLayout(stream: NodeJS.WriteStream): Layout {
     ...fixed,
     ruleMin: maxWidth >= 72 ? 12 : 4,
   };
-}
-
-function createStyle(config: RuntimeConfig): Style {
-  if (config.color === false) {
-    return {
-      bold: identity,
-      blue: identity,
-      cyan: identity,
-      dim: identity,
-      green: identity,
-      magenta: identity,
-      red: identity,
-      yellow: identity,
-    };
-  }
-
-  return {
-    bold: textBold,
-    blue: textBlue,
-    cyan: textCyan,
-    dim: textDim,
-    green: textGreen,
-    magenta: textMagenta,
-    red: textRed,
-    yellow: textYellow,
-  };
-}
-
-function identity(value: string): string {
-  return value;
 }
 
 function padNumber(value: number): string {
