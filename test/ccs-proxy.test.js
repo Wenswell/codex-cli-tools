@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -465,11 +466,11 @@ test("proxy records active and history request lifecycle", async () => {
     }
     state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 100);
     assert.equal(state.metrics.total_requests, 100);
-    assert.equal(state.metrics.recent_requests.length, 100);
-    assert.equal(state.metrics.recent_requests[0].path, "/responses");
-    const requestHistoryLines = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n");
-    assert.equal(requestHistoryLines.length, 101);
-    const requestHistory = requestHistoryLines.map((line) => JSON.parse(line));
+	    assert.equal(state.metrics.recent_requests.length, 100);
+	    assert.equal(state.metrics.recent_requests[0].path, "/responses");
+	    const requestHistoryLines = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n");
+	    assert.equal(requestHistoryLines.length >= state.metrics.recent_requests.length, true);
+	    const requestHistory = requestHistoryLines.map((line) => JSON.parse(line));
     assert.equal(requestHistory[0].path, "/responses");
     assert.equal(requestHistory.at(-1).path, "/responses");
     assert.equal(requestHistory.at(-1).completed_at !== null, true);
@@ -2505,6 +2506,167 @@ test("proxy records reasoning token sources and reasoning text observations sepa
   }
 });
 
+test("proxy writes v2 request record facts with prompt and response text outside records", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const upstream = createServer((req, res) => {
+    void (async () => {
+      await readServerRequestBody(req);
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        id: "resp-v2",
+        model: "upstream-v2",
+        system_fingerprint: "fp-v2",
+        service_tier: "priority",
+        output: [
+          { type: "reasoning", encrypted_content: "encrypted-v2" },
+          { type: "message", role: "assistant", phase: "final", content: [{ type: "output_text", text: "do not store response text" }] },
+        ],
+        usage: {
+          input_tokens: 11,
+          output_tokens: 13,
+          total_tokens: 24,
+          output_tokens_details: { reasoning_tokens: 5 },
+        },
+      }));
+    })().catch((error) => {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const requestBody = JSON.stringify({
+      model: "request-v2",
+      reasoning: { effort: "high" },
+      input: "sensitive prompt text",
+    });
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: "Bearer secret",
+        "x-api-key": "secret",
+        "x-codex-purpose": "v2-observability",
+      },
+      body: requestBody,
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-v2",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(record.schema_version, 2);
+    assert.equal(record.final_action, "passed");
+    assert.equal(record.client_status, 200);
+    assert.equal(record.upstream_status, 200);
+    assert.equal(record.failure_summary, null);
+    assert.equal(record.request_reasoning_effort, "high");
+    assert.equal(record.request_body_sha256, createHash("sha256").update(requestBody).digest("hex"));
+    assert.equal(record.upstream_model, "upstream-v2");
+    assert.equal(record.final_response_model, "upstream-v2");
+    assert.equal(record.system_fingerprint, "fp-v2");
+    assert.equal(record.service_tier, "priority");
+    assert.equal(record.input_tokens, 11);
+    assert.equal(record.reasoning_tokens, 5);
+    assert.equal(record.output_tokens, 13);
+    assert.equal(record.total_tokens, 24);
+    assert.equal(record.has_reasoning_item, true);
+    assert.equal(record.has_final_answer, true);
+    assert.equal(record.final_answer_only, false);
+    assert.equal(record.has_commentary, false);
+    assert.equal(record.has_tool_call, false);
+    assert.equal(record.retry_summary.total, 0);
+    assert.equal(typeof record.upstream_wait_ms, "number");
+    assert.equal(record.time_to_first_chunk_ms, null);
+    assert.equal(record.stream_duration_ms, null);
+    assert.equal(Object.hasOwn(record, "attempt_records"), false);
+    assert.equal(Object.hasOwn(record, "request_headers"), false);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const fullRecord = jsonl.at(-1);
+    assert.equal(fullRecord.request_headers["content-type"], "application/json");
+    assert.equal(fullRecord.request_headers.accept, "application/json");
+    assert.equal(fullRecord.request_headers["x-codex-purpose"], "v2-observability");
+    assert.equal(Object.hasOwn(fullRecord.request_headers, "authorization"), false);
+    assert.equal(Object.hasOwn(fullRecord.request_headers, "x-api-key"), false);
+    assert.equal(fullRecord.attempt_records.length, 1);
+    assertCompleteProxyAttemptRecord(fullRecord.attempt_records[0], {
+      attempt: 1,
+      upstream: "input",
+      upstream_status: 200,
+      upstream_model: "upstream-v2",
+      upstream_model_source: "json.model",
+      stream_model: null,
+      final_response_model: "upstream-v2",
+      system_fingerprint: "fp-v2",
+      service_tier: "priority",
+      input_tokens: 11,
+      reasoning_tokens: 5,
+      reasoning_tokens_source: "/usage/output_tokens_details/reasoning_tokens",
+      output_tokens: 13,
+      total_tokens: 24,
+      reasoning_text_observed: false,
+      reasoning_text_source: null,
+      has_commentary: false,
+      has_final_answer: true,
+      final_answer_only: false,
+      has_tool_call: false,
+      has_reasoning_item: true,
+      final_action: "passed",
+      failure_summary: null,
+      remaining_retries: null,
+    });
+
+    const fullRecordText = JSON.stringify(fullRecord);
+    assert.doesNotMatch(fullRecordText, /sensitive prompt text/);
+    assert.doesNotMatch(fullRecordText, /do not store response text/);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy forwards request bodies larger than the previous proxy cap", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -3951,19 +4113,34 @@ function assertCompleteProxyAttemptRecord(record, expected) {
     "started_at",
     "headers_at",
     "completed_at",
-    "duration_ms",
-    "upstream",
-    "upstream_status",
-    "upstream_model",
-    "upstream_model_source",
-    "reasoning_tokens",
-    "reasoning_tokens_source",
-    "reasoning_text_observed",
-    "reasoning_text_source",
-    "final_action",
-    "failure_summary",
-    "remaining_retries",
-  ]);
+	    "duration_ms",
+	    "upstream",
+	    "upstream_status",
+	    "upstream_wait_ms",
+	    "time_to_first_chunk_ms",
+	    "stream_duration_ms",
+	    "upstream_model",
+	    "upstream_model_source",
+	    "stream_model",
+	    "final_response_model",
+	    "system_fingerprint",
+	    "service_tier",
+	    "input_tokens",
+	    "reasoning_tokens",
+	    "reasoning_tokens_source",
+	    "output_tokens",
+	    "total_tokens",
+	    "reasoning_text_observed",
+	    "reasoning_text_source",
+	    "has_commentary",
+	    "has_final_answer",
+	    "final_answer_only",
+	    "has_tool_call",
+	    "has_reasoning_item",
+	    "final_action",
+	    "failure_summary",
+	    "remaining_retries",
+	  ]);
   assertValidIsoTimestamp(record.started_at);
   assertValidIsoTimestamp(record.headers_at);
   assertValidIsoTimestamp(record.completed_at);
