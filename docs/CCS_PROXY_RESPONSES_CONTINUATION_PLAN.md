@@ -14,6 +14,8 @@ Implemented on 2026-07-05.
 
 Recovery statistics follow-up implemented on 2026-07-05.
 
+Recovery parity follow-up implemented on 2026-07-05.
+
 ## Scope
 
 Included:
@@ -93,6 +95,41 @@ Completed plan:
 1. Added recovery summary derivation from `proxy.json.metrics.recent_requests`.
 2. Extended the reasoning summary line with `recovery=... recovered=... exhausted=...` when recovery activity exists.
 3. Added tests for continuation success, exhausted recovery status output, event-basis counters, and `proxy.log` action records.
+4. Updated README and proxy spec.
+5. Built `dist`, ran tests, and bumped patch version.
+
+Verified with:
+
+```bash
+pnpm test
+```
+
+## Recovery Parity Follow-up
+
+Goal:
+
+- Make continuation recovery as inspectable as ordinary reasoning guard retries in terminal rows and tests.
+
+Scope:
+
+- Add action labels to the table `error` prefix so continuation recovery, standard guard retry, capacity retry, final guard blocking, and upstream errors can be distinguished without opening JSONL files.
+- Extend continuation tests to validate complete `attempt_records` fields.
+- Add request-kind tests for Codex header signals and top-level request fields.
+- Sync README, proxy spec, built `dist`, and package patch version.
+
+Decisions:
+
+- Keep `guard_actions` as the single table-prefix fact source.
+- Format table prefixes as action labels plus the observed value: `guard:<value>`, `cap:<value>`, `rec:<value>`, `block:<value>`, and `err:<value>`.
+- Use `reasoning_tokens` as the prefix value when present, then `status`, then `-`.
+- Keep recovery strategy, retry budget, request schema, and configuration unchanged.
+- Treat standard guard retry and continuation recovery as exclusive hit-handling branches. A guarded hit chooses one next request: original-request retry or continuation request. Both branches consume the same retry budget and write one attempt record.
+
+Completed plan:
+
+1. Added table action labels for standard guard retry, capacity retry, continuation recovery, final guard blocking, and upstream errors.
+2. Added complete `attempt_records` and `guard_actions` assertions for continuation success, continuation exhaustion, and context compaction exclusion.
+3. Added request-kind detection tests for Codex headers, request metadata, top-level fields, and default normal requests.
 4. Updated README and proxy spec.
 5. Built `dist`, ran tests, and bumped patch version.
 

@@ -1080,13 +1080,30 @@ function formatProxyGuardActionPrefix(actions: ProxyGuardActionRecord[]): string
 }
 
 function formatProxyGuardActionPrefixValue(action: ProxyGuardActionRecord): string {
+  const label = formatProxyGuardActionLabel(action);
   if (action.reasoning_tokens !== null) {
-    return textRed(String(action.reasoning_tokens));
+    return textRed(`${label}:${action.reasoning_tokens}`);
   }
   if (action.status !== null) {
-    return textYellow(String(action.status));
+    return textYellow(`${label}:${action.status}`);
   }
-  return "";
+  return textDim(`${label}:-`);
+}
+
+function formatProxyGuardActionLabel(action: ProxyGuardActionRecord): string {
+  if (action.action === "continuation_recovery") {
+    return "rec";
+  }
+  if (action.action === "return_status_502") {
+    return "block";
+  }
+  if (action.action === "upstream_error") {
+    return "err";
+  }
+  if (action.error?.startsWith("upstream_capacity:")) {
+    return "cap";
+  }
+  return action.reasoning_tokens === null ? "retry" : "guard";
 }
 
 async function logProxyGuardAction(stateRoot: string, request: ProxyRequestRecord, action: ProxyGuardActionRecord): Promise<void> {

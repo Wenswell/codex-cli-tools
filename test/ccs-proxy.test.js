@@ -1716,6 +1716,14 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
     assert.equal(record.attempts, 2);
     assert.equal(record.reasoning_tokens, 42);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["continuation_recovery"]);
+    assertCompleteProxyGuardAction(record.guard_actions[0], {
+      action: "continuation_recovery",
+      upstream: "input",
+      attempt: 1,
+      status: 200,
+      reasoning_tokens: 1552,
+      error: null,
+    });
     assert.equal(Object.hasOwn(record, "attempt_records"), false);
     assert.equal(state.metrics.status_counts["200"], 2);
     assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
@@ -1726,8 +1734,34 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
     assert.equal(fullRecord.request_kind, "normal");
     assert.equal(fullRecord.attempt_records.length, 2);
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), ["continuation_recovery", "passed"]);
-    assert.equal(fullRecord.attempt_records[0].reasoning_tokens, 1552);
-    assert.equal(fullRecord.attempt_records[1].reasoning_tokens, 42);
+    assertCompleteProxyAttemptRecord(fullRecord.attempt_records[0], {
+      attempt: 1,
+      upstream: "input",
+      upstream_status: 200,
+      upstream_model: "stream-guarded",
+      upstream_model_source: "sse.data.response.model",
+      reasoning_tokens: 1552,
+      reasoning_tokens_source: "sse.data/usage/output_tokens_details/reasoning_tokens",
+      reasoning_text_observed: false,
+      reasoning_text_source: null,
+      final_action: "continuation_recovery",
+      failure_summary: null,
+      remaining_retries: 2,
+    });
+    assertCompleteProxyAttemptRecord(fullRecord.attempt_records[1], {
+      attempt: 2,
+      upstream: "input",
+      upstream_status: 200,
+      upstream_model: "stream-ok",
+      upstream_model_source: "sse.data.response.model",
+      reasoning_tokens: 42,
+      reasoning_tokens_source: "sse.data/usage/output_tokens_details/reasoning_tokens",
+      reasoning_text_observed: false,
+      reasoning_text_source: null,
+      final_action: "passed",
+      failure_summary: null,
+      remaining_retries: null,
+    });
     await waitForLogIncludes(
       join(stateRoot, "proxy.log"),
       /"path":"\/v1\/responses".*"action":"continuation_recovery".*"attempt":1.*"reasoning_tokens":1552/,
@@ -1735,6 +1769,7 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
 
     const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
     assert.match(output, /reasoning .*recovery=1 recovered=1 exhausted=0/);
+    assert.match(output, /\[rec:1552\]/);
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1816,6 +1851,16 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
       "continuation_recovery",
       "return_status_502",
     ]);
+    record.guard_actions.forEach((action, index) => {
+      assertCompleteProxyGuardAction(action, {
+        action: index < 3 ? "continuation_recovery" : "return_status_502",
+        upstream: "input",
+        attempt: index + 1,
+        status: index < 3 ? 200 : 502,
+        reasoning_tokens: 1552,
+        error: index < 3 ? null : "reasoning_guard_triggered reasoning_tokens=1552",
+      });
+    });
     assert.equal(state.metrics.status_counts["200"], 3);
     assert.equal(state.metrics.status_counts["502"], 1);
     assert.equal(state.metrics.reasoning_token_counts["1552"], 4);
@@ -1828,9 +1873,150 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
       "continuation_recovery",
       "blocked",
     ]);
+    fullRecord.attempt_records.forEach((attempt, index) => {
+      assertCompleteProxyAttemptRecord(attempt, {
+        attempt: index + 1,
+        upstream: "input",
+        upstream_status: 200,
+        upstream_model: "stream-exhausted",
+        upstream_model_source: "sse.data.response.model",
+        reasoning_tokens: 1552,
+        reasoning_tokens_source: "sse.data/usage/output_tokens_details/reasoning_tokens",
+        reasoning_text_observed: false,
+        reasoning_text_source: null,
+        final_action: index < 3 ? "continuation_recovery" : "blocked",
+        failure_summary: index < 3 ? null : {
+          type: "codex_proxy",
+          code: "reasoning_guard_triggered",
+          message: "reasoning_guard_triggered reasoning_tokens=1552",
+        },
+        remaining_retries: Math.max(0, 2 - index),
+      });
+    });
 
     const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
     assert.match(output, /reasoning .*recovery=3 recovered=0 exhausted=1/);
+    assert.match(output, /\[rec:1552 rec:1552 rec:1552 block:1552\] reasoning_guard_triggered reasoning_tokens=1552/);
+  } finally {
+    await stopProxy({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy records request kind from Codex headers and request fields", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const upstream = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const specs = [
+      {
+        model: "kind-header-request-kind",
+        headers: { "x-codex-request-kind": "context_compaction" },
+        body: {},
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-header-purpose",
+        headers: { "x-codex-purpose": "remote_compaction" },
+        body: {},
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-header-turn-metadata",
+        headers: { "x-codex-turn-metadata": JSON.stringify({ purpose: "remote_compaction" }) },
+        body: {},
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-body-metadata",
+        headers: {},
+        body: { metadata: { purpose: "remote_compaction" } },
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-body-codex-request-kind",
+        headers: {},
+        body: { codex_request_kind: "context_compaction" },
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-body-request-kind",
+        headers: {},
+        body: { request_kind: "context_compaction" },
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-body-purpose",
+        headers: {},
+        body: { purpose: "remote_compaction" },
+        expected: "context_compaction",
+      },
+      {
+        model: "kind-default-normal",
+        headers: {},
+        body: {},
+        expected: "normal",
+      },
+    ];
+
+    for (const spec of specs) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=${spec.model}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...spec.headers },
+        body: JSON.stringify({ model: spec.model, ...spec.body }),
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+
+      const state = await waitForState(
+        stateRoot,
+        (candidate) => candidate.metrics.recent_requests[0]?.request_model === spec.model,
+      );
+      assert.equal(state.metrics.recent_requests[0].request_kind, spec.expected);
+      const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      assert.equal(jsonl.at(-1).request_model, spec.model);
+      assert.equal(jsonl.at(-1).request_kind, spec.expected);
+    }
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1922,6 +2108,16 @@ test("proxy excludes context compaction from Responses continuation recovery", a
       "internal_retry",
       "return_status_502",
     ]);
+    record.guard_actions.forEach((action, index) => {
+      assertCompleteProxyGuardAction(action, {
+        action: index < 3 ? "internal_retry" : "return_status_502",
+        upstream: "input",
+        attempt: index + 1,
+        status: index < 3 ? 200 : 502,
+        reasoning_tokens: 1552,
+        error: index < 3 ? null : "reasoning_guard_triggered reasoning_tokens=1552",
+      });
+    });
 
     const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const fullRecord = jsonl.at(-1);
@@ -1932,6 +2128,26 @@ test("proxy excludes context compaction from Responses continuation recovery", a
       "internal_retry",
       "blocked",
     ]);
+    fullRecord.attempt_records.forEach((attempt, index) => {
+      assertCompleteProxyAttemptRecord(attempt, {
+        attempt: index + 1,
+        upstream: "input",
+        upstream_status: 200,
+        upstream_model: "stream-compaction",
+        upstream_model_source: "sse.data.response.model",
+        reasoning_tokens: 1552,
+        reasoning_tokens_source: "sse.data/usage/output_tokens_details/reasoning_tokens",
+        reasoning_text_observed: false,
+        reasoning_text_source: null,
+        final_action: index < 3 ? "internal_retry" : "blocked",
+        failure_summary: index < 3 ? null : {
+          type: "codex_proxy",
+          code: "reasoning_guard_triggered",
+          message: "reasoning_guard_triggered reasoning_tokens=1552",
+        },
+        remaining_retries: Math.max(0, 2 - index),
+      });
+    });
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -2461,7 +2677,7 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+-\/200\s+123ms\s+982K\s+-\/-/);
   assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+516\/200\s+2\.34s\s+3\.41M\s+gpt-5\.5\/gpt-5\.5-m…/);
   assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+text\/200\s+43\.2s\s+76\.3M\s+gpt-5\.5\/gpt-5\.5-m…/);
-  assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+-\/502\s+300ms\s+2\.00K\s+gpt-5\.5\/\[same\]\s+\[502 502 506\] reasoning_guard_triggered reasoning_tokens=506/);
+  assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+-\/502\s+300ms\s+2\.00K\s+gpt-5\.5\/\[same\]\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
   assertProxyRequestColumnsAligned(lines, "active");
   assertProxyRequestColumnsAligned(lines, "history");
 });
@@ -3700,6 +3916,56 @@ function proxyGuardAction(overrides) {
     error: null,
     ...overrides,
   };
+}
+
+function assertCompleteProxyAttemptRecord(record, expected) {
+  assert.deepEqual(Object.keys(record), [
+    "attempt",
+    "started_at",
+    "headers_at",
+    "completed_at",
+    "duration_ms",
+    "upstream",
+    "upstream_status",
+    "upstream_model",
+    "upstream_model_source",
+    "reasoning_tokens",
+    "reasoning_tokens_source",
+    "reasoning_text_observed",
+    "reasoning_text_source",
+    "final_action",
+    "failure_summary",
+    "remaining_retries",
+  ]);
+  assertValidIsoTimestamp(record.started_at);
+  assertValidIsoTimestamp(record.headers_at);
+  assertValidIsoTimestamp(record.completed_at);
+  assert.equal(typeof record.duration_ms, "number");
+  assert.equal(record.duration_ms >= 0, true);
+  for (const [key, value] of Object.entries(expected)) {
+    assert.deepEqual(record[key], value);
+  }
+}
+
+function assertValidIsoTimestamp(value) {
+  assert.equal(typeof value, "string");
+  assert.equal(Number.isNaN(Date.parse(value)), false);
+}
+
+function assertCompleteProxyGuardAction(record, expected) {
+  assert.deepEqual(Object.keys(record), [
+    "at",
+    "action",
+    "upstream",
+    "attempt",
+    "status",
+    "reasoning_tokens",
+    "error",
+  ]);
+  assertValidIsoTimestamp(record.at);
+  for (const [key, value] of Object.entries(expected)) {
+    assert.deepEqual(record[key], value);
+  }
 }
 
 function proxyStateFixture(stateRoot, metrics = {}) {
