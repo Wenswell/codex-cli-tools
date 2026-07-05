@@ -1717,6 +1717,9 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
     assert.equal(record.reasoning_tokens, 42);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["continuation_recovery"]);
     assert.equal(Object.hasOwn(record, "attempt_records"), false);
+    assert.equal(state.metrics.status_counts["200"], 2);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["42"], 1);
 
     const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const fullRecord = jsonl.at(-1);
@@ -1725,6 +1728,13 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), ["continuation_recovery", "passed"]);
     assert.equal(fullRecord.attempt_records[0].reasoning_tokens, 1552);
     assert.equal(fullRecord.attempt_records[1].reasoning_tokens, 42);
+    await waitForLogIncludes(
+      join(stateRoot, "proxy.log"),
+      /"path":"\/v1\/responses".*"action":"continuation_recovery".*"attempt":1.*"reasoning_tokens":1552/,
+    );
+
+    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    assert.match(output, /reasoning .*recovery=1 recovered=1 exhausted=0/);
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1806,6 +1816,9 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
       "continuation_recovery",
       "return_status_502",
     ]);
+    assert.equal(state.metrics.status_counts["200"], 3);
+    assert.equal(state.metrics.status_counts["502"], 1);
+    assert.equal(state.metrics.reasoning_token_counts["1552"], 4);
 
     const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const fullRecord = jsonl.at(-1);
@@ -1815,6 +1828,9 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
       "continuation_recovery",
       "blocked",
     ]);
+
+    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    assert.match(output, /reasoning .*recovery=3 recovered=0 exhausted=1/);
   } finally {
     await stopProxy({
       codexConfigPath: join(home, ".codex", "config.toml"),

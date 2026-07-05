@@ -68,6 +68,11 @@ type ProxyMetrics = {
 type ProxyStatusCounts = Record<string, number>;
 type ProxyReasoningTokenCounts = Record<string, number>;
 type ProxyRequestKind = "normal" | "context_compaction";
+type ProxyContinuationRecoveryCounts = {
+  attempts: number;
+  recovered: number;
+  exhausted: number;
+};
 
 type ProxyRequestRecord = {
   id: string;
@@ -2535,7 +2540,43 @@ function formatProxyReasoningSummary(metrics: ProxyMetrics): string {
     `reasoning total=${colorCount(String(totalProxyReasoningTokenCounts(metrics.reasoning_token_counts)))}`,
     `max=${formatProxyReasoningTokenValue(maxProxyReasoningToken(metrics.reasoning_token_counts))}`,
     ...reasoningCounts,
+    ...formatProxyContinuationRecoveryCounts(proxyContinuationRecoveryCounts(metrics.recent_requests)),
   ].join(" ");
+}
+
+function proxyContinuationRecoveryCounts(records: ProxyRequestRecord[]): ProxyContinuationRecoveryCounts {
+  const counts: ProxyContinuationRecoveryCounts = {
+    attempts: 0,
+    recovered: 0,
+    exhausted: 0,
+  };
+
+  for (const record of records) {
+    const recoveryAttempts = record.guard_actions.filter((action) => action.action === "continuation_recovery").length;
+    if (recoveryAttempts === 0) {
+      continue;
+    }
+
+    counts.attempts += recoveryAttempts;
+    if (record.guard_actions.some((action) => action.action === "return_status_502")) {
+      counts.exhausted += 1;
+    } else if (record.status !== null && record.status < 400 && record.error === null) {
+      counts.recovered += 1;
+    }
+  }
+
+  return counts;
+}
+
+function formatProxyContinuationRecoveryCounts(counts: ProxyContinuationRecoveryCounts): string[] {
+  if (counts.attempts === 0) {
+    return [];
+  }
+  return [
+    `recovery=${textBlue(String(counts.attempts))}`,
+    `recovered=${textGreen(String(counts.recovered))}`,
+    `exhausted=${formatProxyStatusCount(counts.exhausted, textRed)}`,
+  ];
 }
 
 function formatProxyStatusCount(value: number, color: (text: string) => string): string {
