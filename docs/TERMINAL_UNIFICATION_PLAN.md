@@ -65,6 +65,14 @@ The visible output contract is already shared by docs: compact units such as `16
 
 ## Implementation Plan
 
+## Progress
+
+- [x] Phase 1: Live View Helper.
+- [ ] Phase 2: Terminal Helper.
+- [ ] Phase 3: Compact Format Helper.
+- [ ] Phase 4: Style Helper.
+- [ ] Phase 5: Test Harness.
+
 ### Phase 1: Live View Helper
 
 Add `src/lib/live-view.ts` with one API for terminal live frames:

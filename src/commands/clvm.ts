@@ -6,6 +6,7 @@ import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive, type RuntimeRawArchiveOptions, type RuntimeRawReference, type RuntimeRawWriteResult } from "../lib/runtime-log.js";
+import { createLiveViewController } from "../lib/live-view.js";
 import { renderTable, type TableColumn } from "../lib/table.js";
 import {
   bgDarkBlue,
@@ -1094,27 +1095,17 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
   let stopDelay: (() => void) | null = null;
   let renderLatestFrame: (() => void) | null = null;
   const runtimeDedupe: ClvmRuntimeRecordDedupe = { lastFingerprint: null };
-  const useAlternateScreen = config.clear && Boolean(process.stdout.isTTY);
-
-  const restoreTerminal = (): void => {
-    if (useAlternateScreen) {
-      process.stdout.write("\u001b[?25h\u001b[?1049l");
-    }
-  };
-  const stop = (): void => {
-    stopped = true;
-    stopDelay?.();
-  };
-  const repaintOnResize = (): void => {
+  const liveView = createLiveViewController({
+    enabled: config.clear && Boolean(process.stdout.isTTY),
+    onStop: () => {
+      stopped = true;
+      stopDelay?.();
+    },
+  });
+  liveView.setResizeRender(() => {
     renderLatestFrame?.();
-  };
-
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-  if (useAlternateScreen) {
-    process.stdout.write("\u001b[?1049h\u001b[?25l");
-    process.stdout.on("resize", repaintOnResize);
-  }
+  });
+  liveView.start();
 
   const wait = async (milliseconds: number): Promise<void> => {
     await new Promise<void>((resolve) => {
@@ -1142,8 +1133,8 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
         result.closedHistory = closedHistory;
         result.closedTotal = closedTotal;
         await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
-        if (useAlternateScreen) {
-          renderLatestFrame = () => writeMonitorFrame(renderMonitorResultLines(result, config));
+        if (liveView.enabled) {
+          renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config));
           renderLatestFrame();
         } else {
           printMonitorResult(result, config);
@@ -1160,8 +1151,8 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
         const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
         const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
         await recordClvmFailure("monitor", config, failure, runtimeDedupe);
-        if (useAlternateScreen) {
-          renderLatestFrame = () => writeMonitorFrame(renderMonitorFailureLines(failure, config));
+        if (liveView.enabled) {
+          renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config));
           renderLatestFrame();
         } else {
           printMonitorFailure(failure, config);
@@ -1175,12 +1166,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
       }
     }
   } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-    if (useAlternateScreen) {
-      process.stdout.off("resize", repaintOnResize);
-    }
-    restoreTerminal();
+    liveView.stop();
   }
 }
 
@@ -2167,10 +2153,6 @@ function captureMonitorLines(writeOutput: (stream: NodeJS.WriteStream) => void):
   } as NodeJS.WriteStream;
   writeOutput(stream);
   return output.endsWith("\n") ? output.slice(0, -1).split("\n") : output.split("\n");
-}
-
-function writeMonitorFrame(lines: string[], stream: NodeJS.WriteStream = process.stdout): void {
-  stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 
 function clvmMonitorTitle(config: RuntimeConfig): string[] {
