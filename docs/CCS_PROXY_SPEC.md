@@ -59,27 +59,50 @@ Status and watch commands validate the health `protocol` from `/__codex_proxy/he
 
 Request records include:
 
+- `schema_version`: request record schema version. Current value is `2`.
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
 - `method`: HTTP method.
 - `path`: request pathname.
 - `status`: observed upstream or local response status.
+- `upstream_status`: last observed upstream HTTP status.
+- `client_status`: status returned to the local Codex client.
+- `final_action`: canonical completed outcome such as `passed`, `blocked`, `upstream_fetch_failed`, `gateway_error`, or `client_aborted`.
+- `failure_summary`: structured failure details with `type`, `code`, and `message`.
 - `upstream`: selected profile name.
 - `attempts`: upstream fetch attempt count.
 - `latency_ms`: completed request latency.
+- `upstream_wait_ms`: time from upstream fetch start to upstream headers for the final attempt.
+- `time_to_first_chunk_ms`: streaming time from upstream fetch start to first upstream chunk for the final attempt.
+- `stream_duration_ms`: streaming time from first upstream chunk to final upstream chunk for the final attempt.
 - `request_bytes`: request body byte count.
 - `response_bytes`: completed response body byte count.
 - `session`: short Codex session id when present.
 - `request_kind`: `normal` or `context_compaction`.
 - `request_model`: model string from the request body.
+- `request_reasoning_effort`: reasoning effort string from the request body when present.
+- `request_body_sha256`: SHA-256 hash of the incoming request body.
 - `upstream_model`: model string from the accepted upstream payload.
 - `upstream_model_source`: source path for `upstream_model`.
+- `stream_model`: model string observed from SSE payloads when present.
+- `final_response_model`: model string on the accepted or final response payload.
+- `system_fingerprint`: upstream self-reported system fingerprint when present.
+- `service_tier`: upstream self-reported service tier when present.
+- `input_tokens`: explicit upstream input token count.
 - `reasoning_tokens`: latest explicit upstream reasoning token count.
 - `reasoning_tokens_source`: source path for `reasoning_tokens`.
+- `output_tokens`: explicit upstream output token count.
+- `total_tokens`: explicit upstream total token count.
 - `reasoning_text_observed`: true when a supported reasoning text field is present and non-empty.
 - `reasoning_text_source`: source path for the first observed reasoning text field.
+- `has_commentary`: true when the upstream payload contains commentary output.
+- `has_final_answer`: true when the upstream payload contains final-answer output.
+- `final_answer_only`: true when the upstream payload contains only final-answer output.
+- `has_tool_call`: true when the upstream payload contains a tool call.
+- `has_reasoning_item`: true when the upstream payload contains a reasoning item.
 - `guard_actions`: ordered local proxy action records.
+- `retry_summary`: retry counters by `reasoning_guard`, `upstream_capacity`, and `transport`.
 - `error`: local proxy error text.
 
 `guard_actions` entries include:
@@ -96,9 +119,11 @@ Request records include:
 
 `reasoning_text_observed` records reasoning text fields such as `delta.reasoning_content`, `message.reasoning_content`, and `delta.reasoning`. Text observations stay separate from token-count metrics and guard matching.
 
-`attempt_records` entries include `attempt`, `started_at`, `headers_at`, `completed_at`, `duration_ms`, `upstream`, `upstream_status`, upstream model fields, reasoning metadata, per-attempt `final_action`, `failure_summary`, and `remaining_retries`.
+`attempt_records` entries include `attempt`, `started_at`, `headers_at`, `completed_at`, `duration_ms`, `upstream`, `upstream_status`, timing fields, upstream model fields, upstream metadata, usage token fields, reasoning metadata, response shape fields, per-attempt `final_action`, `failure_summary`, and `remaining_retries`.
 
-Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing `reasoning_tokens`, `reasoning_tokens_source`, and `reasoning_text_source` fields normalize to `null`. Missing `reasoning_text_observed` normalizes to `false`. Missing `guard_actions` fields normalize to `[]`.
+`proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
+
+Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -199,12 +224,19 @@ The four paths map to two endpoint classes: `chat/completions` and `responses`.
 ### Field semantics
 
 - `request_model`: model string read from the incoming request JSON body.
+- `request_reasoning_effort`: reasoning effort string read from `reasoning.effort` or `reasoning_effort` in the incoming request JSON body.
 - `upstream_model`: model string read from the upstream response payload.
 - `upstream_model_source`: extraction source for `upstream_model`, such as `json.model`, `json.response.model`, or `sse.data.model`.
+- `stream_model`: model string first observed from SSE payloads.
+- `final_response_model`: model string on the accepted or final response payload.
+- `system_fingerprint`: upstream self-reported `system_fingerprint`.
+- `service_tier`: upstream self-reported `service_tier`.
+- `input_tokens`, `output_tokens`, and `total_tokens`: explicit upstream usage token fields.
 - `reasoning_tokens`: latest explicit upstream reasoning token count.
 - `reasoning_tokens_source`: JSON Pointer or SSE JSON Pointer that produced `reasoning_tokens`.
 - `reasoning_text_observed`: boolean marker for observed reasoning text.
 - `reasoning_text_source`: JSON Pointer or SSE JSON Pointer that produced the first observed reasoning text field.
+- `has_commentary`, `has_final_answer`, `final_answer_only`, `has_tool_call`, and `has_reasoning_item`: response shape booleans stored for anomaly analysis.
 
 The proxy forwards requests directly. Model fields are observational metadata only.
 
@@ -225,8 +257,18 @@ The proxy does not set its own upstream response deadline. Client settings such 
 
 Explicit token count paths:
 
+- `/usage/input_tokens`
+- `/usage/prompt_tokens`
+- `/usage/output_tokens`
+- `/usage/completion_tokens`
+- `/usage/total_tokens`
 - `/usage/output_tokens_details/reasoning_tokens`
 - `/usage/completion_tokens_details/reasoning_tokens`
+- `/response/usage/input_tokens`
+- `/response/usage/prompt_tokens`
+- `/response/usage/output_tokens`
+- `/response/usage/completion_tokens`
+- `/response/usage/total_tokens`
 - `/response/usage/output_tokens_details/reasoning_tokens`
 - `/response/usage/completion_tokens_details/reasoning_tokens`
 

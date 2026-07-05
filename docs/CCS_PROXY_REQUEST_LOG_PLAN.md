@@ -344,10 +344,10 @@ Default plan:
 - Store `request_body_sha256`.
 - Store `request_bytes`.
 - Continue extracting `session` and `request_model`.
-- Do not store request body text.
-- Do not store prompt excerpts.
+- Request body text stays outside records.
+- Prompt excerpts stay outside records.
 
-This gives stable correlation without storing prompt content.
+This gives stable correlation while prompt content stays outside records.
 
 ## Timing Facts
 
@@ -494,3 +494,12 @@ Implementation should begin with record type/schema changes and tests for the fi
 ## Kickoff Record
 
 Confirmed on 2026-07-05 after comparing the reference application evidence fields with current `ccs proxy` behavior.
+
+## Completion Record
+
+Implemented on 2026-07-05.
+
+- Added request record schema v2 fields for final action, upstream/client status, failure summary, retry summary, request body hash, sanitized JSONL-only request headers, upstream metadata, usage tokens, response shape, and timing.
+- Kept terminal status rendering compact and unchanged.
+- Kept prompt text and response text out of runtime records.
+- Added tests for v2 JSONL/state record boundaries, usage tokens, response shape, upstream metadata, timing, and header sanitization.

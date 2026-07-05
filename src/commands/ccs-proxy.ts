@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
@@ -78,27 +78,50 @@ type ProxyContinuationRecoveryCounts = {
 };
 
 type ProxyRequestRecord = {
+  schema_version: number;
   id: string;
   started_at: string;
   completed_at: string | null;
   method: string;
   path: string;
   status: number | null;
+  upstream_status: number | null;
+  client_status: number | null;
+  final_action: string;
+  failure_summary: ProxyFailureSummary | null;
   upstream: string | null;
   attempts: number;
   latency_ms: number;
+  upstream_wait_ms: number | null;
+  time_to_first_chunk_ms: number | null;
+  stream_duration_ms: number | null;
   request_bytes: number;
   response_bytes: number;
   session: string | null;
   request_kind: ProxyRequestKind;
   request_model: string | null;
+  request_reasoning_effort: string | null;
+  request_body_sha256: string | null;
   upstream_model: string | null;
   upstream_model_source: string | null;
+  stream_model: string | null;
+  final_response_model: string | null;
+  system_fingerprint: string | null;
+  service_tier: string | null;
+  input_tokens: number | null;
   reasoning_tokens: number | null;
   reasoning_tokens_source: string | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
   reasoning_text_observed: boolean;
   reasoning_text_source: string | null;
+  has_commentary: boolean;
+  has_final_answer: boolean;
+  final_answer_only: boolean;
+  has_tool_call: boolean;
+  has_reasoning_item: boolean;
   guard_actions: ProxyGuardActionRecord[];
+  retry_summary: ProxyRetrySummary;
   error: string | null;
 };
 
@@ -116,19 +139,42 @@ type ProxyAttemptRecord = {
   duration_ms: number | null;
   upstream: string | null;
   upstream_status: number | null;
+  upstream_wait_ms: number | null;
+  time_to_first_chunk_ms: number | null;
+  stream_duration_ms: number | null;
   upstream_model: string | null;
   upstream_model_source: string | null;
+  stream_model: string | null;
+  final_response_model: string | null;
+  system_fingerprint: string | null;
+  service_tier: string | null;
+  input_tokens: number | null;
   reasoning_tokens: number | null;
   reasoning_tokens_source: string | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
   reasoning_text_observed: boolean;
   reasoning_text_source: string | null;
+  has_commentary: boolean;
+  has_final_answer: boolean;
+  final_answer_only: boolean;
+  has_tool_call: boolean;
+  has_reasoning_item: boolean;
   final_action: string;
   failure_summary: ProxyFailureSummary | null;
   remaining_retries: number | null;
 };
 
 type ProxyCompleteRequestRecord = ProxyRequestRecord & {
+  request_headers: Record<string, string>;
   attempt_records: ProxyAttemptRecord[];
+};
+
+type ProxyRetrySummary = {
+  total: number;
+  reasoning_guard: number;
+  upstream_capacity: number;
+  transport: number;
 };
 
 type ProxyGuardAction = "internal_retry" | "continuation_recovery" | "return_status_502" | "upstream_error";
@@ -195,6 +241,29 @@ type ProxyReasoningMetadata = {
   reasoningTextSource: string | null;
 };
 
+type ProxyUsageMetadata = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+};
+
+type ProxyUpstreamMetadata = {
+  systemFingerprint: string | null;
+  serviceTier: string | null;
+};
+
+type ProxyResponseShape = {
+  hasCommentary: boolean;
+  hasFinalAnswer: boolean;
+  hasToolCall: boolean;
+  hasReasoningItem: boolean;
+};
+
+type ProxyBodyTiming = {
+  timeToFirstChunkMs: number | null;
+  streamDurationMs: number | null;
+};
+
 type ProxyContinuationReasoningItem = Record<string, unknown>;
 
 type ProxyWriteModelObserver = ProxyModelExtraction & {
@@ -225,6 +294,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
+const PROXY_REQUEST_SCHEMA_VERSION = 2;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
@@ -255,6 +325,17 @@ const REASONING_TEXT_POINTERS = [
   "/message/reasoning",
   "/output/0/content/0/reasoning",
   "/response/output/0/content/0/reasoning",
+];
+const REQUEST_HEADER_ALLOWLIST = [
+  "content-type",
+  "accept",
+  "user-agent",
+  "x-codex-request-kind",
+  "x-codex-purpose",
+  "x-codex-turn-metadata",
+  "x-codex-beta-features",
+  "openai-organization",
+  "openai-project",
 ];
 
 const PROXY_REQUEST_TABLE_COLUMNS: TableColumn[] = [
@@ -696,29 +777,78 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
   const startedAt = stringField(request.started_at) || stringField(request.at) || "";
   const completedAt = nullableStringField(request.completed_at)
     ?? (collection === "history" ? nullableStringField(request.at) ?? startedAt : null);
+  const status = Number.isInteger(request.status) ? Number(request.status) : null;
   return {
+    schema_version: Number.isInteger(request.schema_version) ? Number(request.schema_version) : PROXY_REQUEST_SCHEMA_VERSION,
     id: stringField(request.id) || randomUUID(),
     started_at: startedAt,
     completed_at: completedAt,
     method: stringField(request.method),
     path: stringField(request.path),
-    status: Number.isInteger(request.status) ? Number(request.status) : null,
+    status,
+    upstream_status: Number.isInteger(request.upstream_status) ? Number(request.upstream_status) : status,
+    client_status: Number.isInteger(request.client_status) ? Number(request.client_status) : (collection === "history" ? status : null),
+    final_action: stringField(request.final_action) || (collection === "history" ? inferProxyFinalAction(status, nullableStringField(request.error)) : "pending"),
+    failure_summary: normalizeProxyFailureSummary(request.failure_summary),
     upstream: nullableStringField(request.upstream),
     attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
     latency_ms: numberField(request.latency_ms),
+    upstream_wait_ms: nullableNumberField(request.upstream_wait_ms),
+    time_to_first_chunk_ms: nullableNumberField(request.time_to_first_chunk_ms),
+    stream_duration_ms: nullableNumberField(request.stream_duration_ms),
     request_bytes: numberField(request.request_bytes),
     response_bytes: numberField(request.response_bytes),
     session: nullableStringField(request.session),
     request_kind: normalizeProxyRequestKind(request.request_kind),
     request_model: nullableStringField(request.request_model),
+    request_reasoning_effort: nullableStringField(request.request_reasoning_effort),
+    request_body_sha256: nullableStringField(request.request_body_sha256),
     upstream_model: nullableStringField(request.upstream_model),
     upstream_model_source: nullableStringField(request.upstream_model_source),
+    stream_model: nullableStringField(request.stream_model),
+    final_response_model: nullableStringField(request.final_response_model),
+    system_fingerprint: nullableStringField(request.system_fingerprint),
+    service_tier: nullableStringField(request.service_tier),
+    input_tokens: isProxyTokenCount(request.input_tokens) ? Number(request.input_tokens) : null,
     reasoning_tokens: isReasoningTokenCount(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
     reasoning_tokens_source: nullableStringField(request.reasoning_tokens_source),
+    output_tokens: isProxyTokenCount(request.output_tokens) ? Number(request.output_tokens) : null,
+    total_tokens: isProxyTokenCount(request.total_tokens) ? Number(request.total_tokens) : null,
     reasoning_text_observed: request.reasoning_text_observed === true,
     reasoning_text_source: nullableStringField(request.reasoning_text_source),
+    has_commentary: request.has_commentary === true,
+    has_final_answer: request.has_final_answer === true,
+    final_answer_only: request.final_answer_only === true,
+    has_tool_call: request.has_tool_call === true,
+    has_reasoning_item: request.has_reasoning_item === true,
     guard_actions: normalizeProxyGuardActions(request.guard_actions),
+    retry_summary: normalizeProxyRetrySummary(request.retry_summary),
     error: nullableStringField(request.error),
+  };
+}
+
+function normalizeProxyFailureSummary(value: unknown): ProxyFailureSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    type: nullableStringField(raw.type),
+    code: nullableStringField(raw.code),
+    message: nullableStringField(raw.message),
+  };
+}
+
+function normalizeProxyRetrySummary(value: unknown): ProxyRetrySummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return createEmptyProxyRetrySummary();
+  }
+  const raw = value as Record<string, unknown>;
+  return {
+    total: nonNegativeIntegerField(raw.total),
+    reasoning_guard: nonNegativeIntegerField(raw.reasoning_guard),
+    upstream_capacity: nonNegativeIntegerField(raw.upstream_capacity),
+    transport: nonNegativeIntegerField(raw.transport),
   };
 }
 
@@ -763,6 +893,30 @@ function nullableStringField(value: unknown): string | null {
 
 function numberField(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function nullableNumberField(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function nonNegativeIntegerField(value: unknown): number {
+  return Number.isInteger(value) && typeof value === "number" && value >= 0 ? value : 0;
+}
+
+function inferProxyFinalAction(status: number | null, error: string | null): string {
+  if (status === 499) {
+    return "client_aborted";
+  }
+  if (error?.includes("reasoning_guard_triggered")) {
+    return "blocked";
+  }
+  if (error?.includes("upstream_fetch_failed")) {
+    return "upstream_fetch_failed";
+  }
+  if (error) {
+    return "gateway_error";
+  }
+  return "passed";
 }
 
 function normalizeProxyState(state: ProxyState | null): ProxyState | null {
@@ -839,7 +993,7 @@ async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, 
 }
 
 function compactProxyRequestRecord(record: ProxyCompleteRequestRecord): ProxyRequestRecord {
-  const { attempt_records: _attemptRecords, ...compactRecord } = record;
+  const { attempt_records: _attemptRecords, request_headers: _requestHeaders, ...compactRecord } = record;
   return compactRecord;
 }
 
@@ -1215,6 +1369,39 @@ function createEmptyReasoningMetadata(): ProxyReasoningMetadata {
   };
 }
 
+function createEmptyProxyUsageMetadata(): ProxyUsageMetadata {
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    totalTokens: null,
+  };
+}
+
+function createEmptyProxyUpstreamMetadata(): ProxyUpstreamMetadata {
+  return {
+    systemFingerprint: null,
+    serviceTier: null,
+  };
+}
+
+function createEmptyProxyResponseShape(): ProxyResponseShape {
+  return {
+    hasCommentary: false,
+    hasFinalAnswer: false,
+    hasToolCall: false,
+    hasReasoningItem: false,
+  };
+}
+
+function createEmptyProxyRetrySummary(): ProxyRetrySummary {
+  return {
+    total: 0,
+    reasoning_guard: 0,
+    upstream_capacity: 0,
+    transport: 0,
+  };
+}
+
 function parseReasoningMetadata(payload: unknown, sourcePrefix = ""): ProxyReasoningMetadata {
   const metadata = createEmptyReasoningMetadata();
   if (!payload || typeof payload !== "object") {
@@ -1239,6 +1426,213 @@ function parseReasoningMetadata(payload: unknown, sourcePrefix = ""): ProxyReaso
   return metadata;
 }
 
+function parseProxyUsageMetadata(payload: unknown): ProxyUsageMetadata {
+  const usage = createEmptyProxyUsageMetadata();
+  if (!payload || typeof payload !== "object") {
+    return usage;
+  }
+  usage.inputTokens = firstProxyTokenAt(payload, [
+    "/usage/input_tokens",
+    "/usage/prompt_tokens",
+    "/response/usage/input_tokens",
+    "/response/usage/prompt_tokens",
+  ]);
+  usage.outputTokens = firstProxyTokenAt(payload, [
+    "/usage/output_tokens",
+    "/usage/completion_tokens",
+    "/response/usage/output_tokens",
+    "/response/usage/completion_tokens",
+  ]);
+  usage.totalTokens = firstProxyTokenAt(payload, [
+    "/usage/total_tokens",
+    "/response/usage/total_tokens",
+  ]);
+  return usage;
+}
+
+function firstProxyTokenAt(payload: unknown, pointers: string[]): number | null {
+  for (const pointer of pointers) {
+    const value = jsonPointerGet(payload, pointer);
+    if (isProxyTokenCount(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function parseProxyUpstreamMetadata(payload: unknown): ProxyUpstreamMetadata {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return createEmptyProxyUpstreamMetadata();
+  }
+  return {
+    systemFingerprint: jsonStringAt(payload, ["system_fingerprint"]) ?? jsonStringAt(payload, ["response", "system_fingerprint"]),
+    serviceTier: jsonStringAt(payload, ["service_tier"]) ?? jsonStringAt(payload, ["response", "service_tier"]),
+  };
+}
+
+function parseProxyResponseShape(payload: unknown): ProxyResponseShape {
+  const shape = createEmptyProxyResponseShape();
+  visitProxyResponseShape(payload, shape, {});
+  return shape;
+}
+
+function visitProxyResponseShape(
+  value: unknown,
+  shape: ProxyResponseShape,
+  context: { phase?: string | null; role?: string | null },
+): void {
+  if (!value || typeof value !== "object") {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      visitProxyResponseShape(item, shape, context);
+    }
+    return;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const type = typeof raw.type === "string" ? raw.type : null;
+  const phase = nullableStringField(raw.phase) ?? nullableStringField(raw.channel) ?? context.phase ?? null;
+  const role = nullableStringField(raw.role) ?? context.role ?? null;
+  if (phase === "commentary") {
+    shape.hasCommentary = true;
+  }
+  if (phase === "final") {
+    shape.hasFinalAnswer = true;
+  }
+  if (type === "reasoning") {
+    shape.hasReasoningItem = true;
+  }
+  if (isProxyToolCallObject(raw, type)) {
+    shape.hasToolCall = true;
+  }
+  if (isProxyFinalAnswerObject(raw, type, phase, role)) {
+    shape.hasFinalAnswer = true;
+  }
+
+  for (const item of Object.values(raw)) {
+    visitProxyResponseShape(item, shape, { phase, role });
+  }
+}
+
+function isProxyToolCallObject(raw: Record<string, unknown>, type: string | null): boolean {
+  if (Array.isArray(raw.tool_calls) && raw.tool_calls.length > 0) {
+    return true;
+  }
+  if (raw.function_call && typeof raw.function_call === "object") {
+    return true;
+  }
+  return Boolean(type && (
+    type.includes("tool_call")
+    || type === "function_call"
+    || type === "mcp_call"
+    || type === "local_shell_call"
+    || type === "custom_tool_call"
+  ));
+}
+
+function isProxyFinalAnswerObject(
+  raw: Record<string, unknown>,
+  type: string | null,
+  phase: string | null,
+  role: string | null,
+): boolean {
+  if (phase === "commentary") {
+    return false;
+  }
+  if (phase === "final") {
+    return true;
+  }
+  if (type === "output_text") {
+    return typeof raw.text === "string" && raw.text.length > 0;
+  }
+  if (type === "message" && role === "assistant") {
+    return typeof raw.content === "string"
+      ? raw.content.length > 0
+      : Array.isArray(raw.content) && raw.content.length > 0;
+  }
+  if (raw.message && typeof raw.message === "object" && !Array.isArray(raw.message)) {
+    const message = raw.message as Record<string, unknown>;
+    return nullableStringField(message.role) === "assistant"
+      && typeof message.content === "string"
+      && message.content.length > 0;
+  }
+  return false;
+}
+
+function mergeProxyUsageMetadata(current: ProxyUsageMetadata, next: ProxyUsageMetadata): ProxyUsageMetadata {
+  return {
+    inputTokens: next.inputTokens ?? current.inputTokens,
+    outputTokens: next.outputTokens ?? current.outputTokens,
+    totalTokens: next.totalTokens ?? current.totalTokens,
+  };
+}
+
+function mergeProxyUpstreamMetadata(current: ProxyUpstreamMetadata, next: ProxyUpstreamMetadata): ProxyUpstreamMetadata {
+  return {
+    systemFingerprint: next.systemFingerprint ?? current.systemFingerprint,
+    serviceTier: next.serviceTier ?? current.serviceTier,
+  };
+}
+
+function mergeProxyResponseShape(current: ProxyResponseShape, next: ProxyResponseShape): ProxyResponseShape {
+  return {
+    hasCommentary: current.hasCommentary || next.hasCommentary,
+    hasFinalAnswer: current.hasFinalAnswer || next.hasFinalAnswer,
+    hasToolCall: current.hasToolCall || next.hasToolCall,
+    hasReasoningItem: current.hasReasoningItem || next.hasReasoningItem,
+  };
+}
+
+function isProxyFinalAnswerOnly(shape: ProxyResponseShape): boolean {
+  return shape.hasFinalAnswer
+    && !shape.hasCommentary
+    && !shape.hasToolCall
+    && !shape.hasReasoningItem;
+}
+
+function createProxyOutcome(input: {
+  response: Response;
+  upstream: string | null;
+  upstreamStatus: number | null;
+  attempts: number;
+  attemptRecords: ProxyAttemptRecord[];
+  inspection?: ProxyPayloadInspection;
+  upstreamModel?: ProxyModelExtraction;
+  reasoningTokens?: number | null;
+  reasoningTokensSource?: string | null;
+  failureSummary?: ProxyFailureSummary | null;
+  error?: string | null;
+}): ProxyOutcome {
+  const reasoning = input.inspection?.reasoning ?? createEmptyReasoningMetadata();
+  const upstreamModel = input.upstreamModel ?? input.inspection?.upstreamModel ?? { model: null, source: null };
+  const usage = input.inspection?.usage ?? createEmptyProxyUsageMetadata();
+  const upstreamMetadata = input.inspection?.upstreamMetadata ?? createEmptyProxyUpstreamMetadata();
+  const responseShape = input.inspection?.responseShape ?? createEmptyProxyResponseShape();
+  return {
+    response: input.response,
+    upstream: input.upstream,
+    upstreamStatus: input.upstreamStatus,
+    attempts: input.attempts,
+    attemptRecords: input.attemptRecords,
+    upstreamModel: upstreamModel.model,
+    upstreamModelSource: upstreamModel.source,
+    streamModel: upstreamModel.source?.startsWith("sse.") ? upstreamModel.model : null,
+    finalResponseModel: upstreamModel.model,
+    systemFingerprint: upstreamMetadata.systemFingerprint,
+    serviceTier: upstreamMetadata.serviceTier,
+    usage,
+    reasoningTokens: input.reasoningTokens ?? reasoning.reasoningTokens,
+    reasoningTokensSource: input.reasoningTokensSource ?? reasoning.reasoningTokensSource,
+    reasoningTextObserved: reasoning.reasoningTextObserved,
+    reasoningTextSource: reasoning.reasoningTextSource,
+    responseShape,
+    failureSummary: input.failureSummary ?? null,
+    error: input.error ?? null,
+  };
+}
+
 function jsonPointerGet(value: unknown, pointer: string): unknown {
   if (!pointer.startsWith("/")) {
     return undefined;
@@ -1256,6 +1650,10 @@ function jsonPointerGet(value: unknown, pointer: string): unknown {
 }
 
 function isReasoningTokenCount(value: unknown): value is number {
+  return Number.isInteger(value) && typeof value === "number" && value >= 0;
+}
+
+function isProxyTokenCount(value: unknown): value is number {
   return Number.isInteger(value) && typeof value === "number" && value >= 0;
 }
 
@@ -1581,6 +1979,29 @@ function extractRequestModelFromJson(parsed: unknown, endpointClass: ProxyEndpoi
     : null;
 }
 
+function extractRequestReasoningEffortFromJson(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  return jsonStringAt(parsed, ["reasoning", "effort"]) ?? jsonStringAt(parsed, ["reasoning_effort"]);
+}
+
+function hashRequestBody(body: Buffer): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+
+function sanitizeWhitelistedRequestHeaders(headers: IncomingMessage["headers"]): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const key of REQUEST_HEADER_ALLOWLIST) {
+    const value = headers[key];
+    if (value === undefined) {
+      continue;
+    }
+    sanitized[key] = Array.isArray(value) ? value.join(", ") : value;
+  }
+  return sanitized;
+}
+
 function detectProxyRequestKind(headers: IncomingMessage["headers"], requestJson: unknown): ProxyRequestKind {
   const headerSignals = [
     headerSignal(headers, "x-codex-request-kind"),
@@ -1735,14 +2156,22 @@ async function forwardRequest(
 type ProxyOutcome = {
   response: Response;
   upstream: string | null;
+  upstreamStatus: number | null;
   attempts: number;
   attemptRecords: ProxyAttemptRecord[];
   upstreamModel: string | null;
   upstreamModelSource: string | null;
+  streamModel: string | null;
+  finalResponseModel: string | null;
+  systemFingerprint: string | null;
+  serviceTier: string | null;
+  usage: ProxyUsageMetadata;
   reasoningTokens: number | null;
   reasoningTokensSource: string | null;
   reasoningTextObserved: boolean;
   reasoningTextSource: string | null;
+  responseShape: ProxyResponseShape;
+  failureSummary: ProxyFailureSummary | null;
   error: string | null;
 };
 
@@ -1758,13 +2187,21 @@ type ProxyForwardCallbacks = {
 type ProxyAttemptState = {
   attempts: number;
   attemptRecords: ProxyAttemptRecord[];
+  attemptStartedAtMs: number[];
 };
 
 type ProxyPayloadInspection = {
   upstreamModel: ProxyModelExtraction;
   reasoning: ProxyReasoningMetadata;
+  usage: ProxyUsageMetadata;
+  upstreamMetadata: ProxyUpstreamMetadata;
+  responseShape: ProxyResponseShape;
   guardReasoningTokens: number | null;
   continuationReasoningItems: ProxyContinuationReasoningItem[];
+};
+
+type ProxyBufferedBody = ProxyBodyTiming & {
+  buffer: Buffer;
 };
 
 class ProxyResponseWriteError extends Error {
@@ -1869,7 +2306,7 @@ async function proxyThroughActiveUpstreamWithStats(
     requestJson,
     requestBody: body,
   });
-  const attemptState: ProxyAttemptState = { attempts: 0, attemptRecords };
+  const attemptState: ProxyAttemptState = { attempts: 0, attemptRecords, attemptStartedAtMs: [] };
   let guardRetries = 0;
   let currentBody = preparedRequest.requestBody;
   let currentRequestJson = preparedRequest.requestJson;
@@ -1885,7 +2322,9 @@ async function proxyThroughActiveUpstreamWithStats(
     await callbacks.onResponseStart?.(status, upstream.name);
     const headers = responseHeadersToObject(response.headers);
     const responseContentType = `${response.headers.get("content-type") || ""}`;
-    const buffer = await readProxyResponseBody(response, responseContentType, endpointClass, callbacks);
+    const body = await readProxyResponseBody(response, responseContentType, endpointClass, currentProxyAttemptStartedAtMs(attemptState), callbacks);
+    const buffer = body.buffer;
+    updateProxyAttemptBodyTiming(attemptState, body);
     const inspection = inspectProxyPayload(buffer, responseContentType, endpointClass);
     updateProxyAttemptInspection(attemptState, inspection);
     const upstreamModel = inspection.upstreamModel;
@@ -1915,19 +2354,17 @@ async function proxyThroughActiveUpstreamWithStats(
       completeProxyAttemptRecord(attemptState, "passed", {
         failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
       });
-      return {
+      return createProxyOutcome({
         response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
         upstream: upstream.name,
+        upstreamStatus: status,
         attempts: attemptState.attempts,
         attemptRecords: attemptState.attemptRecords,
-        upstreamModel: upstreamModel.model,
-        upstreamModelSource: upstreamModel.source,
-        reasoningTokens: inspection.reasoning.reasoningTokens,
-        reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
-        reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
-        reasoningTextSource: inspection.reasoning.reasoningTextSource,
+        inspection,
+        upstreamModel,
+        failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
         error: null,
-      };
+      });
     }
 
     if (inspection.guardReasoningTokens !== null) {
@@ -1986,35 +2423,33 @@ async function proxyThroughActiveUpstreamWithStats(
         reasoningTokens: inspection.guardReasoningTokens,
         error,
       }));
-      return {
+      return createProxyOutcome({
         response: createReasoningGuardResponse(upstream, inspection.guardReasoningTokens),
         upstream: upstream.name,
+        upstreamStatus: status,
         attempts: attemptState.attempts,
         attemptRecords: attemptState.attemptRecords,
-        upstreamModel: upstreamModel.model,
-        upstreamModelSource: upstreamModel.source,
+        inspection,
+        upstreamModel,
         reasoningTokens: inspection.guardReasoningTokens,
         reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
-        reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
-        reasoningTextSource: inspection.reasoning.reasoningTextSource,
+        failureSummary: proxyFailureSummary("codex_proxy", "reasoning_guard_triggered", error),
         error,
-      };
+      });
     }
 
     completeProxyAttemptRecord(attemptState, "passed");
-    return {
+    return createProxyOutcome({
       response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
       upstream: upstream.name,
+      upstreamStatus: status,
       attempts: attemptState.attempts,
       attemptRecords: attemptState.attemptRecords,
-      upstreamModel: upstreamModel.model,
-      upstreamModelSource: upstreamModel.source,
-      reasoningTokens: inspection.reasoning.reasoningTokens,
-      reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
-      reasoningTextObserved: inspection.reasoning.reasoningTextObserved,
-      reasoningTextSource: inspection.reasoning.reasoningTextSource,
+      inspection,
+      upstreamModel,
+      failureSummary: proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType),
       error: null,
-    };
+    });
   }
 }
 
@@ -2022,14 +2457,19 @@ async function readProxyResponseBody(
   response: Response,
   contentType: string,
   endpointClass: ProxyEndpointClass | null,
+  attemptStartedAtMs: number | null,
   callbacks: ProxyForwardCallbacks,
-): Promise<Buffer> {
+): Promise<ProxyBufferedBody> {
   if (!response.body) {
-    return Buffer.alloc(0);
+    return { buffer: Buffer.alloc(0), timeToFirstChunkMs: null, streamDurationMs: null };
   }
   if (!isStreamContentType(contentType)) {
     try {
-      return Buffer.from(await response.arrayBuffer());
+      return {
+        buffer: Buffer.from(await response.arrayBuffer()),
+        timeToFirstChunkMs: null,
+        streamDurationMs: null,
+      };
     } catch (error) {
       throw proxyResponseBodyReadError(error, callbacks.signal, 0);
     }
@@ -2038,6 +2478,8 @@ async function readProxyResponseBody(
   const chunks: Buffer[] = [];
   const scanner = new ProxySseModelScanner(endpointClass);
   let responseBytes = 0;
+  let firstChunkAtMs: number | null = null;
+  let lastChunkAtMs: number | null = null;
   let emittedModelKey = "";
   let emittedReasoningKey = reasoningMetadataKey(createEmptyReasoningMetadata());
   const emitModelIfChanged = async (extraction: ProxyModelExtraction): Promise<void> => {
@@ -2060,6 +2502,9 @@ async function readProxyResponseBody(
   try {
     for await (const chunk of Readable.fromWeb(response.body as never)) {
       const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const nowMs = performance.now();
+      firstChunkAtMs ??= nowMs;
+      lastChunkAtMs = nowMs;
       chunks.push(value);
       responseBytes += value.length;
       scanner.push(value);
@@ -2072,7 +2517,12 @@ async function readProxyResponseBody(
   }
   await emitModelIfChanged(scanner.current());
   await emitReasoningIfChanged(scanner.currentReasoningMetadata());
-  return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+  const buffer = chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+  return {
+    buffer,
+    timeToFirstChunkMs: firstChunkAtMs === null || attemptStartedAtMs === null ? null : Math.max(0, firstChunkAtMs - attemptStartedAtMs),
+    streamDurationMs: firstChunkAtMs === null || lastChunkAtMs === null ? null : Math.max(0, lastChunkAtMs - firstChunkAtMs),
+  };
 }
 
 function proxyResponseBodyReadError(error: unknown, signal: AbortSignal | undefined, responseBytes: number): ProxyResponseWriteError {
@@ -2098,6 +2548,7 @@ async function fetchUpstreamWithTransportRetry(
     }
     attemptState.attempts += 1;
     attemptState.attemptRecords.push(createProxyAttemptRecord(attemptState.attempts, upstream.name));
+    attemptState.attemptStartedAtMs.push(performance.now());
     await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
     try {
       const response = await forwardRequest(request, upstream, body, callbacks.signal);
@@ -2131,19 +2582,15 @@ async function fetchUpstreamWithTransportRetry(
         failureSummary,
         remainingRetries: 0,
       });
-      return {
+      return createProxyOutcome({
         response: createUpstreamErrorResponse(message, code),
         upstream: upstream.name,
+        upstreamStatus: null,
         attempts: attemptState.attempts,
         attemptRecords: attemptState.attemptRecords,
-        upstreamModel: null,
-        upstreamModelSource: null,
-        reasoningTokens: null,
-        reasoningTokensSource: null,
-        reasoningTextObserved: false,
-        reasoningTextSource: null,
+        failureSummary,
         error: `${code}: ${message}`,
-      };
+      });
     }
   }
 }
@@ -2173,6 +2620,9 @@ function inspectProxyPayload(
   return {
     upstreamModel: { model: null, source: null },
     reasoning: createEmptyReasoningMetadata(),
+    usage: createEmptyProxyUsageMetadata(),
+    upstreamMetadata: createEmptyProxyUpstreamMetadata(),
+    responseShape: createEmptyProxyResponseShape(),
     guardReasoningTokens: null,
     continuationReasoningItems: [],
   };
@@ -2185,6 +2635,9 @@ function inspectJsonPayload(buffer: Buffer, endpointClass: ProxyEndpointClass | 
     return {
       upstreamModel: extractUpstreamModelFromJson(parsed, endpointClass),
       reasoning,
+      usage: parseProxyUsageMetadata(parsed),
+      upstreamMetadata: parseProxyUpstreamMetadata(parsed),
+      responseShape: parseProxyResponseShape(parsed),
       guardReasoningTokens: reasoning.reasoningTokens !== null && REASONING_EQUALS.includes(reasoning.reasoningTokens) ? reasoning.reasoningTokens : null,
       continuationReasoningItems: [],
     };
@@ -2192,6 +2645,9 @@ function inspectJsonPayload(buffer: Buffer, endpointClass: ProxyEndpointClass | 
     return {
       upstreamModel: { model: null, source: null },
       reasoning: createEmptyReasoningMetadata(),
+      usage: createEmptyProxyUsageMetadata(),
+      upstreamMetadata: createEmptyProxyUpstreamMetadata(),
+      responseShape: createEmptyProxyResponseShape(),
       guardReasoningTokens: null,
       continuationReasoningItems: [],
     };
@@ -2201,6 +2657,9 @@ function inspectJsonPayload(buffer: Buffer, endpointClass: ProxyEndpointClass | 
 function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | null): ProxyPayloadInspection {
   let upstreamModel: ProxyModelExtraction = { model: null, source: null };
   let reasoning = createEmptyReasoningMetadata();
+  let usage = createEmptyProxyUsageMetadata();
+  let upstreamMetadata = createEmptyProxyUpstreamMetadata();
+  let responseShape = createEmptyProxyResponseShape();
   let guardReasoningTokens: number | null = null;
   const continuationReasoningItems: ProxyContinuationReasoningItem[] = [];
 
@@ -2216,6 +2675,9 @@ function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | n
       }
       const eventReasoning = parseReasoningMetadata(parsed, "sse.data");
       reasoning = mergeReasoningMetadata(reasoning, eventReasoning);
+      usage = mergeProxyUsageMetadata(usage, parseProxyUsageMetadata(parsed));
+      upstreamMetadata = mergeProxyUpstreamMetadata(upstreamMetadata, parseProxyUpstreamMetadata(parsed));
+      responseShape = mergeProxyResponseShape(responseShape, parseProxyResponseShape(parsed));
       continuationReasoningItems.push(...collectContinuationReasoningItems(parsed));
       if (eventReasoning.reasoningTokens !== null) {
         if (REASONING_EQUALS.includes(eventReasoning.reasoningTokens)) {
@@ -2227,7 +2689,7 @@ function inspectSsePayload(buffer: Buffer, endpointClass: ProxyEndpointClass | n
     }
   }
 
-  return { upstreamModel, reasoning, guardReasoningTokens, continuationReasoningItems };
+  return { upstreamModel, reasoning, usage, upstreamMetadata, responseShape, guardReasoningTokens, continuationReasoningItems };
 }
 
 function splitSseEvents(value: string): string[] {
@@ -2265,12 +2727,27 @@ function createProxyAttemptRecord(attempt: number, upstream: string | null): Pro
     duration_ms: null,
     upstream,
     upstream_status: null,
+    upstream_wait_ms: null,
+    time_to_first_chunk_ms: null,
+    stream_duration_ms: null,
     upstream_model: null,
     upstream_model_source: null,
+    stream_model: null,
+    final_response_model: null,
+    system_fingerprint: null,
+    service_tier: null,
+    input_tokens: null,
     reasoning_tokens: null,
     reasoning_tokens_source: null,
+    output_tokens: null,
+    total_tokens: null,
     reasoning_text_observed: false,
     reasoning_text_source: null,
+    has_commentary: false,
+    has_final_answer: false,
+    final_answer_only: false,
+    has_tool_call: false,
+    has_reasoning_item: false,
     final_action: "pending",
     failure_summary: null,
     remaining_retries: null,
@@ -2288,6 +2765,8 @@ function markProxyAttemptHeaders(attemptState: ProxyAttemptState, status: number
   }
   attempt.headers_at = new Date().toISOString();
   attempt.upstream_status = status;
+  const startedAtMs = currentProxyAttemptStartedAtMs(attemptState);
+  attempt.upstream_wait_ms = startedAtMs === null ? null : Math.max(0, performance.now() - startedAtMs);
 }
 
 function updateProxyAttemptInspection(attemptState: ProxyAttemptState, inspection: ProxyPayloadInspection): void {
@@ -2297,10 +2776,36 @@ function updateProxyAttemptInspection(attemptState: ProxyAttemptState, inspectio
   }
   attempt.upstream_model = inspection.upstreamModel.model;
   attempt.upstream_model_source = inspection.upstreamModel.source;
+  attempt.stream_model = inspection.upstreamModel.source?.startsWith("sse.") ? inspection.upstreamModel.model : null;
+  attempt.final_response_model = inspection.upstreamModel.model;
+  attempt.system_fingerprint = inspection.upstreamMetadata.systemFingerprint;
+  attempt.service_tier = inspection.upstreamMetadata.serviceTier;
+  attempt.input_tokens = inspection.usage.inputTokens;
   attempt.reasoning_tokens = inspection.reasoning.reasoningTokens;
   attempt.reasoning_tokens_source = inspection.reasoning.reasoningTokensSource;
+  attempt.output_tokens = inspection.usage.outputTokens;
+  attempt.total_tokens = inspection.usage.totalTokens;
   attempt.reasoning_text_observed = inspection.reasoning.reasoningTextObserved;
   attempt.reasoning_text_source = inspection.reasoning.reasoningTextSource;
+  attempt.has_commentary = inspection.responseShape.hasCommentary;
+  attempt.has_final_answer = inspection.responseShape.hasFinalAnswer;
+  attempt.final_answer_only = isProxyFinalAnswerOnly(inspection.responseShape);
+  attempt.has_tool_call = inspection.responseShape.hasToolCall;
+  attempt.has_reasoning_item = inspection.responseShape.hasReasoningItem;
+}
+
+function updateProxyAttemptBodyTiming(attemptState: ProxyAttemptState, timing: ProxyBodyTiming): void {
+  const attempt = currentProxyAttemptRecord(attemptState);
+  if (!attempt) {
+    return;
+  }
+  attempt.time_to_first_chunk_ms = timing.timeToFirstChunkMs;
+  attempt.stream_duration_ms = timing.streamDurationMs;
+}
+
+function currentProxyAttemptStartedAtMs(attemptState: ProxyAttemptState): number | null {
+  const startedAtMs = attemptState.attemptStartedAtMs.at(-1);
+  return typeof startedAtMs === "number" && Number.isFinite(startedAtMs) ? startedAtMs : null;
 }
 
 function completeProxyAttemptRecord(
@@ -2334,7 +2839,7 @@ function completeLastPendingProxyAttemptRecord(
     remainingRetries?: number | null;
   } = {},
 ): void {
-  completeProxyAttemptRecord({ attempts: attemptRecords.length, attemptRecords }, finalAction, input);
+  completeProxyAttemptRecord({ attempts: attemptRecords.length, attemptRecords, attemptStartedAtMs: [] }, finalAction, input);
 }
 
 function proxyFailureSummary(type: string | null, code: string | null, message: string | null): ProxyFailureSummary {
@@ -2344,6 +2849,77 @@ function proxyFailureSummary(type: string | null, code: string | null, message: 
 function proxyFailureSummaryFromError(code: string, error: unknown): ProxyFailureSummary {
   const message = error instanceof Error ? error.message : String(error);
   return proxyFailureSummary("upstream_error", code, message);
+}
+
+function proxyFailureSummaryFromBufferedPayload(status: number, buffer: Buffer, contentType: string): ProxyFailureSummary | null {
+  if (status < 400 || !isJsonContentType(contentType) || buffer.length === 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(buffer.toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const raw = parsed as Record<string, unknown>;
+    const error = raw.error;
+    if (typeof error === "string" && error.length > 0) {
+      return proxyFailureSummary("upstream_error", null, error);
+    }
+    if (error && typeof error === "object" && !Array.isArray(error)) {
+      const errorRaw = error as Record<string, unknown>;
+      return proxyFailureSummary(
+        nullableStringField(errorRaw.type) ?? "upstream_error",
+        nullableStringField(errorRaw.code),
+        nullableStringField(errorRaw.message),
+      );
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function createRetrySummary(attemptRecords: ProxyAttemptRecord[]): ProxyRetrySummary {
+  const summary = createEmptyProxyRetrySummary();
+  for (const attempt of attemptRecords) {
+    if (attempt.final_action === "internal_retry" || attempt.final_action === "continuation_recovery") {
+      summary.reasoning_guard += 1;
+    } else if (attempt.final_action === "upstream_capacity_internal_retry") {
+      summary.upstream_capacity += 1;
+    } else if (attempt.final_action === "transport_retry") {
+      summary.transport += 1;
+    }
+  }
+  summary.total = summary.reasoning_guard + summary.upstream_capacity + summary.transport;
+  return summary;
+}
+
+function lastProxyAttemptRecord(attemptRecords: ProxyAttemptRecord[]): ProxyAttemptRecord | null {
+  return attemptRecords.at(-1) ?? null;
+}
+
+function requestTimingFromAttempt(attempt: ProxyAttemptRecord | null): Pick<ProxyRequestRecord, "upstream_wait_ms" | "time_to_first_chunk_ms" | "stream_duration_ms"> {
+  return {
+    upstream_wait_ms: attempt?.upstream_wait_ms ?? null,
+    time_to_first_chunk_ms: attempt?.time_to_first_chunk_ms ?? null,
+    stream_duration_ms: attempt?.stream_duration_ms ?? null,
+  };
+}
+
+function requestFinalAction(input: { status: number | null; error: string | null; failureSummary: ProxyFailureSummary | null }): string {
+  if (input.status === 499) {
+    return "client_aborted";
+  }
+  if (input.failureSummary?.code === "reasoning_guard_triggered" || input.error?.includes("reasoning_guard_triggered")) {
+    return "blocked";
+  }
+  if (input.failureSummary?.code === "upstream_fetch_failed" || input.error?.includes("upstream_fetch_failed")) {
+    return "upstream_fetch_failed";
+  }
+  if (input.error) {
+    return "gateway_error";
+  }
+  return "passed";
 }
 
 function createProxyGuardAction(input: {
@@ -2970,53 +3546,94 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         const requestStartedAt = new Date();
         const requestStartedAtMs = performance.now();
         const activeRecord: ProxyRequestRecord = {
+          schema_version: PROXY_REQUEST_SCHEMA_VERSION,
           id: randomUUID(),
           started_at: requestStartedAt.toISOString(),
           completed_at: null,
           method,
           path: url.pathname,
           status: null,
+          upstream_status: null,
+          client_status: null,
+          final_action: "pending",
+          failure_summary: null,
           upstream: null,
           attempts: 0,
           latency_ms: 0,
+          upstream_wait_ms: null,
+          time_to_first_chunk_ms: null,
+          stream_duration_ms: null,
           request_bytes: 0,
           response_bytes: 0,
           session: null,
           request_kind: REQUEST_KIND_NORMAL,
           request_model: null,
+          request_reasoning_effort: null,
+          request_body_sha256: null,
           upstream_model: null,
           upstream_model_source: null,
+          stream_model: null,
+          final_response_model: null,
+          system_fingerprint: null,
+          service_tier: null,
+          input_tokens: null,
           reasoning_tokens: null,
           reasoning_tokens_source: null,
+          output_tokens: null,
+          total_tokens: null,
           reasoning_text_observed: false,
           reasoning_text_source: null,
+          has_commentary: false,
+          has_final_answer: false,
+          final_answer_only: false,
+          has_tool_call: false,
+          has_reasoning_item: false,
           guard_actions: [],
+          retry_summary: createEmptyProxyRetrySummary(),
           error: null,
         };
         await startProxyRequestMetric(state, options.stateRoot, activeRecord);
 
         let status: number | null = null;
+        let upstreamStatus: number | null = null;
         let upstream: string | null = null;
         let attempts = 0;
         let responseBytes = 0;
         let upstreamModel: string | null = null;
         let upstreamModelSource: string | null = null;
+        let streamModel: string | null = null;
+        let finalResponseModel: string | null = null;
+        let systemFingerprint: string | null = null;
+        let serviceTier: string | null = null;
+        let inputTokens: number | null = null;
         let reasoningTokens: number | null = null;
         let reasoningTokensSource: string | null = null;
+        let outputTokens: number | null = null;
+        let totalTokens: number | null = null;
         let reasoningTextObserved = false;
         let reasoningTextSource: string | null = null;
+        let hasCommentary = false;
+        let hasFinalAnswer = false;
+        let finalAnswerOnly = false;
+        let hasToolCall = false;
+        let hasReasoningItem = false;
+        let failureSummary: ProxyFailureSummary | null = null;
         let errorText: string | null = null;
         const attemptRecords: ProxyAttemptRecord[] = [];
+        let requestHeaders: Record<string, string> = {};
         const endpointClass = route.endpointClass;
         try {
           const profiles = await readProfiles();
           const upstreamProfile = resolveProxyUpstream(profiles);
           const body = await readBody(req);
           const requestJson = parseJsonBody(body);
+          requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
           activeRecord.request_bytes = body.length;
+          activeRecord.request_body_sha256 = hashRequestBody(body);
           activeRecord.session = extractSessionShortId(body);
           activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
           activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
+          activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
           const outcome = await proxyThroughActiveUpstreamWithStats(
             req,
@@ -3033,18 +3650,32 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               activeRecord.attempts = attemptCount;
               if (attemptCount > 1) {
                 activeRecord.status = null;
+                activeRecord.upstream_status = null;
                 activeRecord.reasoning_tokens = null;
                 activeRecord.reasoning_tokens_source = null;
+                activeRecord.input_tokens = null;
+                activeRecord.output_tokens = null;
+                activeRecord.total_tokens = null;
                 activeRecord.reasoning_text_observed = false;
                 activeRecord.reasoning_text_source = null;
                 activeRecord.upstream_model = null;
                 activeRecord.upstream_model_source = null;
+                activeRecord.stream_model = null;
+                activeRecord.final_response_model = null;
+                activeRecord.system_fingerprint = null;
+                activeRecord.service_tier = null;
+                activeRecord.has_commentary = false;
+                activeRecord.has_final_answer = false;
+                activeRecord.final_answer_only = false;
+                activeRecord.has_tool_call = false;
+                activeRecord.has_reasoning_item = false;
                 activeRecord.error = null;
               }
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
             onResponseStart: async (responseStatus, upstreamName) => {
               activeRecord.status = responseStatus;
+              activeRecord.upstream_status = responseStatus;
               activeRecord.upstream = upstreamName;
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
@@ -3079,28 +3710,56 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await logProxyGuardAction(options.stateRoot, activeRecord, action);
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
-          });
-          status = outcome.response.status;
-          upstream = outcome.upstream;
-          attempts = outcome.attempts;
-          upstreamModel = outcome.upstreamModel;
-          upstreamModelSource = outcome.upstreamModelSource;
-          reasoningTokens = outcome.reasoningTokens;
-          reasoningTokensSource = outcome.reasoningTokensSource;
-          reasoningTextObserved = outcome.reasoningTextObserved;
-          reasoningTextSource = outcome.reasoningTextSource;
-          errorText = outcome.error;
-          activeRecord.status = status;
-          activeRecord.upstream = upstream;
-          activeRecord.attempts = attempts;
-          activeRecord.upstream_model = upstreamModel;
-          activeRecord.upstream_model_source = upstreamModelSource;
-          activeRecord.reasoning_tokens = reasoningTokens;
-          activeRecord.reasoning_tokens_source = reasoningTokensSource;
-          activeRecord.reasoning_text_observed = reasoningTextObserved;
-          activeRecord.reasoning_text_source = reasoningTextSource;
-          activeRecord.error = errorText;
-          await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+	          });
+	          status = outcome.response.status;
+	          upstreamStatus = outcome.upstreamStatus;
+	          upstream = outcome.upstream;
+	          attempts = outcome.attempts;
+	          upstreamModel = outcome.upstreamModel;
+	          upstreamModelSource = outcome.upstreamModelSource;
+	          streamModel = outcome.streamModel;
+	          finalResponseModel = outcome.finalResponseModel;
+	          systemFingerprint = outcome.systemFingerprint;
+	          serviceTier = outcome.serviceTier;
+	          inputTokens = outcome.usage.inputTokens;
+	          reasoningTokens = outcome.reasoningTokens;
+	          reasoningTokensSource = outcome.reasoningTokensSource;
+	          outputTokens = outcome.usage.outputTokens;
+	          totalTokens = outcome.usage.totalTokens;
+	          reasoningTextObserved = outcome.reasoningTextObserved;
+	          reasoningTextSource = outcome.reasoningTextSource;
+	          hasCommentary = outcome.responseShape.hasCommentary;
+	          hasFinalAnswer = outcome.responseShape.hasFinalAnswer;
+	          finalAnswerOnly = isProxyFinalAnswerOnly(outcome.responseShape);
+	          hasToolCall = outcome.responseShape.hasToolCall;
+	          hasReasoningItem = outcome.responseShape.hasReasoningItem;
+	          failureSummary = outcome.failureSummary;
+	          errorText = outcome.error;
+	          activeRecord.status = status;
+	          activeRecord.upstream_status = upstreamStatus;
+	          activeRecord.upstream = upstream;
+	          activeRecord.attempts = attempts;
+	          activeRecord.upstream_model = upstreamModel;
+	          activeRecord.upstream_model_source = upstreamModelSource;
+	          activeRecord.stream_model = streamModel;
+	          activeRecord.final_response_model = finalResponseModel;
+	          activeRecord.system_fingerprint = systemFingerprint;
+	          activeRecord.service_tier = serviceTier;
+	          activeRecord.input_tokens = inputTokens;
+	          activeRecord.reasoning_tokens = reasoningTokens;
+	          activeRecord.reasoning_tokens_source = reasoningTokensSource;
+	          activeRecord.output_tokens = outputTokens;
+	          activeRecord.total_tokens = totalTokens;
+	          activeRecord.reasoning_text_observed = reasoningTextObserved;
+	          activeRecord.reasoning_text_source = reasoningTextSource;
+	          activeRecord.has_commentary = hasCommentary;
+	          activeRecord.has_final_answer = hasFinalAnswer;
+	          activeRecord.final_answer_only = finalAnswerOnly;
+	          activeRecord.has_tool_call = hasToolCall;
+	          activeRecord.has_reasoning_item = hasReasoningItem;
+	          activeRecord.failure_summary = failureSummary;
+	          activeRecord.error = errorText;
+	          await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
           const streamModelObserver: ProxyWriteModelObserver = {
             model: upstreamModel,
             source: upstreamModelSource,
@@ -3110,27 +3769,30 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           };
-          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
-          upstreamModel = streamModelObserver.model;
-          upstreamModelSource = streamModelObserver.source;
+	          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
+	          upstreamModel = streamModelObserver.model;
+	          upstreamModelSource = streamModelObserver.source;
+	          streamModel = upstreamModelSource?.startsWith("sse.") ? upstreamModel : streamModel;
+	          finalResponseModel = upstreamModel ?? finalResponseModel;
 	        } catch (error) {
 	          if (error instanceof ProxyResponseWriteError) {
 	            status = error.status;
 	            responseBytes = error.responseBytes;
 	            errorText = error.message;
-          } else {
+	          } else {
 	            status = status ?? 500;
 	            errorText = error instanceof Error ? error.message : String(error);
 	          }
+	          failureSummary = proxyFailureSummary(
+	            status === 499 ? "client_error" : "gateway_error",
+	            status === 499 ? "client_aborted" : "gateway_error",
+	            errorText,
+	          );
 	          completeLastPendingProxyAttemptRecord(
 	            attemptRecords,
 	            status === 499 ? "client_aborted" : "gateway_error",
 	            {
-	              failureSummary: proxyFailureSummary(
-	                status === 499 ? "client_error" : "gateway_error",
-	                status === 499 ? "client_aborted" : "gateway_error",
-	                errorText,
-	              ),
+	              failureSummary,
 	            },
 	          );
 	          upstream = activeRecord.upstream;
@@ -3140,39 +3802,81 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             responseBytes = Buffer.byteLength(payload);
             res.writeHead(status ?? 500, { "content-type": "application/json; charset=utf-8" });
             res.end(payload);
-          }
-          upstreamModel = activeRecord.upstream_model;
-          upstreamModelSource = activeRecord.upstream_model_source;
-          reasoningTokens = activeRecord.reasoning_tokens;
-          reasoningTokensSource = activeRecord.reasoning_tokens_source;
-          reasoningTextObserved = activeRecord.reasoning_text_observed;
-          reasoningTextSource = activeRecord.reasoning_text_source;
-          activeRecord.status = status;
-          activeRecord.response_bytes = responseBytes;
-          activeRecord.error = errorText;
+	          }
+	          upstreamStatus = activeRecord.upstream_status;
+	          upstreamModel = activeRecord.upstream_model;
+	          upstreamModelSource = activeRecord.upstream_model_source;
+	          streamModel = activeRecord.stream_model;
+	          finalResponseModel = activeRecord.final_response_model;
+	          systemFingerprint = activeRecord.system_fingerprint;
+	          serviceTier = activeRecord.service_tier;
+	          inputTokens = activeRecord.input_tokens;
+	          reasoningTokens = activeRecord.reasoning_tokens;
+	          reasoningTokensSource = activeRecord.reasoning_tokens_source;
+	          outputTokens = activeRecord.output_tokens;
+	          totalTokens = activeRecord.total_tokens;
+	          reasoningTextObserved = activeRecord.reasoning_text_observed;
+	          reasoningTextSource = activeRecord.reasoning_text_source;
+	          hasCommentary = activeRecord.has_commentary;
+	          hasFinalAnswer = activeRecord.has_final_answer;
+	          finalAnswerOnly = activeRecord.final_answer_only;
+	          hasToolCall = activeRecord.has_tool_call;
+	          hasReasoningItem = activeRecord.has_reasoning_item;
+	          activeRecord.status = status;
+	          activeRecord.client_status = status;
+	          activeRecord.response_bytes = responseBytes;
+	          activeRecord.failure_summary = failureSummary;
+	          activeRecord.error = errorText;
           await logProxyRequestError(options.stateRoot, activeRecord, status, errorText);
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
         }
 
-        const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
-        await completeProxyRequestMetric(state, options.stateRoot, {
-          ...activeRecord,
-          completed_at: new Date().toISOString(),
-          status,
-          upstream,
-          attempts,
-          latency_ms: latencyMs,
-          response_bytes: responseBytes,
-          request_model: activeRecord.request_model,
-          upstream_model: upstreamModel,
-          upstream_model_source: upstreamModelSource,
-          reasoning_tokens: reasoningTokens,
-          reasoning_tokens_source: reasoningTokensSource,
-          reasoning_text_observed: reasoningTextObserved,
-          reasoning_text_source: reasoningTextSource,
-          error: errorText,
-          attempt_records: attemptRecords,
-        });
+	        const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
+	        const lastAttempt = lastProxyAttemptRecord(attemptRecords);
+	        const attemptTiming = requestTimingFromAttempt(lastAttempt);
+	        const finalAction = requestFinalAction({ status, error: errorText, failureSummary });
+	        const retrySummary = createRetrySummary(attemptRecords);
+	        await completeProxyRequestMetric(state, options.stateRoot, {
+	          ...activeRecord,
+	          completed_at: new Date().toISOString(),
+	          status,
+	          upstream_status: upstreamStatus,
+	          client_status: status,
+	          final_action: finalAction,
+	          failure_summary: failureSummary,
+	          upstream,
+	          attempts,
+	          latency_ms: latencyMs,
+	          upstream_wait_ms: attemptTiming.upstream_wait_ms,
+	          time_to_first_chunk_ms: attemptTiming.time_to_first_chunk_ms,
+	          stream_duration_ms: attemptTiming.stream_duration_ms,
+	          response_bytes: responseBytes,
+	          request_model: activeRecord.request_model,
+	          request_reasoning_effort: activeRecord.request_reasoning_effort,
+	          request_body_sha256: activeRecord.request_body_sha256,
+	          upstream_model: upstreamModel,
+	          upstream_model_source: upstreamModelSource,
+	          stream_model: streamModel,
+	          final_response_model: finalResponseModel,
+	          system_fingerprint: systemFingerprint,
+	          service_tier: serviceTier,
+	          input_tokens: inputTokens,
+	          reasoning_tokens: reasoningTokens,
+	          reasoning_tokens_source: reasoningTokensSource,
+	          output_tokens: outputTokens,
+	          total_tokens: totalTokens,
+	          reasoning_text_observed: reasoningTextObserved,
+	          reasoning_text_source: reasoningTextSource,
+	          has_commentary: hasCommentary,
+	          has_final_answer: hasFinalAnswer,
+	          final_answer_only: finalAnswerOnly,
+	          has_tool_call: hasToolCall,
+	          has_reasoning_item: hasReasoningItem,
+	          retry_summary: retrySummary,
+	          error: errorText,
+	          request_headers: requestHeaders,
+	          attempt_records: attemptRecords,
+	        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
