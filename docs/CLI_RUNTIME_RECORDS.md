@@ -75,7 +75,7 @@ Monitor and watch output should keep display rules predictable:
 - Tables with mixed diagnostic value can assign shrink priority so compact labels and endpoints compress before dense counters, rates, routes, and final details.
 - TTY output can adapt row counts to terminal height.
 - Non-TTY output should stay deterministic.
-- Watch mode should recompute layout after terminal resize.
+- Watch and live monitor modes should recompute layout after terminal resize.
 - Color sets should stay small and semantic, such as red, yellow, and green for status-like values.
 
 ## Numeric Format
