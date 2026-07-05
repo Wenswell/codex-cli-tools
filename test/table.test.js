@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderTable } from "../dist/lib/table.js";
 import { textGreen, textRed, truncateVisible, visibleLength } from "../dist/lib/text.js";
+import { stripAnsi } from "./helpers/terminal.js";
 
 test("table aligns ANSI colored cells by visible width", () => {
   const lines = renderTable(
@@ -87,7 +88,3 @@ test("truncateVisible handles ANSI colored text", () => {
   assert.equal(stripAnsi(truncateVisible(textGreen("abcdef"), 5)), "abcd…");
   assert.equal(visibleLength(truncateVisible(textGreen("中文abcdef"), 7)), 7);
 });
-
-function stripAnsi(value) {
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
-}

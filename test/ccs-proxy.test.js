@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
 import { buildProxyStatusLines, ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, stopProxy } from "../dist/commands/ccs-proxy.js";
+import { captureStdout, execNodeScript, setStdoutProperties, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
   const server = createServer();
@@ -2726,9 +2726,7 @@ test("proxy status table renders configured columns and compact units", () => {
 
 test("proxy status session column uses stable shallow colors in TTY output", async () => {
   const script = `
-    delete process.env.NO_COLOR;
-    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
-    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 180 });
+    ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 180 })}
     const { buildProxyStatusLines } = await import("./dist/commands/ccs-proxy.js");
     const record = (id, session, completedAt) => ({
       id,
@@ -2792,7 +2790,7 @@ test("proxy status session column uses stable shallow colors in TTY output", asy
     );
     process.stdout.write(JSON.stringify(lines));
   `;
-  const { stdout } = await execNode(["--input-type=module", "-e", script]);
+  const { stdout } = await execNodeScript(script);
   const output = JSON.parse(stdout).join("\n");
   const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m019f0df6\u001b\[0m)/g)].map((match) => match[1]);
   const otherSession = output.match(/(\u001b\[[0-9;]*m019f0df7\u001b\[0m)/)?.[1];
@@ -2840,33 +2838,18 @@ test("proxy status error column stays single-line and expands with terminal widt
     },
   };
 
-  const render = (columns) => {
-    const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-    try {
-      Object.defineProperty(process.stdout, "columns", {
-        configurable: true,
-        value: columns,
-      });
-      return buildProxyStatusLines(
-        new Date("2026-01-01T00:00:00.000Z"),
-        state,
-        ["input"],
-        { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
-        {
-          codexConfigPath: "/home/test/.codex/config.toml",
-          listenHost: "127.0.0.1",
-          listenPort: 4610,
-          stateRoot,
-        },
-      );
-    } finally {
-      if (originalColumns) {
-        Object.defineProperty(process.stdout, "columns", originalColumns);
-      } else {
-        delete process.stdout.columns;
-      }
-    }
-  };
+  const render = (columns) => withStdoutProperties({ columns }, () => buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    state,
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot,
+    },
+  ));
 
   const narrowLines = render(118).map(stripAnsi);
   const wideLines = render(150).map(stripAnsi);
@@ -3437,10 +3420,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
           frameCount = output.split("\u001b[H").length - 1;
           if (frameCount === 1 && !resizeSent) {
             resizeSent = true;
-            Object.defineProperty(process.stdout, "rows", {
-              configurable: true,
-              value: 24,
-            });
+            setStdoutProperties({ rows: 24 });
             setImmediate(() => process.stdout.emit("resize"));
             return;
           }
@@ -3912,93 +3892,6 @@ async function captureConsole(run) {
   return `${lines.join("\n")}\n`;
 }
 
-async function captureStdout(run, options = {}) {
-  const originalWrite = process.stdout.write;
-  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-  const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-  const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-  let output = "";
-  Object.defineProperty(process.stdout, "isTTY", {
-    configurable: true,
-    value: options.isTTY ?? process.stdout.isTTY,
-  });
-  Object.defineProperty(process.stdout, "columns", {
-    configurable: true,
-    value: options.columns ?? process.stdout.columns,
-  });
-  Object.defineProperty(process.stdout, "rows", {
-    configurable: true,
-    value: options.rows ?? process.stdout.rows,
-  });
-  process.stdout.write = (chunk, encoding, callback) => {
-    output += Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === "string" ? encoding : "utf8") : String(chunk);
-    options.onWrite?.(output);
-    if (typeof encoding === "function") {
-      encoding();
-    }
-    if (typeof callback === "function") {
-      callback();
-    }
-    return true;
-  };
-  try {
-    await run();
-  } finally {
-    process.stdout.write = originalWrite;
-    if (originalIsTTY) {
-      Object.defineProperty(process.stdout, "isTTY", originalIsTTY);
-    } else {
-      delete process.stdout.isTTY;
-    }
-    if (originalColumns) {
-      Object.defineProperty(process.stdout, "columns", originalColumns);
-    } else {
-      delete process.stdout.columns;
-    }
-    if (originalRows) {
-      Object.defineProperty(process.stdout, "rows", originalRows);
-    } else {
-      delete process.stdout.rows;
-    }
-  }
-  return output;
-}
-
-function withStdoutProperties(properties, run) {
-  const descriptors = Object.fromEntries(
-    Object.keys(properties).map((key) => [key, Object.getOwnPropertyDescriptor(process.stdout, key)]),
-  );
-  try {
-    for (const [key, value] of Object.entries(properties)) {
-      Object.defineProperty(process.stdout, key, {
-        configurable: true,
-        value,
-      });
-    }
-    return run();
-  } finally {
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (descriptor) {
-        Object.defineProperty(process.stdout, key, descriptor);
-      } else {
-        delete process.stdout[key];
-      }
-    }
-  }
-}
-
-function execNode(args) {
-  return new Promise((resolve, reject) => {
-    execFile(process.execPath, args, { cwd: process.cwd(), maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        reject(Object.assign(error, { stdout, stderr }));
-        return;
-      }
-      resolve({ stdout, stderr });
-    });
-  });
-}
-
 function holdControl() {
   let markStarted;
   const started = new Promise((resolve) => {
@@ -4009,10 +3902,6 @@ function holdControl() {
     finish = resolve;
   });
   return { started, release, markStarted, finish };
-}
-
-function stripAnsi(value) {
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 function proxyHistoryRecord(overrides) {

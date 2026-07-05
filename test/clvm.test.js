@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +18,7 @@ import {
   parseDuration,
 } from "../dist/commands/clvm.js";
 import { visibleLength } from "../dist/lib/text.js";
+import { execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
 
 test("normalizes and matches domains", () => {
   assert.deepEqual(normalizeDomains(["Example.com,*.API.Example.com", ".example.com"]), [
@@ -96,19 +96,7 @@ test("sync reports already synced when the merged config matches the local confi
     const templateText = await readFile(join(process.cwd(), "config", "clvm.json"), "utf8");
     await writeFile(join(home, ".config", "codex-tools", "clvm.json"), templateText);
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "sync"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+    const stdout = await runClvmCommand(home, ["sync"]);
 
     assert.match(stdout, /Will modify:\s+\(none\)/);
     assert.match(stdout, /target:\s+already synced .*clvm\.json/);
@@ -275,19 +263,7 @@ test("pads unknown speed columns", async () => {
       }, null, 2)}\n`,
     );
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+    const stdout = await runClvmCommand(home);
 
     const row = stdout
       .split("\n")
@@ -345,19 +321,7 @@ test("formats traffic numbers with three significant digits", async () => {
       }, null, 2)}\n`,
     );
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+    const stdout = await runClvmCommand(home);
 
     assert.match(stdout, /zero speed:\s+160K\/s/);
     assert.match(stdout, /zero<=160K\/s/);
@@ -420,19 +384,7 @@ test("records clvm status state and history", async () => {
       }, null, 2)}\n`,
     );
 
-    await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    await runClvmCommand(home);
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
     assert.equal(state.version, 3);
@@ -510,19 +462,7 @@ test("records clvm raw archive when enabled", async () => {
       }, null, 2)}\n`,
     );
 
-    await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    await runClvmCommand(home);
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
     assert.equal(state.config.rawArchive, true);
@@ -579,19 +519,7 @@ test("records unavailable status when connections payload is invalid", async () 
       }, null, 2)}\n`,
     );
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+    const stdout = await runClvmCommand(home);
 
     assert.match(stdout, /status:\s+unavailable invalid_connections_payload/);
     assert.match(stdout, /\/connections response must contain a connections array/);
@@ -644,19 +572,7 @@ test("omits clvm http error response body by default", async () => {
       }, null, 2)}\n`,
     );
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+    const stdout = await runClvmCommand(home);
 
     assert.match(stdout, /status:\s+unavailable http_error/);
     assert.doesNotMatch(stdout, /secret controller detail/);
@@ -721,19 +637,7 @@ test("omits oversized clvm raw archive payloads", async () => {
       }, null, 2)}\n`,
     );
 
-    await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    await runClvmCommand(home);
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
     assert.equal(state.raw, undefined);
@@ -801,19 +705,7 @@ test("prunes clvm raw archive files", async () => {
       }, null, 2)}\n`,
     );
 
-    await new Promise((resolve, reject) => {
-      execFile("node", ["dist/bin/clvm.js", "--no-color"], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-      }, (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    });
+    await runClvmCommand(home);
 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
     const files = await readdir(rawDir);
@@ -871,7 +763,7 @@ test("monitor retries unavailable connections with backoff", async () => {
       }, null, 2)}\n`,
     );
 
-    const child = spawn("node", ["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
+    const child = spawnNode(["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
@@ -952,7 +844,7 @@ test("monitor skips duplicate idle runtime records", async () => {
       }, null, 2)}\n`,
     );
 
-    child = spawn("node", ["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
+    child = spawnNode(["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: home },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1033,9 +925,7 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
     );
 
     const script = `
-      process.env.NO_COLOR = "1";
-      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
-      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 100 });
+      ${stdoutPropertiesScript({ noColor: true, isTTY: true, columns: 100 })}
       const originalWrite = process.stdout.write.bind(process.stdout);
       let frames = 0;
       process.stdout.write = (chunk, encoding, callback) => {
@@ -1045,7 +935,7 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
           frames += 1;
           if (frames === 1) {
             setImmediate(() => {
-              Object.defineProperty(process.stdout, "columns", { configurable: true, value: 80 });
+              ${stdoutPropertiesScript({ columns: 80 })}
               process.stdout.emit("resize");
             });
           }
@@ -1058,19 +948,11 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
       const { runClvm } = await import("./dist/commands/clvm.js");
       await runClvm(["monitor", "--no-color"]);
     `;
-    const stdout = await new Promise((resolve, reject) => {
-      execFile(process.execPath, ["--input-type=module", "-e", script], {
-        cwd: process.cwd(),
-        env: { ...process.env, HOME: home },
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-      }, (error, stdout, stderr) => {
-        if (error) {
-          reject(Object.assign(error, { stdout, stderr }));
-          return;
-        }
-        resolve(stdout);
-      });
+    const { stdout } = await execNodeScript(script, {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home },
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
     });
 
     assert.match(stdout, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
@@ -1130,27 +1012,18 @@ test("fits connection tables to terminal width", async () => {
       }, null, 2)}\n`,
     );
 
-    const stdout = await new Promise((resolve, reject) => {
-      execFile("node", [
-        "--input-type=module",
-        "-e",
-        [
-          "Object.defineProperty(process.stdout, 'columns', { value: 80, configurable: true });",
-          "const { runClvm } = await import('./dist/commands/clvm.js');",
-          "await runClvm(['--no-color']);",
-        ].join(""),
-      ], {
+    const { stdout } = await execNodeScript(
+      [
+        stdoutPropertiesScript({ columns: 80 }),
+        "const { runClvm } = await import('./dist/commands/clvm.js');",
+        "await runClvm(['--no-color']);",
+      ].join(""),
+      {
         cwd: process.cwd(),
         env: { ...process.env, HOME: home },
         encoding: "utf8",
-      }, (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
-    });
+      },
+    );
 
     const lines = stdout.split("\n");
     const headerIndex = lines.findIndex((line) => line.includes("endpoint") && line.includes("age/zeroFor") && line.includes("up/s") && line.includes("down/s"));
@@ -1177,3 +1050,11 @@ test("fits connection tables to terminal width", async () => {
     await rm(home, { recursive: true, force: true });
   }
 });
+
+function runClvmCommand(home, args = ["--no-color"]) {
+  return execNodeStdout(["dist/bin/clvm.js", ...args], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: home },
+    encoding: "utf8",
+  });
+}

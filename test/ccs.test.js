@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { execNodeStdout, spawnNode } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -39,11 +39,7 @@ test("ccs models lists every provider as a column", async () => {
       },
       current: "input",
     });
-    const output = await execNode(["dist/bin/ccs.js", "models"], {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: "1",
-    });
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
 
     assert.match(output, /^input\s+ciii/m);
     assert.match(output, /gpt-5\.5\s+claude-sonnet-4\.5/);
@@ -81,11 +77,7 @@ test("ccs models keeps successful provider columns when another provider fails",
       },
       current: "ok",
     });
-    const output = await execNode(["dist/bin/ccs.js", "models"], {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: "1",
-    });
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
 
     assert.match(output, /^ok\s+bad/m);
     assert.match(output, /gpt-5\.5\s+http 401/);
@@ -117,11 +109,7 @@ test("ccs models --json prints provider model results", async () => {
       },
       current: "ok",
     });
-    const output = await execNode(["dist/bin/ccs.js", "models", "--json"], {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: "1",
-    });
+    const output = await runCcs(["dist/bin/ccs.js", "models", "--json"], home);
     const payload = JSON.parse(output);
 
     assert.equal(payload.version, 1);
@@ -154,11 +142,7 @@ test("ccs models shows per-provider configuration and response errors", async ()
       },
       current: "missing",
     });
-    const output = await execNode(["dist/bin/ccs.js", "models"], {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: "1",
-    });
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
 
     assert.match(output, /^missing\s+invalid\s+text/m);
     assert.match(output, /missing apiKey\s+invalid baseURL\s+invalid response/);
@@ -179,11 +163,7 @@ test("ccs models rejects unknown arguments", async () => {
   });
   try {
     await assert.rejects(
-      execNode(["dist/bin/ccs.js", "models", "--raw"], {
-        ...process.env,
-        HOME: home,
-        NO_COLOR: "1",
-      }),
+      runCcs(["dist/bin/ccs.js", "models", "--raw"], home),
       /unknown argument for ccs models: --raw/,
     );
   } finally {
@@ -200,15 +180,10 @@ test("ccs top once appends history and writes private runtime files", async () =
       },
       current: "input",
     });
-    const env = {
-      ...process.env,
-      HOME: home,
-      XDG_CACHE_HOME: join(home, ".cache"),
-      NO_COLOR: "1",
-    };
+    const env = { XDG_CACHE_HOME: join(home, ".cache") };
 
-    await execNode(["dist/bin/ccs.js", "top", "--once"], env);
-    await execNode(["dist/bin/ccs.js", "top", "--once"], env);
+    await runCcs(["dist/bin/ccs.js", "top", "--once"], home, env);
+    await runCcs(["dist/bin/ccs.js", "top", "--once"], home, env);
 
     const cacheDir = join(home, ".cache", "codex-tools");
     const statePath = join(cacheDir, "ccs-top-state.json");
@@ -242,7 +217,7 @@ test("ccs top history server rejects oversized windows", async () => {
       },
       current: "input",
     });
-    child = spawn(process.execPath, ["dist/bin/ccs.js", "s", "server", String(port)], {
+    child = spawnNode(["dist/bin/ccs.js", "s", "server", String(port)], {
       cwd: repoRoot,
       env: {
         ...process.env,
@@ -271,25 +246,21 @@ test("ccs top history server rejects oversized windows", async () => {
 async function runTool(tool, args) {
   const home = await mkdtemp(join(tmpdir(), "ccs-version-home-"));
   try {
-    return await execNode([`dist/bin/${tool}.js`, ...args], {
-      ...process.env,
-      HOME: home,
-      NO_COLOR: "1",
-    });
+    return await runCcs([`dist/bin/${tool}.js`, ...args], home);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 }
 
-function execNode(args, env) {
-  return new Promise((resolve, reject) => {
-    execFile(process.execPath, args, { cwd: repoRoot, env }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr.trim() || stdout.trim() || error.message));
-        return;
-      }
-      resolve(stdout);
-    });
+function runCcs(args, home, env = {}) {
+  return execNodeStdout(args, {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      HOME: home,
+      NO_COLOR: "1",
+      ...env,
+    },
   });
 }
 

@@ -19,6 +19,12 @@ Tests should fail for product problems and durable contracts. They should stay f
 - Assert exact color or spacing when that visual detail carries semantics.
 - Prefer semantic assertions over full-output snapshots for monitor and table output.
 
+## Terminal And Subprocess Helpers
+
+- Use `test/helpers/terminal.js` for ANSI stripping, stdout property overrides, stdout capture, inline module scripts, and Node subprocess execution.
+- Use command-specific wrappers only for fixed command paths and environment defaults; keep process execution behavior in the shared helper.
+- Simulate TTY width, rows, color, and resize through shared helpers so tests restore stdout descriptors consistently.
+
 ## Low-Value Tests
 
 - Incidental wording in decorative titles.
