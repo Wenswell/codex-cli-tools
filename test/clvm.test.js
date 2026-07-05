@@ -1003,6 +1003,87 @@ test("monitor skips duplicate idle runtime records", async () => {
   }
 });
 
+test("monitor uses alternate screen and repaints on resize in TTY clear mode", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ connections: [] }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        interval: "10s",
+      }, null, 2)}\n`,
+    );
+
+    const script = `
+      process.env.NO_COLOR = "1";
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 100 });
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      let frames = 0;
+      process.stdout.write = (chunk, encoding, callback) => {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+        const result = originalWrite(chunk, encoding, callback);
+        if (text.includes("\\u001b[J")) {
+          frames += 1;
+          if (frames === 1) {
+            setImmediate(() => {
+              Object.defineProperty(process.stdout, "columns", { configurable: true, value: 80 });
+              process.stdout.emit("resize");
+            });
+          }
+          if (frames >= 2) {
+            setImmediate(() => process.emit("SIGINT"));
+          }
+        }
+        return result;
+      };
+      const { runClvm } = await import("./dist/commands/clvm.js");
+      await runClvm(["monitor", "--no-color"]);
+    `;
+    const stdout = await new Promise((resolve, reject) => {
+      execFile(process.execPath, ["--input-type=module", "-e", script], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          reject(Object.assign(error, { stdout, stderr }));
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+
+    assert.match(stdout, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
+    assert.equal((stdout.match(/\u001b\[H/g) ?? []).length, 2);
+    assert.match(stdout, /no current connections for configured domains/);
+    assert.match(stdout, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
+    assert.doesNotMatch(stdout, /\u001b\[2J/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("fits connection tables to terminal width", async () => {
   const server = createServer((req, res) => {
     if (req.url === "/connections" && req.method === "GET") {

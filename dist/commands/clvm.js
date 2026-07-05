@@ -676,11 +676,27 @@ async function runMonitor(config) {
     let stopped = false;
     let retryAttempt = 0;
     let stopDelay = null;
+    let renderLatestFrame = null;
     const runtimeDedupe = { lastFingerprint: null };
-    process.once("SIGINT", () => {
+    const useAlternateScreen = config.clear && Boolean(process.stdout.isTTY);
+    const restoreTerminal = () => {
+        if (useAlternateScreen) {
+            process.stdout.write("\u001b[?25h\u001b[?1049l");
+        }
+    };
+    const stop = () => {
         stopped = true;
         stopDelay?.();
-    });
+    };
+    const repaintOnResize = () => {
+        renderLatestFrame?.();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    if (useAlternateScreen) {
+        process.stdout.write("\u001b[?1049h\u001b[?25l");
+        process.stdout.on("resize", repaintOnResize);
+    }
     const wait = async (milliseconds) => {
         await new Promise((resolve) => {
             const timeout = setTimeout(resolve, milliseconds);
@@ -691,36 +707,58 @@ async function runMonitor(config) {
         });
         stopDelay = null;
     };
-    while (!stopped) {
-        try {
-            const payload = await api.getConnections();
-            const result = sampleConnections(sampler, payload, config);
-            const closedConnections = await closeExpiredConnections(api, result, config, closedIds);
-            if (closedConnections.length > 0) {
-                closedTotal += closedConnections.length;
-                recordClosedConnections(closedHistory, closedConnections);
+    try {
+        while (!stopped) {
+            try {
+                const payload = await api.getConnections();
+                const result = sampleConnections(sampler, payload, config);
+                const closedConnections = await closeExpiredConnections(api, result, config, closedIds);
+                if (closedConnections.length > 0) {
+                    closedTotal += closedConnections.length;
+                    recordClosedConnections(closedHistory, closedConnections);
+                }
+                result.closedHistory = closedHistory;
+                result.closedTotal = closedTotal;
+                await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
+                if (useAlternateScreen) {
+                    renderLatestFrame = () => writeMonitorFrame(renderMonitorResultLines(result, config));
+                    renderLatestFrame();
+                }
+                else {
+                    printMonitorResult(result, config);
+                }
+                retryAttempt = 0;
+                if (config.once) {
+                    break;
+                }
+                await wait(nextAlignedDelay(config.intervalMs));
             }
-            result.closedHistory = closedHistory;
-            result.closedTotal = closedTotal;
-            await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
-            printMonitorResult(result, config);
-            retryAttempt = 0;
-            if (config.once) {
-                break;
+            catch (error) {
+                retryAttempt += 1;
+                const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
+                const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
+                await recordClvmFailure("monitor", config, failure, runtimeDedupe);
+                if (useAlternateScreen) {
+                    renderLatestFrame = () => writeMonitorFrame(renderMonitorFailureLines(failure, config));
+                    renderLatestFrame();
+                }
+                else {
+                    printMonitorFailure(failure, config);
+                }
+                if (config.once) {
+                    break;
+                }
+                await wait(retryIntervalMs);
             }
-            await wait(nextAlignedDelay(config.intervalMs));
         }
-        catch (error) {
-            retryAttempt += 1;
-            const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
-            const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
-            await recordClvmFailure("monitor", config, failure, runtimeDedupe);
-            printMonitorFailure(failure, config);
-            if (config.once) {
-                break;
-            }
-            await wait(retryIntervalMs);
+    }
+    finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+        if (useAlternateScreen) {
+            process.stdout.off("resize", repaintOnResize);
         }
+        restoreTerminal();
     }
 }
 async function sampleOnce(config) {
@@ -1544,6 +1582,31 @@ function printMonitorFailure(failure, config, stream = process.stdout) {
     }
     stream.write(`${header.join(" ")}\n`);
     stream.write(`${style.red("error:")} ${failure.error.message}\n`);
+}
+function renderMonitorResultLines(result, config) {
+    return captureMonitorLines((stream) => {
+        printMonitorResult(result, { ...config, clear: false }, stream);
+    });
+}
+function renderMonitorFailureLines(failure, config) {
+    return captureMonitorLines((stream) => {
+        printMonitorFailure(failure, { ...config, clear: false }, stream);
+    });
+}
+function captureMonitorLines(writeOutput) {
+    let output = "";
+    const stream = {
+        columns: process.stdout.columns,
+        write: (chunk) => {
+            output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+            return true;
+        },
+    };
+    writeOutput(stream);
+    return output.endsWith("\n") ? output.slice(0, -1).split("\n") : output.split("\n");
+}
+function writeMonitorFrame(lines, stream = process.stdout) {
+    stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 function clvmMonitorTitle(config) {
     if (!config.autoCloseEnabled) {
