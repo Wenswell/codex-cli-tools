@@ -12,6 +12,8 @@ Add the latest useful `ccs proxy` upstream behavior in a narrow scope:
 
 Implemented on 2026-07-05.
 
+Recovery statistics follow-up implemented on 2026-07-05.
+
 ## Scope
 
 Included:
@@ -72,8 +74,30 @@ Excluded:
 - Context compaction requests use ordinary guard behavior and skip continuation recovery.
 - Client-visible SSE output omits encrypted reasoning fields that the proxy added only for recovery.
 
+## Recovery Statistics Follow-up
+
+Goal:
+
+- Make Responses continuation recovery visible in the same status surface as reasoning guard counters.
+
+Decisions:
+
+- Use `guard_actions` as the status-view source, matching existing reasoning and status counters.
+- Count every `continuation_recovery` action as one recovery attempt.
+- Count a request as recovered when it contains at least one `continuation_recovery` action and finishes with an accepted status below `400`.
+- Count a request as exhausted when it contains at least one `continuation_recovery` action and records a final `return_status_502` guard action.
+- Render recovery totals on the existing reasoning summary line to keep the status layout compact.
+
+Completed plan:
+
+1. Added recovery summary derivation from `proxy.json.metrics.recent_requests`.
+2. Extended the reasoning summary line with `recovery=... recovered=... exhausted=...` when recovery activity exists.
+3. Added tests for continuation success, exhausted recovery status output, event-basis counters, and `proxy.log` action records.
+4. Updated README and proxy spec.
+5. Built `dist`, ran tests, and bumped patch version.
+
 Verified with:
 
 ```bash
-node --test test/ccs-proxy.test.js
+pnpm test
 ```
