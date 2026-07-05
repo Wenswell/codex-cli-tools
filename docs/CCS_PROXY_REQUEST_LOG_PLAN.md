@@ -4,16 +4,20 @@
 
 Upgrade `ccs proxy` request history from compact operational records to complete request samples for debugging and analysis.
 
+## Status
+
+This document is a future schema plan. Current runtime records remain compact operational records; bounded request history, event logging, runtime logging, and status rendering are implemented in the current CLI. The target schema below is not the current request-record contract.
+
 The plan keeps one source of truth for completed model API requests:
 
-- `proxy-requests.jsonl`: complete completed request stream.
+- `proxy-requests.jsonl`: bounded completed request stream with complete request records.
 - `proxy.json.metrics.recent_requests`: newest compact status window.
 - `proxy.log`: event stream for guard actions, unsupported paths, upstream errors, and local proxy errors.
 
 ## Decisions
 
 - Store request headers through an explicit whitelist and redact secret-bearing values.
-- Store complete request samples only in `proxy-requests.jsonl`.
+- Store complete request samples only in bounded `proxy-requests.jsonl`.
 - Keep `proxy.json.metrics.recent_requests` as the lightweight live status view.
 - Use `final_action` only for the final client-visible result.
 - Store retry process details in `retry_summary`, `attempt_records`, and existing `guard_actions`.
@@ -105,7 +109,7 @@ Keep existing fields that serve terminal display:
 
 ## Record Shapes
 
-`proxy-requests.jsonl` stores complete completed records:
+`proxy-requests.jsonl` stores bounded completed records with complete request fields:
 
 - all display fields
 - request kind
@@ -189,7 +193,7 @@ Extraction rules:
 - If upstream JSON contains `error.type`, `error.code`, or `error.message`, copy those values.
 - If local code creates the failure, write local `type`, `code`, and `message`.
 - Keep `message` concise.
-- Keep the full request record in `proxy-requests.jsonl`; terminal display still uses `error`.
+- Keep the full request record in bounded `proxy-requests.jsonl`; terminal display still uses `error`.
 
 ## attempt_records
 
@@ -315,7 +319,7 @@ These fields help distinguish:
    - Update on upstream response status.
    - Update on observed model and reasoning metadata.
    - Update on guard action or transport failure.
-   - Persist only in `proxy-requests.jsonl`.
+   - Persist only in bounded `proxy-requests.jsonl`.
 
 7. Keep display stable.
    - Existing status table continues using `status`, `error`, `guard_actions`, model fields, reasoning fields, bytes, and latency.
@@ -339,7 +343,7 @@ These fields help distinguish:
 
 ## Acceptance Criteria
 
-- `proxy-requests.jsonl` contains one complete request record per completed model API request.
+- `proxy-requests.jsonl` contains complete request records for recent completed model API requests.
 - `proxy.json.metrics.recent_requests` stores compact request records without `attempt_records` or `request_headers`.
 - Each completed record has `schema_version=2`.
 - Each completed record has a non-pending `final_action`.

@@ -1,7 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { codexConfigPath, modelPricesCachePath } from "./paths.js";
-import { readTextIfExists } from "./fs.js";
+import { readTextIfExists, writeTextFileAtomic } from "./fs.js";
 import { readTopLevelTomlString } from "./toml.js";
 
 export type CodexCostSpeed = "auto" | "standard" | "fast";
@@ -68,8 +67,7 @@ export async function readModelPriceCache(): Promise<ModelPriceCache> {
     fetchedAt: new Date().toISOString(),
     models,
   };
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(cache, null, 2)}\n`, { mode: 0o644 });
+  await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
   return cache;
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -191,6 +191,83 @@ test("ccs models rejects unknown arguments", async () => {
   }
 });
 
+test("ccs top once appends history and writes private runtime files", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    const env = {
+      ...process.env,
+      HOME: home,
+      XDG_CACHE_HOME: join(home, ".cache"),
+      NO_COLOR: "1",
+    };
+
+    await execNode(["dist/bin/ccs.js", "top", "--once"], env);
+    await execNode(["dist/bin/ccs.js", "top", "--once"], env);
+
+    const cacheDir = join(home, ".cache", "codex-tools");
+    const statePath = join(cacheDir, "ccs-top-state.json");
+    const historyPath = join(cacheDir, "ccs-top-history.jsonl");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    const history = (await readFile(historyPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+
+    assert.equal(state.version, 1);
+    assert.equal(state.active, true);
+    assert.equal(state.entries[0].name, "input");
+    assert.equal(history.length, 2);
+    assert.equal(history[0].entries[0].name, "input");
+    assert.equal(history[1].entries[0].name, "input");
+    assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    assert.equal((await stat(historyPath)).mode & 0o777, 0o600);
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs top history server rejects oversized windows", async () => {
+  let home;
+  let child;
+  const port = await reservePort();
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    child = spawn(process.execPath, ["dist/bin/ccs.js", "s", "server", String(port)], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CACHE_HOME: join(home, ".cache"),
+        NO_COLOR: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    await waitForHttpOk(`http://127.0.0.1:${port}/health`);
+    const response = await fetch(`http://127.0.0.1:${port}/ccs/top/history?since=2026-01-01T00:00:00.000Z&until=2026-01-03T00:00:00.000Z&bucketMinutes=1`);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "history window must be 24h30m or shorter" });
+  } finally {
+    if (child) {
+      child.kill("SIGINT");
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
 async function runTool(tool, args) {
   const home = await mkdtemp(join(tmpdir(), "ccs-version-home-"));
   try {
@@ -233,6 +310,34 @@ async function startJsonServer(handler) {
     server,
     baseUrl: `http://127.0.0.1:${address.port}`,
   };
+}
+
+async function reservePort() {
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await closeServer(server);
+  return port;
+}
+
+async function waitForHttpOk(url) {
+  const deadline = Date.now() + 5000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`unexpected status ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw lastError ?? new Error(`timeout waiting for ${url}`);
 }
 
 function closeServer(server) {

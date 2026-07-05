@@ -1,15 +1,15 @@
 # ccs proxy spec
 
-`ccs proxy` reports proxy runtime state and HTTP request state from `~/.config/codex-tools/proxy.json`.
+`ccs proxy` reports proxy runtime state and HTTP request state from `~/.cache/codex-tools/proxy/proxy.json`.
 
 ## Storage files
 
-Proxy state lives under `~/.config/codex-tools`:
+Proxy state lives under `~/.cache/codex-tools/proxy`:
 
 - `proxy.json`: lightweight runtime state snapshot, counters, active model API requests, and the newest completed model API request snapshot.
-- `proxy-requests.jsonl`: complete completed model API request history, one normalized request record per line in completion order.
-- `proxy.log`: guard, unsupported-path, upstream-error, and local proxy error events as JSONL.
-- `proxy-runtime.log`: background process stdout and stderr.
+- `proxy-requests.jsonl`: bounded completed model API request history up to 64M, one normalized request record per line in completion order.
+- `proxy.log`: bounded guard, unsupported-path, upstream-error, and local proxy error events as JSONL up to 16M.
+- `proxy-runtime.log`: bounded background process stdout and stderr up to 16M.
 - `proxy.pid`: background process id.
 
 ## Route boundary
@@ -131,13 +131,13 @@ The reasoning guard is always active for supported JSON and SSE response payload
 - The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
 - Transport errors record `upstream_error`.
 
-The proxy writes each guard action as one JSON line in `~/.config/codex-tools/proxy.log`. Local proxy request errors also write JSONL events to the same event log.
+The proxy writes each guard action as one JSON line in `~/.cache/codex-tools/proxy/proxy.log`. Local proxy request errors also write JSONL events to the same event log.
 
 ## Status view
 
 `ccs proxy` and `ccs proxy --once` print a full snapshot:
 
-- Title line: `ccs proxy`, current time, runtime, pid, server version, protocol, proxy URL, and trailing refresh interval.
+- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, pid, server version, protocol, proxy URL, and trailing refresh interval.
 - Path lines: state, requests, events, runtime, and config paths.
 - Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
 - Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups. When continuation recovery activity exists, the line also renders `recovery=... recovered=... exhausted=...`.
@@ -162,7 +162,7 @@ History row count follows these rules:
 
 Continuation recovery counters use the same `proxy.json.metrics.recent_requests` window and the same `guard_actions` fact source. `recovery` counts `continuation_recovery` actions. `recovered` counts requests with at least one continuation recovery action that finish with an accepted status below `400`. `exhausted` counts requests with at least one continuation recovery action and a final `return_status_502` guard action.
 
-`reasoning total` is the sum of explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count renders orange. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
+`reasoning total` is the sum of explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count and `recovery` count render yellow. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. The visible data columns are:
 
@@ -179,7 +179,7 @@ Active rows show elapsed time for `lat.`, known request bytes for `size`, and kn
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
-- Completed model API requests append to `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
+- Completed model API requests append to bounded `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
 - State-file counters are recomputed from `metrics.recent_requests` after every completed request and when old state files are read.
 - Status rendering reads JSONL through a reverse block tail reader only for explicit history counts that exceed the compact snapshot.
 
@@ -292,7 +292,7 @@ session time up reas./code lat. size model error
 - Status tables display `reas./code` as one combined column.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
-- Completed model API requests are appended to `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
+- Completed model API requests are appended to bounded `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
 - Background stdout/stderr are written to `proxy-runtime.log`.
 - Status history count follows TTY rows, non-TTY fixed 5, and explicit `--history N`.
 - Watch repaints on terminal resize.

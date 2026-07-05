@@ -10,8 +10,14 @@
 - Any command that modifies files must default to preview and require typing exact `yes` at the prompt to write. Do not add `-y`, `--yes`, or separate dry-run flags.
 - Preview output should directly say that no changes are written unless the user types `yes` at the prompt.
 - Keep output compact and aligned with key/value labels where practical.
-- Logs must preserve complete original information. Store raw input/events/responses first; summaries, previews, or rendered/transformed forms may be additional fields, but must not replace the original facts.
+- Runtime logs preserve normalized facts by default. Raw input, events, and responses are explicit debug data with documented boundaries, private permissions, redaction, and size limits.
 - Status and monitor commands that sample external runtime state should write a latest JSON state file and append normalized JSONL history under `~/.cache/codex-tools`.
+- Long-running monitors should append history only when observed runtime facts change. Terminal refresh cadence and history growth are separate concerns.
+- When a logging issue names one file or command as an example, audit the surrounding command family and similar runtime files before choosing the change scope.
+- Runtime logging changes follow `docs/CLI_RUNTIME_RECORDS.md` and reusable engineering preferences follow `docs/ENGINEERING_PREFERENCES.md`.
+- Monitor/status headers should use compact labels, bare `HH:mm:ss` clocks, single spaces between fields, and a small semantic color set.
+- Tests should cover behavior, data contracts, safety boundaries, parsing, formatting width, and regression-prone calculations. Exact spacing, wording, and color assertions are reserved for explicit user-facing contracts.
+- Test selection follows `docs/TESTING_GUIDELINES.md`.
 - Dense terminal byte, speed, duration, and compact counter values should use three significant digits after the base unit, such as `160K`, `43.2M`, `160K/s`, `56ms`, and `2.34s`.
 - Each commit updates `package.json` version. Use a patch version increment by default.
 - When changing CLI behavior, update both `README.md` and built `dist` files in the same change.

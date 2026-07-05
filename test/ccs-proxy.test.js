@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -77,6 +77,46 @@ test("proxy install records only the current profile as active upstream", async 
       delete process.env.HOME;
     } else {
       process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy default state root lives under cache", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  try {
+    process.env.HOME = home;
+    process.env.XDG_CACHE_HOME = join(home, ".cache");
+    delete process.env.CCS_PROXY_STATE_ROOT;
+    const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(
+      join(stateRoot, "proxy.json"),
+      JSON.stringify(proxyStateFixture(stateRoot), null, 2),
+      "utf8",
+    );
+
+    const state = await readProxyState();
+    assert.ok(state);
+    assert.equal(state.proxy_base_url, "http://127.0.0.1:4610");
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
     }
     if (previousStateRoot === undefined) {
       delete process.env.CCS_PROXY_STATE_ROOT;
@@ -487,7 +527,7 @@ test("proxy rejects unsupported paths without request history", async () => {
     assert.equal(runtime.healthy, true);
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
-    const rootResponse = await fetch(`http://127.0.0.1:${proxyPort}/`);
+    const rootResponse = await fetch(`http://127.0.0.1:${proxyPort}/?api_key=query-secret`);
     assert.equal(rootResponse.status, 404);
     assert.deepEqual(await rootResponse.json(), {
       error: {
@@ -509,6 +549,7 @@ test("proxy rejects unsupported paths without request history", async () => {
     const events = (await readFile(join(stateRoot, "proxy.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_unsupported_path", "ccs_proxy_unsupported_path"]);
     assert.deepEqual(events.map((event) => event.path), ["/", "/anything"]);
+    assert.doesNotMatch(await readFile(join(stateRoot, "proxy.log"), "utf8"), /query-secret|api_key/);
     assert.deepEqual(events.map((event) => event.status), [404, 404]);
     assert.equal(upstreamHits, 0);
 
@@ -3153,7 +3194,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     );
 
     assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
-    assert.match(output, /\u001b\[2Kccs proxy/);
+    assert.match(output, /ccs proxy/);
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /session\s+time\s+up\s+reas\.\/code\s+lat\.\s+size\s+model\s+error/);
@@ -3543,6 +3584,7 @@ test("proxy runtime starts in the background and restore stops it", async () => 
       listenPort,
       stateRoot,
     });
+    await writeFile(join(stateRoot, "proxy-runtime.log"), Buffer.alloc((16 * 1024 * 1024) + 1024, "x"));
 
     const runtime = await ensureProxyRunning({
       codexConfigPath,
@@ -3566,6 +3608,9 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     assert.equal(healthPayload.protocol, 1);
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
+    assert.ok((await stat(join(stateRoot, "proxy-runtime.log"))).size <= 16 * 1024 * 1024);
+    assert.equal((await stat(join(stateRoot, "proxy-runtime.log"))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(stateRoot, "proxy.pid"))).mode & 0o777, 0o600);
 
     await unlink(join(stateRoot, "proxy.pid"));
     const stopped = await restoreProxy({

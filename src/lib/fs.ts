@@ -19,7 +19,7 @@ export async function readTextIfExists(path: string): Promise<string | null> {
 
 export async function writeTextFile(path: string, content: string, mode?: number): Promise<void> {
   await ensureDir(dirname(path));
-  await writeFile(path, content, "utf8");
+  await writeFile(path, content, { encoding: "utf8", mode });
   if (mode !== undefined) {
     await chmod(path, mode);
   }
@@ -29,7 +29,7 @@ export async function writeTextFileAtomic(path: string, content: string, mode?: 
   await ensureDir(dirname(path));
   const tempPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   try {
-    await writeFile(tempPath, content, "utf8");
+    await writeFile(tempPath, content, { encoding: "utf8", mode });
     if (mode !== undefined) {
       await chmod(tempPath, mode);
     }

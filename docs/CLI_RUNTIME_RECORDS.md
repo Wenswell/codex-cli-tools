@@ -1,6 +1,6 @@
 # CLI runtime records
 
-Status and monitor commands that sample external runtime state should keep both a live state file and an append-only history file.
+Status and monitor commands that sample external runtime state should keep both a live state file and a bounded history file.
 
 ## Scope
 
@@ -8,12 +8,14 @@ Use this pattern when a command reads changing external state, such as HTTP runt
 
 The command surface should stay small. Prefer existing status or monitor commands over adding separate log commands unless users need a focused reader.
 
+When a logging issue is found in one file or command, review the surrounding command family and other modules that use the same runtime-record pattern. File-specific examples often identify a broader logging class.
+
 ## Files
 
 - Config lives under `~/.config/codex-tools`.
 - Runtime state and history live under `${XDG_CACHE_HOME:-~/.cache}/codex-tools`.
 - The live state file uses JSON and stores the latest complete snapshot.
-- The history file uses JSONL and appends one normalized record per successful sample or completed request.
+- The history file uses bounded JSONL and appends one normalized record per successful sample or completed request.
 - File names should identify the tool and purpose, such as `clvm-state.json`, `clvm-history.jsonl`, `ccs-top-state.json`, or `proxy-requests.jsonl`.
 
 ## Record Shape
@@ -25,19 +27,23 @@ Each runtime record should include:
 - `source`: command or runtime source, such as `status`, `monitor`, or `proxy`.
 - `config`: active non-secret configuration summary.
 - `summary`: compact counters and totals used by status output.
-- `result`: normalized records used by the terminal renderer or JSON output.
-- `raw`: original external input, event, or response when the module's privacy boundary allows it.
-- `raw_ref`: reference to a raw archive file when the complete raw payload is stored outside the history line.
+- `result`: normalized records used by the terminal renderer or JSON output. Keep detailed results in state when history can accumulate sensitive runtime facts.
+- `raw`: original external input, event, or response only when the module's documented privacy boundary and command mode allow it.
+- `raw_ref`: reference to a raw archive file when an explicit debug mode stores the complete raw payload outside the history line.
 
-Secrets must not be written to runtime records. Modules that handle prompts, responses, API keys, environment files, or other private payloads should store normalized facts and document the raw boundary. Modules that handle operational state, such as local network connection snapshots, can store raw external responses when those facts are needed for debugging.
+Runtime records store normalized facts by default. Modules that handle prompts, responses, API keys, environment files, local network connection snapshots, domains, IPs, process names, rules, node routes, or other sensitive payloads should document the raw boundary and keep those payloads in explicit debug surfaces.
 
 Large raw payloads should use content-addressed archives:
 
-- Keep the latest state file complete for direct inspection.
-- Keep append-only history compact enough for long-running monitors.
+- Keep state and history compact unless a raw debug mode is enabled.
+- Keep JSONL history bounded enough for long-running monitors.
+- Coalesce unchanged monitor samples so idle heartbeats do not grow history or rewrite state every interval.
+- Treat watch refresh cadence as display behavior. State writes and history appends happen when observed runtime facts change.
 - Store raw payload files under the same runtime cache root, `${XDG_CACHE_HOME:-~/.cache}/codex-tools`.
 - Reference raw payloads by SHA-256, byte count, and path.
 - Store identical raw payloads once and let multiple history records point to the same archive file.
+- Enforce payload-size, file-count, and total-byte limits for raw archive directories.
+- Redact secret-like headers and metadata before writing enabled raw records.
 
 ## Counters
 
@@ -47,7 +53,7 @@ For bounded state windows:
 
 - Store the newest records first when humans inspect the JSON directly.
 - Recompute counters from the retained window after each write.
-- Keep complete history in JSONL when users may need older facts.
+- Keep bounded history in JSONL when users may need older facts.
 - If the command reads more history than the state window, read from the JSONL tail rather than scanning the whole file.
 
 ## Terminal Output
@@ -60,6 +66,16 @@ Runtime commands should print active file paths when useful:
 - Event or runtime log paths when they exist.
 
 Status output should put state and results before command/help text. Help text remains a compact footer.
+
+Monitor and watch output should keep display rules predictable:
+
+- Headers use compact command labels and bare `HH:mm:ss` clocks.
+- Header fields use single spaces.
+- Tables keep stable columns and let the final detail column absorb remaining terminal width.
+- TTY output can adapt row counts to terminal height.
+- Non-TTY output should stay deterministic.
+- Watch mode should recompute layout after terminal resize.
+- Color sets should stay small and semantic, such as red, yellow, and green for status-like values.
 
 ## Numeric Format
 
@@ -78,8 +94,9 @@ Use short unit names in dense status tables, such as `K`, `M`, `G`, `K/s`, and `
 ## Implementation Notes
 
 - Write the live JSON state atomically.
-- Append history records as JSON lines.
-- Write referenced raw payloads before writing state and history records.
+- Append history records as JSON lines and compact them through the shared bounded helper for long-running or high-volume commands.
+- Use shared runtime-log helpers for JSONL appends, atomic JSON state writes, and content-addressed raw archives.
+- Write referenced raw payloads before writing state and history records when raw debug mode is enabled.
 - Preserve completion or sample order in JSONL.
 - Keep table columns stable and let the final detail column absorb remaining terminal width.
 - Reuse shared formatters and table rendering helpers when available.
