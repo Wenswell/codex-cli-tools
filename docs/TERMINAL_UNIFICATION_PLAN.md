@@ -71,7 +71,7 @@ The visible output contract is already shared by docs: compact units such as `16
 - [x] Phase 2: Terminal Helper.
 - [x] Phase 3: Compact Format Helper.
 - [x] Phase 4: Style Helper.
-- [ ] Phase 5: Test Harness.
+- [x] Phase 5: Test Harness.
 
 ### Phase 1: Live View Helper
 
