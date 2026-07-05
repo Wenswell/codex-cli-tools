@@ -12,6 +12,7 @@ import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
+import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
@@ -926,13 +927,7 @@ function formatLatencyMs(value: number): string {
   if (!Number.isFinite(value) || value < 0) {
     return textDim("-");
   }
-  if (value < 1000) {
-    return `${Math.round(value)}ms`;
-  }
-  if (value < 60_000) {
-    return `${formatThreeSignificant(value / 1000)}s`;
-  }
-  return `${formatThreeSignificant(value / 60_000)}m`;
+  return formatDurationMs(value, { maxUnit: "m" });
 }
 
 function formatProxyUpstreamHits(profileOrder: string[], metrics: ProxyMetrics): string {
@@ -1044,29 +1039,7 @@ function formatProxyBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return textDim("-");
   }
-  if (value < 1024) {
-    return `${Math.round(value)}B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${formatThreeSignificant(value / 1024)}K`;
-  }
-  if (value < 1024 * 1024 * 1024) {
-    return `${formatThreeSignificant(value / 1024 / 1024)}M`;
-  }
-  return `${formatThreeSignificant(value / 1024 / 1024 / 1024)}G`;
-}
-
-function formatThreeSignificant(value: number): string {
-  if (!Number.isFinite(value)) {
-    return "-";
-  }
-  if (value >= 100) {
-    return Math.round(value).toString();
-  }
-  if (value >= 10) {
-    return value.toFixed(1);
-  }
-  return value.toFixed(2);
+  return formatCompactBytes(value);
 }
 
 function formatProxyRequestModel(model: string | null): string {
