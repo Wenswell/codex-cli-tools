@@ -17,6 +17,7 @@ This document records reusable project preferences that come from implementation
 - Monitor headers use a compact command label plus a bare `HH:mm:ss` clock.
 - Field separators are single spaces. Alignment belongs inside tables, not between unrelated header fields.
 - Color sets stay small and semantic. Status-like values should use red, yellow, and green unless a fourth state has a clear meaning.
+- Repeated short grouping identifiers should use a stable small bright palette so related rows are easy to scan without adding columns or legend text.
 - Dense operational tables keep stable columns. Text-heavy details should live in the final column and use the shared ANSI-aware, wide-character-aware truncation rules.
 - Numeric display uses compact units for terminal output and keeps raw numeric values in JSON.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
