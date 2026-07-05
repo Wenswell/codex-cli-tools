@@ -18,6 +18,7 @@ import { runLiveView } from "../lib/live-view.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable, type TableColumn, type TableRow } from "../lib/table.js";
+import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 
 type Profile = {
@@ -971,15 +972,6 @@ function formatProxyStatusCode(status: number | null): string {
 
 function truncateProxyText(value: string, max = 40): string {
   return truncateVisible(value, max);
-}
-
-function fitProxyTerminalLine(line: string): string {
-  const columns = process.stdout.columns;
-  if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
-    return line;
-  }
-
-  return truncateVisible(line, columns - 1, "");
 }
 
 function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: ProxyRuntimeState | null): string {
@@ -2892,16 +2884,16 @@ export function buildProxyStatusLines(
   const historyCount = resolveProxyHistoryRenderCount(metrics, options);
   const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
   return [
-    fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
-    ...formatProxyPathsLines(options).map(fitProxyTerminalLine),
-    fitProxyTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
-    fitProxyTerminalLine(formatProxyReasoningSummary(metrics)),
-    fitProxyTerminalLine(formatProxyLatencySummary(metrics)),
+    fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
+    ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
+    fitTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
+    fitTerminalLine(formatProxyReasoningSummary(metrics)),
+    fitTerminalLine(formatProxyLatencySummary(metrics)),
     textBold("active"),
     ...formatProxyActiveRows(metrics, now),
     textBold("history"),
     ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount),
-    fitProxyTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
+    fitTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
   ];
 }
 

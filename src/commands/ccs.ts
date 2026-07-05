@@ -66,7 +66,6 @@ import {
   padVisibleLeft,
   padVisibleRight,
   visibleLength,
-  truncateVisible,
 } from "../lib/text.js";
 import {
   colorCost,
@@ -87,6 +86,7 @@ import {
   updateTopLevelTomlString,
 } from "../lib/toml.js";
 import { printTable, renderTable, type TableColumn, type TableRow } from "../lib/table.js";
+import { fitTerminalLine } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
 
 type Profile = {
@@ -2241,15 +2241,6 @@ function nextUsageTopRuntimeDelayMs(runtime: UsageTopRuntime, now: Date): number
   return Math.max(0, Math.min(...dueAt) - now.getTime());
 }
 
-function fitSingleTerminalLine(line: string): string {
-  const columns = process.stdout.columns;
-  if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
-    return line;
-  }
-
-  return truncateVisible(line, columns - 1, "");
-}
-
 function buildUsageTopLine(
   entries: UsageTopEntry[],
   states: Map<string, UsageTopState>,
@@ -2258,7 +2249,7 @@ function buildUsageTopLine(
   const parts = entries.map((entry) => (
     formatUsageTopEntry(entry, states.get(entry.name), now)
   ));
-  return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
+  return fitTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 
 function readUsageTopCosts(entries: UsageTopEntry[]): Map<string, number> {

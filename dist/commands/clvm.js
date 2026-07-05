@@ -8,7 +8,8 @@ import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive } from "../lib/runtime-log.js";
 import { createLiveViewController } from "../lib/live-view.js";
 import { renderTable } from "../lib/table.js";
-import { bgDarkBlue, maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength, } from "../lib/text.js";
+import { bgDarkBlue, maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, } from "../lib/text.js";
+import { fitCommandsLine as fitTerminalCommandsLine, terminalColumns } from "../lib/terminal.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 const domainFields = [
     "host",
@@ -579,11 +580,7 @@ function printConfigValues(config, style = createStyle(config)) {
     printKeyValue("raw archive:", config.rawArchive ? style.yellow("on") : style.dim("off"), 12);
 }
 function printCommands(style) {
-    console.log(style.dim(fitCommandsLine(terminalColumns(process.stdout))));
-}
-function fitCommandsLine(columns) {
-    const line = visibleLength(commandsLine) <= columns ? commandsLine : compactCommandsLine;
-    return visibleLength(line) <= columns ? line : truncateVisible(line, columns);
+    console.log(style.dim(fitTerminalCommandsLine(commandsLine, compactCommandsLine, terminalColumns(process.stdout))));
 }
 function printConfigDiff(configPath, currentText, nextText) {
     if (currentText === nextText) {
@@ -1772,10 +1769,6 @@ function buildLayout(stream) {
         ...fixed,
         ruleMin: maxWidth >= 72 ? 12 : 4,
     };
-}
-function terminalColumns(stream) {
-    const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
-    return columns && columns > 0 ? Math.floor(columns) : 120;
 }
 function createStyle(config) {
     if (config.color === false) {

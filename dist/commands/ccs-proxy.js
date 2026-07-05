@@ -18,6 +18,7 @@ import { runLiveView } from "../lib/live-view.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable } from "../lib/table.js";
+import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
@@ -711,13 +712,6 @@ function formatProxyStatusCode(status) {
 }
 function truncateProxyText(value, max = 40) {
     return truncateVisible(value, max);
-}
-function fitProxyTerminalLine(line) {
-    const columns = process.stdout.columns;
-    if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
-        return line;
-    }
-    return truncateVisible(line, columns - 1, "");
 }
 function formatProxyStatusLine(now, state, runtime) {
     const runtimeLabel = state && runtime?.healthy ? textGreen("healthy") : state ? textYellow("starting") : textDim("none");
@@ -2370,16 +2364,16 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
     const historyCount = resolveProxyHistoryRenderCount(metrics, options);
     const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
     return [
-        fitProxyTerminalLine(formatProxyStatusLine(now, state, runtime)),
-        ...formatProxyPathsLines(options).map(fitProxyTerminalLine),
-        fitProxyTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
-        fitProxyTerminalLine(formatProxyReasoningSummary(metrics)),
-        fitProxyTerminalLine(formatProxyLatencySummary(metrics)),
+        fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
+        ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
+        fitTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
+        fitTerminalLine(formatProxyReasoningSummary(metrics)),
+        fitTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
         ...formatProxyActiveRows(metrics, now),
         textBold("history"),
         ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount),
-        fitProxyTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
+        fitTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
     ];
 }
 async function runProxyStatusOnce(options) {

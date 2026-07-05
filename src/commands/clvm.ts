@@ -19,9 +19,8 @@ import {
   textMagenta,
   textRed,
   textYellow,
-  truncateVisible,
-  visibleLength,
 } from "../lib/text.js";
+import { fitCommandsLine as fitTerminalCommandsLine, terminalColumns } from "../lib/terminal.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 
 const domainFields = [
@@ -980,12 +979,7 @@ function printConfigValues(config: RuntimeConfig, style = createStyle(config)): 
 }
 
 function printCommands(style: Style): void {
-  console.log(style.dim(fitCommandsLine(terminalColumns(process.stdout))));
-}
-
-function fitCommandsLine(columns: number): string {
-  const line = visibleLength(commandsLine) <= columns ? commandsLine : compactCommandsLine;
-  return visibleLength(line) <= columns ? line : truncateVisible(line, columns);
+  console.log(style.dim(fitTerminalCommandsLine(commandsLine, compactCommandsLine, terminalColumns(process.stdout))));
 }
 
 function printConfigDiff(configPath: string, currentText: string, nextText: string): void {
@@ -2365,11 +2359,6 @@ function buildLayout(stream: NodeJS.WriteStream): Layout {
     ...fixed,
     ruleMin: maxWidth >= 72 ? 12 : 4,
   };
-}
-
-function terminalColumns(stream: NodeJS.WriteStream): number {
-  const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
-  return columns && columns > 0 ? Math.floor(columns) : 120;
 }
 
 function createStyle(config: RuntimeConfig): Style {
