@@ -4,7 +4,6 @@ import { copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { setInterval } from "node:timers";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -15,6 +14,7 @@ import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } fro
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
+import { runLiveView } from "../lib/live-view.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable, type TableColumn, type TableRow } from "../lib/table.js";
@@ -2910,78 +2910,10 @@ async function runProxyStatusOnce(options: ProxyOptions): Promise<void> {
 }
 
 async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
-  let stopped = false;
-  let timer: ReturnType<typeof setInterval> | null = null;
-  let refreshing = false;
-  let renderPending = false;
-  const useAlternateScreen = Boolean(process.stdout.isTTY);
-  const restoreTerminal = (): void => {
-    if (useAlternateScreen) {
-      process.stdout.write("\u001b[?25h\u001b[?1049l");
-    }
-  };
-
-  const render = async (): Promise<void> => {
-    if (stopped) {
-      return;
-    }
-    if (refreshing) {
-      renderPending = true;
-      return;
-    }
-    refreshing = true;
-    do {
-      renderPending = false;
-      const lines = await renderProxyStatusLines({ ...options, watch: true });
-      if (useAlternateScreen) {
-        process.stdout.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
-      } else {
-        process.stdout.write(`${lines.join("\n")}\n`);
-      }
-    } while (renderPending && !stopped);
-    refreshing = false;
-  };
-
-  if (useAlternateScreen) {
-    process.stdout.write("\u001b[?1049h\u001b[?25l");
-  }
-  try {
-    await render();
-    if (!useAlternateScreen) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      const repaintOnResize = (): void => {
-        void render();
-      };
-      const cleanup = (): void => {
-        if (stopped) {
-          return;
-        }
-        stopped = true;
-        if (timer) {
-          clearInterval(timer);
-        }
-        process.off("SIGINT", cleanup);
-        process.off("SIGTERM", cleanup);
-        process.stdout.off("resize", repaintOnResize);
-        restoreTerminal();
-        resolve();
-      };
-
-      timer = setInterval(() => {
-        void render();
-      }, PROXY_STATUS_REFRESH_SECONDS * 1000);
-
-      process.stdout.on("resize", repaintOnResize);
-      process.once("SIGINT", cleanup);
-      process.once("SIGTERM", cleanup);
-    });
-  } catch (error) {
-    restoreTerminal();
-    throw error;
-  }
+  await runLiveView(
+    () => renderProxyStatusLines({ ...options, watch: true }),
+    { intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000 },
+  );
 }
 
 export async function stopProxy(options: ProxyOptions): Promise<string> {

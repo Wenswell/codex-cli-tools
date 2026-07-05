@@ -6,6 +6,7 @@ import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
 import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive } from "../lib/runtime-log.js";
+import { createLiveViewController } from "../lib/live-view.js";
 import { renderTable } from "../lib/table.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textRed, textYellow, truncateVisible, visibleLength, } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
@@ -678,25 +679,17 @@ async function runMonitor(config) {
     let stopDelay = null;
     let renderLatestFrame = null;
     const runtimeDedupe = { lastFingerprint: null };
-    const useAlternateScreen = config.clear && Boolean(process.stdout.isTTY);
-    const restoreTerminal = () => {
-        if (useAlternateScreen) {
-            process.stdout.write("\u001b[?25h\u001b[?1049l");
-        }
-    };
-    const stop = () => {
-        stopped = true;
-        stopDelay?.();
-    };
-    const repaintOnResize = () => {
+    const liveView = createLiveViewController({
+        enabled: config.clear && Boolean(process.stdout.isTTY),
+        onStop: () => {
+            stopped = true;
+            stopDelay?.();
+        },
+    });
+    liveView.setResizeRender(() => {
         renderLatestFrame?.();
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    if (useAlternateScreen) {
-        process.stdout.write("\u001b[?1049h\u001b[?25l");
-        process.stdout.on("resize", repaintOnResize);
-    }
+    });
+    liveView.start();
     const wait = async (milliseconds) => {
         await new Promise((resolve) => {
             const timeout = setTimeout(resolve, milliseconds);
@@ -720,8 +713,8 @@ async function runMonitor(config) {
                 result.closedHistory = closedHistory;
                 result.closedTotal = closedTotal;
                 await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
-                if (useAlternateScreen) {
-                    renderLatestFrame = () => writeMonitorFrame(renderMonitorResultLines(result, config));
+                if (liveView.enabled) {
+                    renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config));
                     renderLatestFrame();
                 }
                 else {
@@ -738,8 +731,8 @@ async function runMonitor(config) {
                 const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
                 const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
                 await recordClvmFailure("monitor", config, failure, runtimeDedupe);
-                if (useAlternateScreen) {
-                    renderLatestFrame = () => writeMonitorFrame(renderMonitorFailureLines(failure, config));
+                if (liveView.enabled) {
+                    renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config));
                     renderLatestFrame();
                 }
                 else {
@@ -753,12 +746,7 @@ async function runMonitor(config) {
         }
     }
     finally {
-        process.off("SIGINT", stop);
-        process.off("SIGTERM", stop);
-        if (useAlternateScreen) {
-            process.stdout.off("resize", repaintOnResize);
-        }
-        restoreTerminal();
+        liveView.stop();
     }
 }
 async function sampleOnce(config) {
@@ -1604,9 +1592,6 @@ function captureMonitorLines(writeOutput) {
     };
     writeOutput(stream);
     return output.endsWith("\n") ? output.slice(0, -1).split("\n") : output.split("\n");
-}
-function writeMonitorFrame(lines, stream = process.stdout) {
-    stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 function clvmMonitorTitle(config) {
     if (!config.autoCloseEnabled) {
