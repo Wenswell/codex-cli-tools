@@ -19,6 +19,7 @@ This document records reusable project preferences that come from implementation
 - Color sets stay small and semantic. Status-like values should use red, yellow, and green unless a fourth state has a clear meaning.
 - Repeated short grouping identifiers should use a stable small bright palette so related rows are easy to scan without adding columns or legend text.
 - Dense operational tables keep stable columns. Text-heavy details should live in the final column and use the shared ANSI-aware, wide-character-aware truncation rules.
+- Dense operational tables should assign explicit shrink priority when columns have different diagnostic value. Lower-value status labels and endpoints can compress before dense numeric values, routing chains, and final detail fields.
 - Numeric display uses compact units for terminal output and keeps raw numeric values in JSON.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
 

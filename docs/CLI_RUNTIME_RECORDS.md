@@ -72,6 +72,7 @@ Monitor and watch output should keep display rules predictable:
 - Headers use compact command labels and bare `HH:mm:ss` clocks.
 - Header fields use single spaces.
 - Tables keep stable columns and let the final detail column absorb remaining terminal width.
+- Tables with mixed diagnostic value can assign shrink priority so compact labels and endpoints compress before dense counters, rates, routes, and final details.
 - TTY output can adapt row counts to terminal height.
 - Non-TTY output should stay deterministic.
 - Watch mode should recompute layout after terminal resize.

@@ -324,9 +324,9 @@ type Layout = {
   maxWidth: number;
   showTrafficTotals: boolean;
   showChain: boolean;
-  status: number;
   endpoint: number;
-  age: number;
+  endpointMin: number;
+  ageZeroFor: number;
   zeroFor: number;
   up: number;
   down: number;
@@ -2117,10 +2117,8 @@ function clvmMonitorTitle(config: RuntimeConfig): string[] {
 
 function printCurrentConnections(shownConnections: ConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
   const rows = shownConnections.map((connection) => ({
-    status: statusCell(connection.status, style),
     endpoint: style.cyan(connection.endpoint),
-    age: formatDuration(connection.ageMs),
-    zeroFor: formatDuration(connection.observedIdleMs),
+    ageZeroFor: ageZeroForCell(connection.ageMs, connection.observedIdleMs, style),
     up: speedCell(connection.uploadBytesPerSecond, style),
     down: speedCell(connection.downloadBytesPerSecond, style),
     upload: bytesCell(connection.uploadTotal, style),
@@ -2140,7 +2138,7 @@ function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layo
   const rows = closedHistory.map((connection) => ({
     closedAt: formatLocalTimestamp(connection.closedAt),
     endpoint: style.cyan(connection.endpoint),
-    zeroFor: formatDuration(connection.observedIdleMs),
+    zeroFor: zeroForCell(connection.observedIdleMs, style),
     upload: bytesCell(connection.uploadTotal, style),
     download: bytesCell(connection.downloadTotal, style),
     chain: style.magenta(connection.chains.join(" > ")),
@@ -2179,14 +2177,14 @@ function formatUnavailableStatus(failure: MonitorFailure, style: Style): string 
 
 function formatSpeed(bytesPerSecond: number | null): string {
   if (bytesPerSecond === null) {
-    return "[unknown]";
+    return "-";
   }
   return `${formatByteQuantity(bytesPerSecond)}/s`;
 }
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) {
-    return "[unknown]";
+    return "-";
   }
   return formatByteQuantity(bytes);
 }
@@ -2233,10 +2231,8 @@ function statusRank(status: ConnectionEntry["status"]): number {
 
 function currentConnectionColumns(layout: Layout): TableColumn[] {
   const columns: TableColumn[] = [
-    { key: "status", title: "status", width: layout.status },
-    { key: "endpoint", title: "endpoint", width: layout.endpoint },
-    { key: "age", title: "age", width: layout.age },
-    { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
+    { key: "endpoint", title: "endpoint", maxWidth: layout.endpoint, minWidth: layout.endpointMin, shrinkPriority: 20 },
+    { key: "ageZeroFor", title: "age/zeroFor", width: layout.ageZeroFor },
     { key: "up", title: "up/s", width: layout.up, align: "right" },
     { key: "down", title: "down/s", width: layout.down, align: "right" },
   ];
@@ -2258,7 +2254,7 @@ function currentConnectionColumns(layout: Layout): TableColumn[] {
 function closedConnectionColumns(layout: Layout): TableColumn[] {
   const columns: TableColumn[] = [
     { key: "closedAt", title: "closedAt", width: 8 },
-    { key: "endpoint", title: "endpoint", width: layout.endpoint },
+    { key: "endpoint", title: "endpoint", maxWidth: layout.endpoint, minWidth: layout.endpointMin, shrinkPriority: 20 },
     { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
   ];
 
@@ -2276,19 +2272,17 @@ function closedConnectionColumns(layout: Layout): TableColumn[] {
   return columns;
 }
 
-function statusCell(status: ConnectionEntry["status"], style: Style): string {
-  const text = formatStatus(status);
-  if (status === "zero") {
-    return style.yellow(text);
-  }
-  if (status === "active") {
-    return style.green(text);
-  }
-  return style.dim(text);
+function ageZeroForCell(ageMs: number, zeroForMs: number, style: Style): string {
+  return `${formatDuration(ageMs)}/${zeroForCell(zeroForMs, style)}`;
+}
+
+function zeroForCell(milliseconds: number, style: Style): string {
+  const text = formatDuration(milliseconds);
+  return milliseconds === 0 ? style.green(text) : style.yellow(text);
 }
 
 function speedCell(bytesPerSecond: number | null, style: Style): string {
-  const text = formatSpeed(bytesPerSecond);
+  const text = bytesPerSecond === null ? "-" : formatByteQuantity(bytesPerSecond);
   if (bytesPerSecond === null || bytesPerSecond === 0) {
     return style.dim(text);
   }
@@ -2306,12 +2300,12 @@ function bytesCell(bytes: number | null, style: Style): string {
 function buildLayout(stream: NodeJS.WriteStream): Layout {
   const maxWidth = terminalColumns(stream);
   const fixed = {
-    status: 9,
     endpoint: maxWidth >= 120 ? 28 : 22,
-    age: 7,
+    endpointMin: maxWidth >= 72 ? 10 : 6,
+    ageZeroFor: 12,
     zeroFor: 7,
-    up: 10,
-    down: 10,
+    up: 6,
+    down: 6,
     upload: 8,
     download: 8,
     chain: maxWidth >= 120 ? 20 : 14,
@@ -2329,10 +2323,6 @@ function buildLayout(stream: NodeJS.WriteStream): Layout {
 function terminalColumns(stream: NodeJS.WriteStream): number {
   const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
   return columns && columns > 0 ? Math.floor(columns) : 120;
-}
-
-function formatStatus(status: ConnectionEntry["status"]): string {
-  return status === "unknown" ? "[unknown]" : status;
 }
 
 function createStyle(config: RuntimeConfig): Style {

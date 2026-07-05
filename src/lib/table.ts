@@ -9,6 +9,7 @@ export type TableColumn = {
   width?: number;
   minWidth?: number;
   maxWidth?: number;
+  shrinkPriority?: number;
   flex?: boolean;
   truncate?: boolean;
 };
@@ -83,7 +84,10 @@ function resolveColumnWidths(
   }
 
   let overflow = widths.reduce((sum, width) => sum + width, 0) - available;
-  for (let index = columns.length - 1; index >= 0 && overflow > 0; index -= 1) {
+  for (const index of shrinkOrder(columns)) {
+    if (overflow <= 0) {
+      break;
+    }
     const column = columns[index];
     const minimum = column.minWidth ?? Math.min(widths[index], visibleLength(column.title));
     const shrink = Math.min(overflow, Math.max(0, widths[index] - minimum));
@@ -91,6 +95,13 @@ function resolveColumnWidths(
     overflow -= shrink;
   }
   return widths;
+}
+
+function shrinkOrder(columns: TableColumn[]): number[] {
+  return columns
+    .map((column, index) => ({ index, priority: column.shrinkPriority ?? 100 }))
+    .sort((left, right) => left.priority - right.priority || right.index - left.index)
+    .map((item) => item.index);
 }
 
 function formatTableRow(columns: TableColumn[], row: TableRow, widths: number[], gap: number): string {

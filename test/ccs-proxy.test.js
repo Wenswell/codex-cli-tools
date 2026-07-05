@@ -2977,7 +2977,7 @@ test("proxy status and reasoning summaries use event counts", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /status total=9 active=0 200=8 502=1 upstreams=input=3/);
+  assert.match(lines, /status total=9 active=0 200=8 502=1 upstreams=input=9/);
   assert.match(lines, /reasoning total=8 max=1034/);
   assert.match(lines, /516=3/);
   assert.match(lines, /1034=4/);

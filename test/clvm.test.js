@@ -291,9 +291,10 @@ test("pads unknown speed columns", async () => {
 
     const row = stdout
       .split("\n")
-      .find((line) => line.startsWith("unknown") || line.startsWith("[unknown]"));
+      .find((line) => line.includes("api.example.com:443"));
     assert.ok(row);
-    assert.match(row, /\[unknown\]\s{2}\[unknown\]/);
+    assert.match(row, /\/0ms\s+-\s+-\s+/);
+    assert.doesNotMatch(row, /\[unknown\]/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });
@@ -360,10 +361,14 @@ test("formats traffic numbers with three significant digits", async () => {
 
     assert.match(stdout, /zero speed:\s+160K\/s/);
     assert.match(stdout, /zero<=160K\/s/);
-    assert.match(stdout, /\b160K\/s\b/);
-    assert.match(stdout, /\b43\.2M\/s\b/);
-    assert.match(stdout, /\b160K\b/);
-    assert.match(stdout, /\b43\.2M\b/);
+    const row = stdout
+      .split("\n")
+      .find((line) => line.includes("api.example.com:443") && line.includes("43.2M"));
+    assert.ok(row);
+    assert.match(row, /\b160K\b/);
+    assert.match(row, /\b43\.2M\b/);
+    assert.doesNotMatch(row, /\b160K\/s\b/);
+    assert.doesNotMatch(row, /\b43\.2M\/s\b/);
     assert.doesNotMatch(stdout, /\bKB|MB|GB\b/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1007,11 +1012,13 @@ test("fits connection tables to terminal width", async () => {
           {
             id: "abc",
             metadata: {
-              host: "very-long-api-name.example.com",
+              host: "ai.input.im",
               destinationPort: 443,
             },
             upload: 100,
             download: 200,
+            uploadSpeed: 320,
+            downloadSpeed: 55.5 * 1024,
             start: "2026-06-10T00:00:00.000Z",
             chains: ["Proxy", "Hong-Kong-Long-Node-Name", "Fallback-Long-Node-Name"],
             rule: "DOMAIN-SUFFIX",
@@ -1065,14 +1072,21 @@ test("fits connection tables to terminal width", async () => {
     });
 
     const lines = stdout.split("\n");
-    const headerIndex = lines.findIndex((line) => line.startsWith("status ") && line.includes("endpoint"));
+    const headerIndex = lines.findIndex((line) => line.includes("endpoint") && line.includes("age/zeroFor") && line.includes("up/s") && line.includes("down/s"));
     assert.notEqual(headerIndex, -1);
     const tableLines = lines.slice(headerIndex, headerIndex + 2);
     assert.equal(tableLines.length, 2);
     assert.ok(tableLines.every((line) => visibleLength(line) <= 80));
+    assert.doesNotMatch(tableLines[0], /\bstatus\b/);
     assert.match(tableLines[0], /\brule\b/);
     assert.doesNotMatch(tableLines[0], /\bupload\b/);
     assert.doesNotMatch(tableLines[0], /\bdownload\b/);
+    assert.match(tableLines[0], /up\/s\s+down\/s/);
+    assert.match(tableLines[1], /\/0ms\b/);
+    assert.match(tableLines[1], /\b320B\b/);
+    assert.match(tableLines[1], /\b55\.5K\b/);
+    assert.doesNotMatch(tableLines[1], /\b320B\/s\b|\b55\.5K\/s\b|\bactive\b|act…/);
+    assert.doesNotMatch(tableLines[1], /320…|55\.5K…/);
 
     const commandsLine = lines.find((line) => line.startsWith("commands: "));
     assert.ok(commandsLine);
