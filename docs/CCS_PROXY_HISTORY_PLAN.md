@@ -11,9 +11,9 @@ Scale `ccs proxy` request history while keeping live refresh stable.
 The proxy will separate four responsibilities:
 
 - `proxy.json`: lightweight runtime state snapshot.
-- `proxy-requests.jsonl`: complete completed model API request history.
-- `proxy.log`: guard and error event JSONL.
-- `proxy-runtime.log`: background process stdout and stderr.
+- `proxy-requests.jsonl`: bounded completed model API request history.
+- `proxy.log`: bounded guard and error event JSONL.
+- `proxy-runtime.log`: bounded background process stdout and stderr.
 
 ## Status
 
@@ -35,9 +35,9 @@ The current request is sufficient for implementation. No confirmation blockers r
 - Default rendering reads completed history from `proxy.json`.
 - Explicit `--history N` reads `proxy-requests.jsonl` only when `N` exceeds `metrics.recent_requests.length`.
 - `proxy.json.metrics.recent_requests` remains a small newest-first snapshot.
-- `proxy-requests.jsonl` stores every completed model API request as one JSON line.
-- `proxy.log` stores guard and error events only.
-- Background process output moves to `proxy-runtime.log`.
+- `proxy-requests.jsonl` stores recent completed model API requests as JSON lines up to 64M.
+- `proxy.log` stores recent guard and error events up to 16M.
+- Background process output moves to `proxy-runtime.log` and keeps recent output up to 16M.
 
 ## Storage model
 
@@ -52,11 +52,12 @@ The current request is sufficient for implementation. No confirmation blockers r
 - latency summary
 - recent completed requests
 
-`proxy-requests.jsonl` is the complete completed model API request source:
+`proxy-requests.jsonl` is the bounded completed model API request source:
 
-- path: `~/.config/codex-tools/proxy-requests.jsonl`
+- path: `~/.cache/codex-tools/proxy/proxy-requests.jsonl`
 - format: one normalized `ProxyRequestRecord` JSON object per line
 - order: append in completion order
+- retention: newest complete JSONL records up to 64M
 - fields: all model API request table, metric, model, guard action, byte, latency, session, status, and error fields
 
 `proxy.log` is the event log:
@@ -64,11 +65,13 @@ The current request is sufficient for implementation. No confirmation blockers r
 - guard actions
 - upstream errors
 - local proxy errors with request context
+- retention: newest complete JSONL events up to 16M
 
 `proxy-runtime.log` is the process log:
 
 - foreground startup output for background processes
 - uncaught stdout and stderr from the background process
+- retention: newest process output up to 16M
 
 ## Rendering model
 
@@ -95,6 +98,7 @@ History source selection:
 - [x] Add `proxyRequestsPath(stateRoot)` and `proxyRuntimeLogPath(stateRoot)`.
 - [x] Move background stdout and stderr from `proxy.log` to `proxy-runtime.log`.
 - [x] Append completed request records to `proxy-requests.jsonl`.
+- [x] Bound `proxy-requests.jsonl` and `proxy.log` by byte size.
 - [x] Keep `metrics.recent_requests` limited to the existing compact snapshot size.
 - [x] Add a JSONL tail reader for newest completed request records.
 - [x] Build history rows from `proxy.json` by default.

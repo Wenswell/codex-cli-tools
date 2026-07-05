@@ -3,7 +3,10 @@
 Project design specs:
 
 - [CLI runtime records](./CLI_RUNTIME_RECORDS.md)
+- [engineering preferences](./ENGINEERING_PREFERENCES.md)
+- [testing guidelines](./TESTING_GUIDELINES.md)
 - [runtime logging review](./RUNTIME_LOGGING_REVIEW.md)
+- [runtime logging security plan](./RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](./CCS_COST_SPEC.md)
 - [ccs proxy spec](./CCS_PROXY_SPEC.md)
 - [ccs proxy route boundary plan](./CCS_PROXY_ROUTE_BOUNDARY_PLAN.md)

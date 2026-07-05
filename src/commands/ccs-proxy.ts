@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -11,10 +11,11 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexConfigPath, formatHomePath, profilesPath } from "../lib/paths.js";
+import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
-import { textBlue, textBold, textDim, textGreen, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
+import { appendBoundedJsonLine } from "../lib/runtime-log.js";
+import { bgDarkBlue, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable, type TableColumn, type TableRow } from "../lib/table.js";
 import { packageVersion } from "../lib/version.js";
@@ -218,6 +219,10 @@ const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
 const PROXY_JSONL_TAIL_BLOCK_BYTES = 64 * 1024;
+const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
+const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
+const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
+const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
@@ -278,7 +283,7 @@ async function readProfiles(): Promise<ProfilesFile> {
   return text ? (parseJsonObject(text) as ProfilesFile) : {};
 }
 
-export async function readProxyState(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`): Promise<ProxyState | null> {
+export async function readProxyState(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy")): Promise<ProxyState | null> {
   const text = await readTextIfExists(statePath(stateRoot));
   return text ? normalizeProxyState(parseJsonObject(text) as ProxyState) : null;
 }
@@ -305,13 +310,11 @@ function proxyRuntimeLogPath(stateRoot: string): string {
 }
 
 async function appendProxyJsonLine(filePath: string, value: Record<string, unknown>): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await appendFile(filePath, `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`, { encoding: "utf8", mode: 0o600 });
+  await appendBoundedJsonLine(filePath, { at: new Date().toISOString(), ...value }, { maxBytes: PROXY_EVENT_LOG_MAX_BYTES, mode: 0o600 });
 }
 
 async function appendProxyRequestRecord(stateRoot: string, record: ProxyCompleteRequestRecord): Promise<void> {
-  await mkdir(stateRoot, { recursive: true });
-  await appendFile(proxyRequestsPath(stateRoot), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+  await appendBoundedJsonLine(proxyRequestsPath(stateRoot), record, { maxBytes: PROXY_REQUEST_LOG_MAX_BYTES, mode: 0o600 });
 }
 
 function proxyStartLockPath(stateRoot: string): string {
@@ -419,8 +422,10 @@ function startProxyBackgroundProcess(options: ProxyOptions, state: ProxyState): 
 
   fs.mkdirSync(options.stateRoot, { recursive: true });
   const logPath = proxyRuntimeLogPath(options.stateRoot);
-  const stdout = fs.openSync(logPath, "a");
-  const stderr = fs.openSync(logPath, "a");
+  trimProxyRuntimeLog(logPath);
+  const stdout = fs.openSync(logPath, "a", 0o600);
+  const stderr = fs.openSync(logPath, "a", 0o600);
+  fs.chmodSync(logPath, 0o600);
   try {
     const child = spawn(process.execPath, [scriptPath, "proxy", "serve"], {
       detached: true,
@@ -441,6 +446,32 @@ function startProxyBackgroundProcess(options: ProxyOptions, state: ProxyState): 
     fs.closeSync(stdout);
     fs.closeSync(stderr);
   }
+}
+
+function trimProxyRuntimeLog(logPath: string): void {
+  let fileStat;
+  try {
+    fileStat = fs.statSync(logPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  if (fileStat.size <= PROXY_RUNTIME_LOG_MAX_BYTES) {
+    return;
+  }
+
+  const fd = fs.openSync(logPath, "r+");
+  try {
+    const buffer = Buffer.allocUnsafe(PROXY_RUNTIME_LOG_TRIM_BYTES);
+    const bytesRead = fs.readSync(fd, buffer, 0, PROXY_RUNTIME_LOG_TRIM_BYTES, fileStat.size - PROXY_RUNTIME_LOG_TRIM_BYTES);
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, buffer, 0, bytesRead, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.chmodSync(logPath, 0o600);
 }
 
 async function releaseProxyStartLock(stateRoot: string, lockFd: number): Promise<void> {
@@ -949,15 +980,15 @@ function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: Pro
     : colorCount(String(runtime.protocol));
   const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
   return [
-    textBold("ccs proxy"),
-    `time: ${textDim(now.toLocaleTimeString("en-GB", { hour12: false }))}`,
+    bgDarkBlue(" ccs proxy "),
+    textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
     `runtime: ${state ? runtimeLabel : textRed("missing")}`,
     `pid: ${pid}`,
     `server: ${version}`,
     `protocol: ${protocol}`,
     `proxy: ${proxy}`,
     `refresh: ${textDim(`${PROXY_STATUS_REFRESH_SECONDS}s`)}`,
-  ].join("  ");
+  ].join(" ");
 }
 
 function formatProxyPathsLines(options: ProxyOptions): string[] {
@@ -2590,7 +2621,7 @@ function formatProxyContinuationRecoveryCounts(counts: ProxyContinuationRecovery
     return [];
   }
   return [
-    `recovery=${textBlue(String(counts.attempts))}`,
+    `recovery=${textYellow(String(counts.attempts))}`,
     `recovered=${textGreen(String(counts.recovered))}`,
     `exhausted=${formatProxyStatusCount(counts.exhausted, textRed)}`,
   ];
@@ -2621,7 +2652,7 @@ function formatProxyReasoningTokenValue(reasoningTokens: number | null): string 
     return textDim("-");
   }
   if (reasoningTokens === 0) {
-    return textOrange(String(reasoningTokens));
+    return textYellow(String(reasoningTokens));
   }
   if (REASONING_EQUALS.includes(reasoningTokens)) {
     return textRed(String(reasoningTokens));
@@ -2643,7 +2674,7 @@ function formatGroupedProxyReasoningTokenCounts(counts: ProxyReasoningTokenCount
     ...grouped
       .filter(([, count]) => count > 0)
       .map(([reasoningTokens, count]) => {
-        const color = reasoningTokens === "0" ? textOrange : textRed;
+        const color = reasoningTokens === "0" ? textYellow : textRed;
         return `${reasoningTokens}=${color(String(count))}`;
       }),
     ...(otherCount > 0 ? [`other=${textGreen(String(otherCount))}`] : []),
@@ -2974,9 +3005,12 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
 
   const server = createServer((req, res) => {
     void (async () => {
+      let method = req.method || "GET";
+      let requestPath = "/";
       try {
         const url = new URL(req.url || "/", "http://localhost");
-        const method = req.method || "GET";
+        method = req.method || "GET";
+        requestPath = url.pathname;
         const route = classifyProxyRoute(method, url.pathname);
         if (route.kind === "control") {
           res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
@@ -3215,8 +3249,8 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         const message = error instanceof Error ? error.message : String(error);
         await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
           event: "ccs_proxy_request_error",
-          method: req.method || "GET",
-          path: req.url || "/",
+          method,
+          path: requestPath,
           status: 500,
           error: message,
         });
@@ -3231,7 +3265,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
     server.listen(state.listen_port, state.listen_host, () => resolve());
   });
 
-  await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`);
+  await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
   process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
 
   await new Promise<void>((resolve) => {

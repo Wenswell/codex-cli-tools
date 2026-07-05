@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
@@ -45,6 +45,7 @@ import {
   profilesPath,
   weztermConfigPath,
 } from "../lib/paths.js";
+import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.js";
 import {
   calculateCodexCostUSD,
   missingPricingModels,
@@ -360,6 +361,7 @@ const usageTopSnapshotActiveTtlMs = 5_000;
 const usageTopHistoryWindowMs = 24 * 60 * 60 * 1000;
 const usageTopHistoryBucketMs = 30 * 60 * 1000;
 const usageTopHistoryRetentionMs = usageTopHistoryWindowMs + usageTopHistoryBucketMs;
+const usageTopHistoryMaxWindowMs = usageTopHistoryRetentionMs;
 const usageTopHistoryBucketMinutes = usageTopHistoryBucketMs / (60 * 1000);
 const usageTopHistorySummaryDeltaMs = 5 * 60 * 60 * 1000;
 const usageTopHistoryEpsilon = 0.05;
@@ -371,6 +373,8 @@ const usageTopHistoryChartAxisPrefix = 9;
 const usageTopHistoryChartSummaryGap = 4;
 const usageTopHistoryChartNamedProviderLimit = 2;
 const usageTopHistoryOtherName = "other";
+const usageTopHistoryTailBlockBytes = 64 * 1024;
+const usageTopHistoryMaxBytes = 64 * 1024 * 1024;
 const weztermStatusUpdateIntervalMs = 250;
 const weztermStatusStaleAfterSeconds = 2;
 const usageHttpTimeoutMs = 5_000;
@@ -1405,7 +1409,7 @@ function printProfileDetails(name: string, profile: Profile): void {
 }
 
 function proxyOptions() {
-  const stateRoot = process.env.CCS_PROXY_STATE_ROOT || `${process.env.HOME ?? ""}/.config/codex-tools`;
+  const stateRoot = process.env.CCS_PROXY_STATE_ROOT || join(codexToolsCacheDir(), "proxy");
   return {
     codexConfigPath: codexConfigPath(),
     listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
@@ -2450,7 +2454,7 @@ function buildUsageTopSnapshot(
 }
 
 async function writeUsageTopSnapshot(snapshot: UsageTopSnapshot): Promise<void> {
-  await writeTextFileAtomic(usageTopSnapshotPath(), stringifyJson(snapshot));
+  await writeJsonStateAtomic(usageTopSnapshotPath(), snapshot, 0o600);
 }
 
 function parseUsageTopSnapshot(text: string | null): UsageTopSnapshot | null {
@@ -2488,32 +2492,58 @@ function filterUsageTopHistoryRecords(records: UsageTopSnapshot[], now: Date): U
     });
 }
 
-function parseUsageTopHistoryRecords(text: string | null): UsageTopSnapshot[] {
-  if (!text) {
-    return [];
-  }
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => !!line)
-    .flatMap((line) => {
-      const snapshot = parseUsageTopSnapshot(line);
-      return snapshot ? [snapshot] : [];
-    });
-}
-
 async function readUsageTopHistoryRecords(now = new Date()): Promise<UsageTopSnapshot[]> {
-  return filterUsageTopHistoryRecords(
-    parseUsageTopHistoryRecords(await readTextIfExists(usageTopHistoryPath())),
-    now,
-  );
-}
+  const cutoff = now.getTime() - usageTopHistoryRetentionMs;
+  let file;
+  try {
+    file = await open(usageTopHistoryPath(), "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
 
-async function writeUsageTopHistoryRecords(records: UsageTopSnapshot[]): Promise<void> {
-  await writeTextFileAtomic(
-    usageTopHistoryPath(),
-    records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : ""),
-  );
+  try {
+    const fileStat = await file.stat();
+    let position = fileStat.size;
+    let carry = "";
+    const records: UsageTopSnapshot[] = [];
+    let reachedCutoff = false;
+    while (position > 0 && !reachedCutoff) {
+      const length = Math.min(usageTopHistoryTailBlockBytes, position);
+      position -= length;
+      const buffer = Buffer.allocUnsafe(length);
+      await file.read(buffer, 0, length, position);
+      const lines = `${buffer.toString("utf8")}${carry}`.split("\n");
+      carry = position > 0 ? lines.shift() ?? "" : "";
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const snapshot = parseUsageTopSnapshot(lines[index].trim());
+        if (!snapshot) {
+          continue;
+        }
+        const at = usageTopSnapshotTime(snapshot);
+        if (!at) {
+          continue;
+        }
+        if (at.getTime() < cutoff) {
+          reachedCutoff = true;
+          break;
+        }
+        records.push(snapshot);
+      }
+    }
+    if (!reachedCutoff && position === 0 && carry.trim()) {
+      const snapshot = parseUsageTopSnapshot(carry.trim());
+      const at = snapshot ? usageTopSnapshotTime(snapshot) : null;
+      if (snapshot && at && at.getTime() >= cutoff) {
+        records.push(snapshot);
+      }
+    }
+    return filterUsageTopHistoryRecords(records, now);
+  } finally {
+    await file.close();
+  }
 }
 
 async function recordUsageTopHistorySnapshot(snapshot: UsageTopSnapshot): Promise<void> {
@@ -2524,11 +2554,8 @@ async function recordUsageTopHistorySnapshot(snapshot: UsageTopSnapshot): Promis
   if (!at) {
     return;
   }
-  const records = filterUsageTopHistoryRecords([
-    ...parseUsageTopHistoryRecords(await readTextIfExists(usageTopHistoryPath())),
-    snapshot,
-  ], at);
-  await writeUsageTopHistoryRecords(records);
+  await ensureDir(codexToolsCacheDir());
+  await appendBoundedJsonLine(usageTopHistoryPath(), snapshot, { maxBytes: usageTopHistoryMaxBytes, mode: 0o600 });
 }
 
 function buildUsageTopHistory(records: UsageTopSnapshot[], request: UsageTopHistoryRequest): UsageTopHistory {
@@ -3767,7 +3794,7 @@ async function printUsageTopHistory(profiles: ProfilesFile, profileName?: string
 }
 
 async function writeUsageTopStatusText(value: string): Promise<void> {
-  await writeTextFileAtomic(usageTopStatusTextPath(), value);
+  await writeTextFileAtomic(usageTopStatusTextPath(), value, 0o600);
 }
 
 function formatUsageTopStatusFileText(now: Date, suffix: string): string {
@@ -3803,6 +3830,9 @@ function parseUsageTopHistoryRequestFromUrl(url: URL, now = new Date()): UsageTo
   const windowEnd = parseUsageTopHistoryDateParam(url.searchParams, "until") ?? now;
   if (windowStart.getTime() > windowEnd.getTime()) {
     throw new Error("since must be before until");
+  }
+  if (windowEnd.getTime() - windowStart.getTime() > usageTopHistoryMaxWindowMs) {
+    throw new Error("history window must be 24h30m or shorter");
   }
   return {
     windowStart,
@@ -4164,12 +4194,19 @@ async function printUsageTop(profiles: ProfilesFile, options: UsageTopOptions): 
   const writeLine = async (): Promise<void> => {
     const now = new Date();
     const line = buildUsageTopLine(runtime.entries, runtime.states, now);
-    if (options.once || !process.stdout.isTTY) {
+    const snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, now, true);
+    if (options.once) {
+      await writeUsageTopSnapshot(snapshot);
+      await recordUsageTopHistorySnapshot(snapshot);
+      console.log(line);
+      return;
+    }
+    if (!process.stdout.isTTY) {
       console.log(line);
       return;
     }
     process.stdout.write(`\r\u001b[2K${line}`);
-    await writeUsageTopSnapshot(buildUsageTopSnapshot(runtime.entries, runtime.states, now, true));
+    await writeUsageTopSnapshot(snapshot);
   };
 
   const printMarkLine = (): void => {

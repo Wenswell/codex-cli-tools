@@ -4,5 +4,6 @@
   "domains": [],
   "interval": "1s",
   "zeroSpeedThreshold": 0,
-  "closeZeroForSeconds": null
+  "closeZeroForSeconds": null,
+  "rawArchive": false
 }

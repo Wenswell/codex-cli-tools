@@ -1,14 +1,14 @@
-import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
-import { appendFile, chmod } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
-import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
+import { readTextIfExists, writeTextFile } from "../lib/fs.js";
 import { printKeyValue } from "../lib/output.js";
 import { clvmConfigPath, codexToolsCacheDir, codexToolsConfigDir, formatHomePath } from "../lib/paths.js";
+import { appendBoundedJsonLine, pruneRuntimeRawArchive, writeJsonStateAtomic, writeRuntimeRawArchive, type RuntimeRawArchiveOptions, type RuntimeRawReference, type RuntimeRawWriteResult } from "../lib/runtime-log.js";
 import { renderTable, type TableColumn } from "../lib/table.js";
 import {
+  bgDarkBlue,
   maskSecret,
   textBlue,
   textBold,
@@ -39,6 +39,10 @@ const durationUnits = new Map([
 ]);
 
 const closedHistoryLimit = 5;
+const clvmHistoryMaxBytes = 16 * 1024 * 1024;
+const clvmRawPayloadMaxBytes = 1024 * 1024;
+const clvmRawArchiveMaxFiles = 256;
+const clvmRawArchiveMaxBytes = 64 * 1024 * 1024;
 const clvmStateVersion = 3;
 const clvmRetryMaxIntervalMs = 300_000;
 const clvmRetryMultipliers = [1, 2, 5, 10, 30, 60] as const;
@@ -51,6 +55,16 @@ const setupFields = new Set([
   "interval",
   "zeroSpeedThreshold",
   "closeZeroForSeconds",
+  "rawArchive",
+]);
+const sensitiveClvmResponseHeaders = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "api-key",
+  "x-api-key",
+  "openai-api-key",
 ]);
 
 function clvmTemplatePath(): string {
@@ -78,6 +92,7 @@ type ClvmConfigFile = {
   interval?: string;
   zeroSpeedThreshold?: number;
   closeZeroForSeconds?: number | null;
+  rawArchive?: boolean;
 };
 
 type ClvmConfig = {
@@ -87,6 +102,7 @@ type ClvmConfig = {
   interval: string;
   zeroSpeedThreshold: number;
   closeZeroForSeconds: number | null;
+  rawArchive: boolean;
 };
 
 type CommandOptions = {
@@ -96,6 +112,7 @@ type CommandOptions = {
   interval?: string;
   zeroSpeedThreshold?: number;
   closeZeroForSeconds?: number | null;
+  rawArchive?: boolean;
   json?: boolean;
   clear?: boolean;
   color?: boolean;
@@ -117,6 +134,7 @@ type RuntimeConfig = {
   closeZeroForSeconds: number | null;
   closeZeroForMs: number | null;
   autoCloseEnabled: boolean;
+  rawArchive: boolean;
   once: boolean;
   json: boolean;
   clear: boolean;
@@ -225,11 +243,8 @@ type ClvmConnectionsResponse = {
   raw: ClvmRawHttpResponse;
 };
 
-type ClvmRawReference = {
-  sha256: string;
-  bytes: number;
-  path: string;
-};
+type ClvmRawReference = RuntimeRawReference;
+type ClvmRawWriteResult = RuntimeRawWriteResult;
 
 type ClvmSampleRecord = {
   version: number;
@@ -244,6 +259,7 @@ type ClvmSampleRecord = {
     zeroSpeedThreshold: number;
     closeZeroForSeconds: number | null;
     autoCloseEnabled: boolean;
+    rawArchive: boolean;
   };
   summary: {
     totalConnections: number;
@@ -277,6 +293,7 @@ type ClvmFailureRecord = {
     zeroSpeedThreshold: number;
     closeZeroForSeconds: number | null;
     autoCloseEnabled: boolean;
+    rawArchive: boolean;
   };
   error: ClvmErrorDetail;
   retry?: ClvmRetryState;
@@ -285,7 +302,16 @@ type ClvmFailureRecord = {
 };
 
 type ClvmRuntimeRecord = ClvmSampleRecord | ClvmFailureRecord;
-type ClvmHistoryRecord = Omit<ClvmRuntimeRecord, "raw">;
+type ClvmStateSampleRecord = Omit<ClvmSampleRecord, "raw">;
+type ClvmStateFailureRecord = Omit<ClvmFailureRecord, "raw">;
+type ClvmStateRecord = ClvmStateSampleRecord | ClvmStateFailureRecord;
+type ClvmHistorySampleRecord = Omit<ClvmSampleRecord, "raw" | "result">;
+type ClvmHistoryFailureRecord = Omit<ClvmFailureRecord, "raw">;
+type ClvmHistoryRecord = ClvmHistorySampleRecord | ClvmHistoryFailureRecord;
+
+type ClvmRuntimeRecordDedupe = {
+  lastFingerprint: string | null;
+};
 
 type MonitorFailure = {
   timestamp: string;
@@ -413,8 +439,7 @@ export class ClashApi {
 
     if (!response.ok) {
       const text = await response.text();
-      const suffix = text ? `: ${text}` : "";
-      throw new ClvmRuntimeError("http_error", `${method} ${pathname} failed with ${response.status} ${response.statusText}${suffix}`, {
+      throw new ClvmRuntimeError("http_error", `${method} ${pathname} failed with ${response.status} ${response.statusText}`, {
         status: response.status,
         statusText: response.statusText,
         body: text,
@@ -632,6 +657,11 @@ function parseRunOptions(argv: string[], command: string): CommandOptions {
       index += 1;
       continue;
     }
+    if (arg === "--raw-archive") {
+      options.rawArchive = parseRawArchiveMode(requireValue(argv, index));
+      index += 1;
+      continue;
+    }
     if (arg === "--json") {
       options.json = true;
       continue;
@@ -686,7 +716,8 @@ function parseSetupOptions(argv: string[]): CommandOptions {
     options.domains === undefined &&
     options.interval === undefined &&
     options.zeroSpeedThreshold === undefined &&
-    options.closeZeroForSeconds === undefined
+    options.closeZeroForSeconds === undefined &&
+    options.rawArchive === undefined
   ) {
     throw new Error("clvm setup requires at least one config flag; run clvm config to view current config");
   }
@@ -742,6 +773,7 @@ function printHelp(): void {
     "  --interval DURATION                       # monitor interval, for example 1s",
     "  --zero-speed BYTES                        # zero-speed threshold in bytes per second",
     "  --close-zero-for-seconds SECONDS|off      # close zero-speed connections in monitor mode",
+    "  --raw-archive on|off                      # write bounded raw /connections archives",
     "  --json                                    # print JSON samples",
     "  --no-clear                                # append samples in monitor mode",
     "  --no-color                                # disable clvm output colors",
@@ -756,6 +788,7 @@ function printSetupHelp(): void {
     "  clvm setup --base-url URL --secret SECRET # preview, confirm, back up, and update API config",
     "  clvm setup --interval 1s                  # preview, confirm, back up, and update monitor interval",
     "  clvm setup --close-zero-for-seconds off   # preview, confirm, back up, and disable automatic close",
+    "  clvm setup --raw-archive on               # preview, confirm, back up, and enable raw archives",
   ].join("\n"));
 }
 
@@ -852,6 +885,7 @@ function buildSetupConfig(current: ClvmConfig, options: CommandOptions): ClvmCon
     interval: options.interval,
     zeroSpeedThreshold: options.zeroSpeedThreshold,
     closeZeroForSeconds: options.closeZeroForSeconds,
+    rawArchive: options.rawArchive,
   });
 }
 
@@ -941,6 +975,7 @@ function printConfigValues(config: RuntimeConfig, style = createStyle(config)): 
   printKeyValue("interval:", formatDuration(config.intervalMs), 12);
   printKeyValue("zero speed:", formatSpeed(config.zeroSpeedThreshold), 12);
   printKeyValue("auto close:", config.closeZeroForSeconds === null ? style.dim("off") : style.red(`${formatSeconds(config.closeZeroForSeconds)}`), 12);
+  printKeyValue("raw archive:", config.rawArchive ? style.yellow("on") : style.dim("off"), 12);
 }
 
 function printCommands(style: Style): void {
@@ -1014,7 +1049,7 @@ async function runStatus(config: RuntimeConfig): Promise<void> {
     try {
       printMonitorResult(await sampleOnce(config), config);
     } catch (error) {
-      const failure = buildMonitorFailure(error);
+      const failure = buildMonitorFailure(error, undefined, config.rawArchive);
       await recordClvmFailure("status", config, failure);
       printMonitorFailure(failure, config);
     }
@@ -1034,7 +1069,7 @@ async function runStatus(config: RuntimeConfig): Promise<void> {
     console.log("");
     printMonitorResult(result, config);
   } catch (error) {
-    const failure = buildMonitorFailure(error);
+    const failure = buildMonitorFailure(error, undefined, config.rawArchive);
     await recordClvmFailure("status", config, failure);
     printKeyValue("status:", formatUnavailableStatus(failure, style), 12);
   }
@@ -1057,6 +1092,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
   let stopped = false;
   let retryAttempt = 0;
   let stopDelay: (() => void) | null = null;
+  const runtimeDedupe: ClvmRuntimeRecordDedupe = { lastFingerprint: null };
 
   process.once("SIGINT", () => {
     stopped = true;
@@ -1087,7 +1123,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
 
       result.closedHistory = closedHistory;
       result.closedTotal = closedTotal;
-      await recordClvmSample("monitor", config, result, payload.raw);
+      await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
       printMonitorResult(result, config);
       retryAttempt = 0;
 
@@ -1099,8 +1135,8 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
     } catch (error) {
       retryAttempt += 1;
       const retryIntervalMs = nextClvmRetryInterval(config.intervalMs, retryAttempt);
-      const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs));
-      await recordClvmFailure("monitor", config, failure);
+      const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
+      await recordClvmFailure("monitor", config, failure, runtimeDedupe);
       printMonitorFailure(failure, config);
 
       if (config.once) {
@@ -1145,52 +1181,146 @@ function sampleConnections(sampler: ConnectionSampler, response: ClvmConnections
   }
 }
 
-async function recordClvmSample(source: SampleSource, config: RuntimeConfig, result: MonitorResult, raw: unknown): Promise<void> {
+async function recordClvmSample(
+  source: SampleSource,
+  config: RuntimeConfig,
+  result: MonitorResult,
+  raw: unknown,
+  dedupe?: ClvmRuntimeRecordDedupe,
+): Promise<void> {
   const record = buildClvmSampleRecord(source, config, result, raw);
-  await writeClvmRuntimeRecord(record);
+  await writeClvmRuntimeRecord(record, dedupe);
 }
 
-async function recordClvmFailure(source: SampleSource, config: RuntimeConfig, failure: MonitorFailure): Promise<void> {
+async function recordClvmFailure(source: SampleSource, config: RuntimeConfig, failure: MonitorFailure, dedupe?: ClvmRuntimeRecordDedupe): Promise<void> {
   const record = buildClvmFailureRecord(source, config, failure);
-  await writeClvmRuntimeRecord(record);
+  await writeClvmRuntimeRecord(record, dedupe);
 }
 
-async function writeClvmRuntimeRecord(record: ClvmRuntimeRecord): Promise<void> {
+async function writeClvmRuntimeRecord(record: ClvmRuntimeRecord, dedupe?: ClvmRuntimeRecordDedupe): Promise<void> {
+  const fingerprint = clvmRuntimeRecordFingerprint(record);
+  if (dedupe?.lastFingerprint === fingerprint) {
+    return;
+  }
+  const rawWrite = record.config.rawArchive
+    ? await writeClvmRawPayload(record.raw)
+    : { ref: null, retainedPath: null };
   const recordWithRawRef = {
     ...record,
-    raw_ref: await writeClvmRawPayload(record.raw),
+    raw_ref: rawWrite.ref,
   };
-  await writeTextFileAtomic(clvmStatePath(), `${JSON.stringify(recordWithRawRef, null, 2)}\n`, 0o600);
+  if (rawWrite.retainedPath) {
+    await pruneRuntimeRawArchive(rawWrite.retainedPath, clvmRawArchiveOptions());
+  }
+  await writeJsonStateAtomic(clvmStatePath(), toClvmStateRecord(recordWithRawRef), 0o600);
   await appendClvmHistoryRecord(toClvmHistoryRecord(recordWithRawRef));
+  if (dedupe) {
+    dedupe.lastFingerprint = fingerprint;
+  }
 }
 
 async function appendClvmHistoryRecord(record: ClvmHistoryRecord): Promise<void> {
-  const path = clvmHistoryPath();
-  await appendFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(path, 0o600);
+  await appendBoundedJsonLine(clvmHistoryPath(), record, { maxBytes: clvmHistoryMaxBytes, mode: 0o600 });
 }
 
-async function writeClvmRawPayload(raw: unknown): Promise<ClvmRawReference | null> {
-  if (raw === null || raw === undefined) {
-    return null;
-  }
+async function writeClvmRawPayload(raw: unknown): Promise<ClvmRawWriteResult> {
+  return writeRuntimeRawArchive(raw, clvmRawArchiveOptions());
+}
 
-  const text = JSON.stringify(raw);
-  const sha256 = createHash("sha256").update(text).digest("hex");
-  const path = join(clvmRawDir(), `${sha256}.json`);
-  if (await readTextIfExists(path) === null) {
-    await writeTextFileAtomic(path, `${text}\n`, 0o600);
-  }
+function clvmRawArchiveOptions(): RuntimeRawArchiveOptions {
   return {
-    sha256,
-    bytes: Buffer.byteLength(text, "utf8"),
-    path,
+    dir: clvmRawDir(),
+    maxPayloadBytes: clvmRawPayloadMaxBytes,
+    maxFiles: clvmRawArchiveMaxFiles,
+    maxBytes: clvmRawArchiveMaxBytes,
+    mode: 0o600,
   };
 }
 
+function toClvmStateRecord(record: ClvmRuntimeRecord): ClvmStateRecord {
+  const { raw: _raw, ...state } = record;
+  return state;
+}
+
 function toClvmHistoryRecord(record: ClvmRuntimeRecord): ClvmHistoryRecord {
-  const { raw: _raw, ...history } = record;
-  return history;
+  const state = toClvmStateRecord(record);
+  if (state.ok) {
+    const { result: _result, ...history } = state;
+    return history;
+  }
+  return state;
+}
+
+function clvmRuntimeRecordFingerprint(record: ClvmRuntimeRecord): string {
+  if (record.ok) {
+    return JSON.stringify({
+      version: record.version,
+      ok: record.ok,
+      status: record.status,
+      source: record.source,
+      config: record.config,
+      summary: record.summary,
+      result: clvmResultFingerprint(record.result),
+    });
+  }
+  return JSON.stringify({
+    version: record.version,
+    ok: record.ok,
+    status: record.status,
+    source: record.source,
+    config: record.config,
+    error: record.error,
+    retry: record.retry
+      ? {
+        attempt: record.retry.attempt,
+        intervalMs: record.retry.intervalMs,
+      }
+      : undefined,
+  });
+}
+
+function clvmResultFingerprint(result: Record<string, unknown>): Record<string, unknown> {
+  return {
+    totalConnections: result.totalConnections,
+    matchedConnections: clvmConnectionsFingerprint(result.matchedConnections),
+    closedConnections: clvmConnectionsFingerprint(result.closedConnections),
+    closeFailures: clvmConnectionsFingerprint(result.closeFailures),
+    closedHistory: clvmConnectionsFingerprint(result.closedHistory),
+    closedTotal: result.closedTotal,
+  };
+}
+
+function clvmConnectionsFingerprint(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map(clvmConnectionFingerprint);
+}
+
+function clvmConnectionFingerprint(value: unknown): unknown {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    id: record.id,
+    endpoint: record.endpoint,
+    process: record.process,
+    rule: record.rule,
+    chains: record.chains,
+    matchedDomain: record.matchedDomain,
+    matchedValue: record.matchedValue,
+    uploadTotal: record.uploadTotal,
+    downloadTotal: record.downloadTotal,
+    uploadBytesPerSecond: record.uploadBytesPerSecond,
+    downloadBytesPerSecond: record.downloadBytesPerSecond,
+    totalBytesPerSecond: record.totalBytesPerSecond,
+    isIdle: record.isIdle,
+    status: record.status,
+    closedAt: record.closedAt,
+    failedAt: record.failedAt,
+    error: record.error,
+  };
 }
 
 function buildClvmSampleRecord(source: SampleSource, config: RuntimeConfig, result: MonitorResult, raw: unknown): ClvmSampleRecord {
@@ -1245,15 +1375,16 @@ function clvmRecordConfig(config: RuntimeConfig): ClvmSampleRecord["config"] {
     zeroSpeedThreshold: config.zeroSpeedThreshold,
     closeZeroForSeconds: config.closeZeroForSeconds,
     autoCloseEnabled: config.autoCloseEnabled,
+    rawArchive: config.rawArchive,
   };
 }
 
-function buildMonitorFailure(error: unknown, retry?: ClvmRetryState): MonitorFailure {
+function buildMonitorFailure(error: unknown, retry?: ClvmRetryState, includeRaw = false): MonitorFailure {
   return {
     timestamp: new Date().toISOString(),
-    error: clvmErrorDetail(error),
+    error: clvmErrorDetail(error, includeRaw),
     retry,
-    raw: clvmErrorRaw(error),
+    raw: includeRaw ? clvmErrorRaw(error) : null,
   };
 }
 
@@ -1280,14 +1411,14 @@ export function nextClvmRetryInterval(baseIntervalMs: number, attempt: number): 
   return Math.min(clvmRetryMaxIntervalMs, Math.max(1, interval));
 }
 
-function clvmErrorDetail(error: unknown): ClvmErrorDetail {
+function clvmErrorDetail(error: unknown, includeRaw = false): ClvmErrorDetail {
   if (error instanceof ClvmRuntimeError) {
     return {
       code: error.code,
       message: error.message,
       status: error.status,
       statusText: error.statusText,
-      body: error.body,
+      body: includeRaw ? error.body : undefined,
       cause: error.causeDetail,
     };
   }
@@ -1349,10 +1480,25 @@ function buildClvmRawHttpResponse(method: string, path: string, response: Respon
     path,
     status: response.status,
     statusText: response.statusText,
-    headers: Object.fromEntries(response.headers),
+    headers: redactClvmResponseHeaders(Object.fromEntries(response.headers)),
     body,
     bodyBytes: Buffer.byteLength(body, "utf8"),
   };
+}
+
+function redactClvmResponseHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [
+    name,
+    isSensitiveClvmResponseHeader(name) ? "[redacted]" : value,
+  ]));
+}
+
+function isSensitiveClvmResponseHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return sensitiveClvmResponseHeaders.has(lower)
+    || lower.endsWith("-token")
+    || lower.endsWith("-secret")
+    || lower.endsWith("-api-key");
 }
 
 export async function closeExpiredConnections(
@@ -1388,8 +1534,8 @@ export async function closeExpiredConnections(
       result.closeFailures.push({
         ...connection,
         failedAt: new Date().toISOString(),
-        error: clvmErrorDetail(error),
-        raw: clvmErrorRaw(error),
+        error: clvmErrorDetail(error, config.rawArchive),
+        raw: config.rawArchive ? clvmErrorRaw(error) : null,
       });
     }
   }
@@ -1434,6 +1580,7 @@ export function mergeClvmConfig(base: ClvmConfig, overlay: ClvmConfigFile): Clvm
       overlay.closeZeroForSeconds !== undefined
         ? overlay.closeZeroForSeconds
         : base.closeZeroForSeconds,
+    rawArchive: overlay.rawArchive ?? base.rawArchive,
   };
 }
 
@@ -1448,6 +1595,7 @@ function requireResolvedClvmConfig(config: ClvmConfigFile, path: string): ClvmCo
       config.closeZeroForSeconds === undefined
         ? null
         : requireNullableSeconds(config.closeZeroForSeconds, `${path} closeZeroForSeconds`),
+    rawArchive: requireBoolean(config.rawArchive, `${path} rawArchive`),
   };
 }
 
@@ -1501,6 +1649,9 @@ export function parseClvmConfig(text: string, path = "clvm.json"): ClvmConfigFil
       config.closeZeroForSeconds = parsePositiveSeconds(parsed.closeZeroForSeconds, "closeZeroForSeconds");
     }
   }
+  if (parsed.rawArchive !== undefined) {
+    config.rawArchive = requireBoolean(parsed.rawArchive, "rawArchive");
+  }
 
   return config;
 }
@@ -1525,6 +1676,13 @@ function requireNumber(value: unknown, name: string): number {
     throw new Error(`${name} must be a number`);
   }
 
+  return value;
+}
+
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${name} must be a boolean`);
+  }
   return value;
 }
 
@@ -1556,6 +1714,7 @@ export function buildRuntimeConfig(
   const closeZeroForSeconds = options.closeZeroForSeconds !== undefined
     ? options.closeZeroForSeconds
     : fileConfig.closeZeroForSeconds;
+  const rawArchive = options.rawArchive ?? fileConfig.rawArchive;
 
   new URL(baseUrl);
 
@@ -1581,6 +1740,7 @@ export function buildRuntimeConfig(
     closeZeroForSeconds,
     closeZeroForMs: closeZeroForSeconds === null ? null : closeZeroForSeconds * 1000,
     autoCloseEnabled: mode.autoCloseEnabled,
+    rawArchive,
     once: options.once ?? mode.once,
     json: options.json ?? false,
     clear: (options.clear ?? true) && mode.clear && options.json !== true && options.once !== true,
@@ -1695,6 +1855,16 @@ function parseCloseZeroForSeconds(value: string): number | null {
     return null;
   }
   return parsePositiveSeconds(value, "close zero-for seconds");
+}
+
+function parseRawArchiveMode(value: string): boolean {
+  if (value === "on") {
+    return true;
+  }
+  if (value === "off") {
+    return false;
+  }
+  throw new Error("raw archive must be on or off");
 }
 
 function parsePositiveSeconds(value: unknown, name: string): number {
@@ -1868,6 +2038,7 @@ function printMonitorResult(result: MonitorResult, config: RuntimeConfig, stream
   const shownConnections = sortConnections(result.matchedConnections);
   const style = createStyle(config);
   const header = [
+    ...clvmMonitorTitle(config),
     style.dim(formatLocalTimestamp(result.timestamp)),
     style.cyan(`domains=${config.domains.join(",")}`),
     style.blue(`current=${result.matchedConnections.length}`),
@@ -1921,6 +2092,7 @@ function printMonitorFailure(failure: MonitorFailure, config: RuntimeConfig, str
 
   const style = createStyle(config);
   const header = [
+    ...clvmMonitorTitle(config),
     style.dim(formatLocalTimestamp(failure.timestamp)),
     style.cyan(`domains=${config.domains.join(",")}`),
     style.red("status=unavailable"),
@@ -1934,6 +2106,13 @@ function printMonitorFailure(failure: MonitorFailure, config: RuntimeConfig, str
 
   stream.write(`${header.join(" ")}\n`);
   stream.write(`${style.red("error:")} ${failure.error.message}\n`);
+}
+
+function clvmMonitorTitle(config: RuntimeConfig): string[] {
+  if (!config.autoCloseEnabled) {
+    return [];
+  }
+  return [bgDarkBlue(" clvm monitor ")];
 }
 
 function printCurrentConnections(shownConnections: ConnectionEntry[], layout: Layout, style: Style, stream: NodeJS.WriteStream): void {
@@ -2028,14 +2207,10 @@ function formatLocalTimestamp(value: string): string {
   const date = new Date(value);
 
   return [
-    date.getFullYear(),
-    padNumber(date.getMonth() + 1),
-    padNumber(date.getDate()),
-  ].join("-") + ` ${[
     padNumber(date.getHours()),
     padNumber(date.getMinutes()),
     padNumber(date.getSeconds()),
-  ].join(":")}`;
+  ].join(":");
 }
 
 function sortConnections(connections: ConnectionEntry[]): ConnectionEntry[] {
@@ -2082,7 +2257,7 @@ function currentConnectionColumns(layout: Layout): TableColumn[] {
 
 function closedConnectionColumns(layout: Layout): TableColumn[] {
   const columns: TableColumn[] = [
-    { key: "closedAt", title: "closedAt", width: 19 },
+    { key: "closedAt", title: "closedAt", width: 8 },
     { key: "endpoint", title: "endpoint", width: layout.endpoint },
     { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
   ];
