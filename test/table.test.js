@@ -63,6 +63,26 @@ test("table truncates by visible width and keeps the last flex column within max
   assert.ok(lines.every((line) => visibleLength(line) <= 28));
 });
 
+test("table shrinks columns by explicit priority", () => {
+  const lines = renderTable(
+    [
+      { key: "left", title: "left", width: 10, minWidth: 4, shrinkPriority: 10 },
+      { key: "middle", title: "middle", width: 10, minWidth: 6, shrinkPriority: 30 },
+      { key: "right", title: "right", width: 10, minWidth: 5, shrinkPriority: 20 },
+    ],
+    [
+      { left: "abcdefghij", middle: "klmnopqrst", right: "qrstuvwxyz" },
+    ],
+    { gap: 1, maxWidth: 23, boldHeader: false },
+  );
+
+  assert.deepEqual(lines.map(stripAnsi), [
+    "left middle     right",
+    "abc… klmnopqrst qrstuv…",
+  ]);
+  assert.ok(lines.every((line) => visibleLength(line) <= 23));
+});
+
 test("truncateVisible handles ANSI colored text", () => {
   assert.equal(stripAnsi(truncateVisible(textGreen("abcdef"), 5)), "abcd…");
   assert.equal(visibleLength(truncateVisible(textGreen("中文abcdef"), 7)), 7);

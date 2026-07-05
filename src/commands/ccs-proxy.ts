@@ -651,9 +651,7 @@ function proxyMetricsFromRecentRequests(recentRequests: ProxyRequestRecord[]): O
   for (const record of recentRequests) {
     incrementProxyStatusCountsForRecord(statusCounts, record);
     incrementProxyReasoningTokenCountsForRecord(reasoningTokenCounts, record);
-    if (record.upstream) {
-      upstreamHitCounts[record.upstream] = (upstreamHitCounts[record.upstream] ?? 0) + 1;
-    }
+    incrementProxyUpstreamHitCountsForRecord(upstreamHitCounts, record);
     latency.sum += record.latency_ms;
     latency.min = latency.min === null ? record.latency_ms : Math.min(latency.min, record.latency_ms);
     latency.max = latency.max === null ? record.latency_ms : Math.max(latency.max, record.latency_ms);
@@ -865,6 +863,22 @@ function incrementProxyStatusCountsForRecord(counts: ProxyStatusCounts, record: 
   if (!finalStatusDuplicatesGuardFailure(record)) {
     incrementProxyStatusCount(counts, record.status);
   }
+}
+
+function incrementProxyUpstreamHitCountsForRecord(counts: Record<string, number>, record: ProxyRequestRecord): void {
+  for (const action of record.guard_actions) {
+    incrementProxyUpstreamHitCount(counts, action.upstream);
+  }
+  if (!finalStatusDuplicatesGuardFailure(record)) {
+    incrementProxyUpstreamHitCount(counts, record.upstream);
+  }
+}
+
+function incrementProxyUpstreamHitCount(counts: Record<string, number>, upstream: string | null): void {
+  if (!upstream) {
+    return;
+  }
+  counts[upstream] = (counts[upstream] ?? 0) + 1;
 }
 
 function incrementProxyReasoningTokenCount(counts: ProxyReasoningTokenCounts, reasoningTokens: number | null): void {

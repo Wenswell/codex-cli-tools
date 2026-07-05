@@ -1553,10 +1553,8 @@ function clvmMonitorTitle(config) {
 }
 function printCurrentConnections(shownConnections, layout, style, stream) {
     const rows = shownConnections.map((connection) => ({
-        status: statusCell(connection.status, style),
         endpoint: style.cyan(connection.endpoint),
-        age: formatDuration(connection.ageMs),
-        zeroFor: formatDuration(connection.observedIdleMs),
+        ageZeroFor: ageZeroForCell(connection.ageMs, connection.observedIdleMs, style),
         up: speedCell(connection.uploadBytesPerSecond, style),
         down: speedCell(connection.downloadBytesPerSecond, style),
         upload: bytesCell(connection.uploadTotal, style),
@@ -1574,7 +1572,7 @@ function printClosedHistory(closedHistory, layout, style, stream) {
     const rows = closedHistory.map((connection) => ({
         closedAt: formatLocalTimestamp(connection.closedAt),
         endpoint: style.cyan(connection.endpoint),
-        zeroFor: formatDuration(connection.observedIdleMs),
+        zeroFor: zeroForCell(connection.observedIdleMs, style),
         upload: bytesCell(connection.uploadTotal, style),
         download: bytesCell(connection.downloadTotal, style),
         chain: style.magenta(connection.chains.join(" > ")),
@@ -1609,13 +1607,13 @@ function formatUnavailableStatus(failure, style) {
 }
 function formatSpeed(bytesPerSecond) {
     if (bytesPerSecond === null) {
-        return "[unknown]";
+        return "-";
     }
     return `${formatByteQuantity(bytesPerSecond)}/s`;
 }
 function formatBytes(bytes) {
     if (bytes === null) {
-        return "[unknown]";
+        return "-";
     }
     return formatByteQuantity(bytes);
 }
@@ -1656,10 +1654,8 @@ function statusRank(status) {
 }
 function currentConnectionColumns(layout) {
     const columns = [
-        { key: "status", title: "status", width: layout.status },
-        { key: "endpoint", title: "endpoint", width: layout.endpoint },
-        { key: "age", title: "age", width: layout.age },
-        { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
+        { key: "endpoint", title: "endpoint", maxWidth: layout.endpoint, minWidth: layout.endpointMin, shrinkPriority: 20 },
+        { key: "ageZeroFor", title: "age/zeroFor", width: layout.ageZeroFor },
         { key: "up", title: "up/s", width: layout.up, align: "right" },
         { key: "down", title: "down/s", width: layout.down, align: "right" },
     ];
@@ -1675,7 +1671,7 @@ function currentConnectionColumns(layout) {
 function closedConnectionColumns(layout) {
     const columns = [
         { key: "closedAt", title: "closedAt", width: 8 },
-        { key: "endpoint", title: "endpoint", width: layout.endpoint },
+        { key: "endpoint", title: "endpoint", maxWidth: layout.endpoint, minWidth: layout.endpointMin, shrinkPriority: 20 },
         { key: "zeroFor", title: "zeroFor", width: layout.zeroFor },
     ];
     if (layout.showTrafficTotals) {
@@ -1687,18 +1683,15 @@ function closedConnectionColumns(layout) {
     columns.push({ key: "rule", title: "rule", flex: true, minWidth: layout.ruleMin });
     return columns;
 }
-function statusCell(status, style) {
-    const text = formatStatus(status);
-    if (status === "zero") {
-        return style.yellow(text);
-    }
-    if (status === "active") {
-        return style.green(text);
-    }
-    return style.dim(text);
+function ageZeroForCell(ageMs, zeroForMs, style) {
+    return `${formatDuration(ageMs)}/${zeroForCell(zeroForMs, style)}`;
+}
+function zeroForCell(milliseconds, style) {
+    const text = formatDuration(milliseconds);
+    return milliseconds === 0 ? style.green(text) : style.yellow(text);
 }
 function speedCell(bytesPerSecond, style) {
-    const text = formatSpeed(bytesPerSecond);
+    const text = bytesPerSecond === null ? "-" : formatByteQuantity(bytesPerSecond);
     if (bytesPerSecond === null || bytesPerSecond === 0) {
         return style.dim(text);
     }
@@ -1714,12 +1707,12 @@ function bytesCell(bytes, style) {
 function buildLayout(stream) {
     const maxWidth = terminalColumns(stream);
     const fixed = {
-        status: 9,
         endpoint: maxWidth >= 120 ? 28 : 22,
-        age: 7,
+        endpointMin: maxWidth >= 72 ? 10 : 6,
+        ageZeroFor: 12,
         zeroFor: 7,
-        up: 10,
-        down: 10,
+        up: 6,
+        down: 6,
         upload: 8,
         download: 8,
         chain: maxWidth >= 120 ? 20 : 14,
@@ -1735,9 +1728,6 @@ function buildLayout(stream) {
 function terminalColumns(stream) {
     const columns = Number.isFinite(stream.columns) ? stream.columns : process.stdout.columns;
     return columns && columns > 0 ? Math.floor(columns) : 120;
-}
-function formatStatus(status) {
-    return status === "unknown" ? "[unknown]" : status;
 }
 function createStyle(config) {
     if (config.color === false) {
