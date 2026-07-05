@@ -17,11 +17,12 @@ import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, modelPricesCachePath, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.js";
 import { calculateCodexCostUSD, missingPricingModels, readModelPriceCache, resolveCodexCostSpeed, } from "../lib/pricing.js";
-import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, padVisibleLeft, padVisibleRight, visibleLength, truncateVisible, } from "../lib/text.js";
+import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, padVisibleLeft, padVisibleRight, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable, renderTable } from "../lib/table.js";
+import { fitTerminalLine } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
 const execFile = promisify(execFileCallback);
 const usageTopMinIntervalMs = 25_000;
@@ -1695,16 +1696,9 @@ function nextUsageTopRuntimeDelayMs(runtime, now) {
     }
     return Math.max(0, Math.min(...dueAt) - now.getTime());
 }
-function fitSingleTerminalLine(line) {
-    const columns = process.stdout.columns;
-    if (!process.stdout.isTTY || !columns || visibleLength(line) < columns) {
-        return line;
-    }
-    return truncateVisible(line, columns - 1, "");
-}
 function buildUsageTopLine(entries, states, now) {
     const parts = entries.map((entry) => (formatUsageTopEntry(entry, states.get(entry.name), now)));
-    return fitSingleTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
+    return fitTerminalLine(`${textDim(formatClockTime(now))} ${textDim("|")} ${parts.join(` ${textDim("|")} `)}`);
 }
 function readUsageTopCosts(entries) {
     const costs = new Map();
