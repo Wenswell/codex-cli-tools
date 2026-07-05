@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2723,6 +2724,86 @@ test("proxy status table renders configured columns and compact units", () => {
   assertProxyRequestColumnsAligned(lines, "history");
 });
 
+test("proxy status session column uses stable shallow colors in TTY output", async () => {
+  const script = `
+    delete process.env.NO_COLOR;
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 180 });
+    const { buildProxyStatusLines } = await import("./dist/commands/ccs-proxy.js");
+    const record = (id, session, completedAt) => ({
+      id,
+      started_at: "2026-01-01T00:00:00.000Z",
+      completed_at: completedAt,
+      method: "POST",
+      path: "/responses",
+      status: completedAt ? 200 : null,
+      upstream: "input",
+      attempts: 1,
+      latency_ms: completedAt ? 50 : 0,
+      request_bytes: 1024,
+      response_bytes: completedAt ? 2048 : 0,
+      session,
+      request_kind: "normal",
+      request_model: "gpt-5.5",
+      upstream_model: "gpt-5.5",
+      upstream_model_source: null,
+      reasoning_tokens: null,
+      reasoning_tokens_source: null,
+      reasoning_text_observed: false,
+      reasoning_text_source: null,
+      guard_actions: [],
+      error: null,
+    });
+    const state = {
+      installed_at: "2026-01-01T00:00:00.000Z",
+      codex_config_path: "/home/test/.codex/config.toml",
+      provider_name: "codex",
+      original_base_url: "https://proxy.example.com",
+      proxy_base_url: "http://127.0.0.1:4610",
+      listen_host: "127.0.0.1",
+      listen_port: 4610,
+      profile_order: ["input"],
+      backup_path: "/tmp/backup.toml",
+      metrics: {
+        total_requests: 3,
+        active_requests: [record("active-same", "019f0df6", null)],
+        status_counts: { "200": 2 },
+        reasoning_token_counts: {},
+        upstream_hit_counts: { input: 2 },
+        latency_ms: { last: 50, count: 2, sum: 100, min: 50, max: 50 },
+        recent_requests: [
+          record("history-same", "019f0df6", "2026-01-01T00:00:02.000Z"),
+          record("history-other", "019f0df7", "2026-01-01T00:00:01.000Z"),
+          record("history-none", null, "2026-01-01T00:00:00.000Z"),
+        ],
+      },
+    };
+    const lines = buildProxyStatusLines(
+      new Date("2026-01-01T00:00:03.000Z"),
+      state,
+      ["input"],
+      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 1 },
+      {
+        codexConfigPath: "/home/test/.codex/config.toml",
+        listenHost: "127.0.0.1",
+        listenPort: 4610,
+        stateRoot: "/tmp/codex-tools",
+      },
+    );
+    process.stdout.write(JSON.stringify(lines));
+  `;
+  const { stdout } = await execNode(["--input-type=module", "-e", script]);
+  const output = JSON.parse(stdout).join("\n");
+  const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m019f0df6\u001b\[0m)/g)].map((match) => match[1]);
+  const otherSession = output.match(/(\u001b\[[0-9;]*m019f0df7\u001b\[0m)/)?.[1];
+
+  assert.equal(sameSession.length, 2);
+  assert.equal(sameSession[0], sameSession[1]);
+  assert.ok(otherSession);
+  assert.notEqual(otherSession, sameSession[0]);
+  assert.match(output, /\u001b\[2m-\u001b\[0m/);
+});
+
 test("proxy status error column stays single-line and expands with terminal width", () => {
   const stateRoot = "/tmp/codex-tools";
   const state = {
@@ -3904,6 +3985,18 @@ function withStdoutProperties(properties, run) {
       }
     }
   }
+}
+
+function execNode(args) {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, args, { cwd: process.cwd(), maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout, stderr }));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 function holdControl() {

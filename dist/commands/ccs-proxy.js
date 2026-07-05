@@ -15,7 +15,7 @@ import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } fro
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
-import { bgDarkBlue, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
+import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
 import { renderTable } from "../lib/table.js";
 import { packageVersion } from "../lib/version.js";
@@ -84,6 +84,7 @@ const PROXY_REQUEST_TABLE_COLUMNS = [
     { key: "model", title: "model", width: PROXY_TABLE_MODELS_WIDTH, align: "right" },
     { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
 ];
+const PROXY_SESSION_COLORS = [textBlue, textCyan, textGreen, textMagenta, textOrange, textYellow];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
 }
@@ -895,7 +896,21 @@ async function logProxyUnsupportedPath(stateRoot, method, path) {
     });
 }
 function formatProxySession(value) {
-    return value ? truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH) : textDim("-");
+    if (!value) {
+        return textDim("-");
+    }
+    const text = truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH);
+    return proxySessionColor(value)(text);
+}
+function proxySessionColor(value) {
+    return PROXY_SESSION_COLORS[stableProxySessionColorIndex(value)];
+}
+function stableProxySessionColorIndex(value) {
+    let hash = 0;
+    for (let index = 0; index < value.length; index += 1) {
+        hash = ((hash * 31) + value.charCodeAt(index)) >>> 0;
+    }
+    return hash % PROXY_SESSION_COLORS.length;
 }
 function formatProxyUpstream(upstream, attempts) {
     if (!upstream) {
