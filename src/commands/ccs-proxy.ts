@@ -1255,7 +1255,7 @@ function formatProxyUpstreamModel(requestModel: string | null, upstreamModel: st
 }
 
 function formatProxyError(record: ProxyRequestRecord): string {
-  const prefix = formatProxyGuardActionPrefix(record.guard_actions);
+  const prefix = formatProxyGuardActionPrefix(record.guard_actions, record.status);
   const error = record.error ? textRed(record.error) : textDim("");
   if (prefix && error) {
     return `${prefix} ${error}`;
@@ -1263,22 +1263,30 @@ function formatProxyError(record: ProxyRequestRecord): string {
   return prefix || error;
 }
 
-function formatProxyGuardActionPrefix(actions: ProxyGuardActionRecord[]): string {
+function formatProxyGuardActionPrefix(actions: ProxyGuardActionRecord[], requestStatus: number | null): string {
   const values = actions
-    .map(formatProxyGuardActionPrefixValue)
+    .map((action) => formatProxyGuardActionPrefixValue(action, requestStatus))
     .filter((value) => value.length > 0);
   return values.length === 0 ? "" : `[${values.join(" ")}]`;
 }
 
-function formatProxyGuardActionPrefixValue(action: ProxyGuardActionRecord): string {
+function formatProxyGuardActionPrefixValue(action: ProxyGuardActionRecord, requestStatus: number | null): string {
   const label = formatProxyGuardActionLabel(action);
   if (action.reasoning_tokens !== null) {
     return textRed(`${label}:${action.reasoning_tokens}`);
   }
-  if (action.status !== null) {
-    return textYellow(`${label}:${action.status}`);
+  const status = action.status ?? proxyGuardActionDisplayStatus(action, requestStatus);
+  if (status !== null) {
+    return textYellow(`${label}:${status}`);
   }
   return textDim(`${label}:-`);
+}
+
+function proxyGuardActionDisplayStatus(action: ProxyGuardActionRecord, requestStatus: number | null): number | null {
+  if (action.action !== "upstream_error" || requestStatus === null || requestStatus < 400) {
+    return null;
+  }
+  return requestStatus;
 }
 
 function formatProxyGuardActionLabel(action: ProxyGuardActionRecord): string {
