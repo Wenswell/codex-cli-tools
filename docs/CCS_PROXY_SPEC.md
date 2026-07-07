@@ -20,7 +20,7 @@ Local control endpoints:
 
 - `GET /__codex_proxy/health`
 
-Health responses include `status`, `pid`, `version`, and `protocol`. Health checks are handled before metrics and never enter request history.
+Health responses include `status`, `pid`, `version`, `protocol`, and `mode`. Health checks are handled before metrics and never enter request history.
 
 Only these model API paths enter upstream forwarding and request metrics:
 
@@ -39,7 +39,7 @@ Status and watch commands validate the health `protocol` from `/__codex_proxy/he
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- History records are the completed form of the same request record and include completion time, mode, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
 - `proxy-requests.jsonl` records include JSONL-only `attempt_records` with complete upstream attempt facts. `proxy.json.metrics.recent_requests` keeps compact records without `attempt_records`.
 - SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
@@ -63,6 +63,7 @@ Request records include:
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
+- `mode`: proxy mode used for this request: `recovery`, `intercept`, or `passthrough`.
 - `method`: HTTP method.
 - `path`: request pathname.
 - `status`: observed upstream or local response status.
@@ -123,7 +124,7 @@ Request records include:
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
 
-Old state files are normalized at read time. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
+Old state files are normalized at read time. Missing `mode` normalizes to `recovery`. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -131,27 +132,29 @@ The proxy resolves one active upstream from `profiles.current` for each client r
 
 The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, and `x-api-key` headers, then sets `Authorization: Bearer <current profile apiKey>` before the upstream request. This keeps already-running Codex CLI processes on the local proxy URL while new requests use the API key from the latest `profiles.current`. A current profile without `apiKey` is a configuration error and the proxy fails the request before contacting upstream.
 
-Upstream HTTP responses are upstream facts. The proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
+`ccs proxy install` starts in `recovery` mode. `ccs proxy mode recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `ccs proxy mode intercept` disables continuation recovery and uses ordinary guard retry. `ccs proxy stop` switches to `passthrough`, keeps the proxy URL active, and forwards original client request bodies and upstream responses without reasoning guard retries, continuation recovery, response body stripping, capacity retries, or transport retries. `ccs proxy restore` restores `~/.codex/config.toml`, stops the background proxy, removes proxy state, and exits proxy routing.
 
-Upstream capacity errors are a narrow retryable HTTP-response case. When an upstream error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively, the proxy records `internal_retry` with `error: upstream_capacity`, retries the same upstream, and uses the same retry budget as the reasoning guard. Ordinary `429`, `502`, and `5xx` responses without that text stay upstream facts and pass through unchanged. If every capacity retry is exhausted, the final upstream status and body pass through unchanged.
+Upstream HTTP responses are upstream facts. In `recovery` and `intercept` modes, the proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
 
-Transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`.
+In `recovery` and `intercept` modes, upstream capacity errors are a narrow retryable HTTP-response case. When an upstream error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively, the proxy records `internal_retry` with `error: upstream_capacity`, retries the same upstream, and uses the same retry budget as the reasoning guard. Ordinary `429`, `502`, and `5xx` responses without that text stay upstream facts and pass through unchanged. If every capacity retry is exhausted, the final upstream status and body pass through unchanged.
+
+In `recovery` and `intercept` modes, transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`. In `passthrough` mode, transport failure returns one local upstream error response without an internal retry.
 
 `attempts` counts upstream fetch attempts for the client request. It includes the initial fetch, the single transport retry when used, upstream capacity retries, and reasoning-guard retry fetches.
 
 ## Reasoning guard
 
-The reasoning guard is always active for supported JSON and SSE response payloads.
+The reasoning guard is active in `recovery` and `intercept` modes for supported JSON and SSE response payloads. `passthrough` mode leaves response bodies uninspected.
 
 - `reasoning_equals`: `516`, `1034`, `1552`.
 - `guard_retry_attempts`: `3`.
 - Non-stream JSON and `application/*+json` responses are buffered, parsed, and checked before being forwarded.
 - SSE responses are buffered before client response headers are written. SSE `data:` JSON frames are scanned for model metadata, explicit `reasoning_tokens`, and reasoning text observations; accepted SSE bytes are then forwarded unchanged.
-- Streaming Responses requests with `request_kind=normal` automatically request `reasoning.encrypted_content` when the client request does not include it.
-- A guarded streaming Responses match with collected encrypted reasoning items records `continuation_recovery` and retries with a continuation request before ordinary guard retry.
-- `context_compaction` requests use ordinary guard retry and skip continuation recovery.
+- In `recovery` mode, streaming Responses requests with `request_kind=normal` automatically request `reasoning.encrypted_content` when the client request does not include it.
+- In `recovery` mode, a guarded streaming Responses match with collected encrypted reasoning items records `continuation_recovery` and retries with a continuation request before ordinary guard retry.
+- `intercept` mode and `context_compaction` requests use ordinary guard retry and skip continuation recovery.
 - Standard guard retry and continuation recovery are exclusive handling branches for the same guarded hit. Standard guard retry sends the original request again. Continuation recovery sends a Responses continuation request built from encrypted reasoning state. Both branches consume the same guard retry budget and record one attempt action.
-- Accepted SSE or JSON responses remove `encrypted_content` fields only when the proxy added `reasoning.encrypted_content` automatically.
+- Accepted SSE or JSON responses remove `encrypted_content` fields only in `recovery` mode when the proxy added `reasoning.encrypted_content` automatically.
 - A guard match records `internal_retry` and retries the same upstream until the retry budget is used.
 - The final guard match records `return_status_502` and returns local status `502` with code `reasoning_guard_triggered`.
 - Transport errors record `upstream_error`.
@@ -162,7 +165,7 @@ The proxy writes each guard action as one JSON line in `~/.cache/codex-tools/pro
 
 `ccs proxy` and `ccs proxy --once` print a full snapshot:
 
-- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, pid, server version, protocol, proxy URL, and trailing refresh interval.
+- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, mode, pid, server version, protocol, proxy URL, and trailing refresh interval.
 - Path lines: state, requests, events, runtime, and config paths.
 - Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
 - Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups. When continuation recovery activity exists, the line also renders `recovery=... recovered=... exhausted=...`.
@@ -321,6 +324,8 @@ session time up reas./code lat. size model error
 - SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
 - Streaming Responses guard matches can recover through continuation when encrypted reasoning items are available.
 - Continuation recovery uses the guard retry budget and returns `502 reasoning_guard_triggered` when the budget is exhausted.
+- `intercept` mode disables continuation recovery and uses ordinary guard retry.
+- `ccs proxy stop` switches to `passthrough` and forwards guarded upstream responses without guard actions.
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.

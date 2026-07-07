@@ -4358,7 +4358,7 @@ function usageLines(): string[] {
     "  ccs PROFILE                          # show profile details and usage",
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
     "  ccs models [--json]                  # list profile models from /v1/models",
-    "  ccs proxy [--once|watch|install|restore|stop|serve] # manage proxy state and runtime",
+    "  ccs proxy [--once|watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
     "  ccs cost                             # show cost data source and commands",
     "  ccs cost daily                       # show Codex session daily cost totals",
     "  ccs cost weekly                      # show Codex session weekly cost totals",
@@ -6210,7 +6210,7 @@ function roundCostUSD(value: number): number {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | proxy [--once|watch|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+  console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | proxy [--once|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 
 function printStatusUsageHelp(): void {

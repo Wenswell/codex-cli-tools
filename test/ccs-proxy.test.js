@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
-import { buildProxyStatusLines, ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, stopProxy } from "../dist/commands/ccs-proxy.js";
+import { buildProxyStatusLines, ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, setProxyMode, shutdownProxyRuntime, stopProxy } from "../dist/commands/ccs-proxy.js";
 import { captureStdout, execNodeScript, setStdoutProperties, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
@@ -71,6 +71,7 @@ test("proxy install records only the current profile as active upstream", async 
 
     const state = await readProxyState(stateRoot);
     assert.ok(state);
+    assert.equal(state.mode, "recovery");
     assert.deepEqual(state.profile_order, ["ciii"]);
     const restoredConfig = await readFile(codexConfigPath, "utf8");
     assert.match(restoredConfig, /base_url = "http:\/\/127\.0\.0\.1:4610"/);
@@ -339,6 +340,7 @@ test("proxy records active and history request lifecycle", async () => {
           provider_name: "codex",
           original_base_url: "https://proxy.example.com",
           proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+          mode: "recovery",
           listen_host: "127.0.0.1",
           listen_port: proxyPort,
           profile_order: ["input"],
@@ -466,18 +468,18 @@ test("proxy records active and history request lifecycle", async () => {
     }
     state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 100);
     assert.equal(state.metrics.total_requests, 100);
-	    assert.equal(state.metrics.recent_requests.length, 100);
-	    assert.equal(state.metrics.recent_requests[0].path, "/responses");
-	    const requestHistoryLines = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n");
-	    assert.equal(requestHistoryLines.length >= state.metrics.recent_requests.length, true);
-	    const requestHistory = requestHistoryLines.map((line) => JSON.parse(line));
+    assert.equal(state.metrics.recent_requests.length, 100);
+    assert.equal(state.metrics.recent_requests[0].path, "/responses");
+    const requestHistoryLines = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n");
+    assert.equal(requestHistoryLines.length >= state.metrics.recent_requests.length, true);
+    const requestHistory = requestHistoryLines.map((line) => JSON.parse(line));
     assert.equal(requestHistory[0].path, "/responses");
     assert.equal(requestHistory.at(-1).path, "/responses");
     assert.equal(requestHistory.at(-1).completed_at !== null, true);
     assert.equal(requestHistory.at(-1).status, 200);
   } finally {
     finishStream?.();
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -563,7 +565,7 @@ test("proxy rejects unsupported paths without request history", async () => {
     assert.deepEqual(state.metrics.status_counts, {});
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy-requests.jsonl")), "");
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -804,7 +806,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
   } finally {
     firstHold.finish();
     secondHold.finish();
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -922,7 +924,7 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
     assert.match(output, /upstreams=ciii=5/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1075,7 +1077,7 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     assert.equal(record.error, null);
     assert.deepEqual(record.guard_actions, []);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1180,7 +1182,7 @@ test("proxy rereads current profile and overwrites stale client api key", async 
     assert.equal(state.metrics.recent_requests[0].upstream, "ciii");
     assert.equal(state.metrics.recent_requests[1].upstream, "input");
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1263,7 +1265,7 @@ test("proxy rejects current profile without api key before upstream request", as
     assert.equal(state.metrics.recent_requests[0].attempts, 0);
     assert.equal(state.metrics.recent_requests[0].error, "profiles.current input has no apiKey");
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1350,7 +1352,7 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
     assert.equal(events[0].status, null);
     assert.equal(events[0].reasoning_tokens, null);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1415,7 +1417,7 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["upstream_error", "upstream_error"]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1532,7 +1534,7 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(state.metrics.reasoning_token_counts["1034"], 4);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1034/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1662,7 +1664,7 @@ test("proxy buffers SSE reasoning guard before client headers and retries", asyn
   } finally {
     firstHold.finish();
     secondHold.finish();
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1814,7 +1816,193 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
     assert.match(output, /reasoning .*recovery=1 recovered=1 exhausted=0/);
     assert.match(output, /\[rec:1552\]/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy mode intercept disables continuation recovery", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const requestBodies = [];
+  let hits = 0;
+  const upstream = createServer((req, res) => {
+    void (async () => {
+      requestBodies.push(JSON.parse(await readServerRequestBody(req)));
+      hits += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify({
+        type: "response.output_item.done",
+        item: { type: "reasoning", encrypted_content: `encrypted-${hits}` },
+        response: { model: "stream-intercept" },
+        usage: { output_tokens_details: { reasoning_tokens: 1552 } },
+      })}\n\ndata: [DONE]\n\n`);
+    })().catch((error) => {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const modeResult = await setProxyMode(proxyOptions, "intercept");
+    assert.equal(modeResult.mode, "intercept");
+    assert.equal(modeResult.runtime?.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=intercept`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "stream-intercept", stream: true, input: "hello" }),
+    });
+    assert.equal(response.status, 502);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "reasoning_guard_triggered");
+    assert.equal(payload.error.reasoning_tokens, 1552);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "stream-intercept",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 4);
+    assert.equal(record.mode, "intercept");
+    assert.equal(record.attempts, 4);
+    assert.equal(requestBodies.every((body) => body.include === undefined), true);
+    assert.deepEqual(record.guard_actions.map((action) => action.action), [
+      "internal_retry",
+      "internal_retry",
+      "internal_retry",
+      "return_status_502",
+    ]);
+    assert.equal(record.guard_actions.some((action) => action.action === "continuation_recovery"), false);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const fullRecord = jsonl.at(-1);
+    assert.equal(fullRecord.mode, "intercept");
+    assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.final_action), [
+      "internal_retry",
+      "internal_retry",
+      "internal_retry",
+      "blocked",
+    ]);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy stop switches to passthrough and forwards the original request", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const requestBodies = [];
+  let hits = 0;
+  const upstream = createServer((req, res) => {
+    void (async () => {
+      requestBodies.push(JSON.parse(await readServerRequestBody(req)));
+      hits += 1;
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(reasoningJson("passthrough-guarded", 1552)));
+    })().catch((error) => {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : String(error));
+    });
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const modeResult = await stopProxy(proxyOptions);
+    assert.equal(modeResult.mode, "passthrough");
+    assert.equal(modeResult.runtime?.healthy, true);
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+    const healthPayload = await health.json();
+    assert.equal(healthPayload.mode, "passthrough");
+
+    const body = { model: "passthrough-guarded", stream: true, input: "hello" };
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=passthrough`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.response.model, "passthrough-guarded");
+    assert.equal(payload.usage.output_tokens_details.reasoning_tokens, 1552);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "passthrough-guarded",
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 1);
+    assert.deepEqual(requestBodies, [body]);
+    assert.equal(record.mode, "passthrough");
+    assert.equal(record.status, 200);
+    assert.equal(record.attempts, 1);
+    assert.deepEqual(record.guard_actions, []);
+    assert.equal(record.reasoning_tokens, null);
+  } finally {
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -1941,7 +2129,7 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
     assert.match(output, /reasoning .*recovery=3 recovered=0 exhausted=1/);
     assert.match(output, /\[rec:1552 rec:1552 rec:1552 block:1552\] reasoning_guard_triggered reasoning_tokens=1552/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2061,7 +2249,7 @@ test("proxy records request kind from Codex headers and request fields", async (
       assert.equal(jsonl.at(-1).request_kind, spec.expected);
     }
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2192,7 +2380,7 @@ test("proxy excludes context compaction from Responses continuation recovery", a
       });
     });
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2279,7 +2467,7 @@ test("proxy records client abort while buffering SSE before response headers", a
     assert.equal(record.upstream_model, "stream-held");
   } finally {
     hold.finish();
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2359,7 +2547,7 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1552, 1552, 1552, 1552]);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"return_status_502".*"reasoning_tokens":1552/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2485,7 +2673,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     assert.match(output, /glm-text\s*\/glm-5\.2/);
     assert.match(output, /text\/200/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2646,7 +2834,7 @@ test("proxy writes v2 request record facts with prompt and response text outside
     assert.doesNotMatch(fullRecordText, /sensitive prompt text/);
     assert.doesNotMatch(fullRecordText, /do not store response text/);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2718,7 +2906,7 @@ test("proxy forwards request bodies larger than the previous proxy cap", async (
     assert.equal(state.metrics.recent_requests[0].status, 200);
     assert.equal(state.metrics.recent_requests[0].request_bytes, bodySize);
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
@@ -2749,6 +2937,7 @@ test("proxy status table renders configured columns and compact units", () => {
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
+      mode: "recovery",
       listen_host: "127.0.0.1",
       listen_port: 4610,
       profile_order: ["input"],
@@ -2863,7 +3052,7 @@ test("proxy status table renders configured columns and compact units", () => {
       },
     },
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -2942,7 +3131,7 @@ test("proxy status session column uses stable shallow colors in TTY output", asy
       new Date("2026-01-01T00:00:03.000Z"),
       state,
       ["input"],
-      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 1 },
+      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 2 },
       {
         codexConfigPath: "/home/test/.codex/config.toml",
         listenHost: "127.0.0.1",
@@ -3004,7 +3193,7 @@ test("proxy status error column stays single-line and expands with terminal widt
     new Date("2026-01-01T00:00:00.000Z"),
     state,
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3061,7 +3250,7 @@ test("proxy status summary renders exact status counts", () => {
       },
     },
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3113,7 +3302,7 @@ test("proxy status and reasoning summaries use event counts", () => {
       ],
     }),
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3146,7 +3335,7 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
     new Date("2026-01-01T00:00:00.000Z"),
     state,
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 1 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3195,6 +3384,7 @@ test("proxy rejects invalid --history values", async () => {
     ["--once", "watch"],
     ["watch", "--once"],
     ["watch", "--history", "2", "--once"],
+    ["mode", "recovery", "extra"],
     ["install", "extra"],
     ["restore", "extra"],
   ]) {
@@ -3204,8 +3394,16 @@ test("proxy rejects invalid --history values", async () => {
     );
   }
   await assert.rejects(
+    () => runProxyCommand(["mode", "passthrough"], options),
+    /ccs proxy mode requires intercept or recovery/,
+  );
+  await assert.rejects(
     () => runProxyCommand(["install", "--yes"], options),
     /ccs proxy install no longer accepts -y\/--yes/,
+  );
+  await assert.rejects(
+    () => runProxyCommand(["stop", "--yes"], options),
+    /ccs proxy stop no longer accepts -y\/--yes/,
   );
 });
 
@@ -3246,11 +3444,11 @@ test("proxy status and watch reject protocol mismatches", async () => {
     };
     await assert.rejects(
       () => runProxyCommand(["--once"], options),
-      /proxy protocol mismatch: server=999 client=1; restart ccs proxy/,
+      /proxy protocol mismatch: server=999 client=2; restart ccs proxy/,
     );
     await assert.rejects(
       () => runProxyCommand(["watch"], options),
-      /proxy protocol mismatch: server=999 client=1; restart ccs proxy/,
+      /proxy protocol mismatch: server=999 client=2; restart ccs proxy/,
     );
   } finally {
     await closeServer(health);
@@ -3275,7 +3473,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 1 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
       return;
     }
     res.writeHead(404);
@@ -3369,7 +3567,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 1 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
       return;
     }
     res.writeHead(404);
@@ -3448,7 +3646,7 @@ test("proxy watch --history uses explicit history count", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 1 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
       return;
     }
     res.writeHead(404);
@@ -3529,7 +3727,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 1 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
       return;
     }
     res.writeHead(404);
@@ -3723,7 +3921,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
     assert.equal(state.metrics.recent_requests.length, 1);
     assert.equal(state.metrics.recent_requests[0].path, "/history");
   } finally {
-    await stopProxy({
+    await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort,
@@ -3828,7 +4026,8 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
     assert.equal(healthPayload.version, packageJson.version);
-    assert.equal(healthPayload.protocol, 1);
+    assert.equal(healthPayload.protocol, 2);
+    assert.equal(healthPayload.mode, "recovery");
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
     assert.ok((await stat(join(stateRoot, "proxy-runtime.log"))).size <= 16 * 1024 * 1024);
@@ -4071,6 +4270,7 @@ function proxyHistoryRecord(overrides) {
     id: overrides?.id ?? "history-record",
     started_at: overrides?.started_at ?? "2026-01-01T00:00:00.000Z",
     completed_at: "2026-01-01T00:00:00.000Z",
+    mode: "recovery",
     method: "POST",
     path: "/responses",
     status: 200,
@@ -4113,34 +4313,34 @@ function assertCompleteProxyAttemptRecord(record, expected) {
     "started_at",
     "headers_at",
     "completed_at",
-	    "duration_ms",
-	    "upstream",
-	    "upstream_status",
-	    "upstream_wait_ms",
-	    "time_to_first_chunk_ms",
-	    "stream_duration_ms",
-	    "upstream_model",
-	    "upstream_model_source",
-	    "stream_model",
-	    "final_response_model",
-	    "system_fingerprint",
-	    "service_tier",
-	    "input_tokens",
-	    "reasoning_tokens",
-	    "reasoning_tokens_source",
-	    "output_tokens",
-	    "total_tokens",
-	    "reasoning_text_observed",
-	    "reasoning_text_source",
-	    "has_commentary",
-	    "has_final_answer",
-	    "final_answer_only",
-	    "has_tool_call",
-	    "has_reasoning_item",
-	    "final_action",
-	    "failure_summary",
-	    "remaining_retries",
-	  ]);
+    "duration_ms",
+    "upstream",
+    "upstream_status",
+    "upstream_wait_ms",
+    "time_to_first_chunk_ms",
+    "stream_duration_ms",
+    "upstream_model",
+    "upstream_model_source",
+    "stream_model",
+    "final_response_model",
+    "system_fingerprint",
+    "service_tier",
+    "input_tokens",
+    "reasoning_tokens",
+    "reasoning_tokens_source",
+    "output_tokens",
+    "total_tokens",
+    "reasoning_text_observed",
+    "reasoning_text_source",
+    "has_commentary",
+    "has_final_answer",
+    "final_answer_only",
+    "has_tool_call",
+    "has_reasoning_item",
+    "final_action",
+    "failure_summary",
+    "remaining_retries",
+  ]);
   assertValidIsoTimestamp(record.started_at);
   assertValidIsoTimestamp(record.headers_at);
   assertValidIsoTimestamp(record.completed_at);

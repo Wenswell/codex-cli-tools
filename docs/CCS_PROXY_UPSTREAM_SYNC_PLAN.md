@@ -74,7 +74,7 @@ The test suite includes dedicated coverage for:
 ## Discarded upstream core features
 
 - Request body size limits and `413 request_body_limit_exceeded`. `ccs proxy` forwards request bodies at their original size.
-- Runtime interception toggles for stream and non-stream modes. The reasoning guard is always active for supported response types.
+- Broad upstream runtime interception toggles for stream and non-stream modes. `ccs proxy` now exposes one local mode switch with `recovery`, `intercept`, and `passthrough`; see `docs/CCS_PROXY_MODE_PLAN.md`.
 - `stream_action=disconnect`. Strict SSE buffering is the only stream guard mode.
 - Model-family consistency scoring, suspicious sample storage, fingerprint drift tracking, and rebuild suspicion metrics. `ccs proxy` keeps request-level model observation only.
 - Incremental in-memory logs API. `ccs proxy` keeps compact request history in `proxy.json` and process output in `proxy.log`.

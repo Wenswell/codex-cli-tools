@@ -24,8 +24,12 @@ import { packageVersion } from "../lib/version.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
-const PROXY_HEALTH_PROTOCOL = 1;
+const PROXY_HEALTH_PROTOCOL = 2;
 const PROXY_STATE_FILE = "proxy.json";
+const PROXY_MODE_PASSTHROUGH = "passthrough";
+const PROXY_MODE_INTERCEPT = "intercept";
+const PROXY_MODE_RECOVERY = "recovery";
+const PROXY_DEFAULT_MODE = PROXY_MODE_RECOVERY;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516, 1034, 1552];
 const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
@@ -157,7 +161,7 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!response.ok) {
-            return { healthy: false, pid: null, version: null, protocol: null };
+            return { healthy: false, pid: null, version: null, protocol: null, mode: null };
         }
         const payload = await response.json().catch(() => null);
         return {
@@ -165,10 +169,11 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             pid: payload && Number.isInteger(payload.pid) ? Number(payload.pid) : null,
             version: typeof payload?.version === "string" ? payload.version : null,
             protocol: payload && Number.isInteger(payload.protocol) ? Number(payload.protocol) : null,
+            mode: normalizeProxyMode(payload?.mode),
         };
     }
     catch {
-        return { healthy: false, pid: null, version: null, protocol: null };
+        return { healthy: false, pid: null, version: null, protocol: null, mode: null };
     }
 }
 function assertProxyHealthProtocol(health) {
@@ -494,6 +499,7 @@ function normalizeProxyRequestRecord(request, collection) {
         id: stringField(request.id) || randomUUID(),
         started_at: startedAt,
         completed_at: completedAt,
+        mode: normalizeProxyMode(request.mode) ?? PROXY_DEFAULT_MODE,
         method: stringField(request.method),
         path: stringField(request.path),
         status,
@@ -624,9 +630,22 @@ function normalizeProxyState(state) {
     }
     return {
         ...state,
+        mode: normalizeProxyMode(state.mode) ?? PROXY_DEFAULT_MODE,
         profile_order: Array.isArray(state.profile_order) ? state.profile_order.filter((value) => typeof value === "string" && value.length > 0) : [],
         metrics: normalizeProxyMetrics(state.metrics),
     };
+}
+function normalizeProxyMode(value) {
+    if (value === PROXY_MODE_PASSTHROUGH) {
+        return PROXY_MODE_PASSTHROUGH;
+    }
+    if (value === PROXY_MODE_INTERCEPT) {
+        return PROXY_MODE_INTERCEPT;
+    }
+    if (value === PROXY_MODE_RECOVERY) {
+        return PROXY_MODE_RECOVERY;
+    }
+    return null;
 }
 function ensureProxyMetrics(state) {
     return state.metrics ?? createProxyMetrics();
@@ -800,10 +819,12 @@ function formatProxyStatusLine(now, state, runtime) {
         ? textDim("none")
         : colorCount(String(runtime.protocol));
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
+    const mode = state ? colorName(state.mode) : textDim("unset");
     return [
         bgDarkBlue(" ccs proxy "),
         textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
         `runtime: ${state ? runtimeLabel : textRed("missing")}`,
+        `mode: ${mode}`,
         `pid: ${pid}`,
         `server: ${version}`,
         `protocol: ${protocol}`,
@@ -994,6 +1015,7 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, listenHost, list
         provider_name: providerName,
         original_base_url: originalBaseUrl,
         proxy_base_url: proxyBaseUrl(listenHost, listenPort),
+        mode: PROXY_DEFAULT_MODE,
         listen_host: listenHost,
         listen_port: listenPort,
         profile_order: buildProfileOrder(profiles),
@@ -1778,13 +1800,20 @@ function findSseEventSeparator(value) {
     }
     return match;
 }
-async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endpointClass, requestKind, requestJson, attemptRecords, callbacks = {}) {
-    const preparedRequest = prepareContinuationRecoveryRequestBody({
-        endpointClass,
-        requestKind,
-        requestJson,
-        requestBody: body,
-    });
+async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endpointClass, requestKind, requestJson, attemptRecords, mode, callbacks = {}) {
+    const recoveryMode = mode === PROXY_MODE_RECOVERY;
+    const preparedRequest = recoveryMode
+        ? prepareContinuationRecoveryRequestBody({
+            endpointClass,
+            requestKind,
+            requestJson,
+            requestBody: body,
+        })
+        : {
+            requestJson,
+            requestBody: body,
+            autoAddedEncryptedReasoning: false,
+        };
     const attemptState = { attempts: 0, attemptRecords, attemptStartedAtMs: [] };
     let guardRetries = 0;
     let currentBody = preparedRequest.requestBody;
@@ -1843,6 +1872,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         }
         if (inspection.guardReasoningTokens !== null) {
             const canContinuationRecover = isStreamContentType(responseContentType)
+                && recoveryMode
                 && endpointClass === "responses"
                 && requestKind !== REQUEST_KIND_CONTEXT_COMPACTION
                 && inspection.continuationReasoningItems.length > 0
@@ -1918,6 +1948,51 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
             upstreamModel,
             failureSummary: proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType),
             error: null,
+        });
+    }
+}
+async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, attemptRecords, callbacks = {}) {
+    const attemptState = { attempts: 0, attemptRecords, attemptStartedAtMs: [] };
+    if (callbacks.signal?.aborted) {
+        throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+    }
+    attemptState.attempts += 1;
+    attemptState.attemptRecords.push(createProxyAttemptRecord(attemptState.attempts, upstream.name));
+    attemptState.attemptStartedAtMs.push(performance.now());
+    await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
+    try {
+        const response = await forwardRequest(request, upstream, body, callbacks.signal);
+        markProxyAttemptHeaders(attemptState, response.status);
+        await callbacks.onResponseStart?.(response.status, upstream.name);
+        completeProxyAttemptRecord(attemptState, "passed");
+        return createProxyOutcome({
+            response,
+            upstream: upstream.name,
+            upstreamStatus: response.status,
+            attempts: attemptState.attempts,
+            attemptRecords: attemptState.attemptRecords,
+        });
+    }
+    catch (error) {
+        if (isClientAbortError(error, callbacks.signal)) {
+            throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+        }
+        const fetchFailed = isFetchFailedError(error);
+        const message = error instanceof Error ? error.message : String(error);
+        const code = fetchFailed ? "upstream_fetch_failed" : "upstream_error";
+        const failureSummary = proxyFailureSummaryFromError(code, error);
+        completeProxyAttemptRecord(attemptState, code, {
+            failureSummary,
+            remainingRetries: 0,
+        });
+        return createProxyOutcome({
+            response: createUpstreamErrorResponse(message, code),
+            upstream: upstream.name,
+            upstreamStatus: null,
+            attempts: attemptState.attempts,
+            attemptRecords: attemptState.attemptRecords,
+            failureSummary,
+            error: `${code}: ${message}`,
         });
     }
 }
@@ -2508,7 +2583,7 @@ export async function restoreProxy(options) {
     if (!state.backup_path || !fs.existsSync(state.backup_path)) {
         throw new Error(`backup file was not found: ${state.backup_path}`);
     }
-    const stopped = await stopProxy(options);
+    const stopped = await shutdownProxyRuntime(options);
     await copyFile(state.backup_path, options.codexConfigPath);
     await removeProxyState(options.stateRoot);
     return stopped;
@@ -2779,7 +2854,7 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ...formatProxyActiveRows(metrics, now),
         textBold("history"),
         ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount),
-        fitTerminalLine(textDim("commands: ccs proxy | watch | install | restore | stop | serve")),
+        fitTerminalLine(textDim("commands: ccs proxy | watch | mode [intercept|recovery] | install | restore | stop | serve")),
     ];
 }
 async function runProxyStatusOnce(options) {
@@ -2788,9 +2863,9 @@ async function runProxyStatusOnce(options) {
 async function runProxyStatusWatch(options) {
     await runLiveView(() => renderProxyStatusLines({ ...options, watch: true }), { intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000 });
 }
-export async function stopProxy(options) {
+export async function shutdownProxyRuntime(options) {
     const state = await readProxyState(options.stateRoot);
-    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null };
+    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null, mode: null };
     const file = pidPath(options.stateRoot);
     if (!fs.existsSync(file)) {
         if (state && health.healthy && health.pid !== null) {
@@ -2832,6 +2907,23 @@ export async function stopProxy(options) {
     await rm(file, { force: true });
     return `Proxy stopped. PID=${targetPid}`;
 }
+export async function setProxyMode(options, mode) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state) {
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    }
+    const previousMode = state.mode;
+    await writeProxyState(options.stateRoot, { ...state, mode });
+    const health = await readProxyHealth({ ...state, mode });
+    if (health.healthy && health.protocol !== PROXY_HEALTH_PROTOCOL) {
+        await shutdownProxyRuntime(options);
+    }
+    const runtime = await ensureProxyRunning(options);
+    return { previousMode, mode, runtime };
+}
+export async function stopProxy(options) {
+    return setProxyMode(options, PROXY_MODE_PASSTHROUGH);
+}
 export async function serveProxy(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
@@ -2848,12 +2940,14 @@ export async function serveProxy(options) {
                 requestPath = url.pathname;
                 const route = classifyProxyRoute(method, url.pathname);
                 if (route.kind === "control") {
+                    const currentState = await readProxyState(options.stateRoot) ?? state;
                     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
                     res.end(JSON.stringify({
                         status: "ok",
                         pid: process.pid,
                         version: packageVersion(),
                         protocol: PROXY_HEALTH_PROTOCOL,
+                        mode: currentState.mode,
                     }));
                     return;
                 }
@@ -2864,6 +2958,8 @@ export async function serveProxy(options) {
                     res.end(payload);
                     return;
                 }
+                const requestState = await readProxyState(options.stateRoot) ?? state;
+                const mode = requestState.mode;
                 const downstreamAbort = new AbortController();
                 let responseFinished = false;
                 res.once("finish", () => {
@@ -2881,6 +2977,7 @@ export async function serveProxy(options) {
                     id: randomUUID(),
                     started_at: requestStartedAt.toISOString(),
                     completed_at: null,
+                    mode,
                     method,
                     path: url.pathname,
                     status: null,
@@ -2965,8 +3062,22 @@ export async function serveProxy(options) {
                     activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
                     activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                    const outcome = await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, attemptRecords, {
+                    const passthroughCallbacks = {
                         signal: downstreamAbort.signal,
+                        onAttempt: async (attemptCount, upstreamName) => {
+                            activeRecord.upstream = upstreamName;
+                            activeRecord.attempts = attemptCount;
+                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                        },
+                        onResponseStart: async (responseStatus, upstreamName) => {
+                            activeRecord.status = responseStatus;
+                            activeRecord.upstream_status = responseStatus;
+                            activeRecord.upstream = upstreamName;
+                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                        },
+                    };
+                    const guardedCallbacks = {
+                        ...passthroughCallbacks,
                         onAttempt: async (attemptCount, upstreamName) => {
                             activeRecord.upstream = upstreamName;
                             activeRecord.attempts = attemptCount;
@@ -2993,12 +3104,6 @@ export async function serveProxy(options) {
                                 activeRecord.has_reasoning_item = false;
                                 activeRecord.error = null;
                             }
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                        onResponseStart: async (responseStatus, upstreamName) => {
-                            activeRecord.status = responseStatus;
-                            activeRecord.upstream_status = responseStatus;
-                            activeRecord.upstream = upstreamName;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                         onUpstreamModel: async (extraction) => {
@@ -3030,7 +3135,10 @@ export async function serveProxy(options) {
                             await logProxyGuardAction(options.stateRoot, activeRecord, action);
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
-                    });
+                    };
+                    const outcome = mode === PROXY_MODE_PASSTHROUGH
+                        ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, attemptRecords, passthroughCallbacks)
+                        : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, attemptRecords, mode === PROXY_MODE_INTERCEPT ? PROXY_MODE_INTERCEPT : PROXY_MODE_RECOVERY, guardedCallbacks);
                     status = outcome.response.status;
                     upstreamStatus = outcome.upstreamStatus;
                     upstream = outcome.upstream;
@@ -3229,9 +3337,12 @@ function usageHelpLines() {
         "  ccs proxy --once --history N             # print proxy status with N history rows",
         "  ccs proxy watch                          # watch proxy status and active upstream",
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
+        "  ccs proxy mode                           # print active proxy intervention mode",
+        "  ccs proxy mode recovery                  # enable continuation recovery mode",
+        "  ccs proxy mode intercept                 # enable guard intercept mode",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
         "  ccs proxy restore                        # restore config from the saved backup",
-        "  ccs proxy stop                           # stop the healthy background proxy",
+        "  ccs proxy stop                           # stop intervention and directly forward through the proxy",
         "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
     ];
 }
@@ -3260,6 +3371,24 @@ function rejectProxyCommandArgs(args, commandName) {
         throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
     }
 }
+function parseProxyUserMode(value) {
+    if (value === PROXY_MODE_INTERCEPT) {
+        return PROXY_MODE_INTERCEPT;
+    }
+    if (value === PROXY_MODE_RECOVERY) {
+        return PROXY_MODE_RECOVERY;
+    }
+    throw new Error("ccs proxy mode requires intercept or recovery");
+}
+function formatProxyModeChange(result) {
+    return result.previousMode === result.mode
+        ? textGreen(result.mode)
+        : `${textYellow(result.previousMode)} -> ${textGreen(result.mode)}`;
+}
+function printProxyModeRuntime(runtime) {
+    printKeyValue("runtime:", runtime?.started ? textGreen("started") : runtime?.healthy ? textGreen("healthy") : textDim("none"), 8);
+    printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
+}
 export async function runProxyCommand(args, options) {
     if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
         console.log(usageHelpLines().join("\n"));
@@ -3287,6 +3416,29 @@ export async function runProxyCommand(args, options) {
         await runProxyStatusWatch(parsed.historyCount === undefined ? options : { ...options, historyCount: parsed.historyCount });
         return;
     }
+    if (command === "mode") {
+        if (rest.length === 0) {
+            const state = await readProxyState(options.stateRoot);
+            printKeyValue("mode:", state ? colorName(state.mode) : textDim("missing"), 5);
+            return;
+        }
+        rejectRemovedYesFlags(rest, "ccs proxy mode");
+        const mode = parseProxyUserMode(rest[0]);
+        rejectProxyCommandArgs(rest.slice(1), `ccs proxy mode ${mode}`);
+        const state = await readProxyState(options.stateRoot);
+        if (!state) {
+            throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+        }
+        printKeyValue("plan:", `proxy mode ${state.mode} -> ${mode}`, 5);
+        printKeyValue("note:", "no changes are written unless you type yes", 5);
+        if (!(await confirmApply())) {
+            return;
+        }
+        const result = await setProxyMode(options, mode);
+        printKeyValue("mode:", formatProxyModeChange(result), 5);
+        printProxyModeRuntime(result.runtime);
+        return;
+    }
     if (command === "install") {
         rejectRemovedYesFlags(rest, "ccs proxy install");
         rejectProxyCommandArgs(rest, "ccs proxy install");
@@ -3300,6 +3452,7 @@ export async function runProxyCommand(args, options) {
         printKeyValue("backup:", textBlue(formatProxyFilePath(plan.backupPath)), 5);
         printKeyValue("state:", textGreen(formatProxyFilePath(plan.statePath)), 5);
         printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
+        printKeyValue("mode:", textGreen(plan.state.mode), 5);
         printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
         printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
         printKeyValue("server:", runtime?.version ? textGreen(runtime.version) : textDim("none"), 8);
@@ -3323,8 +3476,20 @@ export async function runProxyCommand(args, options) {
         return;
     }
     if (command === "stop") {
+        rejectRemovedYesFlags(rest, "ccs proxy stop");
         rejectProxyCommandArgs(rest, "ccs proxy stop");
-        console.log(await stopProxy(options));
+        const state = await readProxyState(options.stateRoot);
+        if (!state) {
+            throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+        }
+        printKeyValue("plan:", `proxy mode ${state.mode} -> ${PROXY_MODE_PASSTHROUGH}`, 5);
+        printKeyValue("note:", "no changes are written unless you type yes", 5);
+        if (!(await confirmApply())) {
+            return;
+        }
+        const result = await stopProxy(options);
+        printKeyValue("mode:", formatProxyModeChange(result), 5);
+        printProxyModeRuntime(result.runtime);
         return;
     }
     if (command === "serve") {
