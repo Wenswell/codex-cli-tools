@@ -121,7 +121,7 @@ Decisions:
 
 - Keep `guard_actions` as the single table-prefix fact source.
 - Format table prefixes as action labels plus the observed value: `guard:<value>`, `cap:<value>`, `rec:<value>`, `block:<value>`, and `err:<value>`.
-- Use `reasoning_tokens` as the prefix value when present, then `status`, then `-`.
+- Use `reasoning_tokens` as the prefix value when present, then action HTTP status, then the final local request status for terminal upstream transport failures, then `-`.
 - Keep recovery strategy, retry budget, request schema, and configuration unchanged.
 - Treat standard guard retry and continuation recovery as exclusive hit-handling branches. A guarded hit chooses one next request: original-request retry or continuation request. Both branches consume the same retry budget and write one attempt record.
 

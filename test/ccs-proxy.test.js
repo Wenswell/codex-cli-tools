@@ -1415,6 +1415,12 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
     assert.equal(record.attempts, 2);
     assert.match(record.error, /upstream_fetch_failed: fetch failed/);
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["upstream_error", "upstream_error"]);
+    assert.deepEqual(record.guard_actions.map((action) => action.status), [null, null]);
+    const output = await withStdoutProperties(
+      { isTTY: false, columns: 160, rows: 40 },
+      () => captureConsole(() => runProxyCommand(["--once", "--history", "1"], proxyOptions)),
+    );
+    assert.match(output, /\[err:502 err:502\] upstream_fetch_failed: fetch failed/);
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
   } finally {
     await shutdownProxyRuntime({
@@ -3032,8 +3038,8 @@ test("proxy status table renders configured columns and compact units", () => {
             upstream_model: "gpt-5.5",
             path: "/retry",
             guard_actions: [
-              { at: "2026-01-01T00:00:00.100Z", action: "upstream_error", upstream: "input", attempt: 1, status: 502, reasoning_tokens: null, error: "upstream_fetch_failed" },
-              { at: "2026-01-01T00:00:00.200Z", action: "upstream_error", upstream: "input", attempt: 2, status: 502, reasoning_tokens: null, error: "upstream_fetch_failed" },
+              { at: "2026-01-01T00:00:00.100Z", action: "upstream_error", upstream: "input", attempt: 1, status: null, reasoning_tokens: null, error: "upstream_fetch_failed" },
+              { at: "2026-01-01T00:00:00.200Z", action: "upstream_error", upstream: "input", attempt: 2, status: null, reasoning_tokens: null, error: "upstream_fetch_failed" },
               { at: "2026-01-01T00:00:00.300Z", action: "internal_retry", upstream: "input", attempt: 3, status: 200, reasoning_tokens: 506, error: null },
             ],
             error: "reasoning_guard_triggered reasoning_tokens=506",
