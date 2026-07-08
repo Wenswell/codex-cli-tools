@@ -3247,7 +3247,6 @@ async function serveUsageTop(profiles, portValue) {
     let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
     await writeUsageTopSnapshot(snapshot);
     await recordUsageTopHistorySnapshot(snapshot);
-    await refreshCentralCcsCostDerivedStore();
     const server = createServer((request, response) => {
         const url = new URL(request.url ?? "/", "http://localhost");
         if (request.method === "GET" && url.pathname === "/health") {
@@ -3361,6 +3360,7 @@ async function serveUsageTop(profiles, portValue) {
         });
     });
     console.log(`ccs top server: http://${host}:${port}/ccs/top/state`);
+    void runCcsCostRefresh();
     await new Promise((resolve) => {
         schedule();
         const cleanup = async () => {

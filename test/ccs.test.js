@@ -243,6 +243,75 @@ test("ccs top history server rejects oversized windows", async () => {
   }
 });
 
+test("ccs top server starts when central cost pricing is incomplete", async () => {
+  let home;
+  let child;
+  const port = await reservePort();
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    const cacheDir = join(home, ".cache", "codex-tools");
+    await mkdir(join(cacheDir, "ccs-cost"), { recursive: true });
+    await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
+      source: "test",
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+      models: {},
+    }), "utf8");
+    await writeFile(join(cacheDir, "ccs-cost", "fixture.json"), JSON.stringify({
+      version: 1,
+      machine: "fixture",
+      sourceHost: "fixture-host",
+      sourceUser: "fixture-user",
+      sourceCodexDir: "/tmp/codex",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      timezone: "UTC",
+      speed: "standard",
+      events: [{
+        timestampMs: Date.UTC(2026, 0, 1, 12, 0, 0),
+        project: "/tmp/project",
+        model: "glm-5.2",
+        usage: {
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          outputTokens: 5,
+          reasoningOutputTokens: 0,
+          totalTokens: 15,
+        },
+      }],
+    }), "utf8");
+
+    child = spawnNode(["dist/bin/ccs.js", "s", "server", String(port)], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CACHE_HOME: join(home, ".cache"),
+        NO_COLOR: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    await waitForHttpOk(`http://127.0.0.1:${port}/health`);
+    const response = await fetch(`http://127.0.0.1:${port}/ccs/top/state`);
+    assert.equal(response.status, 200);
+    const snapshot = await response.json();
+    assert.equal(snapshot.version, 1);
+    assert.equal(snapshot.active, true);
+  } finally {
+    if (child) {
+      child.kill("SIGINT");
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
 async function runTool(tool, args) {
   const home = await mkdtemp(join(tmpdir(), "ccs-version-home-"));
   try {
