@@ -9,6 +9,7 @@ This document records reusable project preferences that come from implementation
 - Raw debug surfaces use opt-in configuration, private file permissions, content-addressed files, redaction, payload-size limits, file-count limits, and total-byte limits.
 - State files keep the latest inspectable snapshot and use atomic writes. History files use bounded JSONL and append records only when they add new runtime information.
 - Long-running monitors avoid periodic history growth for unchanged samples. An idle empty sample is useful once; repeated identical samples belong in the live view, not in history.
+- Long-running status servers publish primary health and status endpoints before auxiliary derived-data refreshes. Auxiliary refresh failures should be logged without blocking the primary status surface.
 - Shared helpers own JSONL append, bounded retention, atomic state writes, and raw archive behavior. New runtime logs should reuse those helpers.
 - Status and watch renderers read compact state first. Larger history reads should be explicit and should use tail-oriented readers.
 

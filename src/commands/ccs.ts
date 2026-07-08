@@ -4008,7 +4008,6 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   let snapshot = buildUsageTopSnapshot(runtime.entries, runtime.states, new Date(), true, paused);
   await writeUsageTopSnapshot(snapshot);
   await recordUsageTopHistorySnapshot(snapshot);
-  await refreshCentralCcsCostDerivedStore();
 
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://localhost");
@@ -4122,6 +4121,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
     });
   });
   console.log(`ccs top server: http://${host}:${port}/ccs/top/state`);
+  void runCcsCostRefresh();
 
   await new Promise<void>((resolve) => {
     schedule();
