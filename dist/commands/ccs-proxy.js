@@ -185,6 +185,9 @@ function assertProxyHealthProtocol(health) {
         throw new Error(`proxy protocol mismatch: server=${current} client=${PROXY_HEALTH_PROTOCOL}; restart ccs proxy`);
     }
 }
+function proxyHealthProtocolMatches(health) {
+    return health.healthy && health.protocol === PROXY_HEALTH_PROTOCOL;
+}
 async function isProxyHealthy(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
     return (await readProxyHealth(state, timeoutMs)).healthy;
 }
@@ -221,8 +224,11 @@ async function acquireProxyStartLock(stateRoot) {
                 throw error;
             }
             const state = await readProxyState(stateRoot);
-            if (state && await isProxyHealthy(state)) {
-                return null;
+            if (state) {
+                const health = await readProxyHealth(state);
+                if (proxyHealthProtocolMatches(health)) {
+                    return null;
+                }
             }
             if (Date.now() >= deadline) {
                 throw new Error(`proxy startup lock is still active: ${lockPath}`);
@@ -320,7 +326,7 @@ export async function ensureProxyRunning(options) {
     const logPath = proxyRuntimeLogPath(options.stateRoot);
     const initialPid = await readProxyPid(options.stateRoot);
     const initialHealth = await readProxyHealth(initialState);
-    if (initialHealth.healthy) {
+    if (proxyHealthProtocolMatches(initialHealth)) {
         assertProxyHealthProtocol(initialHealth);
         const state = await readProxyState(options.stateRoot) ?? initialState;
         return {
@@ -361,7 +367,7 @@ export async function ensureProxyRunning(options) {
             return null;
         }
         const health = await readProxyHealth(state);
-        if (health.healthy) {
+        if (proxyHealthProtocolMatches(health)) {
             assertProxyHealthProtocol(health);
             const pid = await readProxyPid(options.stateRoot);
             return {
@@ -373,6 +379,15 @@ export async function ensureProxyRunning(options) {
                 version: health.version,
                 protocol: health.protocol,
             };
+        }
+        if (health.healthy) {
+            await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+                event: "ccs_proxy_protocol_restart",
+                server_protocol: health.protocol,
+                client_protocol: PROXY_HEALTH_PROTOCOL,
+                pid: health.pid,
+            });
+            await shutdownProxyRuntime(options);
         }
         await rm(pidPath(options.stateRoot), { force: true });
         const pid = startProxyBackgroundProcess(options, state);
