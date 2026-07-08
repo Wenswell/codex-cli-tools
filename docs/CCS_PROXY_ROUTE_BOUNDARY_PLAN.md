@@ -115,11 +115,11 @@ Unsupported paths do not update request history or request metrics.
 
 6. [x] Keep model API forwarding behavior unchanged after classification.
 
-7. [x] Add client/server protocol validation for status and watch commands:
+7. [x] Add client/server protocol validation for managed proxy startup:
 
-   - `watch` and status health checks read server protocol from `/__codex_proxy/health`.
-   - A protocol mismatch exits with a clear message to restart the proxy.
-   - No compatibility shim is added for old proxy behavior.
+   - Managed startup reads server protocol from `/__codex_proxy/health`.
+   - A protocol mismatch records a runtime event, stops that proxy process, and starts the current proxy.
+   - A remaining mismatch after restart exits with a clear restart message.
 
 8. [x] Update process/runtime display:
 
@@ -150,7 +150,7 @@ Unsupported paths do not update request history or request metrics.
 - [x] Status counters exclude unsupported paths.
 - [x] Latency counters exclude unsupported paths.
 - [x] Upstream hit counters exclude unsupported paths.
-- [x] Protocol mismatch fails status/watch with an explicit restart message.
+- [x] Protocol mismatch restarts the managed proxy; a remaining mismatch fails with an explicit restart message.
 
 ## Acceptance
 

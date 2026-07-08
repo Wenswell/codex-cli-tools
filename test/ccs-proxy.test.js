@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
 import { buildProxyStatusLines, ensureProxyRunning, installProxy, readProxyState, restoreProxy, runProxyCommand, setProxyMode, shutdownProxyRuntime, stopProxy } from "../dist/commands/ccs-proxy.js";
-import { captureStdout, execNodeScript, setStdoutProperties, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
+import { captureStdout, execNodeScript, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
   const server = createServer();
@@ -3413,28 +3413,14 @@ test("proxy rejects invalid --history values", async () => {
   );
 });
 
-test("proxy status and watch reject protocol mismatches", async () => {
+test("proxy runtime restarts protocol mismatches", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const health = createServer((req, res) => {
-    if (req.url === "/__codex_proxy/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.0", protocol: 999 }));
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
+  const proxyPort = await reservePort();
+  let oldProxy = null;
 
   try {
-    await new Promise((resolve, reject) => {
-      health.once("error", reject);
-      health.listen(0, "127.0.0.1", resolve);
-    });
-    const address = health.address();
-    assert.ok(address && typeof address === "object");
-    const proxyPort = address.port;
     process.env.HOME = home;
     const stateRoot = join(home, ".config", "codex-tools");
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
@@ -3442,22 +3428,90 @@ test("proxy status and watch reject protocol mismatches", async () => {
     await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
     await writeProxyStateFixture(home, stateRoot, proxyPort);
 
+    oldProxy = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { createServer } from "node:http";
+
+          const port = Number(process.env.CCS_TEST_PROXY_PORT);
+          const server = createServer((req, res) => {
+            if (req.url === "/__codex_proxy/health") {
+              res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ status: "ok", pid: process.pid, version: "0.1.0", protocol: 1, mode: "recovery" }));
+              return;
+            }
+            res.writeHead(404);
+            res.end();
+          });
+
+          const close = () => server.close(() => process.exit(0));
+          process.once("SIGINT", close);
+          process.once("SIGTERM", close);
+          server.listen(port, "127.0.0.1", () => process.stdout.write("old-proxy-ready\\n"));
+        `,
+      ],
+      {
+        env: {
+          ...process.env,
+          CCS_TEST_PROXY_PORT: String(proxyPort),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    await waitForChildStdout(oldProxy, /old-proxy-ready/);
+    const oldProxyPid = oldProxy.pid;
+    assert.ok(oldProxyPid);
+
     const options = {
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
       listenPort: proxyPort,
       stateRoot,
     };
-    await assert.rejects(
-      () => runProxyCommand(["--once"], options),
-      /proxy protocol mismatch: server=999 client=2; restart ccs proxy/,
-    );
-    await assert.rejects(
-      () => runProxyCommand(["watch"], options),
-      /proxy protocol mismatch: server=999 client=2; restart ccs proxy/,
+    const oldHealth = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+    assert.equal((await oldHealth.json()).protocol, 1);
+
+    const runtime = await ensureProxyRunning(options);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    assert.equal(runtime.started, true);
+    assert.equal(runtime.protocol, 2);
+    assert.notEqual(runtime.pid, oldProxyPid);
+    await waitForChildExit(oldProxy);
+    oldProxy = null;
+
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+    const healthPayload = await health.json();
+    assert.equal(healthPayload.protocol, 2);
+    assert.equal(healthPayload.pid, runtime.pid);
+    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_protocol_restart"/);
+    const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
+    const restartEvent = events.find((event) => event.event === "ccs_proxy_protocol_restart");
+    assert.deepEqual(
+      {
+        server_protocol: restartEvent?.server_protocol,
+        client_protocol: restartEvent?.client_protocol,
+        pid: restartEvent?.pid,
+      },
+      {
+        server_protocol: 1,
+        client_protocol: 2,
+        pid: oldProxyPid,
+      },
     );
   } finally {
-    await closeServer(health);
+    if (oldProxy) {
+      oldProxy.kill();
+      await waitForChildExit(oldProxy).catch(() => null);
+    }
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
     if (previousHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -4099,6 +4153,49 @@ async function waitForFetchOk(url) {
 
 async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForChildStdout(child, pattern) {
+  if (!child.stdout) {
+    throw new Error("child stdout is not readable");
+  }
+  const deadline = Date.now() + 5000;
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+
+  while (Date.now() < deadline) {
+    if (pattern.test(stdout)) {
+      return stdout;
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`child exited before stdout matched ${pattern}: ${stdout}${stderr}`);
+    }
+    await delay(50);
+  }
+  throw new Error(`child stdout did not match ${pattern}: ${stdout}${stderr}`);
+}
+
+async function waitForChildExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("child process did not exit")), 5000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 }
 
 async function waitForLogIncludes(logPath, pattern) {

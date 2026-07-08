@@ -31,7 +31,7 @@ Only these model API paths enter upstream forwarding and request metrics:
 
 Unsupported paths return local `404` JSON with `code: "unsupported_proxy_path"`, write one `ccs_proxy_unsupported_path` event to `proxy.log`, and do not update `active_requests`, `recent_requests`, `proxy-requests.jsonl`, status counters, latency counters, reasoning counters, or upstream hit counters.
 
-Status and watch commands validate the health `protocol` from `/__codex_proxy/health`. A protocol mismatch fails with a restart message.
+Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A protocol mismatch records `ccs_proxy_protocol_restart` with `server_protocol`, `client_protocol`, and `pid`, stops that proxy process, and starts the current proxy. A remaining mismatch after restart is a startup error with a restart message.
 
 ## Request lifecycle
 
