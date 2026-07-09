@@ -57,6 +57,59 @@ function parseModelPriceCache(text, path) {
 }
 async function fetchModelPriceCache() {
     const path = modelPricesCachePath();
+    const models = await fetchLiteLlmModelPrices(path);
+    const cache = {
+        source: litellmPricingUrl,
+        fetchedAt: new Date().toISOString(),
+        models,
+    };
+    await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+    return mergeBuiltinModelPrices(cache);
+}
+export async function buildModelPriceModelUpdatePlan(models, speed) {
+    const path = modelPricesCachePath();
+    const cachedText = await readTextIfExists(path);
+    const currentCache = cachedText === null
+        ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
+        : parseModelPriceCache(cachedText, path);
+    const remoteModels = await fetchLiteLlmModelPrices(path);
+    const names = expandModelNamePatterns(models, Object.keys(remoteModels));
+    const fetchedAt = new Date().toISOString();
+    const nextModels = { ...currentCache.models };
+    const records = names.map((model) => {
+        const remotePrice = remoteModels[model];
+        const action = remotePrice === undefined ? "missing" : "update";
+        const remoteCache = {
+            source: litellmPricingUrl,
+            fetchedAt,
+            models: remotePrice === undefined ? {} : { [model]: remotePrice },
+        };
+        if (remotePrice !== undefined) {
+            nextModels[model] = remotePrice;
+        }
+        return {
+            model,
+            cached: modelPricingStatus(mergeBuiltinModelPrices(currentCache), model, speed),
+            remote: remotePrice === undefined ? "missing" : modelPricingStatus(remoteCache, model, speed),
+            action,
+        };
+    });
+    return {
+        cachePath: path,
+        source: litellmPricingUrl,
+        fetchedAt,
+        records,
+        nextCache: {
+            source: litellmPricingUrl,
+            fetchedAt,
+            models: nextModels,
+        },
+    };
+}
+export async function writeModelPriceModelUpdatePlan(plan) {
+    await writeTextFileAtomic(plan.cachePath, `${JSON.stringify(plan.nextCache, null, 2)}\n`, 0o644);
+}
+async function fetchLiteLlmModelPrices(path) {
     let response;
     try {
         response = await fetch(litellmPricingUrl);
@@ -67,14 +120,7 @@ async function fetchModelPriceCache() {
     if (!response.ok) {
         throw new Error(`pricing cache missing and refresh failed: ${path} (${response.status} ${response.statusText})`);
     }
-    const models = await response.json();
-    const cache = {
-        source: litellmPricingUrl,
-        fetchedAt: new Date().toISOString(),
-        models,
-    };
-    await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
-    return mergeBuiltinModelPrices(cache);
+    return await response.json();
 }
 function mergeBuiltinModelPrices(cache) {
     return {
@@ -108,6 +154,28 @@ function applyModelPriceOverrides(cache, overrides) {
 }
 function finiteOverride(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function uniqueModelNames(models) {
+    return [...new Set(models.map((model) => model.trim()).filter((model) => model.length > 0))];
+}
+function expandModelNamePatterns(models, remoteModels) {
+    const names = [];
+    for (const model of uniqueModelNames(models)) {
+        if (!model.includes("*")) {
+            names.push(model);
+            continue;
+        }
+        const pattern = modelPatternRegExp(model);
+        const matches = remoteModels.filter((remoteModel) => pattern.test(remoteModel)).sort();
+        names.push(...(matches.length > 0 ? matches : [model]));
+    }
+    return uniqueModelNames(names);
+}
+function modelPatternRegExp(pattern) {
+    return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 export async function resolveCodexCostSpeed(speed) {
     if (speed === "standard" || speed === "fast") {
