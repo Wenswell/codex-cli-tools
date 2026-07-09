@@ -37,7 +37,9 @@ const durationUnits = new Map([
   ["h", 3_600_000],
 ]);
 
-const closedHistoryLimit = 5;
+const closedHistoryRetentionLimit = 100;
+const closedHistoryDefaultRenderCount = 5;
+const closedHistorySectionFixedLines = 3;
 const clvmHistoryMaxBytes = 16 * 1024 * 1024;
 const clvmRawPayloadMaxBytes = 1024 * 1024;
 const clvmRawArchiveMaxFiles = 256;
@@ -333,6 +335,10 @@ type Layout = {
   download: number;
   chain: number;
   ruleMin: number;
+};
+
+type MonitorLayout = Layout & {
+  closedHistoryRenderCount: number;
 };
 
 class ClvmRuntimeError extends Error {
@@ -1475,7 +1481,7 @@ function recordClosedConnections(closedHistory: ClosedConnectionEntry[], closedC
     });
   }
 
-  closedHistory.length = Math.min(closedHistory.length, closedHistoryLimit);
+  closedHistory.length = Math.min(closedHistory.length, closedHistoryRetentionLimit);
 }
 
 function buildClvmRawHttpResponse(method: string, path: string, response: Response, body: string): ClvmRawHttpResponse {
@@ -2046,7 +2052,7 @@ function printMonitorResult(result: MonitorResult, config: RuntimeConfig, stream
 
   stream.write(`${header.join(" ")}\n`);
 
-  const layout = buildLayout(stream);
+  const layout = buildMonitorLayout(stream, shownConnections.length, closedHistory.length);
   if (shownConnections.length === 0) {
     stream.write("no current connections for configured domains\n");
   } else {
@@ -2084,7 +2090,7 @@ function printMonitorFailure(failure: MonitorFailure, config: RuntimeConfig, str
   stream.write(`${style.red("error:")} ${failure.error.message}\n`);
 }
 
-function renderMonitorResultLines(result: MonitorResult, config: RuntimeConfig): string[] {
+export function renderMonitorResultLines(result: MonitorResult, config: RuntimeConfig): string[] {
   return captureMonitorLines((stream) => {
     printMonitorResult(result, { ...config, clear: false }, stream);
   });
@@ -2100,6 +2106,8 @@ function captureMonitorLines(writeOutput: (stream: NodeJS.WriteStream) => void):
   let output = "";
   const stream = {
     columns: process.stdout.columns,
+    rows: process.stdout.rows,
+    isTTY: process.stdout.isTTY,
     write: (chunk: string | Uint8Array): boolean => {
       output += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
       return true;
@@ -2130,13 +2138,13 @@ function printCurrentConnections(shownConnections: ConnectionEntry[], layout: La
   stream.write(`${renderTable(currentConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 
-function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Layout, style: TextStyle, stream: NodeJS.WriteStream): void {
-  if (closedHistory.length === 0) {
+function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: MonitorLayout, style: TextStyle, stream: NodeJS.WriteStream): void {
+  if (layout.closedHistoryRenderCount === 0) {
     return;
   }
 
   stream.write(`\n${style.bold("recent closed")}\n`);
-  const rows = closedHistory.map((connection) => ({
+  const rows = closedHistory.slice(0, layout.closedHistoryRenderCount).map((connection) => ({
     closedAt: formatLocalTimestamp(connection.closedAt),
     endpoint: style.cyan(connection.endpoint),
     zeroFor: zeroForCell(connection.observedIdleMs, style),
@@ -2284,6 +2292,36 @@ function bytesCell(bytes: number | null, style: TextStyle): string {
     return style.dim(text);
   }
   return text;
+}
+
+function buildMonitorLayout(stream: NodeJS.WriteStream, currentConnectionCount: number, closedHistoryCount: number): MonitorLayout {
+  return {
+    ...buildLayout(stream),
+    closedHistoryRenderCount: resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedHistoryCount),
+  };
+}
+
+function resolveClosedHistoryRenderCount(stream: NodeJS.WriteStream, currentConnectionCount: number, closedHistoryCount: number): number {
+  if (closedHistoryCount === 0) {
+    return 0;
+  }
+  if (!stream.isTTY) {
+    return Math.min(closedHistoryCount, closedHistoryDefaultRenderCount);
+  }
+
+  const rows = terminalRows(stream);
+  if (rows === 0) {
+    return Math.min(closedHistoryCount, closedHistoryDefaultRenderCount);
+  }
+
+  const currentSectionLines = currentConnectionCount === 0 ? 1 : 1 + currentConnectionCount;
+  const fixedLines = 1 + currentSectionLines + closedHistorySectionFixedLines;
+  return Math.min(closedHistoryCount, Math.max(0, rows - fixedLines));
+}
+
+function terminalRows(stream: NodeJS.WriteStream): number {
+  const rows = Number.isFinite(stream.rows) ? stream.rows : process.stdout.rows;
+  return rows && rows > 0 ? Math.floor(rows) : 0;
 }
 
 function buildLayout(stream: NodeJS.WriteStream): Layout {

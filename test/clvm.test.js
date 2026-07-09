@@ -16,9 +16,10 @@ import {
   normalizeDomains,
   parseClvmConfig,
   parseDuration,
+  renderMonitorResultLines,
 } from "../dist/commands/clvm.js";
 import { visibleLength } from "../dist/lib/text.js";
-import { execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
+import { execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript, withStdoutProperties } from "./helpers/terminal.js";
 
 test("normalizes and matches domains", () => {
   assert.deepEqual(normalizeDomains(["Example.com,*.API.Example.com", ".example.com"]), [
@@ -960,6 +961,154 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
     assert.match(stdout, /no current connections for configured domains/);
     assert.match(stdout, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.doesNotMatch(stdout, /\u001b\[2J/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("monitor recent closed rows follow TTY height and non-TTY default", () => {
+  const config = buildRuntimeConfig(
+    {
+      baseUrl: "http://127.0.0.1:9090",
+      secret: "",
+      domains: ["example.com"],
+      interval: "1s",
+      zeroSpeedThreshold: 0,
+      closeZeroForSeconds: 0.5,
+      rawArchive: false,
+    },
+    { color: false },
+    { autoCloseEnabled: true, clear: false, once: true },
+  );
+  const closedHistory = Array.from({ length: 12 }, (_, index) => ({
+    id: `closed-${index}`,
+    endpoint: `closed-${index}.example.com:443`,
+    process: "",
+    rule: "DOMAIN-SUFFIX:example.com",
+    chains: ["Proxy", "HK-01"],
+    matchedDomain: "example.com",
+    matchedValue: `closed-${index}.example.com`,
+    ageMs: 2000,
+    observedIdleMs: 1000 + index,
+    uploadTotal: 0,
+    downloadTotal: 0,
+    uploadBytesPerSecond: 0,
+    downloadBytesPerSecond: 0,
+    totalBytesPerSecond: 0,
+    isIdle: true,
+    status: "zero",
+    closedAt: `2026-06-10T00:00:${String(index).padStart(2, "0")}.000Z`,
+  }));
+  const result = {
+    timestamp: "2026-06-10T00:01:00.000Z",
+    totalConnections: 0,
+    matchedConnections: [],
+    closedConnections: [],
+    closeFailures: [],
+    closedHistory,
+    closedTotal: closedHistory.length,
+  };
+  const render = (properties) => withStdoutProperties(properties, () => renderMonitorResultLines(result, config).join("\n"));
+  const countClosedRows = (output) => (output.match(/closed-\d+\.example\.com:443/g) ?? []).length;
+
+  assert.equal(countClosedRows(render({ isTTY: false, columns: 140, rows: 40 })), 5);
+  assert.equal(countClosedRows(render({ isTTY: true, columns: 140, rows: 14 })), 9);
+
+  const tiny = render({ isTTY: true, columns: 140, rows: 4 });
+  assert.equal(countClosedRows(tiny), 0);
+  assert.doesNotMatch(tiny, /recent closed/);
+});
+
+test("monitor retains closed history beyond the default visible rows", async () => {
+  let requestCount = 0;
+  const deletedIds = [];
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      requestCount += 1;
+      const id = `closed-${Math.floor((requestCount - 1) / 2)}`;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        connections: [
+          {
+            id,
+            metadata: { host: `${id}.example.com`, destinationPort: 443 },
+            upload: 0,
+            download: 0,
+            uploadSpeed: 0,
+            downloadSpeed: 0,
+            start: "2026-06-10T00:00:00.000Z",
+            chains: ["Proxy", "HK-01"],
+            rule: "DOMAIN-SUFFIX",
+            rulePayload: "example.com",
+          },
+        ],
+      }));
+      return;
+    }
+
+    if (req.url?.startsWith("/connections/") && req.method === "DELETE") {
+      deletedIds.push(decodeURIComponent(req.url.slice("/connections/".length)));
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        interval: "1ms",
+        closeZeroForSeconds: 0.0005,
+      }, null, 2)}\n`,
+    );
+
+    const child = spawnNode(["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let sigintSent = false;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (!sigintSent && stdout.includes("closedTotal=7")) {
+        sigintSent = true;
+        child.kill("SIGINT");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    const watchdog = setTimeout(() => child.kill("SIGINT"), 5000);
+    const exit = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    clearTimeout(watchdog);
+
+    assert.deepEqual(exit, { code: 0, signal: null });
+    assert.equal(stderr, "");
+    assert.equal(deletedIds.length >= 7, true);
+
+    const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
+    assert.equal(state.ok, true);
+    assert.equal(state.result.closedHistory.length >= 7, true);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });
