@@ -23,30 +23,19 @@ const builtinModelPrices = {
 export async function readModelPriceCache(options = {}) {
     const path = modelPricesCachePath();
     const cachedText = await readTextIfExists(path);
-    if (!options.forceRefresh && cachedText !== null) {
+    if (cachedText !== null) {
         return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
     }
-    try {
-        return applyModelPriceOverrides(await fetchModelPriceCache(), options.overrides);
-    }
-    catch (error) {
-        if (cachedText !== null) {
-            return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
-        }
-        return applyModelPriceOverrides(mergeBuiltinModelPrices({
-            source: "builtin",
-            fetchedAt: new Date().toISOString(),
-            models: {},
-        }), options.overrides);
-    }
+    return applyModelPriceOverrides(mergeBuiltinModelPrices({
+        source: "builtin",
+        fetchedAt: new Date(0).toISOString(),
+        models: {},
+    }), options.overrides);
 }
 export async function readModelPriceCacheForModels(modelUsage, speed, options = {}) {
-    const priceCache = await readModelPriceCache(options);
-    if (missingPricingModels(modelUsage, priceCache, speed).length === 0) {
-        return priceCache;
-    }
-    const refreshed = await readModelPriceCache({ ...options, forceRefresh: true });
-    return refreshed;
+    void modelUsage;
+    void speed;
+    return readModelPriceCache(options);
 }
 function parseModelPriceCache(text, path) {
     const parsed = JSON.parse(text);
@@ -54,17 +43,6 @@ function parseModelPriceCache(text, path) {
         throw new Error(`invalid pricing cache: ${path}`);
     }
     return parsed;
-}
-async function fetchModelPriceCache() {
-    const path = modelPricesCachePath();
-    const models = await fetchLiteLlmModelPrices(path);
-    const cache = {
-        source: litellmPricingUrl,
-        fetchedAt: new Date().toISOString(),
-        models,
-    };
-    await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
-    return mergeBuiltinModelPrices(cache);
 }
 export async function buildModelPriceModelUpdatePlan(models, speed) {
     const path = modelPricesCachePath();
@@ -115,10 +93,10 @@ async function fetchLiteLlmModelPrices(path) {
         response = await fetch(litellmPricingUrl);
     }
     catch (error) {
-        throw new Error(`pricing cache missing and refresh failed: ${path} (${formatUnknownError(error)})`);
+        throw new Error(`pricing refresh failed: ${path} (${formatUnknownError(error)})`);
     }
     if (!response.ok) {
-        throw new Error(`pricing cache missing and refresh failed: ${path} (${response.status} ${response.statusText})`);
+        throw new Error(`pricing refresh failed: ${path} (${response.status} ${response.statusText})`);
     }
     return await response.json();
 }
@@ -165,13 +143,13 @@ function expandModelNamePatterns(models, remoteModels) {
             names.push(model);
             continue;
         }
-        const pattern = modelPatternRegExp(model);
+        const pattern = modelNamePatternRegExp(model);
         const matches = remoteModels.filter((remoteModel) => pattern.test(remoteModel)).sort();
         names.push(...(matches.length > 0 ? matches : [model]));
     }
     return uniqueModelNames(names);
 }
-function modelPatternRegExp(pattern) {
+export function modelNamePatternRegExp(pattern) {
     return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
 }
 function escapeRegExp(value) {
@@ -192,42 +170,42 @@ export async function resolveCodexCostSpeed(speed) {
     throw new Error(`unsupported Codex service_tier for ccs cost --speed auto: ${serviceTier}`);
 }
 export function modelPrice(cache, model, speed, usage) {
+    const parts = modelPriceParts(cache, model, speed);
+    if (!parts) {
+        return null;
+    }
+    if ((usage.inputTokens > usage.cachedInputTokens && parts.input === null) ||
+        (usage.outputTokens > 0 && parts.output === null) ||
+        (usage.cachedInputTokens > 0 && parts.cacheRead === null)) {
+        return null;
+    }
+    return {
+        input: parts.input ?? 0,
+        cacheRead: parts.cacheRead ?? 0,
+        output: parts.output ?? 0,
+    };
+}
+export function modelPriceParts(cache, model, speed) {
     const raw = cache.models[model];
     if (!raw || typeof raw !== "object") {
         return null;
     }
     if (speed === "standard") {
-        const input = readFiniteNumber(raw.input_cost_per_token);
-        const output = readFiniteNumber(raw.output_cost_per_token);
-        const cacheRead = readFiniteNumber(raw.cache_read_input_token_cost);
-        if ((usage.inputTokens > usage.cachedInputTokens && input === null) ||
-            (usage.outputTokens > 0 && output === null) ||
-            (usage.cachedInputTokens > 0 && cacheRead === null)) {
-            return null;
-        }
         return {
-            input: input ?? 0,
-            cacheRead: cacheRead ?? 0,
-            output: output ?? 0,
+            input: readFiniteNumber(raw.input_cost_per_token),
+            cacheRead: readFiniteNumber(raw.cache_read_input_token_cost),
+            output: readFiniteNumber(raw.output_cost_per_token),
         };
     }
     const hasPriorityPricing = raw.input_cost_per_token_priority !== undefined
         || raw.output_cost_per_token_priority !== undefined
         || raw.cache_read_input_token_cost_priority !== undefined;
-    const input = readFiniteNumber(hasPriorityPricing ? raw.input_cost_per_token_priority : raw.input_cost_per_token);
-    const output = readFiniteNumber(hasPriorityPricing ? raw.output_cost_per_token_priority : raw.output_cost_per_token);
-    const cacheRead = readFiniteNumber(hasPriorityPricing
-        ? raw.cache_read_input_token_cost_priority
-        : raw.cache_read_input_token_cost);
-    if ((usage.inputTokens > usage.cachedInputTokens && input === null) ||
-        (usage.outputTokens > 0 && output === null) ||
-        (usage.cachedInputTokens > 0 && cacheRead === null)) {
-        return null;
-    }
     return {
-        input: input ?? 0,
-        cacheRead: cacheRead ?? 0,
-        output: output ?? 0,
+        input: readFiniteNumber(hasPriorityPricing ? raw.input_cost_per_token_priority : raw.input_cost_per_token),
+        cacheRead: readFiniteNumber(hasPriorityPricing
+            ? raw.cache_read_input_token_cost_priority
+            : raw.cache_read_input_token_cost),
+        output: readFiniteNumber(hasPriorityPricing ? raw.output_cost_per_token_priority : raw.output_cost_per_token),
     };
 }
 export function modelPricingStatus(cache, model, speed) {

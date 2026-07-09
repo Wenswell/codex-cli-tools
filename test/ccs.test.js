@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -203,6 +203,41 @@ test("ccs cost daily reports missing pricing without failing", async () => {
   }
 });
 
+test("ccs cost daily does not create a full pricing cache on missing prices", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeCodexCostFixture(home, "test-missing-model");
+
+    const output = await runCcs([
+      "dist/bin/ccs.js",
+      "cost",
+      "daily",
+      "--since",
+      "2026-01-01",
+      "--until",
+      "2026-01-01",
+      "--timezone",
+      "UTC",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /missing 1/);
+    await assert.rejects(
+      access(join(home, ".cache", "codex-tools", "model-prices.json")),
+      /ENOENT/,
+    );
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("ccs pricing prints cache status", async () => {
   let home;
   try {
@@ -217,12 +252,96 @@ test("ccs pricing prints cache status", async () => {
     const output = await runCcs(["dist/bin/ccs.js", "pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
     assert.match(output, /pricing:\s+.*model-prices\.json/);
+    assert.match(output, /watched:\s+none/);
     assert.match(output, /source:\s+test/);
-    assert.match(output, /commands: ccs pricing \| ccs pricing refresh MODEL_PATTERN\.\.\./);
+    assert.match(output, /commands: ccs pricing list \| ccs pricing refresh \| ccs pricing watch MODEL_PATTERN\.\.\. \| ccs pricing unwatch MODEL_PATTERN\.\.\./);
   } finally {
     if (home) {
       await rm(home, { recursive: true, force: true });
     }
+  }
+});
+
+test("ccs pricing list prints watched model prices from local cache", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+      pricing: {
+        models: ["gpt-5.*", "missing-model"],
+      },
+    });
+    await writeModelPriceCache(home, {
+      "gpt-5": modelPriceValueFixture(0.000001),
+      "gpt-5.4": modelPriceValueFixture(0.000004),
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+      "gpt-5x": modelPriceValueFixture(0.000009),
+    });
+
+    const output = await runCcs(["dist/bin/ccs.js", "pricing", "list"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
+    assert.match(output, /gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
+    assert.match(output, /missing-model\s+missing\s+missing\s+missing\s+missing/);
+    assert.doesNotMatch(output, /gpt-5x/);
+    assert.doesNotMatch(output, /gpt-5\s+ok/);
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing list all prints every local cached model price", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+      pricing: {
+        models: ["gpt-5.5"],
+      },
+    });
+    await writeModelPriceCache(home, {
+      "claude-sonnet-4.5": modelPriceValueFixture(0.000006),
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+    });
+
+    const output = await runCcs(["dist/bin/ccs.js", "pricing", "list", "--all"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /claude-sonnet-4\.5\s+ok\s+\$6\.00/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00/);
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing watch previews config edits without noninteractive writes", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    const output = await runCcs(["dist/bin/ccs.js", "pricing", "watch", " gpt-5.* ", "glm-5.2"], home);
+    const profiles = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
+
+    assert.match(output, /ccs pricing watch/);
+    assert.match(output, /gpt-5\.\*\s+watch/);
+    assert.match(output, /glm-5\.2\s+watch/);
+    assert.match(output, /not applied/);
+    assert.equal(profiles.pricing, undefined);
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 
@@ -253,7 +372,7 @@ test("ccs pricing refresh requires model patterns", async () => {
   try {
     await assert.rejects(
       runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
-      /usage: ccs pricing refresh MODEL_PATTERN\.\.\./,
+      /usage: ccs pricing refresh MODEL_PATTERN\.\.\. or add watched models with ccs pricing watch MODEL_PATTERN\.\.\./,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -482,6 +601,14 @@ function modelPriceFixture(kind) {
     input_cost_per_token: 0.000001,
     output_cost_per_token: 0.000002,
     ...(kind === "ok" ? { cache_read_input_token_cost: 0.0000001 } : {}),
+  };
+}
+
+function modelPriceValueFixture(inputCostPerToken) {
+  return {
+    input_cost_per_token: inputCostPerToken,
+    output_cost_per_token: inputCostPerToken * 2,
+    cache_read_input_token_cost: inputCostPerToken / 10,
   };
 }
 

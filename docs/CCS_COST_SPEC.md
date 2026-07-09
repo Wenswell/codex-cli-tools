@@ -26,7 +26,10 @@ Terminal reports show the five columns listed above.
 
 ```bash
 ccs pricing
-ccs pricing refresh MODEL_PATTERN...
+ccs pricing list [MODEL_PATTERN...]
+ccs pricing refresh [MODEL_PATTERN...]
+ccs pricing watch MODEL_PATTERN...
+ccs pricing unwatch MODEL_PATTERN...
 ccs cost
 ccs cost daily
 ccs cost weekly
@@ -48,7 +51,7 @@ ccs cost central day YYYY-MM-DD
 
 `ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 
-`ccs pricing` prints pricing cache status. `ccs pricing refresh MODEL_PATTERN...` refreshes selected local pricing cache entries from LiteLLM. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation.
+`ccs pricing` prints pricing cache status. `ccs pricing list [MODEL_PATTERN...]` prints local model prices as model name plus input/cache/output price per 1M tokens. `ccs pricing refresh [MODEL_PATTERN...]` refreshes selected local pricing cache entries from LiteLLM; when no pattern is passed, it uses the watched model list from `pricing.models`. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation. `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview edits to the watched model list and write `profiles.json` only after exact `yes` confirmation.
 
 Options:
 
@@ -532,11 +535,25 @@ output_cost_per_token_priority
 
 Cost reporting calculates the known priced portion when pricing is incomplete. Missing model prices do not fail local reports, central reports, or central status. Metric JSON includes `missingPricingModels`, and terminal tables show `missing N` in the `pricing` column when a row excludes unpriced usage.
 
-When the cache is missing or used models are missing from the cache, the command refreshes LiteLLM pricing once. If refresh is unavailable, the command continues with built-in supplemental prices and reports remaining missing models explicitly.
+Cost reporting, central reporting, and `ccs models` never write a full LiteLLM price cache automatically. They read the local cache, built-in supplemental prices, and manual overrides only. Missing prices are reported explicitly so cache writes stay tied to explicit `ccs pricing refresh` commands.
+
+Watched model plan:
+
+- `pricing.models` in `~/.config/codex-tools/profiles.json` stores exact model keys and `*` patterns that the user wants to maintain.
+- `ccs pricing watch MODEL_PATTERN...` appends normalized patterns to `pricing.models`.
+- `ccs pricing unwatch MODEL_PATTERN...` removes exact watched entries from `pricing.models`.
+- `ccs pricing refresh` refreshes the watched patterns.
+- `ccs pricing refresh MODEL_PATTERN...` refreshes the given patterns for the current run and does not add them to `pricing.models`.
+- `ccs pricing list` lists watched models from the local cache.
+- `ccs pricing list MODEL_PATTERN...` lists matching local cache entries for the given patterns.
+- `ccs pricing list --all` lists every local cache entry.
 
 Manual selected-model refresh:
 
 ```bash
+ccs pricing watch 'gpt-5.*' glm-5.2
+ccs pricing list
+ccs pricing refresh
 ccs pricing refresh gpt-5.5 glm-5.2
 ccs pricing refresh 'gpt-5.*'
 ```
@@ -556,6 +573,11 @@ Manual overrides live in `~/.config/codex-tools/profiles.json`:
 ```json
 {
   "pricing": {
+    "models": [
+      "gpt-5.*",
+      "glm-5.2",
+      "claude-sonnet-4.5"
+    ],
     "overrides": {
       "custom-model": {
         "inputCostPerToken": 0.000001,
@@ -710,6 +732,11 @@ NO_COLOR=1 node dist/bin/ccs.js models
 NO_COLOR=1 node dist/bin/ccs.js models --json
 NO_COLOR=1 node dist/bin/ccs.js cost --help
 NO_COLOR=1 node dist/bin/ccs.js pricing
+NO_COLOR=1 node dist/bin/ccs.js pricing list
+NO_COLOR=1 node dist/bin/ccs.js pricing list --all
+NO_COLOR=1 node dist/bin/ccs.js pricing watch 'gpt-5.*'
+NO_COLOR=1 node dist/bin/ccs.js pricing unwatch 'gpt-5.*'
+NO_COLOR=1 node dist/bin/ccs.js pricing refresh
 NO_COLOR=1 node dist/bin/ccs.js pricing refresh gpt-5.5
 NO_COLOR=1 node dist/bin/ccs.js pricing refresh 'gpt-5.*'
 NO_COLOR=1 node dist/bin/ccs.js cost daily --since 2026-05-01 --until 2026-05-30
@@ -733,6 +760,9 @@ Acceptance:
 - JSON output uses stable lower camel case keys.
 - Unknown pricing models appear in `missingPricingModels` and terminal pricing status.
 - `ccs models` shows one adjacent price column per provider and JSON per-model pricing status.
-- `ccs pricing refresh MODEL_PATTERN...` previews selected model cache updates, expands `*` patterns, and writes only after exact `yes`.
+- `ccs pricing list [MODEL_PATTERN...]` prints model name plus input/cache/output price per 1M tokens.
+- `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview watched-list edits and write only after exact `yes`.
+- `ccs pricing refresh [MODEL_PATTERN...]` previews selected model cache updates, expands `*` patterns, and writes only after exact `yes`.
+- Cost and model status commands never write a full LiteLLM pricing cache automatically.
 - JSONL files are read line by line.
 - README help, source help, built `dist`, and this spec describe the same command surface.
