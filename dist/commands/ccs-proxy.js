@@ -531,6 +531,8 @@ function normalizeProxyRequestRecord(request, collection) {
         request_bytes: numberField(request.request_bytes),
         response_bytes: numberField(request.response_bytes),
         session: nullableStringField(request.session),
+        client_turn_id: nullableStringField(request.client_turn_id),
+        client_request_attempt: positiveIntegerField(request.client_request_attempt),
         request_kind: normalizeProxyRequestKind(request.request_kind),
         request_model: nullableStringField(request.request_model),
         request_reasoning_effort: nullableStringField(request.request_reasoning_effort),
@@ -624,6 +626,9 @@ function nullableNumberField(value) {
 function nonNegativeIntegerField(value) {
     return Number.isInteger(value) && typeof value === "number" && value >= 0 ? value : 0;
 }
+function positiveIntegerField(value) {
+    return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : 1;
+}
 function inferProxyFinalAction(status, error) {
     if (status === 499) {
         return "client_aborted";
@@ -636,6 +641,9 @@ function inferProxyFinalAction(status, error) {
     }
     if (error) {
         return "gateway_error";
+    }
+    if (status !== null && status >= 400) {
+        return "upstream_error";
     }
     return "passed";
 }
@@ -692,8 +700,13 @@ async function updateProxyActiveRequestMetric(state, stateRoot, record) {
     });
 }
 async function completeProxyRequestMetric(state, stateRoot, record) {
-    await mutateProxyMetrics(state, stateRoot, async (metrics) => {
-        const compactRecord = compactProxyRequestRecord(record);
+    let completedRecord = null;
+    await mutateProxyMetrics(state, stateRoot, (metrics) => {
+        completedRecord = {
+            ...record,
+            client_request_attempt: resolveClientRequestAttempt(record, metrics.recent_requests),
+        };
+        const compactRecord = compactProxyRequestRecord(completedRecord);
         metrics.active_requests = metrics.active_requests.filter((request) => request.id !== record.id);
         metrics.recent_requests.unshift(compactRecord);
         metrics.recent_requests = metrics.recent_requests.slice(0, PROXY_RECENT_REQUEST_LIMIT);
@@ -703,12 +716,19 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
         metrics.reasoning_token_counts = windowMetrics.reasoning_token_counts;
         metrics.upstream_hit_counts = windowMetrics.upstream_hit_counts;
         metrics.latency_ms = windowMetrics.latency_ms;
-        await appendProxyRequestRecord(stateRoot, record);
     });
+    await appendProxyRequestRecord(stateRoot, completedRecord ?? record);
 }
 function compactProxyRequestRecord(record) {
     const { attempt_records: _attemptRecords, request_headers: _requestHeaders, ...compactRecord } = record;
     return compactRecord;
+}
+function resolveClientRequestAttempt(record, recentRequests) {
+    if (!record.client_turn_id || !record.request_body_sha256) {
+        return 1;
+    }
+    return 1 + recentRequests.filter((candidate) => (candidate.client_turn_id === record.client_turn_id
+        && candidate.request_body_sha256 === record.request_body_sha256)).length;
 }
 async function resetProxyActiveRequestsOnStart(state, stateRoot) {
     const metrics = ensureProxyMetrics(state);
@@ -919,18 +939,36 @@ function formatProxyUpstreamModel(requestModel, upstreamModel) {
     return textRed(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
 }
 function formatProxyError(record) {
-    const prefix = formatProxyGuardActionPrefix(record.guard_actions, record.status);
-    const error = record.error ? textRed(record.error) : textDim("");
+    const prefix = formatProxyErrorPrefix(record);
+    const displayError = proxyDisplayError(record);
+    const error = displayError ? textRed(displayError) : textDim("");
     if (prefix && error) {
         return `${prefix} ${error}`;
     }
     return prefix || error;
 }
-function formatProxyGuardActionPrefix(actions, requestStatus) {
-    const values = actions
-        .map((action) => formatProxyGuardActionPrefixValue(action, requestStatus))
-        .filter((value) => value.length > 0);
+function proxyDisplayError(record) {
+    return record.error ?? proxyFailureSummaryDisplay(record.failure_summary);
+}
+function proxyFailureSummaryDisplay(summary) {
+    if (!summary) {
+        return null;
+    }
+    if (summary.code && summary.message) {
+        return `${summary.code}: ${summary.message}`;
+    }
+    return summary.message ?? summary.code;
+}
+function formatProxyErrorPrefix(record) {
+    const values = [
+        formatProxyClientRequestAttemptPrefixValue(record.client_request_attempt),
+        ...record.guard_actions
+            .map((action) => formatProxyGuardActionPrefixValue(action, record.status)),
+    ].filter((value) => value.length > 0);
     return values.length === 0 ? "" : `[${values.join(" ")}]`;
+}
+function formatProxyClientRequestAttemptPrefixValue(attempt) {
+    return attempt > 1 ? textYellow(`client:${attempt}`) : "";
 }
 function formatProxyGuardActionPrefixValue(action, requestStatus) {
     const label = formatProxyGuardActionLabel(action);
@@ -1591,6 +1629,21 @@ function extractRequestReasoningEffortFromJson(parsed) {
     }
     return jsonStringAt(parsed, ["reasoning", "effort"]) ?? jsonStringAt(parsed, ["reasoning_effort"]);
 }
+function extractCodexTurnId(headers) {
+    const metadata = headerSignal(headers, "x-codex-turn-metadata");
+    if (!metadata) {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(metadata);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? nullableStringField(parsed.turn_id)
+            : null;
+    }
+    catch {
+        return null;
+    }
+}
 function hashRequestBody(body) {
     return createHash("sha256").update(body).digest("hex");
 }
@@ -1877,9 +1930,8 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 }));
                 continue;
             }
-            completeProxyAttemptRecord(attemptState, "passed", {
-                failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
-            });
+            const failureSummary = proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE);
+            completeProxyAttemptRecord(attemptState, proxyUpstreamFinalAction(status), { failureSummary });
             return createProxyOutcome({
                 response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
                 upstream: upstream.name,
@@ -1888,7 +1940,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 attemptRecords: attemptState.attemptRecords,
                 inspection,
                 upstreamModel,
-                failureSummary: proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE),
+                failureSummary,
                 error: null,
             });
         }
@@ -1959,7 +2011,8 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 error,
             });
         }
-        completeProxyAttemptRecord(attemptState, "passed");
+        const failureSummary = proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType);
+        completeProxyAttemptRecord(attemptState, proxyUpstreamFinalAction(status), { failureSummary });
         return createProxyOutcome({
             response: createBufferedResponse(buffer, status, headers, responseContentType, stripAutoEncryptedReasoning),
             upstream: upstream.name,
@@ -1968,7 +2021,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
             attemptRecords: attemptState.attemptRecords,
             inspection,
             upstreamModel,
-            failureSummary: proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType),
+            failureSummary,
             error: null,
         });
     }
@@ -1986,13 +2039,15 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, at
         const response = await forwardRequest(request, upstream, body, callbacks.signal);
         markProxyAttemptHeaders(attemptState, response.status);
         await callbacks.onResponseStart?.(response.status, upstream.name);
-        completeProxyAttemptRecord(attemptState, "passed");
+        const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
+        completeProxyAttemptRecord(attemptState, proxyUpstreamFinalAction(response.status), { failureSummary });
         return createProxyOutcome({
             response,
             upstream: upstream.name,
             upstreamStatus: response.status,
             attempts: attemptState.attempts,
             attemptRecords: attemptState.attemptRecords,
+            failureSummary,
         });
     }
     catch (error) {
@@ -2367,28 +2422,43 @@ function proxyFailureSummaryFromError(code, error) {
     return proxyFailureSummary("upstream_error", code, message);
 }
 function proxyFailureSummaryFromBufferedPayload(status, buffer, contentType) {
-    if (status < 400 || !isJsonContentType(contentType) || buffer.length === 0) {
+    if (status < 400) {
         return null;
     }
-    try {
-        const parsed = JSON.parse(buffer.toString("utf8"));
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-            return null;
+    if (isJsonContentType(contentType) && buffer.length > 0) {
+        try {
+            const parsed = JSON.parse(buffer.toString("utf8"));
+            const summary = proxyFailureSummaryFromJsonPayload(parsed);
+            if (summary) {
+                return summary;
+            }
         }
-        const raw = parsed;
-        const error = raw.error;
-        if (typeof error === "string" && error.length > 0) {
-            return proxyFailureSummary("upstream_error", null, error);
-        }
-        if (error && typeof error === "object" && !Array.isArray(error)) {
-            const errorRaw = error;
-            return proxyFailureSummary(nullableStringField(errorRaw.type) ?? "upstream_error", nullableStringField(errorRaw.code), nullableStringField(errorRaw.message));
+        catch {
+            return proxyHttpFailureSummary(status);
         }
     }
-    catch {
+    return proxyHttpFailureSummary(status);
+}
+function proxyFailureSummaryFromJsonPayload(parsed) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return null;
+    }
+    const raw = parsed;
+    const error = raw.error;
+    if (typeof error === "string" && error.length > 0) {
+        return proxyFailureSummary("upstream_error", null, error);
+    }
+    if (error && typeof error === "object" && !Array.isArray(error)) {
+        const errorRaw = error;
+        return proxyFailureSummary(nullableStringField(errorRaw.type) ?? "upstream_error", nullableStringField(errorRaw.code), nullableStringField(errorRaw.message));
     }
     return null;
+}
+function proxyHttpFailureSummary(status) {
+    return proxyFailureSummary("upstream_error", `upstream_http_${status}`, `upstream returned HTTP ${status}`);
+}
+function proxyUpstreamFinalAction(status) {
+    return status >= 400 ? "upstream_error" : "passed";
 }
 function createRetrySummary(attemptRecords) {
     const summary = createEmptyProxyRetrySummary();
@@ -2428,6 +2498,9 @@ function requestFinalAction(input) {
     }
     if (input.error) {
         return "gateway_error";
+    }
+    if (input.status !== null && input.status >= 400 && input.failureSummary?.type === "upstream_error") {
+        return "upstream_error";
     }
     return "passed";
 }
@@ -2481,6 +2554,19 @@ function createBufferedResponse(buffer, status, headers, contentType = "", strip
 }
 function responseStatusAllowsBody(status) {
     return status !== 101 && status !== 204 && status !== 205 && status !== 304;
+}
+function writeProxyJsonErrorResponse(res, status, message) {
+    if (res.destroyed || res.writableEnded) {
+        return false;
+    }
+    if (res.headersSent) {
+        res.destroy();
+        return false;
+    }
+    const payload = JSON.stringify({ error: { message } });
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+    res.end(payload);
+    return true;
 }
 async function writeResponse(res, response, endpointClass, modelObserver) {
     res.writeHead(response.status, responseHeadersToObject(response.headers));
@@ -3016,6 +3102,8 @@ export async function serveProxy(options) {
                     request_bytes: 0,
                     response_bytes: 0,
                     session: null,
+                    client_turn_id: null,
+                    client_request_attempt: 1,
                     request_kind: REQUEST_KIND_NORMAL,
                     request_model: null,
                     request_reasoning_effort: null,
@@ -3080,6 +3168,7 @@ export async function serveProxy(options) {
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
                     activeRecord.session = extractSessionShortId(body);
+                    activeRecord.client_turn_id = extractCodexTurnId(req.headers);
                     activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
                     activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
                     activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
@@ -3241,11 +3330,10 @@ export async function serveProxy(options) {
                     });
                     upstream = activeRecord.upstream;
                     attempts = activeRecord.attempts;
-                    if (!res.headersSent && status !== 499) {
-                        const payload = JSON.stringify({ error: { message: errorText } });
-                        responseBytes = Buffer.byteLength(payload);
-                        res.writeHead(status ?? 500, { "content-type": "application/json; charset=utf-8" });
-                        res.end(payload);
+                    if (status !== 499) {
+                        if (writeProxyJsonErrorResponse(res, status ?? 500, errorText)) {
+                            responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
+                        }
                     }
                     upstreamStatus = activeRecord.upstream_status;
                     upstreamModel = activeRecord.upstream_model;
@@ -3330,8 +3418,7 @@ export async function serveProxy(options) {
                     status: 500,
                     error: message,
                 });
-                res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-                res.end(JSON.stringify({ error: { message } }));
+                writeProxyJsonErrorResponse(res, 500, message);
             }
         })();
     });

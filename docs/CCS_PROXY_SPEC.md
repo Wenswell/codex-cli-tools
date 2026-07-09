@@ -39,8 +39,9 @@ Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A pr
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
 - Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
-- History records are the completed form of the same request record and include completion time, mode, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, attempts, latency, request bytes, response bytes, session short id, model metadata, guard actions, and error text.
+- History records are the completed form of the same request record and include completion time, mode, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, proxy-internal attempts, client request attempt, latency, request bytes, response bytes, session short id, model metadata, guard actions, failure summary, and error text.
 - `proxy-requests.jsonl` records include JSONL-only `attempt_records` with complete upstream attempt facts. `proxy.json.metrics.recent_requests` keeps compact records without `attempt_records`.
+- Compact state history is written before the complete JSONL record append. JSONL append failures after client response completion are recorded in `proxy.log`, and the proxy keeps serving.
 - SSE responses stay active while the proxy buffers upstream chunks before client response headers and while the accepted response body is written to the client.
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
@@ -69,7 +70,7 @@ Request records include:
 - `status`: observed upstream or local response status.
 - `upstream_status`: last observed upstream HTTP status.
 - `client_status`: status returned to the local Codex client.
-- `final_action`: canonical completed outcome such as `passed`, `blocked`, `upstream_fetch_failed`, `gateway_error`, or `client_aborted`.
+- `final_action`: canonical completed outcome such as `passed`, `upstream_error`, `blocked`, `upstream_fetch_failed`, `gateway_error`, or `client_aborted`.
 - `failure_summary`: structured failure details with `type`, `code`, and `message`.
 - `upstream`: selected profile name.
 - `attempts`: upstream fetch attempt count.
@@ -80,6 +81,8 @@ Request records include:
 - `request_bytes`: request body byte count.
 - `response_bytes`: completed response body byte count.
 - `session`: short Codex session id when present.
+- `client_turn_id`: Codex turn id parsed from `x-codex-turn-metadata`.
+- `client_request_attempt`: repeated local client request count for the same `client_turn_id` and `request_body_sha256` inside the compact state window. The first request is `1`.
 - `request_kind`: `normal` or `context_compaction`.
 - `request_model`: model string from the request body.
 - `request_reasoning_effort`: reasoning effort string from the request body when present.
@@ -124,7 +127,7 @@ Request records include:
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
 
-Old state files are normalized at read time. Missing `mode` normalizes to `recovery`. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
+Old state files are normalized at read time. Missing `mode` normalizes to `recovery`. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing `client_turn_id` normalizes to `null`. Missing `client_request_attempt` normalizes to `1`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -134,13 +137,13 @@ The proxy owns upstream authentication in proxy mode. It removes incoming `Autho
 
 `ccs proxy install` starts in `recovery` mode. `ccs proxy mode recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `ccs proxy mode intercept` disables continuation recovery and uses ordinary guard retry. `ccs proxy stop` switches to `passthrough`, keeps the proxy URL active, and forwards original client request bodies and upstream responses without reasoning guard retries, continuation recovery, response body stripping, capacity retries, or transport retries. `ccs proxy restore` restores `~/.codex/config.toml`, stops the background proxy, removes proxy state, and exits proxy routing.
 
-Upstream HTTP responses are upstream facts. In `recovery` and `intercept` modes, the proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`.
+Upstream HTTP responses are upstream facts. In `recovery` and `intercept` modes, the proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`. Upstream `4xx` and `5xx` responses record `final_action=upstream_error`, `failure_summary.type=upstream_error`, and `error=null`. JSON error bodies populate `failure_summary.code/message`; non-JSON error bodies use `upstream_http_<status>` and `upstream returned HTTP <status>`.
 
 In `recovery` and `intercept` modes, upstream capacity errors are a narrow retryable HTTP-response case. When an upstream error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively, the proxy records `internal_retry` with `error: upstream_capacity`, retries the same upstream, and uses the same retry budget as the reasoning guard. Ordinary `429`, `502`, and `5xx` responses without that text stay upstream facts and pass through unchanged. If every capacity retry is exhausted, the final upstream status and body pass through unchanged.
 
 In `recovery` and `intercept` modes, transport-level `TypeError: fetch failed` is retried once for the same upstream. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`. In `passthrough` mode, transport failure returns one local upstream error response without an internal retry.
 
-`attempts` counts upstream fetch attempts for the client request. It includes the initial fetch, the single transport retry when used, upstream capacity retries, and reasoning-guard retry fetches.
+`attempts` counts upstream fetch attempts inside one proxy-handled client request. It includes the initial fetch, the single transport retry when used, upstream capacity retries, and reasoning-guard retry fetches. `retry_summary` counts these proxy-internal retries. `client_request_attempt` counts repeated Codex client requests with the same turn id and request body hash inside the compact state window.
 
 ## Reasoning guard
 
@@ -198,7 +201,7 @@ Request tables use the shared terminal table renderer. Fixed-width columns are r
 session time up reas./code lat. size model error
 ```
 
-Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning metadata, and model fields as soon as the proxy observes them. `session` renders the short session id with a stable color chosen from a small bright palette; the same session id uses the same color in active and history rows, and missing sessions stay dim. `reas./code` renders `reasoning_tokens/status` when an explicit token count is present, `text/status` when reasoning text is observed with absent explicit token count, and `-/status` when reasoning metadata is absent. Examples include `516/200`, `text/200`, and `-/-`. A new retry attempt clears attempt-scoped status, reasoning metadata, and upstream model until that attempt observes fresh values. History rows show completed response bytes for `size`. Attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. `model` renders `request_model/upstream_model`. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. Examples include `gpt-5.5/-`, `gpt-5.5/[same]`, and `gpt-5.5/gpt-5.5-mini`. The `error` column starts with a bracketed local-action prefix when guard actions exist, then the request error text. Prefix entries render as `guard:<value>` for standard reasoning guard retry, `cap:<value>` for capacity retry, `rec:<value>` for Responses continuation recovery, `block:<value>` for final local guard failure, and `err:<value>` for upstream transport errors. The value is `reasoning_tokens` when present, action HTTP status when present, the final local request status for terminal upstream transport failures, or `-`; HTTP status entries are yellow and reasoning-token entries are red, such as `[guard:516 guard:516 block:516] reasoning_guard_triggered ...`, `[rec:1552]`, and `[err:502 err:502] upstream_fetch_failed: fetch failed`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
+Active rows show elapsed time for `lat.`, known request bytes for `size`, and known upstream, status, reasoning metadata, and model fields as soon as the proxy observes them. `session` renders the short session id with a stable color chosen from a small bright palette; the same session id uses the same color in active and history rows, and missing sessions stay dim. `reas./code` renders `reasoning_tokens/status` when an explicit token count is present, `text/status` when reasoning text is observed with absent explicit token count, and `-/status` when reasoning metadata is absent. Examples include `516/200`, `text/200`, and `-/-`. A new proxy-internal retry attempt clears attempt-scoped status, reasoning metadata, and upstream model until that attempt observes fresh values. History rows show completed response bytes for `size`. Proxy-internal attempts greater than one are shown as a yellow number after the upstream name, such as `input3`; retry attempts use the same active upstream. `model` renders `request_model/upstream_model`. Missing request and upstream model fields render as `-`; matching request/upstream models render as `[same]`; differing upstream models render as the upstream model name. Examples include `gpt-5.5/-`, `gpt-5.5/[same]`, and `gpt-5.5/gpt-5.5-mini`. The `error` column starts with a bracketed prefix when client retries or guard actions exist, then local `error` text, then `failure_summary.code/message` for upstream HTTP failures. Prefix entries render as `client:<attempt>` for repeated Codex client requests, `guard:<value>` for standard reasoning guard retry, `cap:<value>` for capacity retry, `rec:<value>` for Responses continuation recovery, `block:<value>` for final local guard failure, and `err:<value>` for upstream transport errors. The guard value is `reasoning_tokens` when present, action HTTP status when present, the final local request status for terminal upstream transport failures, or `-`; HTTP status entries are yellow and reasoning-token entries are red, such as `[client:2] upstream_http_502: upstream returned HTTP 502`, `[guard:516 guard:516 block:516] reasoning_guard_triggered ...`, `[rec:1552]`, and `[err:502 err:502] upstream_fetch_failed: fetch failed`. Request error text renders in the final left-aligned `error` column as one current-width line; request records keep the full text, and wider terminals show more visible content on the next render. Truncated table cells use the shared single-character ellipsis `…`. Time, latency, and size use compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
 
 ## Implementation notes
 
@@ -329,8 +332,9 @@ session time up reas./code lat. size model error
 - `ccs proxy stop` switches to `passthrough` and forwards guarded upstream responses without guard actions.
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
+- Compact state history is updated before appending the complete JSONL request record.
 - The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
-- Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body.
+- Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body and recorded as `upstream_error` failures.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
 - Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
 - Non-stream JSON reasoning guard matches retry the same upstream and record `internal_retry`.
