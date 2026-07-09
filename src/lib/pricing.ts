@@ -28,6 +28,22 @@ export type ModelPriceCache = {
   models: Record<string, unknown>;
 };
 
+export type ModelPriceOverride = {
+  inputCostPerToken?: number;
+  outputCostPerToken?: number;
+  cacheReadInputTokenCost?: number;
+  input_cost_per_token?: number;
+  output_cost_per_token?: number;
+  cache_read_input_token_cost?: number;
+};
+
+export type ModelPriceCacheOptions = {
+  forceRefresh?: boolean;
+  overrides?: Record<string, ModelPriceOverride>;
+};
+
+export type ModelPricingStatus = "ok" | "partial" | "missing";
+
 export const litellmPricingUrl =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -40,17 +56,68 @@ type LiteLlmModelPrice = {
   cache_read_input_token_cost_priority?: unknown;
 };
 
-export async function readModelPriceCache(): Promise<ModelPriceCache> {
+const builtinModelPrices: Record<string, LiteLlmModelPrice> = {
+  "glm-5.2": {
+    input_cost_per_token: 0.0000014,
+    output_cost_per_token: 0.0000044,
+    cache_read_input_token_cost: 0.00000026,
+  },
+  "GLM-5.2": {
+    input_cost_per_token: 0.0000014,
+    output_cost_per_token: 0.0000044,
+    cache_read_input_token_cost: 0.00000026,
+  },
+  "zai/glm-5.2": {
+    input_cost_per_token: 0.0000014,
+    output_cost_per_token: 0.0000044,
+    cache_read_input_token_cost: 0.00000026,
+  },
+};
+
+export async function readModelPriceCache(options: ModelPriceCacheOptions = {}): Promise<ModelPriceCache> {
   const path = modelPricesCachePath();
   const cachedText = await readTextIfExists(path);
-  if (cachedText !== null) {
-    const parsed = JSON.parse(cachedText) as ModelPriceCache;
-    if (!parsed.models || typeof parsed.models !== "object") {
-      throw new Error(`invalid pricing cache: ${path}`);
-    }
-    return parsed;
+  if (!options.forceRefresh && cachedText !== null) {
+    return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
   }
 
+  try {
+    return applyModelPriceOverrides(await fetchModelPriceCache(), options.overrides);
+  } catch (error) {
+    if (cachedText !== null) {
+      return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
+    }
+    return applyModelPriceOverrides(mergeBuiltinModelPrices({
+      source: "builtin",
+      fetchedAt: new Date().toISOString(),
+      models: {},
+    }), options.overrides);
+  }
+}
+
+export async function readModelPriceCacheForModels(
+  modelUsage: Map<string, CodexModelUsage>,
+  speed: ResolvedCodexCostSpeed,
+  options: ModelPriceCacheOptions = {},
+): Promise<ModelPriceCache> {
+  const priceCache = await readModelPriceCache(options);
+  if (missingPricingModels(modelUsage, priceCache, speed).length === 0) {
+    return priceCache;
+  }
+  const refreshed = await readModelPriceCache({ ...options, forceRefresh: true });
+  return refreshed;
+}
+
+function parseModelPriceCache(text: string, path: string): ModelPriceCache {
+  const parsed = JSON.parse(text) as ModelPriceCache;
+  if (!parsed.models || typeof parsed.models !== "object") {
+    throw new Error(`invalid pricing cache: ${path}`);
+  }
+  return parsed;
+}
+
+async function fetchModelPriceCache(): Promise<ModelPriceCache> {
+  const path = modelPricesCachePath();
   let response: Response;
   try {
     response = await fetch(litellmPricingUrl);
@@ -68,7 +135,46 @@ export async function readModelPriceCache(): Promise<ModelPriceCache> {
     models,
   };
   await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
-  return cache;
+  return mergeBuiltinModelPrices(cache);
+}
+
+function mergeBuiltinModelPrices(cache: ModelPriceCache): ModelPriceCache {
+  return {
+    ...cache,
+    models: {
+      ...cache.models,
+      ...Object.fromEntries(Object.entries(builtinModelPrices).filter(([model]) => !(model in cache.models))),
+    },
+  };
+}
+
+function applyModelPriceOverrides(
+  cache: ModelPriceCache,
+  overrides: Record<string, ModelPriceOverride> | undefined,
+): ModelPriceCache {
+  if (!overrides || Object.keys(overrides).length === 0) {
+    return cache;
+  }
+  const models = { ...cache.models };
+  for (const [model, override] of Object.entries(overrides)) {
+    const existing = typeof models[model] === "object" && models[model] !== null
+      ? models[model] as LiteLlmModelPrice
+      : {};
+    models[model] = {
+      ...existing,
+      input_cost_per_token: finiteOverride(override.inputCostPerToken ?? override.input_cost_per_token)
+        ?? existing.input_cost_per_token,
+      output_cost_per_token: finiteOverride(override.outputCostPerToken ?? override.output_cost_per_token)
+        ?? existing.output_cost_per_token,
+      cache_read_input_token_cost: finiteOverride(override.cacheReadInputTokenCost ?? override.cache_read_input_token_cost)
+        ?? existing.cache_read_input_token_cost,
+    };
+  }
+  return { ...cache, models };
+}
+
+function finiteOverride(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 export async function resolveCodexCostSpeed(speed: CodexCostSpeed): Promise<ResolvedCodexCostSpeed> {
@@ -116,9 +222,14 @@ export function modelPrice(
     };
   }
 
-  const input = readFiniteNumber(raw.input_cost_per_token_priority);
-  const output = readFiniteNumber(raw.output_cost_per_token_priority);
-  const cacheRead = readFiniteNumber(raw.cache_read_input_token_cost_priority);
+  const hasPriorityPricing = raw.input_cost_per_token_priority !== undefined
+    || raw.output_cost_per_token_priority !== undefined
+    || raw.cache_read_input_token_cost_priority !== undefined;
+  const input = readFiniteNumber(hasPriorityPricing ? raw.input_cost_per_token_priority : raw.input_cost_per_token);
+  const output = readFiniteNumber(hasPriorityPricing ? raw.output_cost_per_token_priority : raw.output_cost_per_token);
+  const cacheRead = readFiniteNumber(hasPriorityPricing
+    ? raw.cache_read_input_token_cost_priority
+    : raw.cache_read_input_token_cost);
   if (
     (usage.inputTokens > usage.cachedInputTokens && input === null) ||
     (usage.outputTokens > 0 && output === null) ||
@@ -131,6 +242,31 @@ export function modelPrice(
     cacheRead: cacheRead ?? 0,
     output: output ?? 0,
   };
+}
+
+export function modelPricingStatus(
+  cache: ModelPriceCache,
+  model: string,
+  speed: ResolvedCodexCostSpeed,
+): ModelPricingStatus {
+  const baseUsage: CodexModelUsage = {
+    inputTokens: 1,
+    cachedInputTokens: 0,
+    outputTokens: 1,
+    reasoningOutputTokens: 0,
+    totalTokens: 2,
+  };
+  if (!modelPrice(cache, model, speed, baseUsage)) {
+    return "missing";
+  }
+  const cacheReadUsage: CodexModelUsage = {
+    inputTokens: 1,
+    cachedInputTokens: 1,
+    outputTokens: 1,
+    reasoningOutputTokens: 0,
+    totalTokens: 2,
+  };
+  return modelPrice(cache, model, speed, cacheReadUsage) ? "ok" : "partial";
 }
 
 export function missingPricingModels(
@@ -154,7 +290,7 @@ export function calculateCodexCostUSD(
   for (const [model, usage] of modelUsage) {
     const price = modelPrice(cache, model, speed, usage);
     if (!price) {
-      throw new Error(`missing pricing model: ${model}`);
+      continue;
     }
     const nonCachedInputTokens = usage.inputTokens - usage.cachedInputTokens;
     if (nonCachedInputTokens < 0) {

@@ -69,6 +69,16 @@ Supported bucket durations:
 
 `--speed auto` reads the active Codex config and applies fast pricing when the configured service tier requires it. `--speed standard` and `--speed fast` force the pricing mode.
 
+`ccs models` uses the same pricing cache and speed resolution for visibility. Terminal output adds one `price` column next to each provider column. JSON output includes top-level pricing metadata and a per-profile `pricing` object keyed by model id.
+
+Pricing status values:
+
+```text
+ok       input, output, and cache-read pricing are present
+partial  input and output pricing are present, cache-read pricing is missing
+missing  base input or output pricing is missing
+```
+
 ## Reports
 
 ### Daily Totals
@@ -356,7 +366,7 @@ POST /ccs/top/resume
 POST /ccs/top/reset
 ```
 
-`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version. Startup publishes top HTTP endpoints before central cost derived refresh; cost refresh failures are logged and do not block `/health` or `/ccs/top/state`. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`; `pause` and `resume` use the same queued control path. Control and status HTTP clients use at least a five-second timeout.
+`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. Every metric record includes `missingPricingModels`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version. Startup publishes top HTTP endpoints before central cost derived refresh; cost refresh failures are logged and do not block `/health` or `/ccs/top/state`. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`; `pause` and `resume` use the same queued control path. Control and status HTTP clients use at least a five-second timeout.
 
 Central CLI:
 
@@ -461,7 +471,7 @@ costUSD
 
 `cached_input_tokens` and `reasoning_output_tokens` are parsed for correct cost calculation and validation. Default tables omit them.
 
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields.
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. A `pricing` column appears when any row has missing prices. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields and includes `missingPricingModels`.
 
 ## Cost Calculation
 
@@ -516,9 +526,33 @@ cache_read_input_token_cost_priority
 output_cost_per_token_priority
 ```
 
-Cost reporting requires pricing entries for every model with priced usage. The command fails and lists the missing model names when pricing is incomplete.
+Cost reporting calculates the known priced portion when pricing is incomplete. Missing model prices do not fail local reports, central reports, or central status. Metric JSON includes `missingPricingModels`, and terminal tables show `missing N` in the `pricing` column when a row excludes unpriced usage.
 
-When pricing cache is missing and network refresh fails, the command fails and prints the pricing cache path.
+When the cache is missing or used models are missing from the cache, the command refreshes LiteLLM pricing once. If refresh is unavailable, the command continues with built-in supplemental prices and reports remaining missing models explicitly.
+
+Built-in supplemental prices cover GLM-5.2 aliases:
+
+```text
+glm-5.2
+GLM-5.2
+zai/glm-5.2
+```
+
+Manual overrides live in `~/.config/codex-tools/profiles.json`:
+
+```json
+{
+  "pricing": {
+    "overrides": {
+      "custom-model": {
+        "inputCostPerToken": 0.000001,
+        "outputCostPerToken": 0.000002,
+        "cacheReadInputTokenCost": 0.0000001
+      }
+    }
+  }
+}
+```
 
 ## Date And Time Rules
 
@@ -641,7 +675,7 @@ dist/lib/pricing.js
 - model price cache.
 - LiteLLM pricing refresh.
 - cost calculation.
-- missing model errors.
+- missing model detection.
 
 `src/commands/ccs.ts` owns:
 
@@ -659,6 +693,8 @@ pnpm check
 pnpm build
 git diff --check
 NO_COLOR=1 node dist/bin/ccs.js --help
+NO_COLOR=1 node dist/bin/ccs.js models
+NO_COLOR=1 node dist/bin/ccs.js models --json
 NO_COLOR=1 node dist/bin/ccs.js cost --help
 NO_COLOR=1 node dist/bin/ccs.js cost daily --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost weekly --since 2026-05-01 --until 2026-05-30
@@ -679,6 +715,7 @@ Acceptance:
 - `ccs cost day` includes both time buckets and projects for that day.
 - `ccs cost project PROJECT` shows one project by day.
 - JSON output uses stable lower camel case keys.
-- Unknown pricing models fail the command with model names.
+- Unknown pricing models appear in `missingPricingModels` and terminal pricing status.
+- `ccs models` shows one adjacent price column per provider and JSON per-model pricing status.
 - JSONL files are read line by line.
 - README help, source help, built `dist`, and this spec describe the same command surface.
