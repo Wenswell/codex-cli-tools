@@ -9,6 +9,7 @@ import {
   missingPricingModels,
   modelPricingStatus,
   readModelPriceCache,
+  readModelPriceCacheForModels,
   writeModelPriceModelUpdatePlan,
 } from "../dist/lib/pricing.js";
 
@@ -61,6 +62,41 @@ test("pricing includes builtin GLM-5.2 prices without a remote cache", async () 
     const cache = await readModelPriceCache();
 
     assert.equal(modelPricingStatus(cache, "glm-5.2", "standard"), "ok");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousCacheHome;
+    }
+    await rm(cacheHome, { recursive: true, force: true });
+  }
+});
+
+test("pricing cache reads do not fetch remote prices for missing models", async () => {
+  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-no-auto-refresh-cache-"));
+  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    process.env.XDG_CACHE_HOME = cacheHome;
+    await writePriceCache(cacheHome, {
+      "kept-model": modelPriceFixture(0.000003),
+    });
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify({
+        "missing-model": modelPriceFixture(0.000011),
+      }), { status: 200 });
+    };
+
+    const cache = await readModelPriceCacheForModels(new Map([
+      ["missing-model", usage(10, 5)],
+    ]), "standard");
+
+    assert.equal(fetchCount, 0);
+    assert.equal(cache.models["missing-model"], undefined);
+    assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousCacheHome === undefined) {
@@ -175,7 +211,7 @@ test("pricing model update plan fails before cache writes when remote fetch fail
 
     await assert.rejects(
       buildModelPriceModelUpdatePlan(["kept-model"], "standard"),
-      /pricing cache missing and refresh failed/,
+      /pricing refresh failed/,
     );
     const cache = await readModelPriceCache();
 
