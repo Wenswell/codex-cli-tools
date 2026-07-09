@@ -36,6 +36,7 @@ Runtime records store normalized facts by default. Modules that handle prompts, 
 Large raw payloads should use content-addressed archives:
 
 - Keep state and history compact unless a raw debug mode is enabled.
+- Error response bodies belong in raw debug archives. State and history records keep error summaries and `raw_ref`.
 - Keep JSONL history bounded enough for long-running monitors.
 - Coalesce unchanged monitor samples so idle heartbeats do not grow history or rewrite state every interval.
 - Treat watch refresh cadence as display behavior. State writes and history appends happen when observed runtime facts change.

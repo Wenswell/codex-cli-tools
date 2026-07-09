@@ -16,6 +16,7 @@ import {
   normalizeDomains,
   parseClvmConfig,
   parseDuration,
+  renderMonitorFailureLines,
   renderMonitorResultLines,
 } from "../dist/commands/clvm.js";
 import { visibleLength } from "../dist/lib/text.js";
@@ -592,6 +593,61 @@ test("omits clvm http error response body by default", async () => {
   }
 });
 
+test("keeps clvm http error body only in raw archive when enabled", async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(500, {
+        "content-type": "application/json",
+        "x-api-key": "response-secret",
+      });
+      res.end(JSON.stringify({ error: "secret controller detail" }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        rawArchive: true,
+      }, null, 2)}\n`,
+    );
+
+    const stdout = await runClvmCommand(home);
+
+    assert.match(stdout, /status:\s+unavailable http_error/);
+    assert.doesNotMatch(stdout, /secret controller detail|response-secret/);
+
+    const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
+    assert.equal(state.error.body, undefined);
+    assert.equal(state.raw_ref.stored, true);
+    assert.match(state.raw_ref.path, /clvm-raw\/[a-f0-9]{64}\.json$/);
+
+    const history = (await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(history[0].error.body, undefined);
+    assert.deepEqual(history[0].raw_ref, state.raw_ref);
+
+    const raw = JSON.parse(await readFile(state.raw_ref.path, "utf8"));
+    assert.match(raw.body, /secret controller detail/);
+    assert.equal(raw.headers["x-api-key"], "[redacted]");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("omits oversized clvm raw archive payloads", async () => {
   const rawPayload = {
     note: "x".repeat(1024 * 1024),
@@ -1020,6 +1076,50 @@ test("monitor recent closed rows follow TTY height and non-TTY default", () => {
   assert.doesNotMatch(tiny, /recent closed/);
 });
 
+test("monitor headers fit TTY width", () => {
+  const config = buildRuntimeConfig(
+    {
+      baseUrl: "http://127.0.0.1:9090",
+      secret: "",
+      domains: ["very-long-domain-name.example.com", "second-long-domain-name.example.com"],
+      interval: "1s",
+      zeroSpeedThreshold: 160 * 1024,
+      closeZeroForSeconds: 0.5,
+      rawArchive: false,
+    },
+    { color: false },
+    { autoCloseEnabled: true, clear: false, once: true },
+  );
+  const success = withStdoutProperties(
+    { isTTY: true, columns: 60, rows: 20 },
+    () => renderMonitorResultLines({
+      timestamp: "2026-06-10T00:01:00.000Z",
+      totalConnections: 0,
+      matchedConnections: [],
+      closedConnections: [],
+      closeFailures: [],
+      closedHistory: [],
+      closedTotal: 123,
+    }, config)[0],
+  );
+  const failure = withStdoutProperties(
+    { isTTY: true, columns: 60, rows: 20 },
+    () => renderMonitorFailureLines({
+      timestamp: "2026-06-10T00:01:00.000Z",
+      error: { code: "http_error", message: "GET /connections failed with 500 Internal Server Error" },
+      retry: {
+        attempt: 12,
+        intervalMs: 300000,
+        nextAt: "2026-06-10T00:06:00.000Z",
+      },
+      raw: null,
+    }, config)[0],
+  );
+
+  assert.ok(visibleLength(success) <= 60);
+  assert.ok(visibleLength(failure) <= 60);
+});
+
 test("monitor retains closed history beyond the default visible rows", async () => {
   let requestCount = 0;
   const deletedIds = [];
@@ -1109,6 +1209,104 @@ test("monitor retains closed history beyond the default visible rows", async () 
     const state = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8"));
     assert.equal(state.ok, true);
     assert.equal(state.result.closedHistory.length >= 7, true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("omits automatic close failure raw body from state and history", async () => {
+  const closeBody = JSON.stringify({ error: "secret delete detail" });
+  const server = createServer((req, res) => {
+    if (req.url === "/connections" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        connections: [
+          {
+            id: "abc",
+            metadata: { host: "api.example.com", destinationPort: 443 },
+            upload: 0,
+            download: 0,
+            uploadSpeed: 0,
+            downloadSpeed: 0,
+            start: "2026-06-10T00:00:00.000Z",
+            chains: ["Proxy", "HK-01"],
+            rule: "DOMAIN-SUFFIX",
+            rulePayload: "example.com",
+          },
+        ],
+      }));
+      return;
+    }
+
+    if (req.url === "/connections/abc" && req.method === "DELETE") {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(closeBody);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
+  try {
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(
+      join(home, ".config", "codex-tools", "clvm.json"),
+      `${JSON.stringify({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        secret: "",
+        domains: ["example.com"],
+        interval: "1ms",
+        closeZeroForSeconds: 0.0005,
+        rawArchive: true,
+      }, null, 2)}\n`,
+    );
+
+    const child = spawnNode(["dist/bin/clvm.js", "monitor", "--no-color", "--no-clear"], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let sigintSent = false;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (!sigintSent && stdout.includes("closeFailed=1")) {
+        sigintSent = true;
+        child.kill("SIGINT");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    const watchdog = setTimeout(() => child.kill("SIGINT"), 5000);
+    const exit = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    clearTimeout(watchdog);
+
+    assert.deepEqual(exit, { code: 0, signal: null });
+    assert.equal(stderr, "");
+    assert.doesNotMatch(stdout, /secret delete detail/);
+
+    const stateText = await readFile(join(home, ".cache", "codex-tools", "clvm-state.json"), "utf8");
+    assert.doesNotMatch(stateText, /secret delete detail/);
+    const state = JSON.parse(stateText);
+    assert.equal(state.result.closeFailures.length, 1);
+    assert.equal(state.result.closeFailures[0].raw, undefined);
+    assert.equal(state.result.closeFailures[0].error.body, undefined);
+
+    const historyText = await readFile(join(home, ".cache", "codex-tools", "clvm-history.jsonl"), "utf8");
+    assert.doesNotMatch(historyText, /secret delete detail/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });

@@ -5,6 +5,7 @@ Project design specs:
 - [CLI runtime records](./CLI_RUNTIME_RECORDS.md)
 - [engineering preferences](./ENGINEERING_PREFERENCES.md)
 - [testing guidelines](./TESTING_GUIDELINES.md)
+- [clvm optimization plan](./CLVM_OPTIMIZATION_PLAN.md)
 - [terminal unification plan](./TERMINAL_UNIFICATION_PLAN.md)
 - [runtime logging review](./RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](./RUNTIME_LOGGING_SECURITY_PLAN.md)
