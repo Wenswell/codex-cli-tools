@@ -1268,7 +1268,11 @@ function formatProxyRequestModel(model: string | null): string {
   if (!model) {
     return textDim("-");
   }
-  return colorName(truncateProxyText(model, PROXY_TABLE_MODEL_WIDTH));
+  return colorName(truncateProxyText(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH));
+}
+
+function formatProxyModelDisplayName(model: string): string {
+  return model.startsWith("gpt-") ? `o${model.slice(4)}` : model;
 }
 
 function formatProxyReasoningTokens(reasoningTokens: number | null): string {
@@ -1293,7 +1297,7 @@ function formatProxyUpstreamModel(requestModel: string | null, upstreamModel: st
   if (requestModel && upstreamModel === requestModel) {
     return textDim("[same]");
   }
-  return textRed(truncateProxyText(upstreamModel, PROXY_TABLE_MODEL_WIDTH));
+  return textRed(truncateProxyText(formatProxyModelDisplayName(upstreamModel), PROXY_TABLE_MODEL_WIDTH));
 }
 
 function formatProxyError(record: ProxyRequestRecord): string {
