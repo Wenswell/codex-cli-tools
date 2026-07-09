@@ -14,6 +14,7 @@ Project design specs:
 - [ccs proxy route boundary plan](./CCS_PROXY_ROUTE_BOUNDARY_PLAN.md)
 - [ccs proxy request log plan](./CCS_PROXY_REQUEST_LOG_PLAN.md)
 - [ccs proxy reasoning observability plan](./CCS_PROXY_REASONING_OBSERVABILITY_PLAN.md)
+- [ccs proxy model display plan](./CCS_PROXY_MODEL_DISPLAY_PLAN.md)
 - [ccs proxy history plan](./CCS_PROXY_HISTORY_PLAN.md)
 - [ccs proxy upstream sync plan](./CCS_PROXY_UPSTREAM_SYNC_PLAN.md)
 - [ccs proxy mode plan](./CCS_PROXY_MODE_PLAN.md)
