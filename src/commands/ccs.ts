@@ -19,7 +19,9 @@ import {
   aggregateProjectDaily,
   aggregateProjects,
   aggregateWeekly,
+  addUsage,
   dateRangeForDay,
+  emptyAggregate,
   filterCodexUsageEvents,
   formatProjectPath,
   loadCodexUsageEvents,
@@ -49,10 +51,14 @@ import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.
 import {
   calculateCodexCostUSD,
   missingPricingModels,
+  modelPricingStatus,
   readModelPriceCache,
+  readModelPriceCacheForModels,
   resolveCodexCostSpeed,
   type CodexCostSpeed,
   type ModelPriceCache,
+  type ModelPriceOverride,
+  type ModelPricingStatus,
   type ResolvedCodexCostSpeed,
 } from "../lib/pricing.js";
 import {
@@ -63,6 +69,7 @@ import {
   textDim,
   textGreen,
   textRed,
+  textYellow,
   padVisibleLeft,
   padVisibleRight,
   visibleLength,
@@ -99,6 +106,9 @@ type ProfilesFile = {
   usage?: Record<string, Profile>;
   current?: string;
   toggle?: string[];
+  pricing?: {
+    overrides?: Record<string, ModelPriceOverride>;
+  };
   top?: {
     stateUrls?: string[];
   };
@@ -147,6 +157,11 @@ type ModelsOptions = {
 type ModelsProfileResult = {
   name: string;
   result: ModelsResult;
+};
+
+type ModelsPricingContext = {
+  priceCache: ModelPriceCache;
+  speed: ResolvedCodexCostSpeed;
 };
 
 type UsageTopTarget = {
@@ -1921,11 +1936,12 @@ async function printModels(profiles: ProfilesFile, args: string[]): Promise<void
     return;
   }
   const options = parseModelsArgs(args);
+  const pricing = await readModelsPricingContext(profiles);
 
   const entries = Object.entries(profiles.profiles ?? {});
   if (entries.length === 0) {
     if (options.json) {
-      console.log(stringifyJson(buildModelsJson([])).trimEnd());
+      console.log(stringifyJson(buildModelsJson([], pricing)).trimEnd());
     } else {
       console.log(textDim("no profiles"));
     }
@@ -1938,22 +1954,41 @@ async function printModels(profiles: ProfilesFile, args: string[]): Promise<void
   })));
 
   if (options.json) {
-    console.log(stringifyJson(buildModelsJson(results)).trimEnd());
+    console.log(stringifyJson(buildModelsJson(results, pricing)).trimEnd());
     return;
   }
 
   const rowCount = Math.max(1, ...results.map(({ result }) => result.models.length || 1));
   const rows = Array.from({ length: rowCount }, (_value, index) => (
-    Object.fromEntries(results.map(({ name, result }) => {
-      const value = result.models[index] ?? (index === 0 ? formatModelsStatus(result) : "");
-      return [name, value];
+    Object.fromEntries(results.flatMap(({ name, result }) => {
+      const model = result.models[index];
+      const value = model ?? (index === 0 ? formatModelsStatus(result) : "");
+      const price = model ? formatModelPricingStatus(modelPricingStatus(pricing.priceCache, model, pricing.speed)) : "";
+      return [
+        [name, value],
+        [modelsPricingColumnKey(name), price],
+      ];
     }))
   ));
 
   printTable(
-    results.map(({ name }) => ({ key: name, title: name })),
+    results.flatMap(({ name }) => [
+      { key: name, title: name },
+      { key: modelsPricingColumnKey(name), title: "price" },
+    ]),
     rows,
   );
+}
+
+async function readModelsPricingContext(profiles: ProfilesFile): Promise<ModelsPricingContext> {
+  return {
+    priceCache: await readModelPriceCache(ccsCostPriceOptions(profiles)),
+    speed: await resolveCodexCostSpeed("auto"),
+  };
+}
+
+function modelsPricingColumnKey(name: string): string {
+  return `${name}__pricing`;
 }
 
 function parseModelsArgs(args: string[]): ModelsOptions {
@@ -1968,13 +2003,22 @@ function parseModelsArgs(args: string[]): ModelsOptions {
   return { json };
 }
 
-function buildModelsJson(results: ModelsProfileResult[]): unknown {
+function buildModelsJson(results: ModelsProfileResult[], pricing: ModelsPricingContext): unknown {
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
+    pricing: {
+      speed: pricing.speed,
+      source: pricing.priceCache.source,
+      fetchedAt: pricing.priceCache.fetchedAt,
+    },
     profiles: results.map(({ name, result }) => ({
       name,
       models: result.models,
+      pricing: Object.fromEntries(result.models.map((model) => [
+        model,
+        modelPricingStatus(pricing.priceCache, model, pricing.speed),
+      ])),
       error: result.error,
     })),
   };
@@ -1982,6 +2026,16 @@ function buildModelsJson(results: ModelsProfileResult[]): unknown {
 
 function formatModelsStatus(result: ModelsResult): string {
   return result.error ? textRed(result.error) : textDim("(none)");
+}
+
+function formatModelPricingStatus(status: ModelPricingStatus): string {
+  if (status === "ok") {
+    return textGreen("ok");
+  }
+  if (status === "partial") {
+    return textYellow("partial");
+  }
+  return textRed("missing");
 }
 
 function usageTableColumns(): TableColumn[] {
@@ -3981,7 +4035,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
   };
   const runCcsCostRefresh = async (): Promise<void> => {
     try {
-      await refreshCentralCcsCostDerivedStore();
+      await refreshCentralCcsCostDerivedStore(profiles);
     } catch (error) {
       console.error(`ccs cost refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -4046,7 +4100,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
     if (request.method === "GET" && url.pathname === "/ccs/cost/status") {
       void (async () => {
         try {
-          sendUsageTopJson(response, 200, await buildCcsCostStatus());
+          sendUsageTopJson(response, 200, await buildCcsCostStatus(profiles));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           sendUsageTopJson(response, 500, { error: message });
@@ -4065,7 +4119,7 @@ async function serveUsageTop(profiles: ProfilesFile, portValue: string): Promise
       }
       void (async () => {
         try {
-          sendUsageTopJson(response, 200, await buildCentralCcsCostReport(costOptions));
+          sendUsageTopJson(response, 200, await buildCentralCcsCostReport(costOptions, profiles));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           sendUsageTopJson(response, 500, { error: message });
@@ -4446,6 +4500,7 @@ type CcsCostMetricsRecord = {
   inputTokens: number;
   outputTokens: number;
   costUSD: number;
+  missingPricingModels: string[];
 };
 
 type CcsCostTokenUsageRecord = {
@@ -4506,6 +4561,7 @@ type CcsCostSnapshotSummary = {
   inputTokens: number;
   outputTokens: number;
   costUSD: number;
+  missingPricingModels: string[];
 };
 
 type CcsCostStatus = {
@@ -4648,14 +4704,10 @@ async function runCcsCost(args: string[], profiles: ProfilesFile): Promise<void>
     return;
   }
 
-  await printLocalCcsCost(parsed.options);
+  await printLocalCcsCost(parsed.options, profiles);
 }
 
-async function printLocalCcsCost(options: CcsCostOptions): Promise<void> {
-  const context: CcsCostContext = {
-    priceCache: await readModelPriceCache(),
-    speed: await resolveCodexCostSpeed(options.speed),
-  };
+async function printLocalCcsCost(options: CcsCostOptions, profiles: ProfilesFile): Promise<void> {
   const events = await loadCodexUsageEvents({
     ...(options.report === "day" && options.day ? dateRangeForDay(options.day, options.timezone) : {
       since: options.since,
@@ -4664,7 +4716,24 @@ async function printLocalCcsCost(options: CcsCostOptions): Promise<void> {
     }),
     project: options.project,
   });
+  const speed = await resolveCodexCostSpeed(options.speed);
+  const context: CcsCostContext = {
+    priceCache: await readModelPriceCacheForModels(ccsCostAggregateEvents(events).modelUsage, speed, ccsCostPriceOptions(profiles)),
+    speed,
+  };
   printCcsCostReport(buildCcsCostReport(options, events, context, "local"), options);
+}
+
+function ccsCostPriceOptions(profiles: ProfilesFile): { overrides?: Record<string, ModelPriceOverride> } {
+  return { overrides: profiles.pricing?.overrides };
+}
+
+function ccsCostAggregateEvents(events: CodexUsageEvent[]): CodexUsageAggregate {
+  const aggregate = emptyAggregate();
+  for (const event of events) {
+    addUsage(aggregate, event.model, event.usage);
+  }
+  return aggregate;
 }
 
 function parseCcsCostCommandArgs(args: string[]): CcsCostParsedArgs {
@@ -4750,7 +4819,6 @@ function buildCcsCostReport(
   const timeRows = aggregateDayTimeBuckets(selectedEvents, options.timezone, day, options.bucketMinutes);
   const unsortedProjectRows = aggregateDayProjects(selectedEvents, options.timezone, day);
   const total = totalAggregate(unsortedProjectRows);
-  assertCcsCostPricing(total, context);
   const projectRows = sortRowsByCost(
     unsortedProjectRows,
     (aggregate) => ccsCostOf(aggregate, context),
@@ -4776,7 +4844,6 @@ function buildCcsCostRowsReport(
   source: CcsCostReportPayload["source"],
 ): CcsCostReportPayload {
   const total = totalAggregate(rows);
-  assertCcsCostPricing(total, context);
   return {
     version: 1,
     report: options.report,
@@ -4974,6 +5041,7 @@ function ccsCostReportJson(report: CcsCostReportPayload): unknown {
           inputTokens: row.inputTokens,
           outputTokens: row.outputTokens,
           costUSD: row.costUSD,
+          missingPricingModels: row.missingPricingModels,
         };
       }),
       projects: (report.projects ?? []).map((row) => ({
@@ -4981,6 +5049,7 @@ function ccsCostReportJson(report: CcsCostReportPayload): unknown {
         inputTokens: row.inputTokens,
         outputTokens: row.outputTokens,
         costUSD: row.costUSD,
+        missingPricingModels: row.missingPricingModels,
       })),
     };
   }
@@ -4994,6 +5063,7 @@ function ccsCostReportJson(report: CcsCostReportPayload): unknown {
       inputTokens: row.inputTokens,
       outputTokens: row.outputTokens,
       costUSD: row.costUSD,
+      missingPricingModels: row.missingPricingModels,
     })),
     totals: report.totals,
   };
@@ -5027,7 +5097,10 @@ function printCcsCostDayReport(report: CcsCostReportPayload, options: CcsCostOpt
   }
   const title = report.source === "central" ? "ccs cost central day" : "ccs cost day";
   console.log(`${title}  ${day}  bucket ${options.bucket}  timezone ${options.timezone}`);
-  console.log(textBold(`total  input ${colorInput(formatCcsCostTokens(report.totals.inputTokens, options.raw))}  output ${colorOutput(formatCcsCostTokens(report.totals.outputTokens, options.raw))}  cost ${colorCost(formatCcsCostUSD(report.totals.costUSD, options.raw))}`));
+  const pricing = report.totals.missingPricingModels.length > 0
+    ? `  pricing ${formatCcsCostPricing(report.totals)}`
+    : "";
+  console.log(textBold(`total  input ${colorInput(formatCcsCostTokens(report.totals.inputTokens, options.raw))}  output ${colorOutput(formatCcsCostTokens(report.totals.outputTokens, options.raw))}  cost ${colorCost(formatCcsCostUSD(report.totals.costUSD, options.raw))}${pricing}`));
   console.log("");
   console.log("by time");
   printCcsCostRecordTable("time", report.timeBuckets ?? [], null, options.raw, undefined, report.totals);
@@ -5045,13 +5118,17 @@ function printCcsCostRecordTable(
   shareTotal: CcsCostMetricsRecord | null = total,
 ): void {
   const totalCostUSD = shareTotal?.costUSD ?? 0;
-  const bodyRows = rows.map((row) => ccsCostRecordTableRow(formatKey(row.key), row, raw, false, totalCostUSD));
-  const totalRow = total ? ccsCostRecordTableRow("total", total, raw, true, totalCostUSD) : null;
+  const showPricing = [...rows, ...(total ? [total] : [])].some(ccsCostHasMissingPricing);
+  const bodyRows = rows.map((row) => ccsCostRecordTableRow(formatKey(row.key), row, raw, false, totalCostUSD, showPricing));
+  const totalRow = total ? ccsCostRecordTableRow("total", total, raw, true, totalCostUSD, showPricing) : null;
   const tableRows = [...bodyRows];
   if (totalRow) {
     tableRows.push(totalRow);
   }
-  const formatted = renderTable(ccsCostRecordTableColumns(firstHeader), tableRows.map(ccsCostRecordTableValues));
+  const formatted = renderTable(
+    ccsCostRecordTableColumns(firstHeader, showPricing),
+    tableRows.map((row) => ccsCostRecordTableValues(row, showPricing)),
+  );
   const separatorIndex = totalRow ? formatted.length - 1 : -1;
   const width = Math.max(0, ...formatted.map(visibleLength));
   for (let index = 0; index < formatted.length; index += 1) {
@@ -5062,25 +5139,27 @@ function printCcsCostRecordTable(
   }
 }
 
-function ccsCostRecordTableColumns(firstHeader: string): TableColumn[] {
+function ccsCostRecordTableColumns(firstHeader: string, showPricing: boolean): TableColumn[] {
   return [
     { key: "label", title: firstHeader },
     { key: "input", title: "input", align: "right" },
     { key: "output", title: "output", align: "right" },
     { key: "cost", title: "cost", align: "right" },
+    ...(showPricing ? [{ key: "pricing", title: "pricing" }] : []),
     { key: "share", title: "share", align: "right" },
     { key: "bar", title: "bar" },
   ];
 }
 
-function ccsCostRecordTableValues(row: string[]): TableRow {
+function ccsCostRecordTableValues(row: string[], showPricing: boolean): TableRow {
   return {
     label: row[0] ?? "",
     input: row[1] ?? "",
     output: row[2] ?? "",
     cost: row[3] ?? "",
-    share: row[4] ?? "",
-    bar: row[5] ?? "",
+    pricing: showPricing ? row[4] ?? "" : "",
+    share: row[showPricing ? 5 : 4] ?? "",
+    bar: row[showPricing ? 6 : 5] ?? "",
   };
 }
 
@@ -5090,27 +5169,41 @@ function ccsCostRecordTableRow(
   raw: boolean,
   emphasize: boolean,
   totalCostUSD: number,
+  showPricing: boolean,
 ): string[] {
   const row = [
     label,
     colorInput(formatCcsCostTokens(record.inputTokens, raw)),
     colorOutput(formatCcsCostTokens(record.outputTokens, raw)),
     colorCost(formatCcsCostUSD(record.costUSD, raw)),
+    ...(showPricing ? [formatCcsCostPricing(record)] : []),
     formatCcsCostShare(record.costUSD, totalCostUSD),
     colorCost(formatCcsCostBar(record.costUSD, totalCostUSD)),
   ];
   return emphasize ? row.map(textBold) : row;
 }
 
+function ccsCostHasMissingPricing(record: CcsCostMetricsRecord): boolean {
+  return record.missingPricingModels.length > 0;
+}
+
+function formatCcsCostPricing(record: CcsCostMetricsRecord): string {
+  return record.missingPricingModels.length === 0
+    ? textGreen("ok")
+    : textRed(`missing ${record.missingPricingModels.length}`);
+}
+
 function ccsCostMetricsJson(aggregate: CodexUsageAggregate, context: CcsCostContext): {
   inputTokens: number;
   outputTokens: number;
   costUSD: number;
+  missingPricingModels: string[];
 } {
   return {
     inputTokens: aggregate.inputTokens,
     outputTokens: aggregate.outputTokens,
     costUSD: roundCostUSD(ccsCostOf(aggregate, context)),
+    missingPricingModels: missingPricingModels(aggregate.modelUsage, context.priceCache, context.speed),
   };
 }
 
@@ -5372,11 +5465,15 @@ function normalizeCcsCostTokenUsageRecord(value: unknown): CcsCostTokenUsageReco
   return ccsCostTokenUsageRecord(raw as CcsCostTokenUsageRecord);
 }
 
-async function buildCentralCcsCostReport(options: CcsCostOptions): Promise<CcsCostReportPayload> {
+async function buildCentralCcsCostReport(options: CcsCostOptions, profiles: ProfilesFile): Promise<CcsCostReportPayload> {
   const derived = await readCcsCostDerivedStore();
-  const priceCache = await readModelPriceCache();
+  const priceCache = await readCcsCostPriceCacheForDerived(derived, profiles, options.speed);
   const priceFingerprint = await ccsCostPriceFingerprint();
-  const cacheKey = ccsCostReportCacheKey(derived.snapshotFingerprint, priceFingerprint, options);
+  const cacheKey = ccsCostReportCacheKey(
+    derived.snapshotFingerprint,
+    `${priceFingerprint}:${ccsCostPricingConfigFingerprint(profiles)}`,
+    options,
+  );
   const cached = ccsCostReportCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -5386,9 +5483,9 @@ async function buildCentralCcsCostReport(options: CcsCostOptions): Promise<CcsCo
   return report;
 }
 
-async function buildCcsCostStatus(): Promise<CcsCostStatus> {
+async function buildCcsCostStatus(profiles: ProfilesFile): Promise<CcsCostStatus> {
   const derived = await readCcsCostDerivedStore();
-  const priceCache = await readModelPriceCache();
+  const priceCache = await readCcsCostPriceCacheForDerived(derived, profiles, "auto");
   return {
     version: 1,
     updatedAt: new Date().toISOString(),
@@ -5403,12 +5500,13 @@ async function buildCcsCostStatus(): Promise<CcsCostStatus> {
         inputTokens: metrics.inputTokens,
         outputTokens: metrics.outputTokens,
         costUSD: metrics.costUSD,
+        missingPricingModels: metrics.missingPricingModels,
       };
     }).sort((left, right) => left.machine.localeCompare(right.machine)),
   };
 }
 
-async function refreshCentralCcsCostDerivedStore(): Promise<{ fingerprint: string; reports: number }> {
+async function refreshCentralCcsCostDerivedStore(profiles: ProfilesFile): Promise<{ fingerprint: string; reports: number }> {
   const derived = await buildCcsCostDerivedStore();
   await writeTextFileAtomic(ccsCostDerivedPath(), stringifyJson(derived), 0o600);
   ccsCostDerivedCache = derived;
@@ -5416,9 +5514,62 @@ async function refreshCentralCcsCostDerivedStore(): Promise<{ fingerprint: strin
   const options = ["daily", "weekly", "monthly", "projects"]
     .map((report) => defaultCentralCcsCostOptions(report as CcsCostReport, derived.timezone));
   for (const option of options) {
-    await buildCentralCcsCostReport(option);
+    await buildCentralCcsCostReport(option, profiles);
   }
   return { fingerprint: derived.snapshotFingerprint, reports: options.length };
+}
+
+async function readCcsCostPriceCacheForDerived(
+  derived: CcsCostDerivedStore,
+  profiles: ProfilesFile,
+  speed: CodexCostSpeed,
+): Promise<ModelPriceCache> {
+  if (speed !== "auto") {
+    const modelUsage = ccsCostModelUsageFromDerivedStore(derived, ["standard", "fast"]);
+    return readModelPriceCacheForModels(modelUsage, speed, ccsCostPriceOptions(profiles));
+  }
+
+  const standardUsage = ccsCostModelUsageFromDerivedStore(derived, ["standard"]);
+  const fastUsage = ccsCostModelUsageFromDerivedStore(derived, ["fast"]);
+  const standardCache = await readModelPriceCacheForModels(standardUsage, "standard", ccsCostPriceOptions(profiles));
+  if (missingPricingModels(fastUsage, standardCache, "fast").length === 0) {
+    return standardCache;
+  }
+  return readModelPriceCacheForModels(fastUsage, "fast", ccsCostPriceOptions(profiles));
+}
+
+function ccsCostModelUsageFromDerivedStore(
+  derived: CcsCostDerivedStore,
+  speeds: ResolvedCodexCostSpeed[],
+): Map<string, CcsCostTokenUsageRecord> {
+  const usage = new Map<string, CcsCostTokenUsageRecord>();
+  for (const machine of derived.machines) {
+    for (const speed of speeds) {
+      addCcsCostModelUsageRecord(usage, machine.aggregate[speed].modelUsage);
+    }
+  }
+  return usage;
+}
+
+function addCcsCostModelUsageRecord(
+  target: Map<string, CcsCostTokenUsageRecord>,
+  source: Record<string, CcsCostTokenUsageRecord>,
+): void {
+  for (const [model, usage] of Object.entries(source)) {
+    const existing = target.get(model) ?? {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    };
+    existing.inputTokens += usage.inputTokens;
+    existing.cachedInputTokens += usage.cachedInputTokens;
+    existing.outputTokens += usage.outputTokens;
+    existing.reasoningOutputTokens += usage.reasoningOutputTokens;
+    existing.totalTokens += usage.totalTokens;
+    target.set(model, existing);
+  }
 }
 
 function defaultCentralCcsCostOptions(report: CcsCostReport, timezone = systemTimezone()): CcsCostOptions {
@@ -5443,6 +5594,10 @@ async function ccsCostPriceFingerprint(): Promise<string> {
     }
     throw error;
   }
+}
+
+function ccsCostPricingConfigFingerprint(profiles: ProfilesFile): string {
+  return createHash("sha256").update(JSON.stringify(profiles.pricing?.overrides ?? {})).digest("hex").slice(0, 16);
 }
 
 function ccsCostReportCacheKey(snapshotFingerprint: string, priceFingerprint: string, options: CcsCostOptions): string {
@@ -5666,18 +5821,22 @@ function ccsCostMetricsFromDerivedAggregate(
   const fast = ccsCostRecordToAggregate(aggregate.fast);
   const total = ccsCostRecordToAggregate(sumCcsCostAggregateRecords([aggregate.standard, aggregate.fast]));
   let costUSD: number;
+  let missing: string[];
   if (speed === "auto") {
-    assertCcsCostPricing(standard, { priceCache, speed: "standard" });
-    assertCcsCostPricing(fast, { priceCache, speed: "fast" });
     costUSD = ccsCostOf(standard, { priceCache, speed: "standard" }) + ccsCostOf(fast, { priceCache, speed: "fast" });
+    missing = uniqueSorted([
+      ...missingPricingModels(standard.modelUsage, priceCache, "standard"),
+      ...missingPricingModels(fast.modelUsage, priceCache, "fast"),
+    ]);
   } else {
-    assertCcsCostPricing(total, { priceCache, speed });
     costUSD = ccsCostOf(total, { priceCache, speed });
+    missing = missingPricingModels(total.modelUsage, priceCache, speed);
   }
   return {
     inputTokens: total.inputTokens,
     outputTokens: total.outputTokens,
     costUSD: roundCostUSD(costUSD),
+    missingPricingModels: missing,
   };
 }
 
@@ -5964,6 +6123,7 @@ async function printCentralCcsCostStatus(profiles: ProfilesFile): Promise<void> 
         console.log(textDim("no uploaded cost snapshots"));
         return;
       }
+      const showPricing = status.machines.some((machine) => machine.missingPricingModels.length > 0);
       printTable([
         { key: "machine", title: "machine" },
         { key: "speed", title: "speed" },
@@ -5971,6 +6131,7 @@ async function printCentralCcsCostStatus(profiles: ProfilesFile): Promise<void> 
         { key: "input", title: "input", align: "right" },
         { key: "output", title: "output", align: "right" },
         { key: "cost", title: "cost", align: "right" },
+        ...(showPricing ? [{ key: "pricing", title: "pricing" }] : []),
         { key: "updated", title: "updated", align: "right" },
       ], status.machines.map((machine) => ({
         machine: colorName(machine.machine),
@@ -5979,6 +6140,7 @@ async function printCentralCcsCostStatus(profiles: ProfilesFile): Promise<void> 
         input: colorInput(formatCcsCostTokens(machine.inputTokens, false)),
         output: colorOutput(formatCcsCostTokens(machine.outputTokens, false)),
         cost: colorCost(formatCcsCostUSD(machine.costUSD, false)),
+        pricing: showPricing ? formatCcsCostPricing(machine) : "",
         updated: textDim(formatClockTime(new Date(machine.generatedAt))),
       })));
       return;
@@ -6042,6 +6204,7 @@ function normalizeCcsCostSnapshotSummary(value: unknown): CcsCostSnapshotSummary
     || typeof raw.inputTokens !== "number"
     || typeof raw.outputTokens !== "number"
     || typeof raw.costUSD !== "number"
+    || !Array.isArray(raw.missingPricingModels)
     || !Number.isFinite(raw.events)
     || !Number.isFinite(raw.inputTokens)
     || !Number.isFinite(raw.outputTokens)
@@ -6057,6 +6220,7 @@ function normalizeCcsCostSnapshotSummary(value: unknown): CcsCostSnapshotSummary
     inputTokens: raw.inputTokens,
     outputTokens: raw.outputTokens,
     costUSD: raw.costUSD,
+    missingPricingModels: normalizeMissingPricingModels(raw.missingPricingModels),
   };
 }
 
@@ -6139,6 +6303,7 @@ function normalizeCcsCostMetricsRecord(value: unknown): CcsCostMetricsRecord | n
     typeof raw.inputTokens !== "number"
     || typeof raw.outputTokens !== "number"
     || typeof raw.costUSD !== "number"
+    || !Array.isArray(raw.missingPricingModels)
     || !Number.isFinite(raw.inputTokens)
     || !Number.isFinite(raw.outputTokens)
     || !Number.isFinite(raw.costUSD)
@@ -6149,18 +6314,20 @@ function normalizeCcsCostMetricsRecord(value: unknown): CcsCostMetricsRecord | n
     inputTokens: raw.inputTokens,
     outputTokens: raw.outputTokens,
     costUSD: raw.costUSD,
+    missingPricingModels: normalizeMissingPricingModels(raw.missingPricingModels),
   };
-}
-
-function assertCcsCostPricing(aggregate: CodexUsageAggregate, context: CcsCostContext): void {
-  const missing = missingPricingModels(aggregate.modelUsage, context.priceCache, context.speed);
-  if (missing.length > 0) {
-    throw new Error(`missing pricing models: ${missing.join(", ")}; cache: ${modelPricesCachePath()}`);
-  }
 }
 
 function ccsCostOf(aggregate: CodexUsageAggregate, context: CcsCostContext): number {
   return calculateCodexCostUSD(aggregate.modelUsage, context.priceCache, context.speed);
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function normalizeMissingPricingModels(value: unknown[]): string[] {
+  return uniqueSorted(value.filter((model): model is string => typeof model === "string" && model.length > 0));
 }
 
 function formatCcsCostRange(options: CcsCostOptions): string {

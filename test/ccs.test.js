@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,11 +40,15 @@ test("ccs models lists every provider as a column", async () => {
       },
       current: "input",
     });
-    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceFixture("ok"),
+      "gpt-5.5-mini": modelPriceFixture("partial"),
+    });
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /^input\s+ciii/m);
-    assert.match(output, /gpt-5\.5\s+claude-sonnet-4\.5/);
-    assert.match(output, /gpt-5\.5-mini/);
+    assert.match(output, /^input\s+price\s+ciii\s+price/m);
+    assert.match(output, /gpt-5\.5\s+ok\s+claude-sonnet-4\.5\s+missing/);
+    assert.match(output, /gpt-5\.5-mini\s+partial/);
     requests.sort((left, right) => String(left.authorization).localeCompare(String(right.authorization)));
     assert.deepEqual(requests, [
       { url: "/v1/models", authorization: "Bearer ciii-key" },
@@ -77,10 +82,13 @@ test("ccs models keeps successful provider columns when another provider fails",
       },
       current: "ok",
     });
-    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceFixture("ok"),
+    });
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /^ok\s+bad/m);
-    assert.match(output, /gpt-5\.5\s+http 401/);
+    assert.match(output, /^ok\s+price\s+bad\s+price/m);
+    assert.match(output, /gpt-5\.5\s+ok\s+http 401/);
   } finally {
     await closeServer(server);
     if (home) {
@@ -109,14 +117,20 @@ test("ccs models --json prints provider model results", async () => {
       },
       current: "ok",
     });
-    const output = await runCcs(["dist/bin/ccs.js", "models", "--json"], home);
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceFixture("ok"),
+    });
+    const output = await runCcs(["dist/bin/ccs.js", "models", "--json"], home, { XDG_CACHE_HOME: join(home, ".cache") });
     const payload = JSON.parse(output);
 
     assert.equal(payload.version, 1);
     assert.match(payload.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(payload.pricing.speed, "standard");
+    assert.equal(payload.pricing.source, "test");
+    assert.equal(payload.pricing.fetchedAt, "2026-01-01T00:00:00.000Z");
     assert.deepEqual(payload.profiles, [
-      { name: "ok", models: ["gpt-5.5"], error: null },
-      { name: "forbidden", models: [], error: "http 403" },
+      { name: "ok", models: ["gpt-5.5"], pricing: { "gpt-5.5": "ok" }, error: null },
+      { name: "forbidden", models: [], pricing: {}, error: "http 403" },
     ]);
   } finally {
     await closeServer(server);
@@ -142,12 +156,47 @@ test("ccs models shows per-provider configuration and response errors", async ()
       },
       current: "missing",
     });
-    const output = await runCcs(["dist/bin/ccs.js", "models"], home);
+    await writeModelPriceCache(home, {});
+    const output = await runCcs(["dist/bin/ccs.js", "models"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /^missing\s+invalid\s+text/m);
+    assert.match(output, /^missing\s+price\s+invalid\s+price\s+text\s+price/m);
     assert.match(output, /missing apiKey\s+invalid baseURL\s+invalid response/);
   } finally {
     await closeServer(server);
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs cost daily reports missing pricing without failing", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {});
+    await writeCodexCostFixture(home, "test-missing-model");
+
+    const output = await runCcs([
+      "dist/bin/ccs.js",
+      "cost",
+      "daily",
+      "--since",
+      "2026-01-01",
+      "--until",
+      "2026-01-01",
+      "--timezone",
+      "UTC",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /2026-01-01/);
+    assert.match(output, /pricing/);
+    assert.match(output, /missing 1/);
+  } finally {
     if (home) {
       await rm(home, { recursive: true, force: true });
     }
@@ -273,7 +322,7 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
       events: [{
         timestampMs: Date.UTC(2026, 0, 1, 12, 0, 0),
         project: "/tmp/project",
-        model: "glm-5.2",
+        model: "test-missing-model",
         usage: {
           inputTokens: 10,
           cachedInputTokens: 0,
@@ -301,6 +350,9 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
     const snapshot = await response.json();
     assert.equal(snapshot.version, 1);
     assert.equal(snapshot.active, true);
+    const statusResponse = await waitForJsonOk(`http://127.0.0.1:${port}/ccs/cost/status`);
+    assert.equal(statusResponse.version, 1);
+    assert.deepEqual(statusResponse.machines[0].missingPricingModels, ["test-missing-model"]);
   } finally {
     if (child) {
       child.kill("SIGINT");
@@ -341,6 +393,109 @@ async function writeProfiles(profiles) {
   return home;
 }
 
+async function writeModelPriceCache(home, models) {
+  const cacheDir = join(home, ".cache", "codex-tools");
+  await mkdir(cacheDir, { recursive: true });
+  await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
+    source: "test",
+    fetchedAt: "2026-01-01T00:00:00.000Z",
+    models,
+  }, null, 2), "utf8");
+}
+
+function modelPriceFixture(kind) {
+  return {
+    input_cost_per_token: 0.000001,
+    output_cost_per_token: 0.000002,
+    ...(kind === "ok" ? { cache_read_input_token_cost: 0.0000001 } : {}),
+  };
+}
+
+async function writeCodexCostFixture(home, model) {
+  const timestampMs = Date.parse("2026-01-01T12:00:00.000Z");
+  const codexDir = join(home, ".codex");
+  const sessionsDir = join(codexDir, "sessions", "2026", "01", "01");
+  await mkdir(sessionsDir, { recursive: true });
+  const rolloutPath = join(sessionsDir, "rollout-fixture.jsonl");
+  await writeFile(rolloutPath, `${[
+    taskStarted(uuidV7At(timestampMs), timestampMs),
+    turnContext(uuidV7At(timestampMs + 1), "/tmp/ccs-cost-project", model),
+    tokenCount("2026-01-01T12:00:02.000Z", model, { input: 100, output: 10 }),
+  ].map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+
+  await sqliteRun(join(codexDir, "state.sqlite"), `
+    create table threads (
+      id text primary key,
+      rollout_path text not null,
+      created_at integer not null,
+      updated_at integer not null,
+      cwd text not null,
+      model text,
+      created_at_ms integer,
+      updated_at_ms integer
+    );
+    insert into threads values (
+      'thread-fixture',
+      '${sqlString(rolloutPath)}',
+      ${Math.floor(timestampMs / 1000)},
+      ${Math.floor((timestampMs + 120000) / 1000)},
+      '/tmp/ccs-cost-project',
+      '${sqlString(model)}',
+      ${timestampMs},
+      ${timestampMs + 120000}
+    );
+  `);
+}
+
+function taskStarted(turnId, timestampMs) {
+  return {
+    timestamp: new Date(timestampMs).toISOString(),
+    type: "event_msg",
+    payload: {
+      type: "task_started",
+      turn_id: turnId,
+      started_at: Math.floor(timestampMs / 1000),
+    },
+  };
+}
+
+function turnContext(turnId, cwd, model) {
+  return {
+    timestamp: new Date(uuidV7TimestampMs(turnId)).toISOString(),
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      cwd,
+      model,
+    },
+  };
+}
+
+function tokenCount(timestamp, model, usage) {
+  return {
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      model,
+      info: {
+        total_token_usage: tokenUsage(usage),
+        last_token_usage: tokenUsage(usage),
+      },
+    },
+  };
+}
+
+function tokenUsage(usage) {
+  return {
+    input_tokens: usage.input,
+    cached_input_tokens: usage.cached ?? 0,
+    output_tokens: usage.output,
+    reasoning_output_tokens: usage.reasoning ?? 0,
+    total_tokens: usage.input + usage.output,
+  };
+}
+
 async function startJsonServer(handler) {
   const server = createServer(handler);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -378,6 +533,50 @@ async function waitForHttpOk(url) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw lastError ?? new Error(`timeout waiting for ${url}`);
+}
+
+async function waitForJsonOk(url) {
+  const deadline = Date.now() + 5000;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return await response.json();
+      }
+      lastError = new Error(`unexpected status ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw lastError ?? new Error(`timeout waiting for ${url}`);
+}
+
+function sqliteRun(dbPath, sql) {
+  return new Promise((resolve, reject) => {
+    const child = execFile("sqlite3", [dbPath], (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || stdout.trim() || error.message));
+        return;
+      }
+      resolve();
+    });
+    child.stdin?.end(sql);
+  });
+}
+
+function sqlString(value) {
+  return value.replaceAll("'", "''");
+}
+
+function uuidV7At(timestampMs) {
+  const prefix = Math.floor(timestampMs).toString(16).padStart(12, "0");
+  return `${prefix.slice(0, 8)}-${prefix.slice(8, 12)}-7000-8000-000000000000`;
+}
+
+function uuidV7TimestampMs(value) {
+  return Number.parseInt(value.replaceAll("-", "").slice(0, 12), 16);
 }
 
 function closeServer(server) {

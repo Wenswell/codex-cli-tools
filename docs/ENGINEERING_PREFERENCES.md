@@ -28,6 +28,12 @@ This document records reusable project preferences that come from implementation
 - Runtime retention and visible terminal row counts are separate display concerns. Non-TTY output keeps fixed row counts, while TTY output can use terminal height to reveal more retained rows.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
 
+## Cost And Pricing
+
+- Cost reports should calculate the known priced portion and expose missing model prices as structured status. A missing price for one model should not fail unrelated rows, central status, or central reports.
+- Pricing lookup should use the shared cache, refresh once when observed models are missing, and support explicit user overrides through config. Remaining gaps belong in `missingPricingModels` and terminal pricing status.
+- Model inventory commands that list available models should show whether each model has pricing with `ok`, `partial`, or `missing` status.
+
 ## Test Value
 
 - Prefer tests that protect behavior, data contracts, safety/privacy boundaries, parser behavior, retention limits, and calculations.
