@@ -203,6 +203,80 @@ test("ccs cost daily reports missing pricing without failing", async () => {
   }
 });
 
+test("ccs pricing prints cache status", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {});
+
+    const output = await runCcs(["dist/bin/ccs.js", "pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /pricing:\s+.*model-prices\.json/);
+    assert.match(output, /source:\s+test/);
+    assert.match(output, /commands: ccs pricing \| ccs pricing refresh MODEL_PATTERN\.\.\./);
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing refresh rejects report options", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    await assert.rejects(
+      runCcs(["dist/bin/ccs.js", "pricing", "refresh", "--json"], home),
+      /unknown argument for ccs pricing refresh: --json/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs pricing refresh requires model patterns", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    await assert.rejects(
+      runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
+      /usage: ccs pricing refresh MODEL_PATTERN\.\.\./,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs cost pricing command is removed", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    await assert.rejects(
+      runCcs(["dist/bin/ccs.js", "cost", "pricing"], home),
+      /unknown argument for ccs cost: pricing/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs models rejects unknown arguments", async () => {
   const home = await writeProfiles({
     profiles: {

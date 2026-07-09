@@ -44,6 +44,23 @@ export type ModelPriceCacheOptions = {
 
 export type ModelPricingStatus = "ok" | "partial" | "missing";
 
+export type ModelPriceModelUpdateAction = "update" | "missing";
+
+export type ModelPriceModelUpdateRecord = {
+  model: string;
+  cached: ModelPricingStatus;
+  remote: ModelPricingStatus | "missing";
+  action: ModelPriceModelUpdateAction;
+};
+
+export type ModelPriceModelUpdatePlan = {
+  cachePath: string;
+  source: string;
+  fetchedAt: string;
+  records: ModelPriceModelUpdateRecord[];
+  nextCache: ModelPriceCache;
+};
+
 export const litellmPricingUrl =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -118,6 +135,66 @@ function parseModelPriceCache(text: string, path: string): ModelPriceCache {
 
 async function fetchModelPriceCache(): Promise<ModelPriceCache> {
   const path = modelPricesCachePath();
+  const models = await fetchLiteLlmModelPrices(path);
+  const cache: ModelPriceCache = {
+    source: litellmPricingUrl,
+    fetchedAt: new Date().toISOString(),
+    models,
+  };
+  await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+  return mergeBuiltinModelPrices(cache);
+}
+
+export async function buildModelPriceModelUpdatePlan(
+  models: string[],
+  speed: ResolvedCodexCostSpeed,
+): Promise<ModelPriceModelUpdatePlan> {
+  const path = modelPricesCachePath();
+  const cachedText = await readTextIfExists(path);
+  const currentCache = cachedText === null
+    ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
+    : parseModelPriceCache(cachedText, path);
+  const remoteModels = await fetchLiteLlmModelPrices(path);
+  const names = expandModelNamePatterns(models, Object.keys(remoteModels));
+  const fetchedAt = new Date().toISOString();
+  const nextModels = { ...currentCache.models };
+  const records = names.map((model) => {
+    const remotePrice = remoteModels[model];
+    const action: ModelPriceModelUpdateAction = remotePrice === undefined ? "missing" : "update";
+    const remoteCache: ModelPriceCache = {
+      source: litellmPricingUrl,
+      fetchedAt,
+      models: remotePrice === undefined ? {} : { [model]: remotePrice },
+    };
+    if (remotePrice !== undefined) {
+      nextModels[model] = remotePrice;
+    }
+    return {
+      model,
+      cached: modelPricingStatus(mergeBuiltinModelPrices(currentCache), model, speed),
+      remote: remotePrice === undefined ? "missing" : modelPricingStatus(remoteCache, model, speed),
+      action,
+    };
+  });
+
+  return {
+    cachePath: path,
+    source: litellmPricingUrl,
+    fetchedAt,
+    records,
+    nextCache: {
+      source: litellmPricingUrl,
+      fetchedAt,
+      models: nextModels,
+    },
+  };
+}
+
+export async function writeModelPriceModelUpdatePlan(plan: ModelPriceModelUpdatePlan): Promise<void> {
+  await writeTextFileAtomic(plan.cachePath, `${JSON.stringify(plan.nextCache, null, 2)}\n`, 0o644);
+}
+
+async function fetchLiteLlmModelPrices(path: string): Promise<Record<string, unknown>> {
   let response: Response;
   try {
     response = await fetch(litellmPricingUrl);
@@ -128,14 +205,7 @@ async function fetchModelPriceCache(): Promise<ModelPriceCache> {
     throw new Error(`pricing cache missing and refresh failed: ${path} (${response.status} ${response.statusText})`);
   }
 
-  const models = await response.json() as Record<string, unknown>;
-  const cache: ModelPriceCache = {
-    source: litellmPricingUrl,
-    fetchedAt: new Date().toISOString(),
-    models,
-  };
-  await writeTextFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, 0o644);
-  return mergeBuiltinModelPrices(cache);
+  return await response.json() as Record<string, unknown>;
 }
 
 function mergeBuiltinModelPrices(cache: ModelPriceCache): ModelPriceCache {
@@ -175,6 +245,32 @@ function applyModelPriceOverrides(
 
 function finiteOverride(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function uniqueModelNames(models: string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter((model) => model.length > 0))];
+}
+
+function expandModelNamePatterns(models: string[], remoteModels: string[]): string[] {
+  const names: string[] = [];
+  for (const model of uniqueModelNames(models)) {
+    if (!model.includes("*")) {
+      names.push(model);
+      continue;
+    }
+    const pattern = modelPatternRegExp(model);
+    const matches = remoteModels.filter((remoteModel) => pattern.test(remoteModel)).sort();
+    names.push(...(matches.length > 0 ? matches : [model]));
+  }
+  return uniqueModelNames(names);
+}
+
+function modelPatternRegExp(pattern: string): RegExp {
+  return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function resolveCodexCostSpeed(speed: CodexCostSpeed): Promise<ResolvedCodexCostSpeed> {

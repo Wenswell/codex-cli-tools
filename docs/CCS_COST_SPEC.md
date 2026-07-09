@@ -25,6 +25,8 @@ Terminal reports show the five columns listed above.
 ## Command Surface
 
 ```bash
+ccs pricing
+ccs pricing refresh MODEL_PATTERN...
 ccs cost
 ccs cost daily
 ccs cost weekly
@@ -45,6 +47,8 @@ ccs cost central day YYYY-MM-DD
 `ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and compact command/options hints. Local reports require an explicit subcommand such as `ccs cost daily`.
 
 `ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
+
+`ccs pricing` prints pricing cache status. `ccs pricing refresh MODEL_PATTERN...` refreshes selected local pricing cache entries from LiteLLM. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation.
 
 Options:
 
@@ -530,6 +534,15 @@ Cost reporting calculates the known priced portion when pricing is incomplete. M
 
 When the cache is missing or used models are missing from the cache, the command refreshes LiteLLM pricing once. If refresh is unavailable, the command continues with built-in supplemental prices and reports remaining missing models explicitly.
 
+Manual selected-model refresh:
+
+```bash
+ccs pricing refresh gpt-5.5 glm-5.2
+ccs pricing refresh 'gpt-5.*'
+```
+
+This command fetches the current LiteLLM price file, merges only selected model entries into local `model-prices.json`, and updates the cache `fetchedAt` to the command time. Plain model names use exact LiteLLM keys, including provider prefixes and case. `*` patterns expand against remote LiteLLM keys; `gpt-5.*` matches later `gpt-5.` models and does not match bare `gpt-5`. Remote misses are listed as `missing` and are not added to the cache. The command updates the local machine only; central reports use the server machine's pricing cache.
+
 Built-in supplemental prices cover GLM-5.2 aliases:
 
 ```text
@@ -696,6 +709,9 @@ NO_COLOR=1 node dist/bin/ccs.js --help
 NO_COLOR=1 node dist/bin/ccs.js models
 NO_COLOR=1 node dist/bin/ccs.js models --json
 NO_COLOR=1 node dist/bin/ccs.js cost --help
+NO_COLOR=1 node dist/bin/ccs.js pricing
+NO_COLOR=1 node dist/bin/ccs.js pricing refresh gpt-5.5
+NO_COLOR=1 node dist/bin/ccs.js pricing refresh 'gpt-5.*'
 NO_COLOR=1 node dist/bin/ccs.js cost daily --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost weekly --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost monthly --since 2026-01-01
@@ -717,5 +733,6 @@ Acceptance:
 - JSON output uses stable lower camel case keys.
 - Unknown pricing models appear in `missingPricingModels` and terminal pricing status.
 - `ccs models` shows one adjacent price column per provider and JSON per-model pricing status.
+- `ccs pricing refresh MODEL_PATTERN...` previews selected model cache updates, expands `*` patterns, and writes only after exact `yes`.
 - JSONL files are read line by line.
 - README help, source help, built `dist`, and this spec describe the same command surface.

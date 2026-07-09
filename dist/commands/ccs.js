@@ -16,7 +16,7 @@ import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from 
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsCacheDir, modelPricesCachePath, codexToolsConfigDir, profilesPath, weztermConfigPath, } from "../lib/paths.js";
 import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.js";
-import { calculateCodexCostUSD, missingPricingModels, modelPricingStatus, readModelPriceCache, readModelPriceCacheForModels, resolveCodexCostSpeed, } from "../lib/pricing.js";
+import { buildModelPriceModelUpdatePlan, calculateCodexCostUSD, missingPricingModels, modelPricingStatus, readModelPriceCache, readModelPriceCacheForModels, resolveCodexCostSpeed, writeModelPriceModelUpdatePlan, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, padVisibleLeft, padVisibleRight, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
@@ -3603,6 +3603,8 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
         "  ccs models [--json]                  # list profile models from /v1/models",
+        "  ccs pricing                          # show pricing cache status",
+        "  ccs pricing refresh MODEL_PATTERN... # preview and refresh selected model prices",
         "  ccs proxy [--once|watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
@@ -3705,7 +3707,7 @@ async function printCcsCostStatus(profiles) {
     printKeyValue("upload:", colorPath(ccsCostRemoteDisplay), 9);
     printKeyValue("timezone:", systemTimezone(), 9);
     printKeyValue("speed:", `auto -> ${speed}`, 9);
-    console.log(textDim("commands: ccs cost | ccs cost push | ccs cost [daily|weekly|monthly|projects|project PROJECT|day YYYY-MM-DD] | ccs cost central [daily|weekly|monthly|projects|project PROJECT|day YYYY-MM-DD]"));
+    console.log(textDim("commands: ccs cost | ccs pricing | ccs pricing refresh MODEL_PATTERN... | ccs cost push | ccs cost [daily|weekly|monthly|projects|project PROJECT|day YYYY-MM-DD] | ccs cost central [daily|weekly|monthly|projects|project PROJECT|day YYYY-MM-DD]"));
     console.log(textDim("options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast"));
 }
 async function runCcsCost(args, profiles) {
@@ -3751,6 +3753,88 @@ async function printLocalCcsCost(options, profiles) {
         speed,
     };
     printCcsCostReport(buildCcsCostReport(options, events, context, "local"), options);
+}
+async function refreshCcsPricing(models) {
+    const speed = await resolveCodexCostSpeed("auto");
+    const plan = await buildModelPriceModelUpdatePlan(models, speed);
+    printCcsPricingRefreshPlan(plan, speed);
+    const updateCount = plan.records.filter((record) => record.action === "update").length;
+    if (updateCount === 0) {
+        console.log(textDim("nothing to update."));
+        return;
+    }
+    if (!(await confirmApply())) {
+        return;
+    }
+    await writeModelPriceModelUpdatePlan(plan);
+    const missing = plan.records.filter((record) => record.action === "missing").map((record) => record.model);
+    console.log(`pricing cache updated: ${textGreen(plan.cachePath)}`);
+    printKeyValue("updated:", formatInteger(updateCount), 9);
+    if (missing.length > 0) {
+        printKeyValue("missing:", textRed(missing.join(", ")), 9);
+    }
+}
+async function printCcsPricingStatus() {
+    const speed = await resolveCodexCostSpeed("auto");
+    const cacheText = await readTextIfExists(modelPricesCachePath());
+    const cache = cacheText ? JSON.parse(cacheText) : null;
+    printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+    printKeyValue("source:", cache?.source ? colorUrl(cache.source) : textDim("missing"), 9);
+    printKeyValue("fetched:", cache?.fetchedAt ?? textDim("missing"), 9);
+    printKeyValue("speed:", `auto -> ${speed}`, 9);
+    console.log(textDim("commands: ccs pricing | ccs pricing refresh MODEL_PATTERN..."));
+}
+function printCcsPricingHelp() {
+    console.log([
+        textBold("Usage:"),
+        "  ccs pricing                         # show pricing cache status",
+        "  ccs pricing refresh MODEL_PATTERN... # preview and refresh selected model prices",
+    ].join("\n"));
+}
+async function runCcsPricing(args) {
+    if (args.some(isHelpArgument)) {
+        printCcsPricingHelp();
+        return;
+    }
+    if (args.length === 0) {
+        await printCcsPricingStatus();
+        return;
+    }
+    const subcommand = args[0];
+    if (subcommand !== "refresh") {
+        throw new Error(`unknown argument for ccs pricing: ${subcommand}`);
+    }
+    const models = args.slice(1);
+    if (models.length === 0) {
+        throw new Error("usage: ccs pricing refresh MODEL_PATTERN...");
+    }
+    const unknownOption = models.find((model) => model.startsWith("-"));
+    if (unknownOption) {
+        throw new Error(`unknown argument for ccs pricing refresh: ${unknownOption}`);
+    }
+    await refreshCcsPricing(models);
+}
+function printCcsPricingRefreshPlan(plan, speed) {
+    console.log(textBold("ccs pricing refresh"));
+    printKeyValue("cache:", colorPath(formatDisplayPath(plan.cachePath)), 9);
+    printKeyValue("source:", colorUrl(plan.source), 9);
+    printKeyValue("fetched:", plan.fetchedAt, 9);
+    printKeyValue("speed:", speed, 9);
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
+    printTable([
+        { key: "model", title: "model" },
+        { key: "cached", title: "cached" },
+        { key: "remote", title: "remote" },
+        { key: "action", title: "action" },
+    ], plan.records.map(ccsPricingRefreshPlanRow));
+}
+function ccsPricingRefreshPlanRow(record) {
+    return {
+        model: record.model,
+        cached: formatModelPricingStatus(record.cached),
+        remote: record.remote === "missing" ? textRed("missing") : formatModelPricingStatus(record.remote),
+        action: record.action === "update" ? textGreen("update") : textRed("missing"),
+    };
 }
 function ccsCostPriceOptions(profiles) {
     return { overrides: profiles.pricing?.overrides };
@@ -5183,7 +5267,7 @@ function roundCostUSD(value) {
     return Math.round(value * 1_000_000) / 1_000_000;
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | proxy [--once|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [refresh MODEL_PATTERN...] | proxy [--once|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
@@ -5201,6 +5285,10 @@ export async function runCcs(argv) {
     }
     if (command === "config") {
         await runConfigSync(args);
+        return;
+    }
+    if (command === "pricing") {
+        await runCcsPricing(args);
         return;
     }
     const profiles = await readProfiles();
