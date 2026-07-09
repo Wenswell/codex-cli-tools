@@ -24,6 +24,7 @@ This document records reusable project preferences that come from implementation
 - Dense operational tables should assign explicit shrink priority when columns have different diagnostic value. Lower-value status labels and endpoints can compress before dense numeric values, routing chains, and final detail fields.
 - Terminal display values can enrich compact diagnostics from related normalized facts. Tests should cover both the stored fact and the rendered display value.
 - Numeric display uses compact units for terminal output and keeps raw numeric values in JSON.
+- Runtime retention and visible terminal row counts are separate display concerns. Non-TTY output keeps fixed row counts, while TTY output can use terminal height to reveal more retained rows.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
 
 ## Test Value

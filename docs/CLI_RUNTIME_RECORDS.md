@@ -76,6 +76,7 @@ Monitor and watch output should keep display rules predictable:
 - TTY output can adapt row counts to terminal height.
 - Non-TTY output should stay deterministic.
 - Watch and live monitor modes should recompute layout after terminal resize.
+- Runtime retention windows and visible terminal row counts should be separate values. Taller terminals can reveal more retained facts without changing non-TTY output.
 - Color sets should stay small and semantic, such as red, yellow, and green for status-like values.
 
 ## Numeric Format
