@@ -439,7 +439,19 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.total_requests, 10);
     assert.equal(state.metrics.upstream_hit_counts.input, 10);
     assert.equal(state.metrics.recent_requests[0].status, 503);
+    assert.equal(state.metrics.recent_requests[0].final_action, "upstream_error");
+    assert.deepEqual(state.metrics.recent_requests[0].failure_summary, {
+      type: "upstream_error",
+      code: null,
+      message: "down",
+    });
     assert.equal(state.metrics.recent_requests[1].status, 404);
+    assert.equal(state.metrics.recent_requests[1].final_action, "upstream_error");
+    assert.deepEqual(state.metrics.recent_requests[1].failure_summary, {
+      type: "upstream_error",
+      code: null,
+      message: "missing",
+    });
     assert.equal(state.metrics.recent_requests[2].status, 200);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
@@ -456,6 +468,8 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
     assert.match(output, /active\n\s+session\s+time\s+up\s+reas\.\/code\s+lat\.\s+size\s+model\s+error\n\s+no active requests/);
     assert.match(output, /history\n\s+session\s+time\s+up\s+reas\.\/code\s+lat\.\s+size\s+model\s+error/);
+    assert.match(output, /503\s+\d+ms\s+\d+B\s+-\/-\s+down/);
+    assert.match(output, /404\s+\d+ms\s+\d+B\s+-\/-\s+missing/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
@@ -1027,6 +1041,12 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     assert.equal(record.status, 200);
     assert.equal(record.attempts, 4);
     assert.equal(record.error, null);
+    assert.deepEqual(record.retry_summary, {
+      total: 3,
+      reasoning_guard: 0,
+      upstream_capacity: 3,
+      transport: 0,
+    });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
     assert.deepEqual(record.guard_actions.map((action) => action.status), [429, 429, 429]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [null, null, null]);
@@ -1053,8 +1073,20 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     record = state.metrics.recent_requests[0];
     assert.equal(exhaustedCapacityHits, 4);
     assert.equal(record.status, 429);
+    assert.equal(record.final_action, "upstream_error");
     assert.equal(record.attempts, 4);
     assert.equal(record.error, null);
+    assert.deepEqual(record.retry_summary, {
+      total: 3,
+      reasoning_guard: 0,
+      upstream_capacity: 3,
+      transport: 0,
+    });
+    assert.deepEqual(record.failure_summary, {
+      type: "upstream_error",
+      code: "model_at_capacity",
+      message: "Selected model is at capacity. Please try a different model.",
+    });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
     assert.deepEqual(record.guard_actions.map((action) => action.status), [429, 429, 429]);
 
@@ -1073,9 +1105,126 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     record = state.metrics.recent_requests[0];
     assert.equal(plain429Hits, 1);
     assert.equal(record.status, 429);
+    assert.equal(record.final_action, "upstream_error");
     assert.equal(record.attempts, 1);
     assert.equal(record.error, null);
+    assert.deepEqual(record.failure_summary, {
+      type: "upstream_error",
+      code: "rate_limit",
+      message: "ordinary rate limit",
+    });
     assert.deepEqual(record.guard_actions, []);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy records upstream http failures and client request attempts separately", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let upstreamHits = 0;
+
+  const upstream = createServer((_req, res) => {
+    upstreamHits += 1;
+    res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+    res.end("bad gateway");
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const requestBody = JSON.stringify({ model: "retry-model", input: "same request" });
+    const turnMetadata = JSON.stringify({ turn_id: "turn-client-retry" });
+    const headers = {
+      "content-type": "application/json",
+      "x-codex-turn-metadata": turnMetadata,
+    };
+
+    const first = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers,
+      body: requestBody,
+    });
+    assert.equal(first.status, 502);
+    assert.equal(await first.text(), "bad gateway");
+    await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.client_request_attempt === 1,
+    );
+
+    const second = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers,
+      body: requestBody,
+    });
+    assert.equal(second.status, 502);
+    assert.equal(await second.text(), "bad gateway");
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.client_request_attempt === 2,
+    );
+    assert.equal(upstreamHits, 2);
+    const [latest, previous] = state.metrics.recent_requests;
+    assert.equal(latest.status, 502);
+    assert.equal(latest.upstream_status, 502);
+    assert.equal(latest.final_action, "upstream_error");
+    assert.equal(latest.error, null);
+    assert.equal(latest.attempts, 1);
+    assert.equal(latest.retry_summary.total, 0);
+    assert.equal(latest.client_turn_id, "turn-client-retry");
+    assert.equal(latest.client_request_attempt, 2);
+    assert.equal(previous.client_request_attempt, 1);
+    assert.deepEqual(latest.failure_summary, {
+      type: "upstream_error",
+      code: "upstream_http_502",
+      message: "upstream returned HTTP 502",
+    });
+
+    const output = await withStdoutProperties(
+      { isTTY: false, columns: 180, rows: 40 },
+      () => captureConsole(() => runProxyCommand(["--once", "--history", "2"], proxyOptions)),
+    );
+    assert.match(output, /\[client:2\] upstream_http_502: upstream returned HTTP 502/);
+
+    const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(jsonl.map((record) => record.client_request_attempt), [1, 2]);
+    assert.deepEqual(jsonl.map((record) => record.attempt_records[0].final_action), ["upstream_error", "upstream_error"]);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1339,6 +1488,12 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
     assert.equal(record.status, 200);
     assert.equal(record.attempts, 2);
     assert.equal(record.error, null);
+    assert.deepEqual(record.retry_summary, {
+      total: 1,
+      reasoning_guard: 0,
+      upstream_capacity: 0,
+      transport: 1,
+    });
     assert.equal(record.guard_actions.length, 1);
     assert.equal(record.guard_actions[0].action, "upstream_error");
     assert.match(record.guard_actions[0].error, /upstream_fetch_failed: fetch failed/);
@@ -1414,6 +1569,12 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 2);
     assert.match(record.error, /upstream_fetch_failed: fetch failed/);
+    assert.deepEqual(record.retry_summary, {
+      total: 1,
+      reasoning_guard: 0,
+      upstream_capacity: 0,
+      transport: 1,
+    });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["upstream_error", "upstream_error"]);
     assert.deepEqual(record.guard_actions.map((action) => action.status), [null, null]);
     const output = await withStdoutProperties(
@@ -1500,6 +1661,12 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     let record = state.metrics.recent_requests[0];
     assert.equal(successHits, 4);
     assert.equal(record.attempts, 4);
+    assert.deepEqual(record.retry_summary, {
+      total: 3,
+      reasoning_guard: 3,
+      upstream_capacity: 0,
+      transport: 0,
+    });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [516, 516, 516]);
     assert.equal(record.error, null);
@@ -1527,6 +1694,12 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.equal(exhaustedHits, 4);
     assert.equal(record.status, 502);
     assert.equal(record.attempts, 4);
+    assert.deepEqual(record.retry_summary, {
+      total: 3,
+      reasoning_guard: 3,
+      upstream_capacity: 0,
+      transport: 0,
+    });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
     assert.deepEqual(record.guard_actions.map((action) => action.status), [200, 200, 200, 502]);
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [1034, 1034, 1034, 1034]);
@@ -2839,6 +3012,75 @@ test("proxy writes v2 request record facts with prompt and response text outside
     const fullRecordText = JSON.stringify(fullRecord);
     assert.doesNotMatch(fullRecordText, /sensitive prompt text/);
     assert.doesNotMatch(fullRecordText, /do not store response text/);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy keeps running when completed request logging fails after response headers", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+
+  const upstream = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await mkdir(join(stateRoot, "proxy-requests.jsonl"));
+    await listenServer(upstream, upstreamPort);
+
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(proxyOptions);
+    assert.ok(runtime);
+    assert.equal(runtime.healthy, true);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "logging-failure" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "logging-failure",
+    );
+    assert.equal(state.metrics.active_requests.length, 0);
+    assert.equal(state.metrics.recent_requests[0].status, 200);
+    await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_request_error".*proxy-requests\.jsonl/);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -4383,6 +4625,8 @@ function proxyHistoryRecord(overrides) {
     request_bytes: 0,
     response_bytes: 0,
     session: "019f0df6",
+    client_turn_id: null,
+    client_request_attempt: 1,
     request_kind: "normal",
     request_model: null,
     upstream_model: null,
