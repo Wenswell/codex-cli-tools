@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { codexConfigPath, modelPricesCachePath } from "./paths.js";
+import { codexConfigPath, modelPricesConfigPath } from "./paths.js";
 import { readTextIfExists, writeTextFileAtomic } from "./fs.js";
 import { readTopLevelTomlString } from "./toml.js";
 export const litellmPricingUrl = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -30,12 +30,12 @@ export async function readModelPriceCacheForModels(modelUsage, speed, options = 
     return readModelPriceCache(options);
 }
 export async function readStoredModelPriceCache() {
-    const path = modelPricesCachePath();
+    const path = modelPricesConfigPath();
     const text = await readTextIfExists(path);
     return text === null ? emptyModelPriceCache() : parseModelPriceCache(text, path);
 }
 export async function writeModelPriceCache(cache) {
-    await writeTextFileAtomic(modelPricesCachePath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+    await writeTextFileAtomic(modelPricesConfigPath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
 }
 function emptyModelPriceCache() {
     return {
@@ -70,7 +70,7 @@ function parseModelPriceCache(text, path) {
 export async function buildModelPriceSnapshotPlan(patterns, providers) {
     const remote = await readRemoteModelPriceCatalog();
     if (!remote.models) {
-        throw new Error(`pricing refresh failed: ${modelPricesCachePath()} (${remote.error})`);
+        throw new Error(`pricing refresh failed: ${modelPricesConfigPath()} (${remote.error})`);
     }
     return buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remote.models);
 }
@@ -80,7 +80,7 @@ export async function buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, pro
     const nextProviders = normalizeModelPriceProviders(providers);
     const fetchedAt = new Date().toISOString();
     return {
-        cachePath: modelPricesCachePath(),
+        configPath: modelPricesConfigPath(),
         source: litellmPricingUrl,
         fetchedAt,
         currentCache,

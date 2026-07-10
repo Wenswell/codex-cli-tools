@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { codexConfigPath, modelPricesCachePath } from "./paths.js";
+import { codexConfigPath, modelPricesConfigPath } from "./paths.js";
 import { readTextIfExists, writeTextFileAtomic } from "./fs.js";
 import { readTopLevelTomlString } from "./toml.js";
 
@@ -52,7 +52,7 @@ export type ModelPriceCacheOptions = {
 export type ModelPricingStatus = "ok" | "partial" | "missing";
 
 export type ModelPriceSnapshotPlan = {
-  cachePath: string;
+  configPath: string;
   source: string;
   fetchedAt: string;
   currentCache: ModelPriceCache;
@@ -114,13 +114,13 @@ export async function readModelPriceCacheForModels(
 }
 
 export async function readStoredModelPriceCache(): Promise<ModelPriceCache> {
-  const path = modelPricesCachePath();
+  const path = modelPricesConfigPath();
   const text = await readTextIfExists(path);
   return text === null ? emptyModelPriceCache() : parseModelPriceCache(text, path);
 }
 
 export async function writeModelPriceCache(cache: ModelPriceCache): Promise<void> {
-  await writeTextFileAtomic(modelPricesCachePath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+  await writeTextFileAtomic(modelPricesConfigPath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
 }
 
 function emptyModelPriceCache(): ModelPriceCache {
@@ -163,7 +163,7 @@ export async function buildModelPriceSnapshotPlan(
 ): Promise<ModelPriceSnapshotPlan> {
   const remote = await readRemoteModelPriceCatalog();
   if (!remote.models) {
-    throw new Error(`pricing refresh failed: ${modelPricesCachePath()} (${remote.error})`);
+    throw new Error(`pricing refresh failed: ${modelPricesConfigPath()} (${remote.error})`);
   }
   return buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remote.models);
 }
@@ -179,7 +179,7 @@ export async function buildModelPriceSnapshotPlanFromRemoteCatalog(
   const fetchedAt = new Date().toISOString();
 
   return {
-    cachePath: modelPricesCachePath(),
+    configPath: modelPricesConfigPath(),
     source: litellmPricingUrl,
     fetchedAt,
     currentCache,
