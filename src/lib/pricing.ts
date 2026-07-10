@@ -31,6 +31,8 @@ export type ModelPriceParts = {
 export type ModelPriceCache = {
   source: string;
   fetchedAt: string;
+  patterns: string[];
+  providers: string[];
   models: Record<string, unknown>;
 };
 
@@ -49,25 +51,16 @@ export type ModelPriceCacheOptions = {
 
 export type ModelPricingStatus = "ok" | "partial" | "missing";
 
-export type ModelPriceModelUpdateAction = "update" | "missing";
-
-export type ModelPriceModelUpdateRecord = {
-  model: string;
-  cached: ModelPricingStatus;
-  remote: ModelPricingStatus | "missing";
-  action: ModelPriceModelUpdateAction;
-};
-
-export type ModelPriceModelUpdatePlan = {
+export type ModelPriceSnapshotPlan = {
   cachePath: string;
   source: string;
   fetchedAt: string;
-  records: ModelPriceModelUpdateRecord[];
+  currentCache: ModelPriceCache;
   nextCache: ModelPriceCache;
 };
 
 export type RemoteModelPriceCatalog =
-  | { models: Record<string, unknown>; error: null }
+  | { models: Record<string, RemoteModelPrice>; error: null }
   | { models: null; error: string };
 
 export const litellmPricingUrl =
@@ -75,13 +68,17 @@ export const litellmPricingUrl =
 
 const remoteModelPriceTimeoutMs = 5_000;
 
-type LiteLlmModelPrice = {
+export type LiteLlmModelPrice = {
   input_cost_per_token?: unknown;
   input_cost_per_token_priority?: unknown;
   output_cost_per_token?: unknown;
   output_cost_per_token_priority?: unknown;
   cache_read_input_token_cost?: unknown;
   cache_read_input_token_cost_priority?: unknown;
+};
+
+export type RemoteModelPrice = LiteLlmModelPrice & {
+  litellm_provider: string;
 };
 
 const builtinModelPrices: Record<string, LiteLlmModelPrice> = {
@@ -103,17 +100,7 @@ const builtinModelPrices: Record<string, LiteLlmModelPrice> = {
 };
 
 export async function readModelPriceCache(options: ModelPriceCacheOptions = {}): Promise<ModelPriceCache> {
-  const path = modelPricesCachePath();
-  const cachedText = await readTextIfExists(path);
-  if (cachedText !== null) {
-    return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
-  }
-
-  return applyModelPriceOverrides(mergeBuiltinModelPrices({
-    source: "builtin",
-    fetchedAt: new Date(0).toISOString(),
-    models: {},
-  }), options.overrides);
+  return applyModelPriceOverrides(mergeBuiltinModelPrices(await readStoredModelPriceCache()), options.overrides);
 }
 
 export async function readModelPriceCacheForModels(
@@ -126,72 +113,88 @@ export async function readModelPriceCacheForModels(
   return readModelPriceCache(options);
 }
 
-function parseModelPriceCache(text: string, path: string): ModelPriceCache {
-  const parsed = JSON.parse(text) as ModelPriceCache;
-  if (!parsed.models || typeof parsed.models !== "object") {
-    throw new Error(`invalid pricing cache: ${path}`);
-  }
-  return parsed;
+export async function readStoredModelPriceCache(): Promise<ModelPriceCache> {
+  const path = modelPricesCachePath();
+  const text = await readTextIfExists(path);
+  return text === null ? emptyModelPriceCache() : parseModelPriceCache(text, path);
 }
 
-export async function buildModelPriceModelUpdatePlan(
-  models: string[],
-  speed: ResolvedCodexCostSpeed,
-): Promise<ModelPriceModelUpdatePlan> {
+export async function writeModelPriceCache(cache: ModelPriceCache): Promise<void> {
+  await writeTextFileAtomic(modelPricesCachePath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+}
+
+function emptyModelPriceCache(): ModelPriceCache {
+  return {
+    source: "builtin",
+    fetchedAt: new Date(0).toISOString(),
+    patterns: [],
+    providers: [],
+    models: {},
+  };
+}
+
+function parseModelPriceCache(text: string, path: string): ModelPriceCache {
+  const parsed = JSON.parse(text) as Partial<ModelPriceCache>;
+  if (
+    typeof parsed.source !== "string"
+    || typeof parsed.fetchedAt !== "string"
+    || !Array.isArray(parsed.patterns)
+    || !parsed.patterns.every((pattern) => typeof pattern === "string")
+    || !Array.isArray(parsed.providers)
+    || !parsed.providers.every((provider) => typeof provider === "string")
+    || !parsed.models
+    || typeof parsed.models !== "object"
+    || Array.isArray(parsed.models)
+  ) {
+    throw new Error(`invalid pricing cache: ${path}`);
+  }
+  return {
+    source: parsed.source,
+    fetchedAt: parsed.fetchedAt,
+    patterns: normalizeModelPricePatterns(parsed.patterns),
+    providers: normalizeModelPriceProviders(parsed.providers),
+    models: parsed.models,
+  };
+}
+
+export async function buildModelPriceSnapshotPlan(
+  patterns: string[],
+  providers: string[],
+): Promise<ModelPriceSnapshotPlan> {
   const remote = await readRemoteModelPriceCatalog();
   if (!remote.models) {
     throw new Error(`pricing refresh failed: ${modelPricesCachePath()} (${remote.error})`);
   }
-  return buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remote.models);
+  return buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remote.models);
 }
 
-export async function buildModelPriceModelUpdatePlanFromRemoteCatalog(
-  models: string[],
-  speed: ResolvedCodexCostSpeed,
-  remoteModels: Record<string, unknown>,
-): Promise<ModelPriceModelUpdatePlan> {
-  const path = modelPricesCachePath();
-  const cachedText = await readTextIfExists(path);
-  const currentCache = cachedText === null
-    ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
-    : parseModelPriceCache(cachedText, path);
-  const names = expandModelNamePatterns(models, Object.keys(remoteModels));
+export async function buildModelPriceSnapshotPlanFromRemoteCatalog(
+  patterns: string[],
+  providers: string[],
+  remoteModels: Record<string, RemoteModelPrice>,
+): Promise<ModelPriceSnapshotPlan> {
+  const currentCache = await readStoredModelPriceCache();
+  const nextPatterns = normalizeModelPricePatterns(patterns);
+  const nextProviders = normalizeModelPriceProviders(providers);
   const fetchedAt = new Date().toISOString();
-  const nextModels = { ...currentCache.models };
-  const records = names.map((model) => {
-    const remotePrice = remoteModels[model];
-    const action: ModelPriceModelUpdateAction = remotePrice === undefined ? "missing" : "update";
-    const remoteCache: ModelPriceCache = {
-      source: litellmPricingUrl,
-      fetchedAt,
-      models: remotePrice === undefined ? {} : { [model]: remotePrice },
-    };
-    if (remotePrice !== undefined) {
-      nextModels[model] = remotePrice;
-    }
-    return {
-      model,
-      cached: modelPricingStatus(mergeBuiltinModelPrices(currentCache), model, speed),
-      remote: remotePrice === undefined ? "missing" : modelPricingStatus(remoteCache, model, speed),
-      action,
-    };
-  });
 
   return {
-    cachePath: path,
+    cachePath: modelPricesCachePath(),
     source: litellmPricingUrl,
     fetchedAt,
-    records,
+    currentCache,
     nextCache: {
       source: litellmPricingUrl,
       fetchedAt,
-      models: nextModels,
+      patterns: nextPatterns,
+      providers: nextProviders,
+      models: selectRemoteModelPrices(remoteModels, nextPatterns, nextProviders),
     },
   };
 }
 
-export async function writeModelPriceModelUpdatePlan(plan: ModelPriceModelUpdatePlan): Promise<void> {
-  await writeTextFileAtomic(plan.cachePath, `${JSON.stringify(plan.nextCache, null, 2)}\n`, 0o644);
+export async function writeModelPriceSnapshotPlan(plan: ModelPriceSnapshotPlan): Promise<void> {
+  await writeModelPriceCache(plan.nextCache);
 }
 
 export async function readRemoteModelPriceCatalog(): Promise<RemoteModelPriceCatalog> {
@@ -204,9 +207,8 @@ export async function readRemoteModelPriceCatalog(): Promise<RemoteModelPriceCat
     }
     try {
       const models = await response.json() as unknown;
-      return isModelPriceCatalog(models)
-        ? { models, error: null }
-        : { models: null, error: "invalid response" };
+      const catalog = parseRemoteModelPriceCatalog(models);
+      return catalog ? { models: catalog, error: null } : { models: null, error: "invalid response" };
     } catch {
       return { models: null, error: "invalid response" };
     }
@@ -218,8 +220,20 @@ export async function readRemoteModelPriceCatalog(): Promise<RemoteModelPriceCat
   }
 }
 
-function isModelPriceCatalog(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function parseRemoteModelPriceCatalog(value: unknown): Record<string, RemoteModelPrice> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, RemoteModelPrice] => (
+    isRemoteModelPrice(entry[1])
+  )));
+}
+
+function isRemoteModelPrice(value: unknown): value is RemoteModelPrice {
+  return Boolean(value)
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && typeof (value as { litellm_provider?: unknown }).litellm_provider === "string";
 }
 
 function mergeBuiltinModelPrices(cache: ModelPriceCache): ModelPriceCache {
@@ -261,17 +275,51 @@ function finiteOverride(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function uniqueModelNames(models: string[]): string[] {
-  return [...new Set(models.map((model) => model.trim()).filter((model) => model.length > 0))];
+export function normalizeModelPricePatterns(patterns: string[]): string[] {
+  return normalizeModelPriceNames(patterns);
 }
 
-function expandModelNamePatterns(models: string[], remoteModels: string[]): string[] {
-  const names: string[] = [];
-  for (const model of uniqueModelNames(models)) {
-    const matches = matchingModelNames(model, remoteModels);
-    names.push(...(matches.length > 0 ? matches : [model]));
+export function normalizeModelPriceProviders(providers: string[]): string[] {
+  return normalizeModelPriceNames(providers);
+}
+
+function normalizeModelPriceNames(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
+}
+
+export function selectRemoteModelPrices(
+  models: Record<string, RemoteModelPrice>,
+  patterns: string[],
+  providers: string[],
+): Record<string, RemoteModelPrice> {
+  const selectedPatterns = normalizeModelPricePatterns(patterns);
+  const selectedProviders = new Set(normalizeModelPriceProviders(providers));
+  if (selectedPatterns.length === 0 || selectedProviders.size === 0) {
+    return {};
   }
-  return uniqueModelNames(names);
+  const providerModels = Object.entries(models)
+    .filter(([, record]) => selectedProviders.has(record.litellm_provider))
+    .map(([model]) => model);
+  const names = new Set(selectedPatterns.flatMap((pattern) => matchingModelNames(pattern, providerModels)));
+  return Object.fromEntries([...names].sort().map((model) => [model, models[model]]));
+}
+
+export function pruneModelPriceCache(
+  cache: ModelPriceCache,
+  patterns: string[] = cache.patterns,
+  providers: string[] = cache.providers,
+): ModelPriceCache {
+  const nextPatterns = normalizeModelPricePatterns(patterns);
+  const nextProviders = normalizeModelPriceProviders(providers);
+  const currentModels = Object.fromEntries(Object.entries(cache.models).filter((entry): entry is [string, RemoteModelPrice] => (
+    isRemoteModelPrice(entry[1])
+  )));
+  return {
+    ...cache,
+    patterns: nextPatterns,
+    providers: nextProviders,
+    models: selectRemoteModelPrices(currentModels, nextPatterns, nextProviders),
+  };
 }
 
 export function matchingModelNames(pattern: string, models: string[]): string[] {

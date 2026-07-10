@@ -22,77 +22,79 @@ const builtinModelPrices = {
     },
 };
 export async function readModelPriceCache(options = {}) {
-    const path = modelPricesCachePath();
-    const cachedText = await readTextIfExists(path);
-    if (cachedText !== null) {
-        return applyModelPriceOverrides(mergeBuiltinModelPrices(parseModelPriceCache(cachedText, path)), options.overrides);
-    }
-    return applyModelPriceOverrides(mergeBuiltinModelPrices({
-        source: "builtin",
-        fetchedAt: new Date(0).toISOString(),
-        models: {},
-    }), options.overrides);
+    return applyModelPriceOverrides(mergeBuiltinModelPrices(await readStoredModelPriceCache()), options.overrides);
 }
 export async function readModelPriceCacheForModels(modelUsage, speed, options = {}) {
     void modelUsage;
     void speed;
     return readModelPriceCache(options);
 }
+export async function readStoredModelPriceCache() {
+    const path = modelPricesCachePath();
+    const text = await readTextIfExists(path);
+    return text === null ? emptyModelPriceCache() : parseModelPriceCache(text, path);
+}
+export async function writeModelPriceCache(cache) {
+    await writeTextFileAtomic(modelPricesCachePath(), `${JSON.stringify(cache, null, 2)}\n`, 0o644);
+}
+function emptyModelPriceCache() {
+    return {
+        source: "builtin",
+        fetchedAt: new Date(0).toISOString(),
+        patterns: [],
+        providers: [],
+        models: {},
+    };
+}
 function parseModelPriceCache(text, path) {
     const parsed = JSON.parse(text);
-    if (!parsed.models || typeof parsed.models !== "object") {
+    if (typeof parsed.source !== "string"
+        || typeof parsed.fetchedAt !== "string"
+        || !Array.isArray(parsed.patterns)
+        || !parsed.patterns.every((pattern) => typeof pattern === "string")
+        || !Array.isArray(parsed.providers)
+        || !parsed.providers.every((provider) => typeof provider === "string")
+        || !parsed.models
+        || typeof parsed.models !== "object"
+        || Array.isArray(parsed.models)) {
         throw new Error(`invalid pricing cache: ${path}`);
     }
-    return parsed;
+    return {
+        source: parsed.source,
+        fetchedAt: parsed.fetchedAt,
+        patterns: normalizeModelPricePatterns(parsed.patterns),
+        providers: normalizeModelPriceProviders(parsed.providers),
+        models: parsed.models,
+    };
 }
-export async function buildModelPriceModelUpdatePlan(models, speed) {
+export async function buildModelPriceSnapshotPlan(patterns, providers) {
     const remote = await readRemoteModelPriceCatalog();
     if (!remote.models) {
         throw new Error(`pricing refresh failed: ${modelPricesCachePath()} (${remote.error})`);
     }
-    return buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remote.models);
+    return buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remote.models);
 }
-export async function buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remoteModels) {
-    const path = modelPricesCachePath();
-    const cachedText = await readTextIfExists(path);
-    const currentCache = cachedText === null
-        ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
-        : parseModelPriceCache(cachedText, path);
-    const names = expandModelNamePatterns(models, Object.keys(remoteModels));
+export async function buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remoteModels) {
+    const currentCache = await readStoredModelPriceCache();
+    const nextPatterns = normalizeModelPricePatterns(patterns);
+    const nextProviders = normalizeModelPriceProviders(providers);
     const fetchedAt = new Date().toISOString();
-    const nextModels = { ...currentCache.models };
-    const records = names.map((model) => {
-        const remotePrice = remoteModels[model];
-        const action = remotePrice === undefined ? "missing" : "update";
-        const remoteCache = {
-            source: litellmPricingUrl,
-            fetchedAt,
-            models: remotePrice === undefined ? {} : { [model]: remotePrice },
-        };
-        if (remotePrice !== undefined) {
-            nextModels[model] = remotePrice;
-        }
-        return {
-            model,
-            cached: modelPricingStatus(mergeBuiltinModelPrices(currentCache), model, speed),
-            remote: remotePrice === undefined ? "missing" : modelPricingStatus(remoteCache, model, speed),
-            action,
-        };
-    });
     return {
-        cachePath: path,
+        cachePath: modelPricesCachePath(),
         source: litellmPricingUrl,
         fetchedAt,
-        records,
+        currentCache,
         nextCache: {
             source: litellmPricingUrl,
             fetchedAt,
-            models: nextModels,
+            patterns: nextPatterns,
+            providers: nextProviders,
+            models: selectRemoteModelPrices(remoteModels, nextPatterns, nextProviders),
         },
     };
 }
-export async function writeModelPriceModelUpdatePlan(plan) {
-    await writeTextFileAtomic(plan.cachePath, `${JSON.stringify(plan.nextCache, null, 2)}\n`, 0o644);
+export async function writeModelPriceSnapshotPlan(plan) {
+    await writeModelPriceCache(plan.nextCache);
 }
 export async function readRemoteModelPriceCatalog() {
     const controller = new AbortController();
@@ -104,9 +106,8 @@ export async function readRemoteModelPriceCatalog() {
         }
         try {
             const models = await response.json();
-            return isModelPriceCatalog(models)
-                ? { models, error: null }
-                : { models: null, error: "invalid response" };
+            const catalog = parseRemoteModelPriceCatalog(models);
+            return catalog ? { models: catalog, error: null } : { models: null, error: "invalid response" };
         }
         catch {
             return { models: null, error: "invalid response" };
@@ -120,8 +121,17 @@ export async function readRemoteModelPriceCatalog() {
         clearTimeout(timeout);
     }
 }
-function isModelPriceCatalog(value) {
-    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function parseRemoteModelPriceCatalog(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return null;
+    }
+    return Object.fromEntries(Object.entries(value).filter((entry) => (isRemoteModelPrice(entry[1]))));
+}
+function isRemoteModelPrice(value) {
+    return Boolean(value)
+        && typeof value === "object"
+        && !Array.isArray(value)
+        && typeof value.litellm_provider === "string";
 }
 function mergeBuiltinModelPrices(cache) {
     return {
@@ -156,16 +166,37 @@ function applyModelPriceOverrides(cache, overrides) {
 function finiteOverride(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
-function uniqueModelNames(models) {
-    return [...new Set(models.map((model) => model.trim()).filter((model) => model.length > 0))];
+export function normalizeModelPricePatterns(patterns) {
+    return normalizeModelPriceNames(patterns);
 }
-function expandModelNamePatterns(models, remoteModels) {
-    const names = [];
-    for (const model of uniqueModelNames(models)) {
-        const matches = matchingModelNames(model, remoteModels);
-        names.push(...(matches.length > 0 ? matches : [model]));
+export function normalizeModelPriceProviders(providers) {
+    return normalizeModelPriceNames(providers);
+}
+function normalizeModelPriceNames(values) {
+    return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
+}
+export function selectRemoteModelPrices(models, patterns, providers) {
+    const selectedPatterns = normalizeModelPricePatterns(patterns);
+    const selectedProviders = new Set(normalizeModelPriceProviders(providers));
+    if (selectedPatterns.length === 0 || selectedProviders.size === 0) {
+        return {};
     }
-    return uniqueModelNames(names);
+    const providerModels = Object.entries(models)
+        .filter(([, record]) => selectedProviders.has(record.litellm_provider))
+        .map(([model]) => model);
+    const names = new Set(selectedPatterns.flatMap((pattern) => matchingModelNames(pattern, providerModels)));
+    return Object.fromEntries([...names].sort().map((model) => [model, models[model]]));
+}
+export function pruneModelPriceCache(cache, patterns = cache.patterns, providers = cache.providers) {
+    const nextPatterns = normalizeModelPricePatterns(patterns);
+    const nextProviders = normalizeModelPriceProviders(providers);
+    const currentModels = Object.fromEntries(Object.entries(cache.models).filter((entry) => (isRemoteModelPrice(entry[1]))));
+    return {
+        ...cache,
+        patterns: nextPatterns,
+        providers: nextProviders,
+        models: selectRemoteModelPrices(currentModels, nextPatterns, nextProviders),
+    };
 }
 export function matchingModelNames(pattern, models) {
     if (!pattern.includes("*")) {

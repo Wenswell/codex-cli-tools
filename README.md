@@ -60,6 +60,7 @@ codex-rename
 - [runtime logging review](docs/RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](docs/RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
+- [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 
 ## CLI conventions
@@ -185,7 +186,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|refresh|watch|unwatch] | proxy [--history N|--once [--history N]|watch [--history N]|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
+commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--history N|--once [--history N]|watch [--history N]|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync
 ```
 
 Supported commands:
@@ -199,9 +200,13 @@ ccs run PROFILE [CODEX_ARGS...]
 ccs models [--json]
 ccs pricing
 ccs pricing list [--remote]
-ccs pricing refresh [MODEL_PATTERN...]
-ccs pricing watch MODEL_PATTERN...
-ccs pricing unwatch MODEL...
+ccs pricing pattern
+ccs pricing pattern watch PATTERN...
+ccs pricing pattern unwatch PATTERN...
+ccs pricing provider
+ccs pricing provider add PROVIDER...
+ccs pricing provider remove PROVIDER...
+ccs pricing refresh
 ccs cost
 ccs cost daily
 ccs cost weekly
@@ -318,14 +323,15 @@ Daily, weekly, monthly, project, and one-project reports include a `total` row. 
 
 Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields and includes `missingPricingModels` for every metric record.
 
-Costs use LiteLLM model pricing cached at `~/.cache/codex-tools/model-prices.json`; its `models` object maps exact model names to cached price records. `pricing.models` in `~/.config/codex-tools/profiles.json` stores exact selected model names for default refreshes. `MODEL_PATTERN...` is used only to select remote models for `ccs pricing watch` and parameterized `ccs pricing refresh`. `ccs cost`, `ccs cost central`, and `ccs models` read the local cache, built-in supplemental prices, and manual overrides. `ccs pricing` prints cache status. `ccs pricing list` reads and prints local prices without a network request. `ccs pricing list --remote` reads and prints every remote LiteLLM model. Both modes use the same `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. `ccs pricing watch MODEL_PATTERN...` previews each matching remote model with prices and writes exact selected models plus their price records after exact `yes`. `ccs pricing unwatch MODEL...` previews local prices and removes exact names from `pricing.models` after exact `yes`; cached records remain available for reports. Remote request failures render `unavailable` for `list --remote` and `watch`. `ccs pricing refresh` updates the selected models; with arguments it expands the given remote patterns. `gpt-5.*` expands to later `gpt-5.` models and excludes bare `gpt-5`. The built-in supplemental table covers GLM-5.2 names. Manual pricing overrides can be added under `pricing.overrides` in `profiles.json` with `inputCostPerToken`, `outputCostPerToken`, and `cacheReadInputTokenCost` fields. Missing model prices are reported through terminal `pricing` status and JSON `missingPricingModels`. `--speed auto` reads top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
+Costs use LiteLLM model pricing cached at `~/.cache/codex-tools/model-prices.json`. Its `patterns`, `providers`, and `models` fields form one selection snapshot: `patterns` stores normalized model patterns, `providers` stores normalized LiteLLM `litellm_provider` names, and `models` maps exact selected model names to their price records. Remote selection first keeps watched providers and then applies the pattern union, so saved models always meet both filters. Entries without a string `litellm_provider` never enter the snapshot. `ccs cost`, `ccs cost central`, and `ccs models` read the local cache, built-in supplemental prices, and manual overrides. `ccs pricing` prints local selection state. `ccs pricing list` reads and prints selected local prices without a network request. `ccs pricing list --remote` fetches LiteLLM and prints every model from watched providers. Both modes use `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. `ccs pricing pattern` prints watched patterns and local matched-model counts. `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild the complete remote snapshot after exact `yes`. `ccs pricing provider` prints watched providers; `add PROVIDER...` and `remove PROVIDER...` modify only local cache state after exact `yes`, with removal pruning local models that no longer satisfy provider and pattern filters. `ccs pricing refresh` rebuilds the complete snapshot from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing. The built-in supplemental table covers GLM-5.2 names. Manual pricing overrides remain under `pricing.overrides` in `profiles.json` with `inputCostPerToken`, `outputCostPerToken`, and `cacheReadInputTokenCost` fields. Missing model prices are reported through terminal `pricing` status and JSON `missingPricingModels`. Cost speed resolution uses top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
 
 ```bash
-ccs pricing watch 'gpt-5.*' glm-5.2
+ccs pricing provider add openai
+ccs pricing pattern watch 'gpt-5.*'
 ccs pricing list
 ccs pricing list --remote
 ccs pricing refresh
-ccs pricing refresh gpt-5.5
+ccs pricing provider remove openai
 ```
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.

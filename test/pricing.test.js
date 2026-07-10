@@ -4,14 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  buildModelPriceModelUpdatePlan,
+  buildModelPriceSnapshotPlan,
   calculateCodexCostUSD,
   missingPricingModels,
   modelPricingStatus,
   readModelPriceCache,
   readModelPriceCacheForModels,
   readRemoteModelPriceCatalog,
-  writeModelPriceModelUpdatePlan,
+  readStoredModelPriceCache,
+  selectRemoteModelPrices,
+  writeModelPriceSnapshotPlan,
 } from "../dist/lib/pricing.js";
 
 test("pricing skips missing models and reports them separately", () => {
@@ -19,33 +21,22 @@ test("pricing skips missing models and reports them separately", () => {
     ["known-model", usage(100, 20)],
     ["missing-model", usage(50, 10)],
   ]);
-  const cache = {
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    models: {
-      "known-model": {
-        input_cost_per_token: 0.000001,
-        output_cost_per_token: 0.000002,
-        cache_read_input_token_cost: 0.0000001,
-      },
-    },
-  };
+  const cache = priceCache({
+    "known-model": modelPriceFixture(0.000001),
+  });
 
   assert.equal(calculateCodexCostUSD(modelUsage, cache, "standard"), 0.00014);
   assert.deepEqual(missingPricingModels(modelUsage, cache, "standard"), ["missing-model"]);
 });
 
 test("pricing reports partial status when cache-read pricing is missing", () => {
-  const cache = {
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    models: {
-      "partial-model": {
-        input_cost_per_token: 0.000001,
-        output_cost_per_token: 0.000002,
-      },
+  const cache = priceCache({
+    "partial-model": {
+      litellm_provider: "openai",
+      input_cost_per_token: 0.000001,
+      output_cost_per_token: 0.000002,
     },
-  };
+  });
 
   assert.equal(modelPricingStatus(cache, "partial-model", "standard"), "partial");
   assert.equal(modelPricingStatus(cache, "missing-model", "standard"), "missing");
@@ -54,22 +45,13 @@ test("pricing reports partial status when cache-read pricing is missing", () => 
 test("pricing includes builtin GLM-5.2 prices without a remote cache", async () => {
   const cacheHome = await mkdtemp(join(tmpdir(), "pricing-cache-"));
   const previousCacheHome = process.env.XDG_CACHE_HOME;
-  const previousFetch = globalThis.fetch;
   try {
     process.env.XDG_CACHE_HOME = cacheHome;
-    globalThis.fetch = async () => {
-      throw new Error("offline");
-    };
     const cache = await readModelPriceCache();
 
     assert.equal(modelPricingStatus(cache, "glm-5.2", "standard"), "ok");
   } finally {
-    globalThis.fetch = previousFetch;
-    if (previousCacheHome === undefined) {
-      delete process.env.XDG_CACHE_HOME;
-    } else {
-      process.env.XDG_CACHE_HOME = previousCacheHome;
-    }
+    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
@@ -83,12 +65,10 @@ test("pricing cache reads do not fetch remote prices for missing models", async 
     process.env.XDG_CACHE_HOME = cacheHome;
     await writePriceCache(cacheHome, {
       "kept-model": modelPriceFixture(0.000003),
-    });
+    }, { patterns: ["kept-*"], providers: ["openai"] });
     globalThis.fetch = async () => {
       fetchCount += 1;
-      return new Response(JSON.stringify({
-        "missing-model": modelPriceFixture(0.000011),
-      }), { status: 200 });
+      return new Response("{}", { status: 200 });
     };
 
     const cache = await readModelPriceCacheForModels(new Map([
@@ -100,169 +80,112 @@ test("pricing cache reads do not fetch remote prices for missing models", async 
     assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousCacheHome === undefined) {
-      delete process.env.XDG_CACHE_HOME;
-    } else {
-      process.env.XDG_CACHE_HOME = previousCacheHome;
-    }
+    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
 
-test("pricing remote catalog returns a recoverable network error", async () => {
+test("pricing remote catalog keeps only LiteLLM model records", async () => {
   const previousFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async () => {
-      throw new Error("offline");
-    };
-
-    assert.deepEqual(await readRemoteModelPriceCatalog(), {
-      models: null,
-      error: "fetch failed",
-    });
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("pricing remote catalog normalizes HTTP and response errors", async () => {
-  const previousFetch = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => new Response("busy", { status: 503 });
-    assert.deepEqual(await readRemoteModelPriceCatalog(), {
-      models: null,
-      error: "http 503",
-    });
-
-    globalThis.fetch = async () => new Response("[]", { status: 200 });
-    assert.deepEqual(await readRemoteModelPriceCatalog(), {
-      models: null,
-      error: "invalid response",
-    });
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("pricing updates only selected model cache entries", async () => {
-  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-update-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
-  const previousFetch = globalThis.fetch;
-  try {
-    process.env.XDG_CACHE_HOME = cacheHome;
-    await writePriceCache(cacheHome, {
-      "kept-model": {
-        input_cost_per_token: 0.000003,
-        output_cost_per_token: 0.000004,
-        cache_read_input_token_cost: 0.0000003,
-      },
-      "updated-model": {
-        input_cost_per_token: 0.000001,
-        output_cost_per_token: 0.000002,
-      },
-    });
     globalThis.fetch = async () => new Response(JSON.stringify({
-      "updated-model": {
-        input_cost_per_token: 0.000011,
-        output_cost_per_token: 0.000012,
-        cache_read_input_token_cost: 0.0000011,
-      },
-    }), { status: 200 });
-
-    const plan = await buildModelPriceModelUpdatePlan([" updated-model ", "updated-model", "missing-model", ""], "standard");
-
-    assert.deepEqual(plan.records, [
-      { model: "updated-model", cached: "partial", remote: "ok", action: "update" },
-      { model: "missing-model", cached: "missing", remote: "missing", action: "missing" },
-    ]);
-    await writeModelPriceModelUpdatePlan(plan);
-    const cache = await readModelPriceCache();
-
-    assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
-    assert.equal(cache.models["updated-model"].input_cost_per_token, 0.000011);
-    assert.equal(cache.models["missing-model"], undefined);
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousCacheHome === undefined) {
-      delete process.env.XDG_CACHE_HOME;
-    } else {
-      process.env.XDG_CACHE_HOME = previousCacheHome;
-    }
-    await rm(cacheHome, { recursive: true, force: true });
-  }
-});
-
-test("pricing expands star patterns against remote model names", async () => {
-  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-pattern-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
-  const previousFetch = globalThis.fetch;
-  try {
-    process.env.XDG_CACHE_HOME = cacheHome;
-    await writePriceCache(cacheHome, {});
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      "gpt-5": modelPriceFixture(0.000001),
       "gpt-5.5": modelPriceFixture(0.000005),
-      "gpt-5.4": modelPriceFixture(0.000004),
-      "gpt-5x": modelPriceFixture(0.000009),
-      "claude-sonnet-4.5": modelPriceFixture(0.000006),
+      fallback_generalizations: { rules: [] },
+      missing_provider: { input_cost_per_token: 0.000001 },
     }), { status: 200 });
 
-    const plan = await buildModelPriceModelUpdatePlan(["gpt-5.5", "gpt-5.*", "missing-*"], "standard");
+    const remote = await readRemoteModelPriceCatalog();
 
-    assert.deepEqual(plan.records.map((record) => record.model), ["gpt-5.5", "gpt-5.4", "missing-*"]);
-    assert.deepEqual(plan.records.map((record) => record.action), ["update", "update", "missing"]);
-    await writeModelPriceModelUpdatePlan(plan);
-    const cache = await readModelPriceCache();
-
-    assert.equal(cache.models["gpt-5"], undefined);
-    assert.equal(cache.models["gpt-5.4"].input_cost_per_token, 0.000004);
-    assert.equal(cache.models["gpt-5.5"].input_cost_per_token, 0.000005);
-    assert.equal(cache.models["gpt-5x"], undefined);
+    assert.deepEqual(Object.keys(remote.models ?? {}), ["gpt-5.5"]);
+    assert.equal(remote.models?.["gpt-5.5"].litellm_provider, "openai");
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousCacheHome === undefined) {
-      delete process.env.XDG_CACHE_HOME;
-    } else {
-      process.env.XDG_CACHE_HOME = previousCacheHome;
-    }
-    await rm(cacheHome, { recursive: true, force: true });
   }
 });
 
-test("pricing model update plan fails before cache writes when remote fetch fails", async () => {
-  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-update-fail-cache-"));
+test("pricing provider filtering precedes the pattern union", () => {
+  const models = {
+    "gpt-5.4": modelPriceFixture(0.000004),
+    "gpt-5.5": modelPriceFixture(0.000005),
+    "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
+    "claude-sonnet-4.5": modelPriceFixture(0.000003, "anthropic"),
+  };
+
+  const selected = selectRemoteModelPrices(models, ["gpt-5.*", "claude-*"], ["openai", "anthropic"]);
+
+  assert.deepEqual(Object.keys(selected), ["claude-sonnet-4.5", "gpt-5.4", "gpt-5.5"]);
+  assert.deepEqual(selectRemoteModelPrices(models, ["*"], []), {});
+});
+
+test("pricing rebuild replaces models with the watched provider and pattern intersection", async () => {
+  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-cache-"));
   const previousCacheHome = process.env.XDG_CACHE_HOME;
   const previousFetch = globalThis.fetch;
   try {
     process.env.XDG_CACHE_HOME = cacheHome;
     await writePriceCache(cacheHome, {
-      "kept-model": {
-        input_cost_per_token: 0.000003,
-        output_cost_per_token: 0.000004,
-      },
-    });
+      "kept-model": modelPriceFixture(0.000003),
+      "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
+    }, { patterns: ["kept-*"], providers: ["openai", "azure"] });
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      "gpt-5.4": modelPriceFixture(0.000004),
+      "gpt-5.5": modelPriceFixture(0.000005),
+      "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
+      fallback_generalizations: { rules: [] },
+    }), { status: 200 });
+
+    const plan = await buildModelPriceSnapshotPlan([" gpt-5.* ", "gpt-5.*"], ["openai"]);
+    await writeModelPriceSnapshotPlan(plan);
+    const cache = await readStoredModelPriceCache();
+
+    assert.deepEqual(cache.patterns, ["gpt-5.*"]);
+    assert.deepEqual(cache.providers, ["openai"]);
+    assert.deepEqual(Object.keys(cache.models), ["gpt-5.4", "gpt-5.5"]);
+    assert.equal(cache.models["kept-model"], undefined);
+    assert.equal(cache.models["azure/gpt-5.5"], undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
+    await rm(cacheHome, { recursive: true, force: true });
+  }
+});
+
+test("pricing rebuild fails before cache writes when remote fetch fails", async () => {
+  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-fail-cache-"));
+  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousFetch = globalThis.fetch;
+  try {
+    process.env.XDG_CACHE_HOME = cacheHome;
+    await writePriceCache(cacheHome, {
+      "kept-model": modelPriceFixture(0.000003),
+    }, { patterns: ["kept-*"], providers: ["openai"] });
     globalThis.fetch = async () => {
       throw new Error("offline");
     };
 
     await assert.rejects(
-      buildModelPriceModelUpdatePlan(["kept-model"], "standard"),
+      buildModelPriceSnapshotPlan(["gpt-5.*"], ["openai"]),
       /pricing refresh failed/,
     );
-    const cache = await readModelPriceCache();
+    const cache = await readStoredModelPriceCache();
 
-    assert.equal(cache.source, "test");
-    assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
+    assert.deepEqual(Object.keys(cache.models), ["kept-model"]);
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousCacheHome === undefined) {
-      delete process.env.XDG_CACHE_HOME;
-    } else {
-      process.env.XDG_CACHE_HOME = previousCacheHome;
-    }
+    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
+
+function priceCache(models, patterns = [], providers = []) {
+  return {
+    source: "test",
+    fetchedAt: "2026-01-01T00:00:00.000Z",
+    patterns,
+    providers,
+    models,
+  };
+}
 
 function usage(inputTokens, outputTokens) {
   return {
@@ -274,20 +197,25 @@ function usage(inputTokens, outputTokens) {
   };
 }
 
-function modelPriceFixture(inputCostPerToken) {
+function modelPriceFixture(inputCostPerToken, provider = "openai") {
   return {
+    litellm_provider: provider,
     input_cost_per_token: inputCostPerToken,
     output_cost_per_token: inputCostPerToken * 2,
     cache_read_input_token_cost: inputCostPerToken / 10,
   };
 }
 
-async function writePriceCache(cacheHome, models) {
+async function writePriceCache(cacheHome, models, { patterns = [], providers = [] } = {}) {
   const dir = join(cacheHome, "codex-tools");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "model-prices.json"), JSON.stringify({
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    models,
-  }, null, 2), "utf8");
+  await writeFile(join(dir, "model-prices.json"), JSON.stringify(priceCache(models, patterns, providers), null, 2), "utf8");
+}
+
+function restoreEnvironment(name, value) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
 }
