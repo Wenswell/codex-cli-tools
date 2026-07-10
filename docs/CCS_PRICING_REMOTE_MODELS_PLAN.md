@@ -1,45 +1,59 @@
-# ccs pricing model selection plan
+# ccs pricing selection plan
 
 ## Goal
 
-Keep selected model names, price records, and update patterns in separate roles.
+Keep the selected LiteLLM price snapshot in one local cache. Patterns and providers define the snapshot; cached models always satisfy both filters.
 
 ## Data Contract
 
-- `pricing.models` in `~/.config/codex-tools/profiles.json` stores exact selected model names.
-- `~/.cache/codex-tools/model-prices.json.models` stores exact model-name to LiteLLM price-record mappings.
-- `MODEL_PATTERN...` is a command input for remote updates. It is expanded for `watch` and for `refresh` calls with model-pattern arguments.
+`~/.cache/codex-tools/model-prices.json` stores:
+
+- `source`: LiteLLM directory URL.
+- `fetchedAt`: timestamp of the last successful remote rebuild.
+- `patterns`: normalized model-name patterns.
+- `providers`: normalized LiteLLM `litellm_provider` names.
+- `models`: exact model names mapped to their LiteLLM price records.
+
+`patterns`, `providers`, and `models` are one selection state. `profiles.json.pricing` retains only manual price overrides. No selected-model configuration exists in `profiles.json`.
+
+Remote selection first keeps model records with an exact `litellm_provider` in `providers`, then applies the pattern union. Entries without a string `litellm_provider`, including LiteLLM metadata, never enter the snapshot. An empty pattern set or provider set produces an empty model set.
 
 ## Command Contract
 
-- `ccs pricing list` reads and prints local cached model prices without a network request.
-- `ccs pricing list --remote` reads and prints the full remote LiteLLM model directory with the same price columns.
-- `ccs pricing watch MODEL_PATTERN...` resolves remote matches, previews `pattern`, `model`, and price columns, then writes selected exact model names and their price records after exact `yes` confirmation.
-- `ccs pricing unwatch MODEL...` previews local price rows and removes exact model names from `pricing.models` after exact `yes` confirmation. Cached prices remain available for local reports.
-- `ccs pricing refresh` updates exact model names from `pricing.models`.
-- `ccs pricing refresh MODEL_PATTERN...` expands the given remote patterns and updates their local price records.
+- `ccs pricing` prints cache state and the compact command list.
+- `ccs pricing list` prints local snapshot models and price columns without a network request.
+- `ccs pricing list --remote` fetches LiteLLM and prints only models from watched providers with the same price columns.
+- `ccs pricing pattern` prints watched patterns and the local snapshot count matched by each pattern.
+- `ccs pricing pattern watch PATTERN...` adds normalized patterns, fetches LiteLLM, previews the filtered remote model table, then writes the rebuilt cache after exact `yes`.
+- `ccs pricing pattern unwatch PATTERN...` removes existing patterns, fetches LiteLLM, previews the filtered remote model table, then writes the rebuilt cache after exact `yes`.
+- `ccs pricing provider` prints watched providers from the local cache without a network request.
+- `ccs pricing provider add PROVIDER...` updates only local providers after exact `yes`.
+- `ccs pricing provider remove PROVIDER...` updates only local providers after exact `yes`, then removes local models whose stored provider is no longer watched or whose name no longer matches a watched pattern.
+- `ccs pricing refresh` fetches LiteLLM, rebuilds the complete provider-and-pattern snapshot, previews it, then writes after exact `yes`.
+
+All model lists use `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. Every write command prints its complete preview and states that no changes are written until `yes` is entered.
 
 ## Plan
 
-1. Split remote catalog retrieval from local cache update-plan construction.
-2. Restore `pricing.models` as the exact selected-model configuration and remove persisted pattern handling.
-3. Render all model rows with the common status, input, cache, and output price columns.
-4. Change local and remote list modes to `list` and `list --remote`.
-5. Build watch updates from one remote catalog request, then write both selected models and prices after confirmation.
-6. Update tests, README, pricing specification, built files, and patch version.
+1. Move selection state from `profiles.json.pricing.models` to `model-prices.json`.
+2. Validate LiteLLM model records and expose provider-filtered catalog helpers.
+3. Rebuild, rather than merge, the selected model snapshot after remote pattern operations and refreshes.
+4. Add local provider commands and prune stale local model records on provider removal.
+5. Replace the CLI help, tests, README, cost specification, built files, and package version.
 
 ## Acceptance
 
-- Local lists run without a network request and show local price records.
-- Remote lists show every remote model and normalized price columns.
-- Watch previews include prices and no action column.
-- A confirmed watch writes exact model names and matching remote price records.
-- Remote request failures produce `unavailable` output for remote list and watch.
+- The cache contains only models matching both watched patterns and watched providers.
+- Remote lists and pattern operations exclude untracked providers and non-model catalog metadata.
+- Pattern status and provider status are local-only reads.
+- Provider add/remove remains local-only; removal preserves the cache invariant.
+- Refresh, pattern watch, and pattern unwatch remove models absent from the newly selected remote catalog.
+- Each changing command requires exact `yes` before it writes.
 
 ## Completion Notes
 
-- Split `pricing.models`, cached price records, and temporary update patterns into separate roles.
-- Added local and remote list modes with shared price columns.
-- Added one-request watch plans that write exact selected models and prices together after confirmation.
-- Added local unwatch previews and retained cache records for cost reporting.
-- Added focused local, remote, unavailable-network, and confirmed-watch tests.
+- Moved patterns, providers, and selected model prices into `model-prices.json`.
+- Added structured LiteLLM catalog filtering on exact `litellm_provider` values and excluded non-model metadata.
+- Replaced top-level watch and unwatch commands with pattern and provider command groups.
+- Rebuilt model snapshots on pattern changes and refreshes; provider removal prunes local records without a remote request.
+- Updated command help, README, cost specification, focused data-contract tests, built files, and package version.

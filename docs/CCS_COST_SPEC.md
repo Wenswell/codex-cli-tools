@@ -27,9 +27,13 @@ Terminal reports show the five columns listed above.
 ```bash
 ccs pricing
 ccs pricing list [--remote]
-ccs pricing refresh [MODEL_PATTERN...]
-ccs pricing watch MODEL_PATTERN...
-ccs pricing unwatch MODEL...
+ccs pricing pattern
+ccs pricing pattern watch PATTERN...
+ccs pricing pattern unwatch PATTERN...
+ccs pricing provider
+ccs pricing provider add PROVIDER...
+ccs pricing provider remove PROVIDER...
+ccs pricing refresh
 ccs cost
 ccs cost daily
 ccs cost weekly
@@ -51,7 +55,7 @@ ccs cost central day YYYY-MM-DD
 
 `ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 
-`ccs pricing` prints pricing cache status. `ccs pricing list` prints local cached models and prices without a network request. `ccs pricing list --remote` prints the full LiteLLM directory. Both tables use `model`, `status`, `input/M`, `cache/M`, and `output/M`. `ccs pricing refresh [MODEL_PATTERN...]` refreshes selected local pricing cache entries from LiteLLM; without patterns it reads exact model names from `pricing.models`. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation. `ccs pricing watch MODEL_PATTERN...` previews each matching remote model with price columns, then writes exact model names to `pricing.models` and matching price records to `model-prices.json` after exact `yes` confirmation. `ccs pricing unwatch MODEL...` previews local price rows and removes exact names from `pricing.models` after exact `yes` confirmation. Remote request failures render `unavailable` in `list --remote` and `watch` output.
+`ccs pricing` prints local pricing selection state. `ccs pricing list` prints local snapshot models and prices without a network request. `ccs pricing list --remote` prints LiteLLM models filtered to watched providers. Both tables use `model`, `status`, `input/M`, `cache/M`, and `output/M`. `ccs pricing pattern` prints watched patterns with local matched-model counts. `ccs pricing pattern watch PATTERN...` and `ccs pricing pattern unwatch PATTERN...` fetch LiteLLM, preview the full provider-and-pattern filtered model table, then write the rebuilt snapshot after exact `yes`. `ccs pricing provider` prints watched providers. `provider add PROVIDER...` and `provider remove PROVIDER...` modify local selection state after exact `yes`; removal prunes local model records that no longer satisfy both filters. `ccs pricing refresh` fetches LiteLLM and rebuilds every selected model and price from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing.
 
 Options:
 
@@ -500,7 +504,16 @@ Cache format:
 {
   "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
   "fetchedAt": "2026-05-30T00:00:00.000Z",
-  "models": {}
+  "patterns": ["gpt-5.*"],
+  "providers": ["openai"],
+  "models": {
+    "gpt-5.5": {
+      "litellm_provider": "openai",
+      "input_cost_per_token": 0.000005,
+      "cache_read_input_token_cost": 0.0000005,
+      "output_cost_per_token": 0.00001
+    }
+  }
 }
 ```
 
@@ -539,27 +552,27 @@ Cost reporting, central reporting, and `ccs models` never write a full LiteLLM p
 
 Pricing model plan:
 
-- `pricing.models` in `~/.config/codex-tools/profiles.json` stores exact selected model keys.
-- `~/.cache/codex-tools/model-prices.json.models` stores cached model-price records keyed by exact model name.
-- `ccs pricing watch MODEL_PATTERN...` uses patterns to select remote models, then saves exact selected model names and remote price records after confirmation.
-- `ccs pricing unwatch MODEL...` removes exact selected model names and retains cached price records for cost reports.
-- `ccs pricing refresh` refreshes `pricing.models`.
-- `ccs pricing refresh MODEL_PATTERN...` expands the given remote patterns and updates their local price records.
-- `ccs pricing list` reads all local cached price records.
-- `ccs pricing list --remote` reads all remote price records.
-- Remote network, HTTP, and response-format errors render `unavailable` in `list --remote` and `watch`; `refresh` reports the error because cache updates require a remote catalog.
+- `~/.cache/codex-tools/model-prices.json.patterns` stores normalized watched patterns.
+- `~/.cache/codex-tools/model-prices.json.providers` stores normalized LiteLLM `litellm_provider` names.
+- `~/.cache/codex-tools/model-prices.json.models` stores only exact model records matching both fields.
+- `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild models from the remote catalog after changing patterns.
+- `ccs pricing provider add PROVIDER...` and `remove PROVIDER...` update local providers only; removal prunes local models using stored `litellm_provider` values.
+- `ccs pricing refresh` rebuilds the remote snapshot from current patterns and providers.
+- `ccs pricing list` reads local snapshot prices, and `list --remote` reads all remote models from watched providers.
+- Remote records without a string `litellm_provider` do not enter remote lists or snapshots.
+- Remote network, HTTP, and response-format errors render `unavailable` and preserve the current local snapshot.
 
-Manual selected-model refresh:
+Pricing selection:
 
 ```bash
-ccs pricing watch 'gpt-5.*' glm-5.2
+ccs pricing provider add openai
+ccs pricing pattern watch 'gpt-5.*'
 ccs pricing list
 ccs pricing refresh
-ccs pricing refresh gpt-5.5 glm-5.2
-ccs pricing refresh 'gpt-5.*'
+ccs pricing provider remove openai
 ```
 
-This command fetches the current LiteLLM price file, merges only selected model entries into local `model-prices.json`, and updates the cache `fetchedAt` to the command time. Plain model names use exact LiteLLM keys, including provider prefixes and case. `*` patterns expand against remote LiteLLM keys; `gpt-5.*` matches later `gpt-5.` models and does not match bare `gpt-5`. Remote misses are listed as `missing` and are not added to the cache. The command updates the local machine only; central reports use the server machine's pricing cache.
+Remote rebuilds first keep records with a watched exact `litellm_provider`, then apply the union of watched patterns. A rebuild replaces the entire `models` object, removing remote models that disappeared or no longer satisfy either filter. `provider remove` uses only the local cache and applies the same filters to its stored model records. The commands update the local machine only; central reports use the server machine's pricing cache.
 
 Built-in supplemental prices cover GLM-5.2 aliases:
 
@@ -735,11 +748,13 @@ NO_COLOR=1 node dist/bin/ccs.js cost --help
 NO_COLOR=1 node dist/bin/ccs.js pricing
 NO_COLOR=1 node dist/bin/ccs.js pricing list
 NO_COLOR=1 node dist/bin/ccs.js pricing list --remote
-NO_COLOR=1 node dist/bin/ccs.js pricing watch 'gpt-5.*'
-NO_COLOR=1 node dist/bin/ccs.js pricing unwatch gpt-5.5
+NO_COLOR=1 node dist/bin/ccs.js pricing pattern
+NO_COLOR=1 node dist/bin/ccs.js pricing pattern watch 'gpt-5.*'
+NO_COLOR=1 node dist/bin/ccs.js pricing pattern unwatch 'gpt-5.*'
+NO_COLOR=1 node dist/bin/ccs.js pricing provider
+NO_COLOR=1 node dist/bin/ccs.js pricing provider add openai
+NO_COLOR=1 node dist/bin/ccs.js pricing provider remove openai
 NO_COLOR=1 node dist/bin/ccs.js pricing refresh
-NO_COLOR=1 node dist/bin/ccs.js pricing refresh gpt-5.5
-NO_COLOR=1 node dist/bin/ccs.js pricing refresh 'gpt-5.*'
 NO_COLOR=1 node dist/bin/ccs.js cost daily --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost weekly --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost monthly --since 2026-01-01
@@ -762,9 +777,10 @@ Acceptance:
 - Unknown pricing models appear in `missingPricingModels` and terminal pricing status.
 - `ccs models` shows one adjacent price column per provider and JSON per-model pricing status.
 - `ccs pricing list` prints local model prices, and `ccs pricing list --remote` prints remote model prices.
-- `ccs pricing watch MODEL_PATTERN...` previews remote models with prices and writes exact `pricing.models` plus cached price records after exact `yes`.
-- `ccs pricing unwatch MODEL...` previews local prices and removes exact `pricing.models` entries after exact `yes`.
-- `ccs pricing refresh [MODEL_PATTERN...]` previews selected model cache updates, expands `*` patterns, and writes only after exact `yes`.
+- `ccs pricing pattern` displays watched patterns with local model counts.
+- `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` preview provider-filtered remote models and rebuild the local snapshot after exact `yes`.
+- `ccs pricing provider` displays local providers; `add` and `remove` update local selection state after exact `yes`.
+- `ccs pricing refresh` previews and rebuilds the complete pattern-and-provider snapshot after exact `yes`.
 - Cost and model status commands never write a full LiteLLM pricing cache automatically.
 - JSONL files are read line by line.
 - README help, source help, built `dist`, and this spec describe the same command surface.

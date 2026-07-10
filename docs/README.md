@@ -10,6 +10,7 @@ Project design specs:
 - [runtime logging review](./RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](./RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](./CCS_COST_SPEC.md)
+- [ccs pricing selection plan](./CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [ccs proxy spec](./CCS_PROXY_SPEC.md)
 - [ccs proxy route boundary plan](./CCS_PROXY_ROUTE_BOUNDARY_PLAN.md)
 - [ccs proxy request log plan](./CCS_PROXY_REQUEST_LOG_PLAN.md)

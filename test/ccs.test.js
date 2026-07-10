@@ -240,7 +240,7 @@ test("ccs cost daily does not create a full pricing cache on missing prices", as
   }
 });
 
-test("ccs pricing prints cache status", async () => {
+test("ccs pricing prints local selection status", async () => {
   let home;
   try {
     home = await writeProfiles({
@@ -249,14 +249,18 @@ test("ccs pricing prints cache status", async () => {
       },
       current: "input",
     });
-    await writeModelPriceCache(home, {});
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+    }, { patterns: ["gpt-5.*"], providers: ["openai"] });
 
     const output = await runCcs(["dist/bin/ccs.js", "pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
     assert.match(output, /pricing:\s+.*model-prices\.json/);
-    assert.match(output, /models:\s+none/);
+    assert.match(output, /patterns:\s+1/);
+    assert.match(output, /providers:\s+1/);
+    assert.match(output, /models:\s+1/);
     assert.match(output, /source:\s+test/);
-    assert.match(output, /commands: ccs pricing list \| ccs pricing list --remote \| ccs pricing refresh \| ccs pricing watch MODEL_PATTERN\.\.\. \| ccs pricing unwatch MODEL\.\.\./);
+    assert.match(output, /commands: ccs pricing list \[--remote\] \| ccs pricing pattern \[watch\|unwatch\] \| ccs pricing provider \[add\|remove\] \| ccs pricing refresh/);
   } finally {
     if (home) {
       await rm(home, { recursive: true, force: true });
@@ -301,7 +305,7 @@ test("ccs pricing list shows local prices without a network request", async () =
   }
 });
 
-test("ccs pricing list remote prints every remote model", async () => {
+test("ccs pricing list remote filters to watched providers", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   try {
@@ -311,16 +315,19 @@ test("ccs pricing list remote prints every remote model", async () => {
       },
       current: "input",
     });
+    await writeModelPriceCache(home, {}, { providers: ["openai"] });
     globalThis.fetch = async () => new Response(JSON.stringify({
-      "claude-sonnet-4.5": modelPriceValueFixture(0.000006),
+      "claude-sonnet-4.5": modelPriceValueFixture(0.000006, "anthropic"),
       "gpt-5.5": modelPriceValueFixture(0.000005),
+      fallback_generalizations: { rules: [] },
     }), { status: 200 });
 
     const output = await runCcsDirect(["pricing", "list", "--remote"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
     assert.match(output, /remote:\s+https:\/\/raw\.githubusercontent\.com/);
-    assert.match(output, /claude-sonnet-4\.5\s+ok\s+\$6\.00/);
     assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00/);
+    assert.doesNotMatch(output, /claude-sonnet-4\.5/);
+    assert.doesNotMatch(output, /fallback_generalizations/);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -329,7 +336,7 @@ test("ccs pricing list remote prints every remote model", async () => {
   }
 });
 
-test("ccs pricing watch previews matching model prices without an action column", async () => {
+test("ccs pricing pattern watch previews provider-filtered remote prices", async () => {
   const previousFetch = globalThis.fetch;
   const home = await writeProfiles({
     profiles: {
@@ -338,29 +345,30 @@ test("ccs pricing watch previews matching model prices without an action column"
     current: "input",
   });
   try {
+    await writeModelPriceCache(home, {}, { providers: ["openai"] });
     globalThis.fetch = async () => new Response(JSON.stringify({
       "gpt-5.4": modelPriceValueFixture(0.000004),
       "gpt-5.5": modelPriceValueFixture(0.000005),
-      "glm-5.2": modelPriceValueFixture(0.0000014),
+      "azure/gpt-5.5": modelPriceValueFixture(0.000006, "azure"),
     }), { status: 200 });
-    const output = await runCcsDirect(["pricing", "watch", " gpt-5.* ", "glm-5.2"], home);
-    const profiles = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
+    const output = await runCcsDirect(["pricing", "pattern", "watch", " gpt-5.* "], home);
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
 
-    assert.match(output, /ccs pricing watch/);
-    assert.match(output, /pattern\s+model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
-    assert.match(output, /glm-5\.2\s+glm-5\.2\s+ok\s+\$1\.40\s+\$0\.14\s+\$2\.80/);
-    assert.doesNotMatch(output, /action/);
+    assert.match(output, /ccs pricing pattern watch/);
+    assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
+    assert.match(output, /gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
+    assert.doesNotMatch(output, /azure\/gpt-5\.5/);
     assert.match(output, /not applied/);
-    assert.equal(profiles.pricing, undefined);
+    assert.deepEqual(cache.patterns, []);
+    assert.deepEqual(cache.models, {});
   } finally {
     globalThis.fetch = previousFetch;
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("ccs pricing watch confirmation saves exact models and prices", async () => {
+test("ccs pricing pattern watch confirmation rebuilds the selected cache", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -370,32 +378,29 @@ test("ccs pricing watch confirmation saves exact models and prices", async () =>
         input: { baseURL: "https://example.invalid", apiKey: "" },
       },
       current: "input",
-      pricing: {
-        patterns: ["legacy-*"],
-      },
     });
     await writeModelPriceCache(home, {
       "kept-model": modelPriceValueFixture(0.000003),
-    });
+    }, { patterns: ["legacy-*"], providers: ["openai"] });
     globalThis.fetch = async () => {
       fetchCount += 1;
       return new Response(JSON.stringify({
         "gpt-5.4": modelPriceValueFixture(0.000004),
         "gpt-5.5": modelPriceValueFixture(0.000005),
+        "azure/gpt-5.5": modelPriceValueFixture(0.000006, "azure"),
       }), { status: 200 });
     };
 
-    const output = await runCcsWithConfirmation(["pricing", "watch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const profiles = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
+    const output = await runCcsWithConfirmation(["pricing", "pattern", "watch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
     const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /pricing cache updated/);
-    assert.match(output, /profiles updated/);
-    assert.deepEqual(profiles.pricing.models, ["gpt-5.4", "gpt-5.5"]);
-    assert.equal(profiles.pricing.patterns, undefined);
+    assert.deepEqual(cache.patterns, ["gpt-5.*", "legacy-*"]);
+    assert.deepEqual(cache.providers, ["openai"]);
     assert.equal(cache.models["gpt-5.4"].input_cost_per_token, 0.000004);
     assert.equal(cache.models["gpt-5.5"].input_cost_per_token, 0.000005);
-    assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
+    assert.equal(cache.models["kept-model"], undefined);
+    assert.equal(cache.models["azure/gpt-5.5"], undefined);
     assert.equal(fetchCount, 1);
   } finally {
     globalThis.fetch = previousFetch;
@@ -405,7 +410,7 @@ test("ccs pricing watch confirmation saves exact models and prices", async () =>
   }
 });
 
-test("ccs pricing unwatch previews local prices without a remote request", async () => {
+test("ccs pricing pattern unwatch rebuilds remote matches", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -415,25 +420,28 @@ test("ccs pricing unwatch previews local prices without a remote request", async
         input: { baseURL: "https://example.invalid", apiKey: "" },
       },
       current: "input",
-      pricing: {
-        models: ["gpt-5.5"],
-      },
     });
     await writeModelPriceCache(home, {
       "gpt-5.5": modelPriceValueFixture(0.000005),
-    });
+      "claude-sonnet-4.5": modelPriceValueFixture(0.000003, "anthropic"),
+    }, { patterns: ["claude-*", "gpt-5.*"], providers: ["anthropic", "openai"] });
     globalThis.fetch = async () => {
       fetchCount += 1;
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({
+        "gpt-5.5": modelPriceValueFixture(0.000005),
+        "claude-sonnet-4.5": modelPriceValueFixture(0.000003, "anthropic"),
+      }), { status: 200 });
     };
 
-    const output = await runCcsDirect(["pricing", "unwatch", "gpt-5.5"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const output = await runCcsWithConfirmation(["pricing", "pattern", "unwatch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
 
-    assert.match(output, /ccs pricing unwatch/);
-    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
-    assert.doesNotMatch(output, /action/);
-    assert.match(output, /not applied/);
-    assert.equal(fetchCount, 0);
+    assert.match(output, /ccs pricing pattern unwatch/);
+    assert.match(output, /claude-sonnet-4\.5\s+ok\s+\$3\.00/);
+    assert.doesNotMatch(output, /gpt-5\.5/);
+    assert.deepEqual(cache.patterns, ["claude-*"]);
+    assert.deepEqual(Object.keys(cache.models), ["claude-sonnet-4.5"]);
+    assert.equal(fetchCount, 1);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -442,7 +450,7 @@ test("ccs pricing unwatch previews local prices without a remote request", async
   }
 });
 
-test("ccs pricing remote list and watch continue when remote pricing is unavailable", async () => {
+test("ccs pricing remote list and pattern updates leave local state on remote failure", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   try {
@@ -454,17 +462,19 @@ test("ccs pricing remote list and watch continue when remote pricing is unavaila
     });
     await writeModelPriceCache(home, {
       "gpt-5.5": modelPriceValueFixture(0.000005),
-    });
+    }, { patterns: ["gpt-5.*"], providers: ["openai"] });
     globalThis.fetch = async () => {
       throw new Error("offline");
     };
 
     const listOutput = await runCcsDirect(["pricing", "list", "--remote"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const watchOutput = await runCcsDirect(["pricing", "watch", "claude-*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const watchOutput = await runCcsDirect(["pricing", "pattern", "watch", "claude-*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(listOutput, /remote:\s+unavailable \(fetch failed\)/);
     assert.match(watchOutput, /remote:\s+unavailable \(fetch failed\)/);
     assert.doesNotMatch(watchOutput, /Apply changes/);
+    assert.deepEqual(cache.patterns, ["gpt-5.*"]);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -473,7 +483,7 @@ test("ccs pricing remote list and watch continue when remote pricing is unavaila
   }
 });
 
-test("ccs pricing ignores persisted patterns", async () => {
+test("ccs pricing pattern shows local match counts without a network request", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -483,17 +493,98 @@ test("ccs pricing ignores persisted patterns", async () => {
         input: { baseURL: "https://example.invalid", apiKey: "" },
       },
       current: "input",
-      pricing: { patterns: ["gpt-5.*"] },
     });
+    await writeModelPriceCache(home, {
+      "gpt-5.4": modelPriceValueFixture(0.000004),
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+      "claude-sonnet-4.5": modelPriceValueFixture(0.000003, "anthropic"),
+    }, { patterns: ["claude-*", "gpt-5.*"], providers: ["anthropic", "openai"] });
     globalThis.fetch = async () => {
       fetchCount += 1;
       return new Response("{}", { status: 200 });
     };
 
-    const output = await runCcsDirect(["pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const output = await runCcsDirect(["pricing", "pattern"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /models:\s+none/);
+    assert.match(output, /pattern\s+models/);
+    assert.match(output, /claude-\*\s+1/);
+    assert.match(output, /gpt-5\.\*\s+2/);
     assert.equal(fetchCount, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing provider commands modify local filters and prune local models", async () => {
+  let home;
+  const previousFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+      "azure/gpt-5.5": modelPriceValueFixture(0.000006, "azure"),
+    }, { patterns: ["*"], providers: ["azure", "openai"] });
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response("{}", { status: 200 });
+    };
+
+    const statusOutput = await runCcsDirect(["pricing", "provider"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const addOutput = await runCcsWithConfirmation(["pricing", "provider", "add", "anthropic"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const output = await runCcsWithConfirmation(["pricing", "provider", "remove", "azure"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+
+    assert.match(statusOutput, /provider/);
+    assert.match(statusOutput, /azure/);
+    assert.match(statusOutput, /openai/);
+    assert.match(addOutput, /providers:\s+2 -> 3/);
+    assert.match(output, /providers:\s+3 -> 2/);
+    assert.deepEqual(cache.providers, ["anthropic", "openai"]);
+    assert.deepEqual(Object.keys(cache.models), ["gpt-5.5"]);
+    assert.equal(fetchCount, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing refresh rebuilds every selected model and price", async () => {
+  let home;
+  const previousFetch = globalThis.fetch;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      "stale-model": modelPriceValueFixture(0.000003),
+    }, { patterns: ["gpt-5.*"], providers: ["openai"] });
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+      "gpt-5.6": modelPriceValueFixture(0.000006),
+      "azure/gpt-5.5": modelPriceValueFixture(0.000007, "azure"),
+    }), { status: 200 });
+
+    const output = await runCcsWithConfirmation(["pricing", "refresh"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+
+    assert.match(output, /ccs pricing refresh/);
+    assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
+    assert.deepEqual(Object.keys(cache.models), ["gpt-5.5", "gpt-5.6"]);
+    assert.equal(cache.models["stale-model"], undefined);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -519,7 +610,7 @@ test("ccs pricing list rejects the removed all option", async () => {
   }
 });
 
-test("ccs pricing refresh rejects report options", async () => {
+test("ccs pricing refresh rejects arguments", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
@@ -529,14 +620,14 @@ test("ccs pricing refresh rejects report options", async () => {
   try {
     await assert.rejects(
       runCcs(["dist/bin/ccs.js", "pricing", "refresh", "--json"], home),
-      /unknown argument for ccs pricing refresh: --json/,
+      /usage: ccs pricing refresh/,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("ccs pricing refresh requires model patterns", async () => {
+test("ccs pricing refresh requires watched patterns and providers", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
@@ -546,7 +637,24 @@ test("ccs pricing refresh requires model patterns", async () => {
   try {
     await assert.rejects(
       runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
-      /usage: ccs pricing refresh MODEL_PATTERN\.\.\. or add models with ccs pricing watch MODEL_PATTERN\.\.\./,
+      /ccs pricing refresh requires watched patterns and providers/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs pricing rejects removed top-level pattern commands", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    await assert.rejects(
+      runCcs(["dist/bin/ccs.js", "pricing", "watch", "gpt-5.*"], home),
+      /unknown argument for ccs pricing: watch/,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -675,6 +783,8 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
     await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
       source: "test",
       fetchedAt: "2026-01-01T00:00:00.000Z",
+      patterns: [],
+      providers: [],
       models: {},
     }), "utf8");
     await writeFile(join(cacheDir, "ccs-cost", "fixture.json"), JSON.stringify({
@@ -797,12 +907,14 @@ async function writeProfiles(profiles) {
   return home;
 }
 
-async function writeModelPriceCache(home, models) {
+async function writeModelPriceCache(home, models, { patterns = [], providers = [] } = {}) {
   const cacheDir = join(home, ".cache", "codex-tools");
   await mkdir(cacheDir, { recursive: true });
   await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
     source: "test",
     fetchedAt: "2026-01-01T00:00:00.000Z",
+    patterns,
+    providers,
     models,
   }, null, 2), "utf8");
 }
@@ -815,8 +927,9 @@ function modelPriceFixture(kind) {
   };
 }
 
-function modelPriceValueFixture(inputCostPerToken) {
+function modelPriceValueFixture(inputCostPerToken, provider = "openai") {
   return {
+    litellm_provider: provider,
     input_cost_per_token: inputCostPerToken,
     output_cost_per_token: inputCostPerToken * 2,
     cache_read_input_token_cost: inputCostPerToken / 10,
