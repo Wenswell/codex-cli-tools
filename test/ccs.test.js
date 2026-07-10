@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile, access } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -730,6 +730,117 @@ test("ccs top once appends history and writes private runtime files", async () =
   }
 });
 
+test("ccs status marks the current switching profile", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        aaa: { baseURL: "https://example.invalid", apiKey: "" },
+        bbb: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "bbb",
+    });
+    const env = { XDG_CACHE_HOME: join(home, ".cache") };
+    await writeUsageTopState(home, [
+      { name: "aaa", used: 123.5 },
+      { name: "bbb", used: 321.5 },
+    ]);
+
+    const output = await runCcs(["dist/bin/ccs.js", "s", "line"], home, env);
+
+    assert.match(output, /\| aaa 123\.5 \| \*bbb 321\.5/);
+    assert.doesNotMatch(output, /\*aaa/);
+
+    await replaceJson(join(home, ".config", "codex-tools", "profiles.json"), {
+      profiles: {
+        aaa: { baseURL: "https://example.invalid", apiKey: "" },
+        bbb: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      usage: {
+        ccc: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "ccc",
+    });
+    await writeUsageTopState(home, [
+      { name: "aaa", used: 123.5 },
+      { name: "bbb", used: 321.5 },
+    ]);
+    const unmatchedOutput = await runCcs(["dist/bin/ccs.js", "s", "line"], home, env);
+    assert.doesNotMatch(unmatchedOutput, /\*/);
+  } finally {
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs status agent reloads the current switching profile", async () => {
+  let home;
+  let child;
+  let server;
+  try {
+    const endpoint = await startJsonServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        usage: {
+          today: {
+            actual_cost: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            requests: 0,
+          },
+        },
+      }));
+    });
+    server = endpoint.server;
+    const profiles = {
+      profiles: {
+        aaa: { baseURL: endpoint.baseUrl, apiKey: "aaa-key" },
+        bbb: { baseURL: endpoint.baseUrl, apiKey: "bbb-key" },
+      },
+      current: "aaa",
+    };
+    home = await writeProfiles(profiles);
+    const cacheHome = join(home, ".cache");
+    const statusPath = join(cacheHome, "codex-tools", "ccs-top-status.txt");
+    await writeUsageTopState(home, [
+      { name: "aaa", used: 123.5 },
+      { name: "bbb", used: 321.5 },
+    ]);
+    child = spawnNode(["dist/bin/ccs.js", "s", "agent"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CACHE_HOME: cacheHome,
+        NO_COLOR: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    await waitForFileMatch(statusPath, /\| \*aaa 123\.5 \| bbb 321\.5/);
+    await runCcs(["dist/bin/ccs.js", "toggle", "bbb"], home, { XDG_CACHE_HOME: cacheHome });
+    await writeUsageTopState(home, [
+      { name: "aaa", used: 123.5 },
+      { name: "bbb", used: 321.5 },
+    ]);
+
+    await waitForFileMatch(statusPath, /\| aaa 123\.5 \| \*bbb 321\.5/);
+  } finally {
+    if (child) {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.on("exit", resolve));
+    }
+    if (server) {
+      await closeServer(server);
+    }
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("ccs top history server rejects oversized windows", async () => {
   let home;
   let child;
@@ -905,6 +1016,43 @@ async function writeProfiles(profiles) {
   await mkdir(configDir, { recursive: true });
   await writeFile(join(configDir, "profiles.json"), JSON.stringify(profiles, null, 2), "utf8");
   return home;
+}
+
+async function replaceJson(path, value) {
+  const temporaryPath = `${path}.test.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(value, null, 2), "utf8");
+  await rename(temporaryPath, path);
+}
+
+async function writeUsageTopState(home, entries) {
+  const cacheDir = join(home, ".cache", "codex-tools");
+  await mkdir(cacheDir, { recursive: true });
+  await replaceJson(join(cacheDir, "ccs-top-state.json"), {
+    version: 1,
+    active: true,
+    pid: process.pid,
+    updatedAt: new Date().toISOString(),
+    entries,
+  });
+}
+
+async function waitForFileMatch(path, pattern) {
+  const deadline = Date.now() + 5000;
+  let lastValue = "";
+  while (Date.now() < deadline) {
+    try {
+      lastValue = await readFile(path, "utf8");
+      if (pattern.test(lastValue)) {
+        return;
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timeout waiting for ${path} to match ${pattern}; last value: ${lastValue}`);
 }
 
 async function writeModelPriceCache(home, models, { patterns = [], providers = [] } = {}) {
