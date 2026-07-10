@@ -51,7 +51,7 @@ ccs cost central day YYYY-MM-DD
 
 `ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 
-`ccs pricing` prints pricing cache status. `ccs pricing list [MODEL_PATTERN...]` prints local model prices as model name plus input/cache/output price per 1M tokens. `ccs pricing refresh [MODEL_PATTERN...]` refreshes selected local pricing cache entries from LiteLLM; when no pattern is passed, it uses the watched model list from `pricing.models`. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation. `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview edits to the watched model list and write `profiles.json` only after exact `yes` confirmation.
+`ccs pricing` prints pricing cache status. `ccs pricing list [MODEL_PATTERN...]` expands selected patterns against the current LiteLLM directory and prints `pattern`, `remote`, local pricing status, and input/cache/output price per 1M tokens. `ccs pricing list --all` prints every remote model. `ccs pricing refresh [MODEL_PATTERN...]` refreshes selected local pricing cache entries from LiteLLM; when no pattern is passed, it uses `pricing.patterns`. The command prints a preview table with `model`, `cached`, `remote`, and `action`, then writes only after exact `yes` confirmation. `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview the remote models matched by each changed pattern and write `profiles.json` only after exact `yes` confirmation. Remote request failures render `unavailable` in list and watch output.
 
 Options:
 
@@ -537,16 +537,18 @@ Cost reporting calculates the known priced portion when pricing is incomplete. M
 
 Cost reporting, central reporting, and `ccs models` never write a full LiteLLM price cache automatically. They read the local cache, built-in supplemental prices, and manual overrides only. Missing prices are reported explicitly so cache writes stay tied to explicit `ccs pricing refresh` commands.
 
-Watched model plan:
+Pricing pattern plan:
 
-- `pricing.models` in `~/.config/codex-tools/profiles.json` stores exact model keys and `*` patterns that the user wants to maintain.
-- `ccs pricing watch MODEL_PATTERN...` appends normalized patterns to `pricing.models`.
-- `ccs pricing unwatch MODEL_PATTERN...` removes exact watched entries from `pricing.models`.
+- `pricing.patterns` in `~/.config/codex-tools/profiles.json` stores exact model keys and `*` patterns that the user wants to maintain.
+- `~/.cache/codex-tools/model-prices.json.models` stores cached model-price records keyed by exact model name.
+- `ccs pricing watch MODEL_PATTERN...` appends normalized patterns to `pricing.patterns` and previews their remote matches.
+- `ccs pricing unwatch MODEL_PATTERN...` removes exact watched entries from `pricing.patterns` and previews their remote matches.
 - `ccs pricing refresh` refreshes the watched patterns.
-- `ccs pricing refresh MODEL_PATTERN...` refreshes the given patterns for the current run and does not add them to `pricing.models`.
-- `ccs pricing list` lists watched models from the local cache.
-- `ccs pricing list MODEL_PATTERN...` lists matching local cache entries for the given patterns.
-- `ccs pricing list --all` lists every local cache entry.
+- `ccs pricing refresh MODEL_PATTERN...` refreshes the given patterns for the current run and keeps `pricing.patterns` unchanged.
+- `ccs pricing list` lists remote models selected by `pricing.patterns` alongside local pricing information.
+- `ccs pricing list MODEL_PATTERN...` lists remote models selected by the given patterns.
+- `ccs pricing list --all` lists every remote model.
+- Remote network, HTTP, and response-format errors render `unavailable` in `list`, `watch`, and `unwatch`; `refresh` reports the error because cache updates require a remote catalog.
 
 Manual selected-model refresh:
 
@@ -573,7 +575,7 @@ Manual overrides live in `~/.config/codex-tools/profiles.json`:
 ```json
 {
   "pricing": {
-    "models": [
+    "patterns": [
       "gpt-5.*",
       "glm-5.2",
       "claude-sonnet-4.5"
@@ -760,8 +762,8 @@ Acceptance:
 - JSON output uses stable lower camel case keys.
 - Unknown pricing models appear in `missingPricingModels` and terminal pricing status.
 - `ccs models` shows one adjacent price column per provider and JSON per-model pricing status.
-- `ccs pricing list [MODEL_PATTERN...]` prints model name plus input/cache/output price per 1M tokens.
-- `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview watched-list edits and write only after exact `yes`.
+- `ccs pricing list [MODEL_PATTERN...]` prints pattern, remote model, and local input/cache/output price per 1M tokens.
+- `ccs pricing watch MODEL_PATTERN...` and `ccs pricing unwatch MODEL_PATTERN...` preview remote matches and write `pricing.patterns` only after exact `yes`.
 - `ccs pricing refresh [MODEL_PATTERN...]` previews selected model cache updates, expands `*` patterns, and writes only after exact `yes`.
 - Cost and model status commands never write a full LiteLLM pricing cache automatically.
 - JSONL files are read line by line.
