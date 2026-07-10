@@ -230,7 +230,7 @@ test("ccs cost daily does not create a full pricing cache on missing prices", as
 
     assert.match(output, /missing 1/);
     await assert.rejects(
-      access(join(home, ".cache", "codex-tools", "model-prices.json")),
+      access(join(home, ".config", "codex-tools", "model-prices.json")),
       /ENOENT/,
     );
   } finally {
@@ -352,7 +352,7 @@ test("ccs pricing pattern watch previews provider-filtered remote prices", async
       "azure/gpt-5.5": modelPriceValueFixture(0.000006, "azure"),
     }), { status: 200 });
     const output = await runCcsDirect(["pricing", "pattern", "watch", " gpt-5.* "], home);
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /ccs pricing pattern watch/);
     assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
@@ -392,7 +392,7 @@ test("ccs pricing pattern watch confirmation rebuilds the selected cache", async
     };
 
     const output = await runCcsWithConfirmation(["pricing", "pattern", "watch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /pricing cache updated/);
     assert.deepEqual(cache.patterns, ["gpt-5.*", "legacy-*"]);
@@ -434,7 +434,7 @@ test("ccs pricing pattern unwatch rebuilds remote matches", async () => {
     };
 
     const output = await runCcsWithConfirmation(["pricing", "pattern", "unwatch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /ccs pricing pattern unwatch/);
     assert.match(output, /claude-sonnet-4\.5\s+ok\s+\$3\.00/);
@@ -469,7 +469,7 @@ test("ccs pricing remote list and pattern updates leave local state on remote fa
 
     const listOutput = await runCcsDirect(["pricing", "list", "--remote"], home, { XDG_CACHE_HOME: join(home, ".cache") });
     const watchOutput = await runCcsDirect(["pricing", "pattern", "watch", "claude-*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(listOutput, /remote:\s+unavailable \(fetch failed\)/);
     assert.match(watchOutput, /remote:\s+unavailable \(fetch failed\)/);
@@ -541,7 +541,7 @@ test("ccs pricing provider commands modify local filters and prune local models"
     const statusOutput = await runCcsDirect(["pricing", "provider"], home, { XDG_CACHE_HOME: join(home, ".cache") });
     const addOutput = await runCcsWithConfirmation(["pricing", "provider", "add", "anthropic"], home, { XDG_CACHE_HOME: join(home, ".cache") });
     const output = await runCcsWithConfirmation(["pricing", "provider", "remove", "azure"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(statusOutput, /provider/);
     assert.match(statusOutput, /azure/);
@@ -579,7 +579,7 @@ test("ccs pricing refresh rebuilds every selected model and price", async () => 
     }), { status: 200 });
 
     const output = await runCcsWithConfirmation(["pricing", "refresh"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /ccs pricing refresh/);
     assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
@@ -890,8 +890,10 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
       current: "input",
     });
     const cacheDir = join(home, ".cache", "codex-tools");
+    const configDir = join(home, ".config", "codex-tools");
     await mkdir(join(cacheDir, "ccs-cost"), { recursive: true });
-    await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "model-prices.json"), JSON.stringify({
       source: "test",
       fetchedAt: "2026-01-01T00:00:00.000Z",
       patterns: [],
@@ -1056,9 +1058,9 @@ async function waitForFileMatch(path, pattern) {
 }
 
 async function writeModelPriceCache(home, models, { patterns = [], providers = [] } = {}) {
-  const cacheDir = join(home, ".cache", "codex-tools");
-  await mkdir(cacheDir, { recursive: true });
-  await writeFile(join(cacheDir, "model-prices.json"), JSON.stringify({
+  const configDir = join(home, ".config", "codex-tools");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, "model-prices.json"), JSON.stringify({
     source: "test",
     fetchedAt: "2026-01-01T00:00:00.000Z",
     patterns,

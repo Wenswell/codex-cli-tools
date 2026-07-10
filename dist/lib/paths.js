@@ -16,8 +16,8 @@ export function codexToolsConfigDir() {
 export function codexToolsCacheDir() {
     return join(process.env.XDG_CACHE_HOME || join(homeDir(), ".cache"), "codex-tools");
 }
-export function modelPricesCachePath() {
-    return join(codexToolsCacheDir(), "model-prices.json");
+export function modelPricesConfigPath() {
+    return join(codexToolsConfigDir(), "model-prices.json");
 }
 export function profilesPath() {
     return join(codexToolsConfigDir(), "profiles.json");

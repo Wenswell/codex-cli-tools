@@ -44,25 +44,25 @@ test("pricing reports partial status when cache-read pricing is missing", () => 
 
 test("pricing includes builtin GLM-5.2 prices without a remote cache", async () => {
   const cacheHome = await mkdtemp(join(tmpdir(), "pricing-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousHome = process.env.HOME;
   try {
-    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.HOME = cacheHome;
     const cache = await readModelPriceCache();
 
     assert.equal(modelPricingStatus(cache, "glm-5.2", "standard"), "ok");
   } finally {
-    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
+    restoreEnvironment("HOME", previousHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
 
 test("pricing cache reads do not fetch remote prices for missing models", async () => {
   const cacheHome = await mkdtemp(join(tmpdir(), "pricing-no-auto-refresh-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousHome = process.env.HOME;
   const previousFetch = globalThis.fetch;
   let fetchCount = 0;
   try {
-    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.HOME = cacheHome;
     await writePriceCache(cacheHome, {
       "kept-model": modelPriceFixture(0.000003),
     }, { patterns: ["kept-*"], providers: ["openai"] });
@@ -80,7 +80,7 @@ test("pricing cache reads do not fetch remote prices for missing models", async 
     assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
   } finally {
     globalThis.fetch = previousFetch;
-    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
+    restoreEnvironment("HOME", previousHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
@@ -119,10 +119,10 @@ test("pricing provider filtering precedes the pattern union", () => {
 
 test("pricing rebuild replaces models with the watched provider and pattern intersection", async () => {
   const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousHome = process.env.HOME;
   const previousFetch = globalThis.fetch;
   try {
-    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.HOME = cacheHome;
     await writePriceCache(cacheHome, {
       "kept-model": modelPriceFixture(0.000003),
       "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
@@ -145,17 +145,17 @@ test("pricing rebuild replaces models with the watched provider and pattern inte
     assert.equal(cache.models["azure/gpt-5.5"], undefined);
   } finally {
     globalThis.fetch = previousFetch;
-    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
+    restoreEnvironment("HOME", previousHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
 
 test("pricing rebuild fails before cache writes when remote fetch fails", async () => {
   const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-fail-cache-"));
-  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  const previousHome = process.env.HOME;
   const previousFetch = globalThis.fetch;
   try {
-    process.env.XDG_CACHE_HOME = cacheHome;
+    process.env.HOME = cacheHome;
     await writePriceCache(cacheHome, {
       "kept-model": modelPriceFixture(0.000003),
     }, { patterns: ["kept-*"], providers: ["openai"] });
@@ -172,7 +172,7 @@ test("pricing rebuild fails before cache writes when remote fetch fails", async 
     assert.deepEqual(Object.keys(cache.models), ["kept-model"]);
   } finally {
     globalThis.fetch = previousFetch;
-    restoreEnvironment("XDG_CACHE_HOME", previousCacheHome);
+    restoreEnvironment("HOME", previousHome);
     await rm(cacheHome, { recursive: true, force: true });
   }
 });
@@ -207,7 +207,7 @@ function modelPriceFixture(inputCostPerToken, provider = "openai") {
 }
 
 async function writePriceCache(cacheHome, models, { patterns = [], providers = [] } = {}) {
-  const dir = join(cacheHome, "codex-tools");
+  const dir = join(cacheHome, ".config", "codex-tools");
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "model-prices.json"), JSON.stringify(priceCache(models, patterns, providers), null, 2), "utf8");
 }

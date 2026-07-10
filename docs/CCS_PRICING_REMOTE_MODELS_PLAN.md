@@ -6,7 +6,7 @@ Keep the selected LiteLLM price snapshot in one local cache. Patterns and provid
 
 ## Data Contract
 
-`~/.cache/codex-tools/model-prices.json` stores:
+`~/.config/codex-tools/model-prices.json` stores:
 
 - `source`: LiteLLM directory URL.
 - `fetchedAt`: timestamp of the last successful remote rebuild.

@@ -492,13 +492,13 @@ Pricing source:
 LiteLLM model_prices_and_context_window.json
 ```
 
-Local cache:
+Local model-prices configuration:
 
 ```text
-~/.cache/codex-tools/model-prices.json
+~/.config/codex-tools/model-prices.json
 ```
 
-Cache format:
+File format:
 
 ```json
 {
@@ -552,9 +552,9 @@ Cost reporting, central reporting, and `ccs models` never write a full LiteLLM p
 
 Pricing model plan:
 
-- `~/.cache/codex-tools/model-prices.json.patterns` stores normalized watched patterns.
-- `~/.cache/codex-tools/model-prices.json.providers` stores normalized LiteLLM `litellm_provider` names.
-- `~/.cache/codex-tools/model-prices.json.models` stores only exact model records matching both fields.
+- `~/.config/codex-tools/model-prices.json.patterns` stores normalized watched patterns.
+- `~/.config/codex-tools/model-prices.json.providers` stores normalized LiteLLM `litellm_provider` names.
+- `~/.config/codex-tools/model-prices.json.models` stores only exact model records matching both fields.
 - `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild models from the remote catalog after changing patterns.
 - `ccs pricing provider add PROVIDER...` and `remove PROVIDER...` update local providers only; removal prunes local models using stored `litellm_provider` values.
 - `ccs pricing refresh` rebuilds the remote snapshot from current patterns and providers.

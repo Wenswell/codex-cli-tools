@@ -42,7 +42,7 @@ import {
   codexConfigPath,
   codexDir,
   codexToolsCacheDir,
-  modelPricesCachePath,
+  modelPricesConfigPath,
   codexToolsConfigDir,
   profilesPath,
   weztermConfigPath,
@@ -4703,7 +4703,7 @@ async function printCcsCostStatus(profiles: ProfilesFile): Promise<void> {
   const speed = await resolveCodexCostSpeed("auto");
   const urls = await readUsageTopStateUrls(profiles);
   printKeyValue("sessions:", colorPath(formatDisplayPath(codexDir())), 9);
-  printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue("remote:", urls[0] ? colorUrl(ccsCostStatusUrl(urls[0])) : textDim("none"), 9);
   printKeyValue("upload:", colorPath(ccsCostRemoteDisplay), 9);
   printKeyValue("timezone:", systemTimezone(), 9);
@@ -4770,7 +4770,7 @@ type CcsPricingListOptions = {
 async function printCcsPricingStatus(): Promise<void> {
   const speed = await resolveCodexCostSpeed("auto");
   const cache = await readStoredModelPriceCache();
-  printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue("patterns:", cache.patterns.length > 0 ? formatInteger(cache.patterns.length) : textDim("none"), 9);
   printKeyValue("providers:", cache.providers.length > 0 ? formatInteger(cache.providers.length) : textDim("none"), 9);
   printKeyValue("models:", Object.keys(cache.models).length > 0 ? formatInteger(Object.keys(cache.models).length) : textDim("none"), 9);
@@ -4863,7 +4863,7 @@ async function runCcsPricingPattern(args: string[]): Promise<void> {
 async function printCcsPricingPatterns(): Promise<void> {
   const cache = await readStoredModelPriceCache();
   console.log(textBold("ccs pricing pattern"));
-  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue("patterns:", cache.patterns.length > 0 ? formatInteger(cache.patterns.length) : textDim("none"), 9);
   if (cache.patterns.length === 0) {
     return;
@@ -4903,7 +4903,7 @@ async function runCcsPricingProvider(args: string[]): Promise<void> {
   const nextCache = pruneModelPriceCache(cache, cache.patterns, nextProviders);
   const speed = await resolveCodexCostSpeed("auto");
   console.log(textBold(label));
-  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue("providers:", `${formatInteger(cache.providers.length)} -> ${formatInteger(nextCache.providers.length)}`, 9);
   printKeyValue("models:", `${formatInteger(Object.keys(cache.models).length)} -> ${formatInteger(Object.keys(nextCache.models).length)}`, 9);
   console.log(textDim("no changes are written unless you type yes at the prompt."));
@@ -4912,13 +4912,13 @@ async function runCcsPricingProvider(args: string[]): Promise<void> {
     return;
   }
   await writeModelPriceCache(nextCache);
-  console.log(`pricing cache updated: ${textGreen(modelPricesCachePath())}`);
+  console.log(`pricing cache updated: ${textGreen(modelPricesConfigPath())}`);
 }
 
 async function printCcsPricingProviders(): Promise<void> {
   const cache = await readStoredModelPriceCache();
   console.log(textBold("ccs pricing provider"));
-  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue("providers:", cache.providers.length > 0 ? formatInteger(cache.providers.length) : textDim("none"), 9);
   if (cache.providers.length > 0) {
     printTable([{ key: "provider", title: "provider" }], cache.providers.map((provider) => ({ provider })));
@@ -4933,7 +4933,7 @@ async function rebuildCcsPricingSnapshot(
   const remote = await readRemoteModelPriceCatalog();
   const speed = await resolveCodexCostSpeed("auto");
   console.log(textBold(title));
-  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesConfigPath())), 9);
   printKeyValue(
     "remote:",
     remote.models ? colorUrl(litellmPricingUrl) : textYellow(`unavailable (${remote.error})`),
@@ -4949,11 +4949,11 @@ async function rebuildCcsPricingSnapshot(
     return;
   }
   await writeModelPriceSnapshotPlan(plan);
-  console.log(`pricing cache updated: ${textGreen(plan.cachePath)}`);
+  console.log(`pricing cache updated: ${textGreen(plan.configPath)}`);
 }
 
 function printCcsPricingSnapshotPlan(plan: ModelPriceSnapshotPlan, speed: ResolvedCodexCostSpeed): void {
-  printKeyValue("cache:", colorPath(formatDisplayPath(plan.cachePath)), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(plan.configPath)), 9);
   printKeyValue("source:", colorUrl(plan.source), 9);
   printKeyValue("fetched:", plan.fetchedAt, 9);
   printKeyValue("patterns:", `${formatInteger(plan.currentCache.patterns.length)} -> ${formatInteger(plan.nextCache.patterns.length)}`, 9);
@@ -4971,7 +4971,7 @@ async function printCcsPricingList(profiles: ProfilesFile, options: CcsPricingLi
   }
   const storedCache = await readStoredModelPriceCache();
   const cache = await readModelPriceCache(ccsCostPriceOptions(profiles));
-  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 8);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesConfigPath())), 8);
   printKeyValue("source:", storedCache.source === "builtin" ? textDim(storedCache.source) : colorUrl(storedCache.source), 8);
   printKeyValue("speed:", `auto -> ${speed}`, 8);
   printCcsPricingPriceTable(cache, Object.keys(storedCache.models).sort(), speed);
@@ -5937,7 +5937,7 @@ function defaultCentralCcsCostOptions(report: CcsCostReport, timezone = systemTi
 
 async function ccsCostPriceFingerprint(): Promise<string> {
   try {
-    const file = await stat(modelPricesCachePath());
+    const file = await stat(modelPricesConfigPath());
     return `${file.size}:${file.mtimeMs}`;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
