@@ -3,6 +3,7 @@ import { codexConfigPath, modelPricesCachePath } from "./paths.js";
 import { readTextIfExists, writeTextFileAtomic } from "./fs.js";
 import { readTopLevelTomlString } from "./toml.js";
 export const litellmPricingUrl = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const remoteModelPriceTimeoutMs = 5_000;
 const builtinModelPrices = {
     "glm-5.2": {
         input_cost_per_token: 0.0000014,
@@ -50,7 +51,11 @@ export async function buildModelPriceModelUpdatePlan(models, speed) {
     const currentCache = cachedText === null
         ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
         : parseModelPriceCache(cachedText, path);
-    const remoteModels = await fetchLiteLlmModelPrices(path);
+    const remote = await readRemoteModelPriceCatalog();
+    if (!remote.models) {
+        throw new Error(`pricing refresh failed: ${path} (${remote.error})`);
+    }
+    const remoteModels = remote.models;
     const names = expandModelNamePatterns(models, Object.keys(remoteModels));
     const fetchedAt = new Date().toISOString();
     const nextModels = { ...currentCache.models };
@@ -87,18 +92,34 @@ export async function buildModelPriceModelUpdatePlan(models, speed) {
 export async function writeModelPriceModelUpdatePlan(plan) {
     await writeTextFileAtomic(plan.cachePath, `${JSON.stringify(plan.nextCache, null, 2)}\n`, 0o644);
 }
-async function fetchLiteLlmModelPrices(path) {
-    let response;
+export async function readRemoteModelPriceCatalog() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), remoteModelPriceTimeoutMs);
     try {
-        response = await fetch(litellmPricingUrl);
+        const response = await fetch(litellmPricingUrl, { signal: controller.signal });
+        if (!response.ok) {
+            return { models: null, error: `http ${response.status}` };
+        }
+        try {
+            const models = await response.json();
+            return isModelPriceCatalog(models)
+                ? { models, error: null }
+                : { models: null, error: "invalid response" };
+        }
+        catch {
+            return { models: null, error: "invalid response" };
+        }
     }
     catch (error) {
-        throw new Error(`pricing refresh failed: ${path} (${formatUnknownError(error)})`);
+        const name = error instanceof Error ? error.name : "";
+        return { models: null, error: name === "AbortError" ? "timeout" : "fetch failed" };
     }
-    if (!response.ok) {
-        throw new Error(`pricing refresh failed: ${path} (${response.status} ${response.statusText})`);
+    finally {
+        clearTimeout(timeout);
     }
-    return await response.json();
+}
+function isModelPriceCatalog(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 function mergeBuiltinModelPrices(cache) {
     return {
@@ -139,15 +160,17 @@ function uniqueModelNames(models) {
 function expandModelNamePatterns(models, remoteModels) {
     const names = [];
     for (const model of uniqueModelNames(models)) {
-        if (!model.includes("*")) {
-            names.push(model);
-            continue;
-        }
-        const pattern = modelNamePatternRegExp(model);
-        const matches = remoteModels.filter((remoteModel) => pattern.test(remoteModel)).sort();
+        const matches = matchingModelNames(model, remoteModels);
         names.push(...(matches.length > 0 ? matches : [model]));
     }
     return uniqueModelNames(names);
+}
+export function matchingModelNames(pattern, models) {
+    if (!pattern.includes("*")) {
+        return models.includes(pattern) ? [pattern] : [];
+    }
+    const regexp = modelNamePatternRegExp(pattern);
+    return models.filter((model) => regexp.test(model)).sort();
 }
 export function modelNamePatternRegExp(pattern) {
     return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
@@ -255,7 +278,4 @@ export function calculateCodexCostUSD(modelUsage, cache, speed) {
 }
 function readFiniteNumber(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-function formatUnknownError(error) {
-    return error instanceof Error ? error.message : String(error);
 }

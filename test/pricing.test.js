@@ -10,6 +10,7 @@ import {
   modelPricingStatus,
   readModelPriceCache,
   readModelPriceCacheForModels,
+  readRemoteModelPriceCatalog,
   writeModelPriceModelUpdatePlan,
 } from "../dist/lib/pricing.js";
 
@@ -105,6 +106,41 @@ test("pricing cache reads do not fetch remote prices for missing models", async 
       process.env.XDG_CACHE_HOME = previousCacheHome;
     }
     await rm(cacheHome, { recursive: true, force: true });
+  }
+});
+
+test("pricing remote catalog returns a recoverable network error", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {
+      throw new Error("offline");
+    };
+
+    assert.deepEqual(await readRemoteModelPriceCatalog(), {
+      models: null,
+      error: "fetch failed",
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("pricing remote catalog normalizes HTTP and response errors", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("busy", { status: 503 });
+    assert.deepEqual(await readRemoteModelPriceCatalog(), {
+      models: null,
+      error: "http 503",
+    });
+
+    globalThis.fetch = async () => new Response("[]", { status: 200 });
+    assert.deepEqual(await readRemoteModelPriceCatalog(), {
+      models: null,
+      error: "invalid response",
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });
 
