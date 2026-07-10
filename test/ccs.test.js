@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
@@ -253,9 +254,9 @@ test("ccs pricing prints cache status", async () => {
     const output = await runCcs(["dist/bin/ccs.js", "pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
     assert.match(output, /pricing:\s+.*model-prices\.json/);
-    assert.match(output, /patterns:\s+none/);
+    assert.match(output, /models:\s+none/);
     assert.match(output, /source:\s+test/);
-    assert.match(output, /commands: ccs pricing list \| ccs pricing refresh \| ccs pricing watch MODEL_PATTERN\.\.\. \| ccs pricing unwatch MODEL_PATTERN\.\.\./);
+    assert.match(output, /commands: ccs pricing list \| ccs pricing list --remote \| ccs pricing refresh \| ccs pricing watch MODEL_PATTERN\.\.\. \| ccs pricing unwatch MODEL\.\.\./);
   } finally {
     if (home) {
       await rm(home, { recursive: true, force: true });
@@ -263,18 +264,16 @@ test("ccs pricing prints cache status", async () => {
   }
 });
 
-test("ccs pricing list shows remote models selected by configured patterns", async () => {
+test("ccs pricing list shows local prices without a network request", async () => {
   let home;
   const previousFetch = globalThis.fetch;
+  let fetchCount = 0;
   try {
     home = await writeProfiles({
       profiles: {
         input: { baseURL: "https://example.invalid", apiKey: "" },
       },
       current: "input",
-      pricing: {
-        patterns: ["gpt-5.*", "missing-model"],
-      },
     });
     await writeModelPriceCache(home, {
       "gpt-5": modelPriceValueFixture(0.000001),
@@ -282,20 +281,18 @@ test("ccs pricing list shows remote models selected by configured patterns", asy
       "gpt-5.5": modelPriceValueFixture(0.000005),
       "gpt-5x": modelPriceValueFixture(0.000009),
     });
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      "gpt-5": modelPriceValueFixture(0.000001),
-      "gpt-5.4": modelPriceValueFixture(0.000004),
-      "gpt-5.5": modelPriceValueFixture(0.000005),
-      "gpt-5x": modelPriceValueFixture(0.000009),
-    }), { status: 200 });
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response("{}", { status: 200 });
+    };
 
     const output = await runCcsDirect(["pricing", "list"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /pattern\s+remote\s+status\s+input\/M\s+cache\/M\s+output\/M/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
-    assert.match(output, /missing-model\s+missing\s+missing\s+missing\s+missing\s+missing/);
-    assert.doesNotMatch(output, /gpt-5x/);
+    assert.match(output, /model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
+    assert.match(output, /gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
+    assert.match(output, /gpt-5x\s+ok\s+\$9\.00\s+\$0\.90\s+\$18\.00/);
+    assert.equal(fetchCount, 0);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -304,7 +301,7 @@ test("ccs pricing list shows remote models selected by configured patterns", asy
   }
 });
 
-test("ccs pricing list all prints every remote model", async () => {
+test("ccs pricing list remote prints every remote model", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   try {
@@ -313,23 +310,17 @@ test("ccs pricing list all prints every remote model", async () => {
         input: { baseURL: "https://example.invalid", apiKey: "" },
       },
       current: "input",
-      pricing: {
-        patterns: ["gpt-5.5"],
-      },
-    });
-    await writeModelPriceCache(home, {
-      "claude-sonnet-4.5": modelPriceValueFixture(0.000006),
-      "gpt-5.5": modelPriceValueFixture(0.000005),
     });
     globalThis.fetch = async () => new Response(JSON.stringify({
       "claude-sonnet-4.5": modelPriceValueFixture(0.000006),
       "gpt-5.5": modelPriceValueFixture(0.000005),
     }), { status: 200 });
 
-    const output = await runCcsDirect(["pricing", "list", "--all"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const output = await runCcsDirect(["pricing", "list", "--remote"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /\*\s+claude-sonnet-4\.5\s+ok\s+\$6\.00/);
-    assert.match(output, /\*\s+gpt-5\.5\s+ok\s+\$5\.00/);
+    assert.match(output, /remote:\s+https:\/\/raw\.githubusercontent\.com/);
+    assert.match(output, /claude-sonnet-4\.5\s+ok\s+\$6\.00/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00/);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
@@ -338,7 +329,7 @@ test("ccs pricing list all prints every remote model", async () => {
   }
 });
 
-test("ccs pricing watch previews config edits without noninteractive writes", async () => {
+test("ccs pricing watch previews matching model prices without an action column", async () => {
   const previousFetch = globalThis.fetch;
   const home = await writeProfiles({
     profiles: {
@@ -356,9 +347,11 @@ test("ccs pricing watch previews config edits without noninteractive writes", as
     const profiles = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
 
     assert.match(output, /ccs pricing watch/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.4\s+watch/);
-    assert.match(output, /gpt-5\.\*\s+gpt-5\.5\s+watch/);
-    assert.match(output, /glm-5\.2\s+glm-5\.2\s+watch/);
+    assert.match(output, /pattern\s+model\s+status\s+input\/M\s+cache\/M\s+output\/M/);
+    assert.match(output, /gpt-5\.\*\s+gpt-5\.4\s+ok\s+\$4\.00\s+\$0\.40\s+\$8\.00/);
+    assert.match(output, /gpt-5\.\*\s+gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
+    assert.match(output, /glm-5\.2\s+glm-5\.2\s+ok\s+\$1\.40\s+\$0\.14\s+\$2\.80/);
+    assert.doesNotMatch(output, /action/);
     assert.match(output, /not applied/);
     assert.equal(profiles.pricing, undefined);
   } finally {
@@ -367,42 +360,7 @@ test("ccs pricing watch previews config edits without noninteractive writes", as
   }
 });
 
-test("ccs pricing list and watch continue when remote pricing is unavailable", async () => {
-  let home;
-  const previousFetch = globalThis.fetch;
-  try {
-    home = await writeProfiles({
-      profiles: {
-        input: { baseURL: "https://example.invalid", apiKey: "" },
-      },
-      current: "input",
-      pricing: {
-        patterns: ["gpt-5.*"],
-      },
-    });
-    await writeModelPriceCache(home, {
-      "gpt-5.5": modelPriceValueFixture(0.000005),
-    });
-    globalThis.fetch = async () => {
-      throw new Error("offline");
-    };
-
-    const listOutput = await runCcsDirect(["pricing", "list"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const watchOutput = await runCcsDirect(["pricing", "watch", "claude-*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-
-    assert.match(listOutput, /remote:\s+unavailable \(fetch failed\)/);
-    assert.match(listOutput, /gpt-5\.\*\s+unavailable\s+ok\s+\$5\.00/);
-    assert.match(watchOutput, /claude-\*\s+unavailable\s+watch/);
-    assert.match(watchOutput, /not applied/);
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (home) {
-      await rm(home, { recursive: true, force: true });
-    }
-  }
-});
-
-test("ccs pricing reads pricing.patterns only", async () => {
+test("ccs pricing watch confirmation saves exact models and prices", async () => {
   let home;
   const previousFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -413,24 +371,151 @@ test("ccs pricing reads pricing.patterns only", async () => {
       },
       current: "input",
       pricing: {
-        models: ["gpt-5.*"],
+        patterns: ["legacy-*"],
       },
+    });
+    await writeModelPriceCache(home, {
+      "kept-model": modelPriceValueFixture(0.000003),
+    });
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response(JSON.stringify({
+        "gpt-5.4": modelPriceValueFixture(0.000004),
+        "gpt-5.5": modelPriceValueFixture(0.000005),
+      }), { status: 200 });
+    };
+
+    const output = await runCcsWithConfirmation(["pricing", "watch", "gpt-5.*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const profiles = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
+    const cache = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "model-prices.json"), "utf8"));
+
+    assert.match(output, /pricing cache updated/);
+    assert.match(output, /profiles updated/);
+    assert.deepEqual(profiles.pricing.models, ["gpt-5.4", "gpt-5.5"]);
+    assert.equal(profiles.pricing.patterns, undefined);
+    assert.equal(cache.models["gpt-5.4"].input_cost_per_token, 0.000004);
+    assert.equal(cache.models["gpt-5.5"].input_cost_per_token, 0.000005);
+    assert.equal(cache.models["kept-model"].input_cost_per_token, 0.000003);
+    assert.equal(fetchCount, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing unwatch previews local prices without a remote request", async () => {
+  let home;
+  const previousFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+      pricing: {
+        models: ["gpt-5.5"],
+      },
+    });
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceValueFixture(0.000005),
     });
     globalThis.fetch = async () => {
       fetchCount += 1;
       return new Response("{}", { status: 200 });
     };
 
-    const output = await runCcsDirect(["pricing", "list"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const output = await runCcsDirect(["pricing", "unwatch", "gpt-5.5"], home, { XDG_CACHE_HOME: join(home, ".cache") });
 
-    assert.match(output, /patterns:\s+none/);
-    assert.match(output, /pricing patterns: none/);
+    assert.match(output, /ccs pricing unwatch/);
+    assert.match(output, /gpt-5\.5\s+ok\s+\$5\.00\s+\$0\.50\s+\$10\.00/);
+    assert.doesNotMatch(output, /action/);
+    assert.match(output, /not applied/);
     assert.equal(fetchCount, 0);
   } finally {
     globalThis.fetch = previousFetch;
     if (home) {
       await rm(home, { recursive: true, force: true });
     }
+  }
+});
+
+test("ccs pricing remote list and watch continue when remote pricing is unavailable", async () => {
+  let home;
+  const previousFetch = globalThis.fetch;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      "gpt-5.5": modelPriceValueFixture(0.000005),
+    });
+    globalThis.fetch = async () => {
+      throw new Error("offline");
+    };
+
+    const listOutput = await runCcsDirect(["pricing", "list", "--remote"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const watchOutput = await runCcsDirect(["pricing", "watch", "claude-*"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(listOutput, /remote:\s+unavailable \(fetch failed\)/);
+    assert.match(watchOutput, /remote:\s+unavailable \(fetch failed\)/);
+    assert.doesNotMatch(watchOutput, /Apply changes/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing ignores persisted patterns", async () => {
+  let home;
+  const previousFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    home = await writeProfiles({
+      profiles: {
+        input: { baseURL: "https://example.invalid", apiKey: "" },
+      },
+      current: "input",
+      pricing: { patterns: ["gpt-5.*"] },
+    });
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      return new Response("{}", { status: 200 });
+    };
+
+    const output = await runCcsDirect(["pricing"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+
+    assert.match(output, /models:\s+none/);
+    assert.equal(fetchCount, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (home) {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ccs pricing list rejects the removed all option", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+    },
+    current: "input",
+  });
+  try {
+    await assert.rejects(
+      runCcsDirect(["pricing", "list", "--all"], home),
+      /unknown argument for ccs pricing list: --all/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 
@@ -461,7 +546,7 @@ test("ccs pricing refresh requires model patterns", async () => {
   try {
     await assert.rejects(
       runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
-      /usage: ccs pricing refresh MODEL_PATTERN\.\.\. or add patterns with ccs pricing watch MODEL_PATTERN\.\.\./,
+      /usage: ccs pricing refresh MODEL_PATTERN\.\.\. or add models with ccs pricing watch MODEL_PATTERN\.\.\./,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -667,7 +752,7 @@ function runCcs(args, home, env = {}) {
   });
 }
 
-async function runCcsDirect(args, home, env = {}) {
+async function runCcsDirect(args, home, env = {}, isTTY = false) {
   const values = {
     HOME: home,
     NO_COLOR: "1",
@@ -676,7 +761,7 @@ async function runCcsDirect(args, home, env = {}) {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
   Object.assign(process.env, values);
   try {
-    return await captureStdout(() => runCcsCommand(args), { isTTY: false });
+    return await captureStdout(() => runCcsCommand(args), { isTTY });
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) {
@@ -684,6 +769,22 @@ async function runCcsDirect(args, home, env = {}) {
       } else {
         process.env[key] = value;
       }
+    }
+  }
+}
+
+async function runCcsWithConfirmation(args, home, env = {}) {
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(process, "stdin");
+  const input = new PassThrough();
+  Object.defineProperty(input, "isTTY", { configurable: true, value: true });
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  const timer = setTimeout(() => input.end("yes\n"), 10);
+  try {
+    return await runCcsDirect(args, home, env, true);
+  } finally {
+    clearTimeout(timer);
+    if (stdinDescriptor) {
+      Object.defineProperty(process, "stdin", stdinDescriptor);
     }
   }
 }

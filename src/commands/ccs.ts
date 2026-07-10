@@ -50,6 +50,7 @@ import {
 import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.js";
 import {
   buildModelPriceModelUpdatePlan,
+  buildModelPriceModelUpdatePlanFromRemoteCatalog,
   calculateCodexCostUSD,
   litellmPricingUrl,
   matchingModelNames,
@@ -115,7 +116,7 @@ type ProfilesFile = {
   current?: string;
   toggle?: string[];
   pricing?: {
-    patterns?: string[];
+    models?: string[];
     overrides?: Record<string, ModelPriceOverride>;
   };
   top?: {
@@ -4422,10 +4423,10 @@ function usageLines(): string[] {
     "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
     "  ccs models [--json]                  # list profile models from /v1/models",
     "  ccs pricing                          # show pricing cache status",
-    "  ccs pricing list [MODEL_PATTERN...]  # show local prices and remote models",
-    "  ccs pricing refresh [MODEL_PATTERN...] # preview and refresh watched or selected model prices",
-    "  ccs pricing watch MODEL_PATTERN...   # preview and add watched pricing patterns",
-    "  ccs pricing unwatch MODEL_PATTERN... # preview and remove watched pricing patterns",
+    "  ccs pricing list [--remote]          # show local or remote model prices",
+    "  ccs pricing refresh [MODEL_PATTERN...] # preview and refresh selected model prices",
+    "  ccs pricing watch MODEL_PATTERN...   # preview and save matching model prices",
+    "  ccs pricing unwatch MODEL...          # preview and remove selected models",
     "  ccs proxy [--once|watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
     "  ccs cost                             # show cost data source and commands",
     "  ccs cost daily                       # show Codex session daily cost totals",
@@ -4739,8 +4740,7 @@ async function printLocalCcsCost(options: CcsCostOptions, profiles: ProfilesFile
 }
 
 type CcsPricingListOptions = {
-  all: boolean;
-  patterns: string[];
+  remote: boolean;
   speed: CodexCostSpeed;
 };
 
@@ -4748,8 +4748,6 @@ type CcsPricingRefreshOptions = {
   patterns: string[];
   speed: CodexCostSpeed;
 };
-
-type CcsPricingWatchMode = "watch" | "unwatch";
 
 async function refreshCcsPricing(models: string[], speedOption: CodexCostSpeed): Promise<void> {
   const speed = await resolveCodexCostSpeed(speedOption);
@@ -4777,25 +4775,24 @@ async function printCcsPricingStatus(profiles: ProfilesFile): Promise<void> {
   const speed = await resolveCodexCostSpeed("auto");
   const cacheText = await readTextIfExists(modelPricesCachePath());
   const cache = cacheText ? JSON.parse(cacheText) as Partial<ModelPriceCache> : null;
-  const patterns = pricingPatterns(profiles);
+  const models = pricingModels(profiles);
   printKeyValue("pricing:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
   printKeyValue("config:", colorPath(formatDisplayPath(profilesPath())), 9);
-  printKeyValue("patterns:", patterns.length > 0 ? formatInteger(patterns.length) : textDim("none"), 9);
+  printKeyValue("models:", models.length > 0 ? formatInteger(models.length) : textDim("none"), 9);
   printKeyValue("source:", cache?.source ? colorUrl(cache.source) : textDim("missing"), 9);
   printKeyValue("fetched:", cache?.fetchedAt ?? textDim("missing"), 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs pricing list | ccs pricing refresh | ccs pricing watch MODEL_PATTERN... | ccs pricing unwatch MODEL_PATTERN..."));
+  console.log(textDim("commands: ccs pricing list | ccs pricing list --remote | ccs pricing refresh | ccs pricing watch MODEL_PATTERN... | ccs pricing unwatch MODEL..."));
 }
 
 function printCcsPricingHelp(): void {
   console.log([
     textBold("Usage:"),
     "  ccs pricing                          # show pricing cache status",
-    "  ccs pricing list [MODEL_PATTERN...]  # show local prices and remote models",
-    "  ccs pricing list --all               # show every remote model",
-    "  ccs pricing refresh [MODEL_PATTERN...] # preview and refresh watched or selected model prices",
-    "  ccs pricing watch MODEL_PATTERN...   # preview and add watched pricing patterns",
-    "  ccs pricing unwatch MODEL_PATTERN... # preview and remove watched pricing patterns",
+    "  ccs pricing list [--remote]          # show local or remote model prices",
+    "  ccs pricing refresh [MODEL_PATTERN...] # preview and refresh selected model prices",
+    "  ccs pricing watch MODEL_PATTERN...   # preview and save matching model prices",
+    "  ccs pricing unwatch MODEL...          # preview and remove selected models",
     "",
     textBold("Options:"),
     "  --speed auto|standard|fast            # pricing mode for list and refresh status",
@@ -4819,16 +4816,21 @@ async function runCcsPricing(args: string[]): Promise<void> {
   if (subcommand === "refresh") {
     rejectRemovedYesFlags(args, "ccs pricing refresh");
     const options = parseCcsPricingRefreshArgs(args.slice(1));
-    const patterns = options.patterns.length > 0 ? options.patterns : pricingPatterns(await readProfiles());
-    if (patterns.length === 0) {
-      throw new Error("usage: ccs pricing refresh MODEL_PATTERN... or add patterns with ccs pricing watch MODEL_PATTERN...");
+    const models = options.patterns.length > 0 ? options.patterns : pricingModels(await readProfiles());
+    if (models.length === 0) {
+      throw new Error("usage: ccs pricing refresh MODEL_PATTERN... or add models with ccs pricing watch MODEL_PATTERN...");
     }
-    await refreshCcsPricing(patterns, options.speed);
+    await refreshCcsPricing(models, options.speed);
     return;
   }
-  if (subcommand === "watch" || subcommand === "unwatch") {
-    rejectRemovedYesFlags(args, `ccs pricing ${subcommand}`);
-    await updateWatchedCcsPricingModels(subcommand, parseCcsPricingModelPatternArgs(args.slice(1), `ccs pricing ${subcommand}`));
+  if (subcommand === "watch") {
+    rejectRemovedYesFlags(args, "ccs pricing watch");
+    await watchCcsPricingModels(parseCcsPricingPatternArgs(args.slice(1), "ccs pricing watch"));
+    return;
+  }
+  if (subcommand === "unwatch") {
+    rejectRemovedYesFlags(args, "ccs pricing unwatch");
+    await unwatchCcsPricingModels(parseCcsPricingModelArgs(args.slice(1), "ccs pricing unwatch"));
     return;
   }
   throw new Error(`unknown argument for ccs pricing: ${subcommand}`);
@@ -4860,76 +4862,65 @@ function ccsPricingRefreshPlanRow(record: ModelPriceModelUpdateRecord): TableRow
 
 async function printCcsPricingList(profiles: ProfilesFile, options: CcsPricingListOptions): Promise<void> {
   const speed = await resolveCodexCostSpeed(options.speed);
+  if (options.remote) {
+    await printRemoteCcsPricingList(speed, options.speed);
+    return;
+  }
   const cache = await readModelPriceCache(ccsCostPriceOptions(profiles));
-  const watchedPatterns = pricingPatterns(profiles);
-  const patterns = options.all ? ["*"] : (options.patterns.length > 0 ? options.patterns : watchedPatterns);
   printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 8);
   printKeyValue("source:", cache.source === "builtin" ? textDim(cache.source) : colorUrl(cache.source), 8);
   printKeyValue("speed:", `${options.speed} -> ${speed}`, 8);
-  if (!options.all && options.patterns.length === 0) {
-    printKeyValue("patterns:", watchedPatterns.length > 0 ? formatInteger(watchedPatterns.length) : textDim("none"), 8);
-  }
-  if (patterns.length === 0) {
-    console.log(textDim("pricing patterns: none."));
-    return;
-  }
+  printCcsPricingPriceTable(cache, Object.keys(cache.models).sort(), speed);
+}
+
+async function printRemoteCcsPricingList(
+  speed: ResolvedCodexCostSpeed,
+  speedOption: CodexCostSpeed,
+): Promise<void> {
   const remote = await readRemoteModelPriceCatalog();
   printKeyValue(
     "remote:",
     remote.models ? colorUrl(litellmPricingUrl) : textYellow(`unavailable (${remote.error})`),
     8,
   );
-  printTable([
-    { key: "pattern", title: "pattern" },
-    { key: "remote", title: "remote" },
+  printKeyValue("speed:", `${speedOption} -> ${speed}`, 8);
+  if (!remote.models) {
+    return;
+  }
+  const cache = remoteModelPriceCache(remote.models);
+  printCcsPricingPriceTable(cache, Object.keys(cache.models).sort(), speed);
+}
+
+function printCcsPricingPriceTable(
+  cache: ModelPriceCache,
+  models: string[],
+  speed: ResolvedCodexCostSpeed,
+): void {
+  if (models.length === 0) {
+    console.log(textDim("model prices: none."));
+    return;
+  }
+  printTable(ccsPricingPriceColumns(), models.map((model) => ccsPricingPriceRow(cache, model, speed)));
+}
+
+function ccsPricingPriceColumns(): TableColumn[] {
+  return [
+    { key: "model", title: "model" },
     { key: "status", title: "status" },
     { key: "input", title: "input/M", align: "right" },
     { key: "cache", title: "cache/M", align: "right" },
     { key: "output", title: "output/M", align: "right" },
-  ], remote.models
-    ? ccsPricingRemoteListRows(cache, patterns, Object.keys(remote.models), speed)
-    : ccsPricingUnavailableListRows(cache, patterns, speed));
+  ];
 }
 
-function ccsPricingRemoteListRows(
+function ccsPricingPriceRow(
   cache: ModelPriceCache,
-  patterns: string[],
-  remoteModels: string[],
-  speed: ResolvedCodexCostSpeed,
-): TableRow[] {
-  return patterns.flatMap((pattern) => {
-    const matches = matchingModelNames(pattern, remoteModels);
-    if (matches.length === 0) {
-      return [ccsPricingListRow(cache, pattern, pattern, textRed("missing"), speed)];
-    }
-    return matches.map((model) => ccsPricingListRow(cache, pattern, model, model, speed));
-  });
-}
-
-function ccsPricingUnavailableListRows(
-  cache: ModelPriceCache,
-  patterns: string[],
-  speed: ResolvedCodexCostSpeed,
-): TableRow[] {
-  const localModels = Object.keys(cache.models);
-  return patterns.flatMap((pattern) => {
-    const matches = matchingModelNames(pattern, localModels);
-    const models = matches.length > 0 ? matches : [pattern];
-    return models.map((model) => ccsPricingListRow(cache, pattern, model, textYellow("unavailable"), speed));
-  });
-}
-
-function ccsPricingListRow(
-  cache: ModelPriceCache,
-  pattern: string,
   model: string,
-  remote: string,
   speed: ResolvedCodexCostSpeed,
 ): TableRow {
   const parts = modelPriceParts(cache, model, speed);
   return {
-    pattern,
-    remote,
+    model,
     status: formatModelPricingStatus(modelPricingStatus(cache, model, speed)),
     input: formatPricePerMillion(parts?.input ?? null),
     cache: formatPricePerMillion(parts?.cacheRead ?? null),
@@ -4941,99 +4932,152 @@ function formatPricePerMillion(value: number | null): string {
   return value === null ? textDim("missing") : colorCost(formatCost(value * 1_000_000));
 }
 
-async function updateWatchedCcsPricingModels(mode: CcsPricingWatchMode, models: string[]): Promise<void> {
-  if (models.length === 0) {
-    throw new Error(`usage: ccs pricing ${mode} MODEL_PATTERN...`);
+function remoteModelPriceCache(models: Record<string, unknown>): ModelPriceCache {
+  return {
+    source: litellmPricingUrl,
+    fetchedAt: new Date().toISOString(),
+    models,
+  };
+}
+
+async function watchCcsPricingModels(patterns: string[]): Promise<void> {
+  if (patterns.length === 0) {
+    throw new Error("usage: ccs pricing watch MODEL_PATTERN...");
   }
   const profiles = await readProfiles();
-  const current = pricingPatterns(profiles);
-  const next = mode === "watch"
-    ? [...current, ...models.filter((model) => !current.includes(model))]
-    : current.filter((model) => !models.includes(model));
   const remote = await readRemoteModelPriceCatalog();
-  printCcsPricingWatchPlan(mode, current, next, remote.models ? Object.keys(remote.models) : null, remote.error);
-  if (sameStringList(current, next)) {
-    console.log(textDim("nothing to update."));
+  const speed = await resolveCodexCostSpeed("auto");
+  console.log(textBold("ccs pricing watch"));
+  printKeyValue("config:", colorPath(formatDisplayPath(profilesPath())), 9);
+  printKeyValue("cache:", colorPath(formatDisplayPath(modelPricesCachePath())), 9);
+  printKeyValue(
+    "remote:",
+    remote.models ? colorUrl(litellmPricingUrl) : textYellow(`unavailable (${remote.error})`),
+    9,
+  );
+  printKeyValue("speed:", `auto -> ${speed}`, 9);
+  if (!remote.models) {
     return;
   }
+  const cache = remoteModelPriceCache(remote.models);
+  const rows = pricingWatchRows(patterns, cache, speed);
+  const models = [...new Set(rows.map((row) => row.model))];
+  if (rows.length === 0) {
+    console.log(textDim("matching remote models: none."));
+    return;
+  }
+  printTable([
+    { key: "pattern", title: "pattern" },
+    ...ccsPricingPriceColumns(),
+  ], rows);
+  const current = pricingModels(profiles);
+  const next = normalizePricingModelNames([...current, ...models]);
+  const plan = await buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remote.models);
+  printKeyValue("models:", `${formatInteger(current.length)} -> ${formatInteger(next.length)}`, 9);
+  console.log(textDim("no changes are written unless you type yes at the prompt."));
   if (!(await confirmApply())) {
     return;
   }
 
+  await writeModelPriceModelUpdatePlan(plan);
   await writeProfiles({
     ...profiles,
     pricing: {
-      ...pricingWithoutLegacyModels(profiles),
-      patterns: next,
+      ...pricingWithoutLegacyPatterns(profiles),
+      models: next,
     } as ProfilesFile["pricing"],
   });
+  console.log(`pricing cache updated: ${textGreen(plan.cachePath)}`);
   console.log(`profiles updated: ${textGreen(profilesPath())}`);
-  printKeyValue(mode === "watch" ? "patterns:" : "removed:", formatInteger(Math.abs(next.length - current.length)), 9);
+  printKeyValue("models:", formatInteger(models.length), 9);
 }
 
-function printCcsPricingWatchPlan(
-  mode: CcsPricingWatchMode,
-  current: string[],
-  next: string[],
-  remoteModels: string[] | null,
-  remoteError: string | null,
-): void {
-  console.log(textBold(`ccs pricing ${mode}`));
-  printKeyValue("config:", colorPath(formatDisplayPath(profilesPath())), 9);
-  printKeyValue("current:", current.length > 0 ? formatInteger(current.length) : textDim("none"), 9);
-  printKeyValue("next:", next.length > 0 ? formatInteger(next.length) : textDim("none"), 9);
-  printKeyValue(
-    "remote:",
-    remoteModels ? colorUrl(litellmPricingUrl) : textYellow(`unavailable (${remoteError})`),
-    9,
-  );
-  console.log(textDim("no changes are written unless you type yes at the prompt."));
-  const rows = pricingWatchPlanRows(current, next, remoteModels);
-  if (rows.length > 0) {
-    printTable([
-      { key: "pattern", title: "pattern" },
-      { key: "remote", title: "remote" },
-      { key: "action", title: "action" },
-    ], rows);
-  }
-}
-
-function pricingWatchPlanRows(current: string[], next: string[], remoteModels: string[] | null): TableRow[] {
-  const values = [...new Set([...current, ...next])].sort();
-  const rows: TableRow[] = [];
-  for (const pattern of values) {
-    const wasWatched = current.includes(pattern);
-    const willWatch = next.includes(pattern);
-    if (wasWatched !== willWatch) {
-      const remote = remoteModels === null
-        ? [textYellow("unavailable")]
-        : matchingModelNames(pattern, remoteModels);
-      const matches = remote.length > 0 ? remote : [textRed("missing")];
-      for (const model of matches) {
-        rows.push({
-          pattern,
-          remote: model,
-          action: willWatch ? textGreen("watch") : textRed("unwatch"),
-        });
-      }
+function pricingWatchRows(
+  patterns: string[],
+  cache: ModelPriceCache,
+  speed: ResolvedCodexCostSpeed,
+): Array<TableRow & { model: string }> {
+  const remoteModels = Object.keys(cache.models);
+  const rows: Array<TableRow & { model: string }> = [];
+  for (const pattern of patterns) {
+    for (const model of matchingModelNames(pattern, remoteModels)) {
+      const price = ccsPricingPriceRow(cache, model, speed);
+      rows.push({
+        pattern,
+        model,
+        status: price.status,
+        input: price.input,
+        cache: price.cache,
+        output: price.output,
+      });
     }
   }
   return rows;
 }
 
-function parseCcsPricingListArgs(args: string[]): CcsPricingListOptions {
-  let all = false;
-  const parsed = parseCcsPricingPatternAndSpeedArgs(args, "ccs pricing list", (arg) => {
-    if (arg === "--all") {
-      all = true;
-      return true;
-    }
-    return false;
-  });
-  if (all && parsed.patterns.length > 0) {
-    throw new Error("usage: ccs pricing list --all or ccs pricing list MODEL_PATTERN...");
+async function unwatchCcsPricingModels(models: string[]): Promise<void> {
+  if (models.length === 0) {
+    throw new Error("usage: ccs pricing unwatch MODEL...");
   }
-  return { all, ...parsed };
+  const profiles = await readProfiles();
+  const current = pricingModels(profiles);
+  const missing = models.filter((model) => !current.includes(model));
+  if (missing.length > 0) {
+    throw new Error(`pricing models not selected: ${missing.join(", ")}`);
+  }
+  const next = current.filter((model) => !models.includes(model));
+  const speed = await resolveCodexCostSpeed("auto");
+  const cache = await readModelPriceCache(ccsCostPriceOptions(profiles));
+  console.log(textBold("ccs pricing unwatch"));
+  printKeyValue("config:", colorPath(formatDisplayPath(profilesPath())), 9);
+  printKeyValue("current:", current.length > 0 ? formatInteger(current.length) : textDim("none"), 9);
+  printKeyValue("next:", next.length > 0 ? formatInteger(next.length) : textDim("none"), 9);
+  printKeyValue("speed:", `auto -> ${speed}`, 9);
+  console.log(textDim("no changes are written unless you type yes at the prompt."));
+  printCcsPricingPriceTable(cache, models, speed);
+  if (!(await confirmApply())) {
+    return;
+  }
+  await writeProfiles({
+    ...profiles,
+    pricing: {
+      ...pricingWithoutLegacyPatterns(profiles),
+      models: next,
+    } as ProfilesFile["pricing"],
+  });
+  console.log(`profiles updated: ${textGreen(profilesPath())}`);
+  printKeyValue("removed:", formatInteger(models.length), 9);
+}
+
+function parseCcsPricingListArgs(args: string[]): CcsPricingListOptions {
+  let remote = false;
+  let speed: CodexCostSpeed = "auto";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--remote") {
+      remote = true;
+      continue;
+    }
+    if (arg === "--speed") {
+      const value = args[index + 1];
+      if (!isCodexCostSpeed(value)) {
+        throw new Error("usage: ccs pricing list --speed auto|standard|fast");
+      }
+      speed = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--speed=")) {
+      const value = arg.slice("--speed=".length);
+      if (!isCodexCostSpeed(value)) {
+        throw new Error("usage: ccs pricing list --speed auto|standard|fast");
+      }
+      speed = value;
+      continue;
+    }
+    throw new Error(`unknown argument for ccs pricing list: ${arg}`);
+  }
+  return { remote, speed };
 }
 
 function parseCcsPricingRefreshArgs(args: string[]): CcsPricingRefreshOptions {
@@ -5080,7 +5124,7 @@ function parseCcsPricingPatternAndSpeedArgs(
   };
 }
 
-function parseCcsPricingModelPatternArgs(args: string[], command: string): string[] {
+function parseCcsPricingPatternArgs(args: string[], command: string): string[] {
   const patterns = normalizePricingModelPatterns(args);
   const unknownOption = patterns.find((model) => model.startsWith("-"));
   if (unknownOption) {
@@ -5089,12 +5133,20 @@ function parseCcsPricingModelPatternArgs(args: string[], command: string): strin
   return patterns;
 }
 
-function pricingPatterns(profiles: ProfilesFile): string[] {
-  return normalizePricingModelPatterns(Array.isArray(profiles.pricing?.patterns) ? profiles.pricing.patterns : []);
+function parseCcsPricingModelArgs(args: string[], command: string): string[] {
+  const models = parseCcsPricingPatternArgs(args, command);
+  if (models.some((model) => model.includes("*"))) {
+    throw new Error(`usage: ${command} MODEL...`);
+  }
+  return models;
 }
 
-function pricingWithoutLegacyModels(profiles: ProfilesFile): Record<string, unknown> {
-  const { models: _models, ...pricing } = (profiles.pricing ?? {}) as Record<string, unknown>;
+function pricingModels(profiles: ProfilesFile): string[] {
+  return normalizePricingModelNames(Array.isArray(profiles.pricing?.models) ? profiles.pricing.models : []);
+}
+
+function pricingWithoutLegacyPatterns(profiles: ProfilesFile): Record<string, unknown> {
+  const { patterns: _patterns, ...pricing } = (profiles.pricing ?? {}) as Record<string, unknown>;
   return pricing;
 }
 
@@ -5102,8 +5154,8 @@ function normalizePricingModelPatterns(patterns: string[]): string[] {
   return [...new Set(patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern.length > 0))];
 }
 
-function sameStringList(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+function normalizePricingModelNames(models: string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter((model) => model.length > 0))].sort();
 }
 
 function isCodexCostSpeed(value: string | undefined): value is CodexCostSpeed {

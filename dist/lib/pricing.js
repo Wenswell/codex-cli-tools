@@ -46,16 +46,18 @@ function parseModelPriceCache(text, path) {
     return parsed;
 }
 export async function buildModelPriceModelUpdatePlan(models, speed) {
+    const remote = await readRemoteModelPriceCatalog();
+    if (!remote.models) {
+        throw new Error(`pricing refresh failed: ${modelPricesCachePath()} (${remote.error})`);
+    }
+    return buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remote.models);
+}
+export async function buildModelPriceModelUpdatePlanFromRemoteCatalog(models, speed, remoteModels) {
     const path = modelPricesCachePath();
     const cachedText = await readTextIfExists(path);
     const currentCache = cachedText === null
         ? { source: litellmPricingUrl, fetchedAt: new Date(0).toISOString(), models: {} }
         : parseModelPriceCache(cachedText, path);
-    const remote = await readRemoteModelPriceCatalog();
-    if (!remote.models) {
-        throw new Error(`pricing refresh failed: ${path} (${remote.error})`);
-    }
-    const remoteModels = remote.models;
     const names = expandModelNamePatterns(models, Object.keys(remoteModels));
     const fetchedAt = new Date().toISOString();
     const nextModels = { ...currentCache.models };
