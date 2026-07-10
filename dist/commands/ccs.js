@@ -105,7 +105,7 @@ async function readProfiles() {
     }
 }
 async function writeProfiles(profiles) {
-    await writeTextFile(profilesPath(), stringifyJson(profiles), 0o600);
+    await writeTextFileAtomic(profilesPath(), stringifyJson(profiles), 0o600);
 }
 async function readDefaultProfiles() {
     const path = fileURLToPath(new URL("../../config/ccs-profiles.json", import.meta.url));
@@ -477,7 +477,7 @@ async function pullConfigFromServer(local, remote) {
             throw new Error(`invalid remote profiles.json: ${message}`);
         }
         const backupDir = await backupCcsFiles([{ source: profilesPath(), target: "profiles.json" }]);
-        await writeTextFile(profilesPath(), nextText, 0o600);
+        await writeTextFileAtomic(profilesPath(), nextText, 0o600);
         if (backupDir) {
             console.log(`backup: ${textBlue(backupDir)}`);
         }
@@ -1798,13 +1798,14 @@ function formatStatusLineRefresh(snapshot, now) {
     const seconds = Math.max(0, Math.ceil((Math.min(...dueAt) - now.getTime()) / 1000));
     return `r${seconds}s`;
 }
-function renderUsageTopStatusSuffix(snapshot, stateNow) {
+function renderUsageTopStatusSuffix(snapshot, stateNow, currentProfile) {
     const parts = snapshot.entries.map((entry) => {
+        const name = entry.name === currentProfile ? `*${entry.name}` : entry.name;
         if (entry.skipped) {
-            return `${entry.name} -`;
+            return `${name} -`;
         }
         if (entry.used === undefined) {
-            return `${entry.name} ?`;
+            return `${name} ?`;
         }
         const delta = formatStatusLineDelta(entry.delta, entry.changedAt, stateNow);
         const tags = [
@@ -1812,13 +1813,13 @@ function renderUsageTopStatusSuffix(snapshot, stateNow) {
             entry.stale ? "stale" : "",
             entry.done ? "done" : "",
         ].filter(Boolean);
-        return `${entry.name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
+        return `${name} ${formatStatusLineCost(entry.used)}${tags.length > 0 ? ` ${tags.join(" ")}` : ""}`;
     });
     const refresh = formatStatusLineRefresh(snapshot, stateNow);
     return `${refresh ? ` ${refresh}` : ""} | ${parts.join(" | ")}`;
 }
-function renderUsageTopStatusLine(snapshot, displayNow, stateNow) {
-    return `${formatStatusLineClock(displayNow)}${renderUsageTopStatusSuffix(snapshot, stateNow)}`;
+function renderUsageTopStatusLine(snapshot, displayNow, stateNow, currentProfile) {
+    return `${formatStatusLineClock(displayNow)}${renderUsageTopStatusSuffix(snapshot, stateNow, currentProfile)}`;
 }
 function usageTopSnapshotPath() {
     return join(codexToolsCacheDir(), "ccs-top-state.json");
@@ -2368,7 +2369,12 @@ async function readActiveUsageTopStatusSource(profiles, now) {
 }
 async function renderCurrentUsageTopStatusSuffix(profiles, now, inactiveLabel = "ccs top inactive") {
     const source = await readActiveUsageTopStatusSource(profiles, now);
-    return source ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow) : ` | ${inactiveLabel}`;
+    const currentProfile = profiles.current && profiles.profiles?.[profiles.current]
+        ? profiles.current
+        : undefined;
+    return source
+        ? renderUsageTopStatusSuffix(source.snapshot, source.stateNow, currentProfile)
+        : ` | ${inactiveLabel}`;
 }
 async function printUsageTopStatusLine(profiles) {
     const now = new Date();
@@ -3114,7 +3120,7 @@ function parseUsageTopHistoryRequestFromUrl(url, now = new Date()) {
         profileName: url.searchParams.get("profile")?.trim() || undefined,
     };
 }
-async function runUsageTopStatusAgent(profiles) {
+async function runUsageTopStatusAgent() {
     let stopped = false;
     let cachedSuffix = " | ccs top unavailable";
     let refreshInFlight = false;
@@ -3124,7 +3130,8 @@ async function runUsageTopStatusAgent(profiles) {
         }
         refreshInFlight = true;
         try {
-            cachedSuffix = await renderCurrentUsageTopStatusSuffix(profiles, new Date(), "ccs top unavailable");
+            const currentProfiles = await readProfiles();
+            cachedSuffix = await renderCurrentUsageTopStatusSuffix(currentProfiles, new Date(), "ccs top unavailable");
         }
         catch {
             cachedSuffix = " | ccs top unavailable";
@@ -3555,7 +3562,7 @@ async function runCcsStatus(profiles, args) {
     }
     if (subcommand === "agent") {
         assertExactArgs(subargs, "s agent", 0);
-        await runUsageTopStatusAgent(profiles);
+        await runUsageTopStatusAgent();
         return;
     }
     if (subcommand === "server") {

@@ -355,17 +355,17 @@ Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider
 Run `ccs s` to print the same compact status plus one compact command line:
 
 ```text
-22:52:22 r7s | input 181.9 | ciii 161.3 | oops ? | input-cc 0
+22:52:22 r7s | *input 181.9 | ciii 161.3 | oops ? | input-cc 0
 commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]
 ```
 
 Use `ccs s line` from terminal status bars or shell prompts. It reads configured top state, prints one compact line, and exits:
 
 ```text
-14:09:12 r18s | input 6.6 | ciii 22.6 +0.3 | input-cc 0
+14:09:12 r18s | *input 6.6 | ciii 22.6 +0.3 | input-cc 0
 ```
 
-Run `ccs top` locally to produce a local snapshot. The status line does not request usage APIs directly; it renders configured state URLs first, then falls back to the latest active local `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running collector. Deltas such as `+0.3` stay visible for 1 minute after the collector observes the change. If no active state exists, the status line prints `ccs top inactive`.
+Run `ccs top` locally to produce a local snapshot. The status line does not request usage APIs directly; it renders configured state URLs first, then falls back to the latest active local `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. A leading `*` marks the local switching profile from `profiles.current`; usage-only entries remain unmarked. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running collector. Deltas such as `+0.3` stay visible for 1 minute after the collector observes the change. If no active state exists, the status line prints `ccs top inactive`.
 
 Use `ccs s server [PORT]` to run the same collector without an interactive terminal and expose the current snapshot over HTTP. It listens on `0.0.0.0` and defaults to port `8765`:
 
@@ -420,7 +420,7 @@ time          total  input  ciii  |  time          total  input  ciii
 20:00-20:30  +$0.2  +$0.2    $0  |
 ```
 
-For WezTerm, keep `ccs s agent` running in one terminal. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
+For WezTerm, keep `ccs s agent` running in one terminal. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries and reloads `profiles.json` so the `*` marker follows profile switches. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
 
 Install the WezTerm status bar integration with the project command:
 
