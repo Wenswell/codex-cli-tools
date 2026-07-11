@@ -105,9 +105,9 @@ const PROXY_OVERVIEW_TABLE_COLUMNS = [
 ];
 const PROXY_TOKEN_TABLE_COLUMNS = [
     ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
-    { key: "input_tokens", title: "input_tokens", width: 12, align: "right" },
-    { key: "output_tokens", title: "output_tokens", width: 13, align: "right" },
-    { key: "cached_input_tokens", title: "cached_input_tokens", width: 19, align: "right" },
+    { key: "input_tokens", title: "input", width: 6, align: "right" },
+    { key: "output_tokens", title: "output", width: 6, align: "right" },
+    { key: "cached_input_tokens", title: "cached", width: 6, align: "right" },
     PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_COST_TABLE_COLUMNS = [
@@ -1073,11 +1073,11 @@ export function formatProxyAttemptCosts(attempts, cache) {
         input_cost: invalid ? textRed("invalid") : inputMissing ? textDim("-") : colorCost(formatProxyUsd(input)),
         output_cost: outputMissing ? textDim("-") : colorCost(formatProxyUsd(output)),
         cached_cost: cachedMissing ? textDim("-") : colorCost(formatProxyUsd(cached)),
-        total_cost: invalid ? textRed("invalid") : totalMissing ? textDim("missing") : colorCost(formatProxyUsd(input + output + cached)),
+        total_cost: invalid ? textRed("invalid") : totalMissing ? textDim("-") : colorCost(formatProxyUsd(input + output + cached)),
     };
 }
 function missingProxyCosts() {
-    return { input_cost: textDim("-"), output_cost: textDim("-"), cached_cost: textDim("-"), total_cost: textDim("missing") };
+    return { input_cost: textDim("-"), output_cost: textDim("-"), cached_cost: textDim("-"), total_cost: textDim("-") };
 }
 export function formatProxyUsd(value) {
     if (value === 0)
@@ -3763,7 +3763,7 @@ function usageHelpLines() {
         "  ccs proxy --once --history N             # print proxy status with N history rows",
         "  ccs proxy watch                          # watch proxy status and active upstream",
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
-        "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles and q exits",
+        "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy mode                           # print active proxy intervention mode",
         "  ccs proxy mode recovery                  # enable continuation recovery mode",
         "  ccs proxy mode intercept                 # enable guard intercept mode",

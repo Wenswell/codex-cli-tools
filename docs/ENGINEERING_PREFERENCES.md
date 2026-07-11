@@ -28,6 +28,7 @@ This document records reusable project preferences that come from implementation
 - Numeric display uses compact units for terminal output and keeps raw numeric values in JSON.
 - Runtime retention and visible terminal row counts are separate display concerns. Non-TTY output keeps fixed row counts, while TTY output can use terminal height to reveal more retained rows.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
+- Raw TTY monitors handle `Ctrl-C` as the ETX input byte and route it through the same cleanup path as command-specific exit keys, restoring raw mode, cursor visibility, screen state, and input listeners.
 
 ## Cost And Pricing
 
