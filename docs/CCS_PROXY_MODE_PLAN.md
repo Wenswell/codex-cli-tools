@@ -14,7 +14,7 @@ Implemented on 2026-07-07.
 - `intercept`: inspect supported model responses and use ordinary guard retry. Streaming Responses continuation recovery is disabled.
 - `passthrough`: forward the original client request body to the active upstream and stream the upstream response back without reasoning guard retries, continuation recovery, response body stripping, capacity retries, or transport retries.
 
-`ccs proxy install` starts in `recovery`, matching the current strongest protection behavior.
+This plan originally installed the proxy in `recovery`. The current install contract starts in `passthrough`; users explicitly select `recovery` or `intercept` when intervention is required.
 
 ## Command Surface
 
@@ -36,6 +36,7 @@ Commands that write `proxy.json` print the planned change and require typing exa
 
 ## Acceptance
 
+- `ccs proxy install` starts in `passthrough`.
 - `ccs proxy mode recovery` enables continuation recovery for eligible streaming Responses requests.
 - `ccs proxy mode intercept` keeps guard retries and blocks exhausted guarded responses without continuation recovery.
 - `ccs proxy stop` forwards guarded responses as upstream responses and keeps the proxy endpoint reachable.

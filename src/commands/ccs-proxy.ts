@@ -320,6 +320,7 @@ const PROXY_MODE_PASSTHROUGH = "passthrough";
 const PROXY_MODE_INTERCEPT = "intercept";
 const PROXY_MODE_RECOVERY = "recovery";
 const PROXY_DEFAULT_MODE: ProxyMode = PROXY_MODE_RECOVERY;
+const PROXY_INSTALL_MODE: ProxyMode = PROXY_MODE_PASSTHROUGH;
 const NON_STREAM_STATUS_CODE = 502;
 const REASONING_EQUALS = [516, 1034, 1552];
 const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
@@ -1634,7 +1635,7 @@ function buildProxyStateFromProfiles(
     provider_name: providerName,
     original_base_url: originalBaseUrl,
     proxy_base_url: proxyBaseUrl(listenHost, listenPort),
-    mode: PROXY_DEFAULT_MODE,
+    mode: PROXY_INSTALL_MODE,
     listen_host: listenHost,
     listen_port: listenPort,
     profile_order: buildProfileOrder(profiles),
