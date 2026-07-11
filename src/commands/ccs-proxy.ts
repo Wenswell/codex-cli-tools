@@ -110,6 +110,7 @@ type ProxyRequestRecord = {
   upstream: string | null;
   attempts: number;
   latency_ms: number;
+  client_ttfb_ms: number | null;
   upstream_wait_ms: number | null;
   time_to_first_chunk_ms: number | null;
   stream_duration_ms: number | null;
@@ -340,7 +341,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-export const PROXY_REQUEST_SCHEMA_VERSION = 4;
+export const PROXY_REQUEST_SCHEMA_VERSION = 5;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
@@ -395,9 +396,9 @@ const PROXY_OVERVIEW_TABLE_COLUMNS: TableColumn[] = [
 ];
 const PROXY_TOKEN_TABLE_COLUMNS: TableColumn[] = [
   ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
-  { key: "input_tokens", title: "input", width: 6, align: "right" },
-  { key: "output_tokens", title: "output", width: 6, align: "right" },
-  { key: "cached_input_tokens", title: "cached", width: 6, align: "right" },
+  { key: "input_tokens", title: "input", width: 9, align: "right" },
+  { key: "output_tokens", title: "output", width: 9, align: "right" },
+  { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
   PROXY_OVERVIEW_TABLE_COLUMNS.at(-1)!,
 ];
 const PROXY_COST_TABLE_COLUMNS: TableColumn[] = [
@@ -875,6 +876,7 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
     upstream: nullableStringField(request.upstream),
     attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
     latency_ms: numberField(request.latency_ms),
+    client_ttfb_ms: nullableNumberField(request.client_ttfb_ms),
     upstream_wait_ms: nullableNumberField(request.upstream_wait_ms),
     time_to_first_chunk_ms: nullableNumberField(request.time_to_first_chunk_ms),
     stream_duration_ms: nullableNumberField(request.stream_duration_ms),
@@ -3418,7 +3420,7 @@ function responseStatusAllowsBody(status: number): boolean {
   return status !== 101 && status !== 204 && status !== 205 && status !== 304;
 }
 
-function writeProxyJsonErrorResponse(res: ServerResponse, status: number, message: string): boolean {
+function writeProxyJsonErrorResponse(res: ServerResponse, status: number, message: string, onHeadersWritten?: () => void): boolean {
   if (res.destroyed || res.writableEnded) {
     return false;
   }
@@ -3428,6 +3430,7 @@ function writeProxyJsonErrorResponse(res: ServerResponse, status: number, messag
   }
   const payload = JSON.stringify({ error: { message } });
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  onHeadersWritten?.();
   res.end(payload);
   return true;
 }
@@ -3437,8 +3440,10 @@ async function writeResponse(
   response: Response,
   endpointClass: ProxyEndpointClass | null,
   modelObserver: ProxyWriteModelObserver,
+  onHeadersWritten?: () => void,
 ): Promise<number> {
   res.writeHead(response.status, responseHeadersToObject(response.headers));
+  onHeadersWritten?.();
   if (!response.body) {
     return endEmptyResponse(res);
   }
@@ -4139,6 +4144,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           upstream: null,
           attempts: 0,
           latency_ms: 0,
+          client_ttfb_ms: null,
           upstream_wait_ms: null,
           time_to_first_chunk_ms: null,
           stream_duration_ms: null,
@@ -4174,6 +4180,15 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           guard_actions: [],
           retry_summary: createEmptyProxyRetrySummary(),
           error: null,
+        };
+        let clientTtfbMs: number | null = null;
+        const recordClientTtfb = (): void => {
+          if (clientTtfbMs !== null) {
+            return;
+          }
+          clientTtfbMs = Math.max(0, performance.now() - requestStartedAtMs);
+          activeRecord.client_ttfb_ms = clientTtfbMs;
+          void updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord).catch(() => undefined);
         };
         await startProxyRequestMetric(state, options.stateRoot, activeRecord);
 
@@ -4380,7 +4395,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           };
-          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
+          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb);
           if (outcome.deferredInspection) {
             const inspection = await outcome.deferredInspection;
             const deferred = createProxyOutcome({
@@ -4439,7 +4454,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           upstream = activeRecord.upstream;
           attempts = activeRecord.attempts;
           if (status !== 499) {
-            if (writeProxyJsonErrorResponse(res, status ?? 500, errorText)) {
+            if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb)) {
               responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
             }
           }
@@ -4488,6 +4503,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           upstream,
           attempts,
           latency_ms: latencyMs,
+          client_ttfb_ms: clientTtfbMs,
           upstream_wait_ms: attemptTiming.upstream_wait_ms,
           time_to_first_chunk_ms: attemptTiming.time_to_first_chunk_ms,
           stream_duration_ms: attemptTiming.stream_duration_ms,
