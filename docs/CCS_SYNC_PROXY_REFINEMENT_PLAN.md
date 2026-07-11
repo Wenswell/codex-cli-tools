@@ -1,6 +1,6 @@
 # ccs sync and proxy refinement plan
 
-Status: confirmed plan, implementation pending
+Status: completed
 
 ## Goal Input
 
@@ -14,7 +14,7 @@ Implement docs/CCS_SYNC_PROXY_REFINEMENT_PLAN.md end to end. Follow its confirme
 2. Make proxy install and restore change only the routed provider's `base_url` in `config.toml`.
 3. Add overview, token, and cost request-table views with totals across every upstream attempt.
 
-Current `ccs sync` adds missing TOML fields. Proxy restore copies the complete install-time backup. The request table is `session time up reas./code lat. size model error`, with a 21-cell `request/upstream` model. Detailed `attempt_records` already contain the required per-attempt facts; compact records omit them.
+Before this change, `ccs sync` added only missing TOML fields, proxy restore copied the complete install-time backup, and the request table used `session time up reas./code lat. size model error` with a 21-cell `request/upstream` model. Detailed `attempt_records` contained the required per-attempt facts while compact records omitted them.
 
 ## ccs sync
 
@@ -114,12 +114,12 @@ total$  = input$ + cached$ + output$
 
 ## Implementation Plan
 
-1. [ ] Add sync argument parsing, selected-value replacement, field summaries, preview application, and focused tests.
-2. [ ] Change proxy install/restore planning and writes to the confirmed `base_url` behavior.
-3. [ ] Capture request tier and per-attempt usage/pricing attribution in compact records; increase request and health protocol versions.
-4. [ ] Add view parsing, three column sets, model rendering, token/cost aggregation, and `v`/`q` watch controls.
-5. [ ] Update CLI help, README, `docs/CCS_PROXY_SPEC.md`, and this document's status; build `dist` and increment the package patch version.
-6. [ ] Run focused and full tests, type checking, diff checks, manual CLI verification, and commit.
+1. [x] Add sync argument parsing, selected-value replacement, field summaries, preview application, and focused tests.
+2. [x] Change proxy install/restore planning and writes to the confirmed `base_url` behavior.
+3. [x] Capture request tier and per-attempt usage/pricing attribution in compact records; increase request and health protocol versions.
+4. [x] Add view parsing, three column sets, model rendering, token/cost aggregation, and `v`/`q` watch controls.
+5. [x] Update CLI help, README, `docs/CCS_PROXY_SPEC.md`, and this document's status; build `dist` and increment the package patch version.
+6. [x] Run focused and full tests, type checking, diff checks, manual CLI verification, and commit.
 
 ## Acceptance Criteria
 

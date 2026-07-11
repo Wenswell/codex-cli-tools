@@ -17,6 +17,7 @@ export type LiveViewController = {
 export type RunLiveViewOptions = LiveViewControllerOptions & {
   intervalMs: number;
   onceWhenDisabled?: boolean;
+  onKey?: (key: string, controls: { stop: () => void; render: () => void }) => void;
 };
 
 export function writeLiveFrame(lines: string[], stream: NodeJS.WriteStream = process.stdout): void {
@@ -91,9 +92,18 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
         timer = null;
       }
       options.onStop?.();
+      if (options.onKey && process.stdin.isTTY) {
+        process.stdin.off("data", onInput);
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
       resolveStopped?.();
     },
   });
+
+  const onInput = (value: Buffer | string): void => {
+    options.onKey?.(value.toString(), { stop: controller.stop, render: () => { void requestRender(); } });
+  };
 
   const requestRender = async (): Promise<void> => {
     if (stopped) {
@@ -122,6 +132,11 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
 
   controller.start();
   try {
+    if (controller.enabled && options.onKey && process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", onInput);
+    }
     await requestRender();
     if (!controller.enabled && options.onceWhenDisabled !== false) {
       controller.stop();

@@ -10,21 +10,22 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
+import { codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
-import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
+import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
+import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
-import { readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl } from "../lib/toml.js";
+import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable } from "../lib/table.js";
 import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
-const PROXY_HEALTH_PROTOCOL = 3;
+export const PROXY_HEALTH_PROTOCOL = 4;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
 const PROXY_MODE_INTERCEPT = "intercept";
@@ -49,7 +50,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-const PROXY_REQUEST_SCHEMA_VERSION = 3;
+export const PROXY_REQUEST_SCHEMA_VERSION = 4;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
@@ -57,7 +58,6 @@ const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_REASONING_STATUS_WIDTH = 10;
 const PROXY_TABLE_MODEL_WIDTH = 10;
-const PROXY_TABLE_MODELS_WIDTH = (PROXY_TABLE_MODEL_WIDTH * 2) + 1;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
@@ -92,15 +92,30 @@ const REQUEST_HEADER_ALLOWLIST = [
     "openai-organization",
     "openai-project",
 ];
-const PROXY_REQUEST_TABLE_COLUMNS = [
+const PROXY_OVERVIEW_TABLE_COLUMNS = [
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
+    { key: "model", title: "model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
     { key: "reasoning_status", title: "reas./code", width: PROXY_TABLE_REASONING_STATUS_WIDTH, align: "right" },
     { key: "ms", title: "lat.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-    { key: "model", title: "model", width: PROXY_TABLE_MODELS_WIDTH, align: "right" },
     { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
+];
+const PROXY_TOKEN_TABLE_COLUMNS = [
+    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+    { key: "input_tokens", title: "input_tokens", width: 12, align: "right" },
+    { key: "output_tokens", title: "output_tokens", width: 13, align: "right" },
+    { key: "cached_input_tokens", title: "cached_input_tokens", width: 19, align: "right" },
+    PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
+];
+const PROXY_COST_TABLE_COLUMNS = [
+    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+    { key: "input_cost", title: "input$", width: 9, align: "right" },
+    { key: "output_cost", title: "output$", width: 9, align: "right" },
+    { key: "cached_cost", title: "cached$", width: 9, align: "right" },
+    { key: "total_cost", title: "total$", width: 9, align: "right" },
+    PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_SESSION_COLORS = [textBlue, textCyan, textGreen, textMagenta, textOrange, textYellow];
 function statePath(stateRoot) {
@@ -409,7 +424,11 @@ export async function ensureProxyRunning(options) {
     }
 }
 function currentProviderName(content) {
-    return readTopLevelTomlString(content, "model_provider") ?? "codex";
+    const provider = readTopLevelTomlString(content, "model_provider");
+    if (!provider) {
+        throw new Error("model_provider was not found in Codex config");
+    }
+    return provider;
 }
 function currentProviderBaseUrl(content) {
     return readTomlBaseUrl(content) ?? "";
@@ -549,6 +568,7 @@ function normalizeProxyRequestRecord(request, collection) {
         reasoning_tokens_source: nullableStringField(request.reasoning_tokens_source),
         output_tokens: isProxyTokenCount(request.output_tokens) ? Number(request.output_tokens) : null,
         total_tokens: isProxyTokenCount(request.total_tokens) ? Number(request.total_tokens) : null,
+        usage_attempts: normalizeProxyUsageAttempts(request.usage_attempts),
         reasoning_text_observed: request.reasoning_text_observed === true,
         reasoning_text_source: nullableStringField(request.reasoning_text_source),
         has_commentary: request.has_commentary === true,
@@ -560,6 +580,30 @@ function normalizeProxyRequestRecord(request, collection) {
         retry_summary: normalizeProxyRetrySummary(request.retry_summary),
         error: nullableStringField(request.error),
     };
+}
+function normalizeProxyUsageAttempts(value) {
+    if (!Array.isArray(value)) {
+        throw new Error("invalid proxy request usage_attempts");
+    }
+    return value.map((entry) => {
+        const item = entry && typeof entry === "object" ? entry : {};
+        const modelSource = item.pricing_model_source === "upstream_model" || item.pricing_model_source === "request_model"
+            ? item.pricing_model_source
+            : null;
+        const tierSource = item.pricing_tier_source === "response" || item.pricing_tier_source === "request" || item.pricing_tier_source === "config"
+            ? item.pricing_tier_source
+            : null;
+        return {
+            attempt: positiveIntegerField(item.attempt),
+            input_tokens: isProxyTokenCount(item.input_tokens) ? Number(item.input_tokens) : null,
+            output_tokens: isProxyTokenCount(item.output_tokens) ? Number(item.output_tokens) : null,
+            cached_input_tokens: isProxyTokenCount(item.cached_input_tokens) ? Number(item.cached_input_tokens) : null,
+            pricing_model: nullableStringField(item.pricing_model),
+            pricing_model_source: modelSource,
+            pricing_tier: nullableStringField(item.pricing_tier),
+            pricing_tier_source: tierSource,
+        };
+    });
 }
 function normalizeProxyFailureSummary(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -724,6 +768,28 @@ function compactProxyRequestRecord(record) {
     const { attempt_records: _attemptRecords, request_headers: _requestHeaders, ...compactRecord } = record;
     return compactRecord;
 }
+export function projectProxyUsageAttempts(attempts, requestModel, requestTier, configTier) {
+    return attempts.map((attempt) => {
+        const pricingModel = attempt.upstream_model ?? requestModel;
+        const pricingModelSource = attempt.upstream_model
+            ? "upstream_model"
+            : requestModel ? "request_model" : null;
+        const pricingTier = attempt.service_tier ?? requestTier ?? configTier;
+        const pricingTierSource = attempt.service_tier
+            ? "response"
+            : requestTier ? "request" : configTier ? "config" : null;
+        return {
+            attempt: attempt.attempt,
+            input_tokens: attempt.input_tokens,
+            output_tokens: attempt.output_tokens,
+            cached_input_tokens: attempt.cached_input_tokens,
+            pricing_model: pricingModel,
+            pricing_model_source: pricingModelSource,
+            pricing_tier: pricingTier,
+            pricing_tier_source: pricingTierSource,
+        };
+    });
+}
 function resolveClientRequestAttempt(record, recentRequests) {
     if (!record.client_turn_id || !record.request_body_sha256) {
         return 1;
@@ -883,7 +949,7 @@ function formatProxyPathsLines(options) {
 function formatProxyFilePath(value) {
     return formatHomePath(value);
 }
-function formatProxyRequest(record, nowMs) {
+function formatProxyRequest(record, nowMs, priceCache) {
     const completed = record.completed_at !== null;
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
@@ -898,7 +964,11 @@ function formatProxyRequest(record, nowMs) {
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
         session: formatProxySession(record.session),
-        model: formatProxyModels(record.request_model, record.upstream_model),
+        model: formatProxyModel(record.request_model, record.upstream_model),
+        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "input_tokens"),
+        output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
+        cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
+        ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
         error: formatProxyError(record),
     };
 }
@@ -912,12 +982,6 @@ function formatProxyBytes(value) {
     }
     return formatCompactBytes(value);
 }
-function formatProxyRequestModel(model) {
-    if (!model) {
-        return textDim("-");
-    }
-    return colorName(truncateProxyText(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH));
-}
 function formatProxyModelDisplayName(model) {
     return model.startsWith("gpt-") ? `o${model.slice(4)}` : model;
 }
@@ -930,17 +994,98 @@ function formatProxyReasoningStatus(reasoningTokens, reasoningTextObserved, stat
         : formatProxyReasoningTokens(reasoningTokens);
     return `${reasoning}${textDim("/")}${formatProxyStatusCode(status)}`;
 }
-function formatProxyModels(requestModel, upstreamModel) {
-    return `${formatProxyRequestModel(requestModel)}${textDim("/")}${formatProxyUpstreamModel(requestModel, upstreamModel)}`;
-}
-function formatProxyUpstreamModel(requestModel, upstreamModel) {
-    if (!upstreamModel) {
+export function formatProxyModel(requestModel, upstreamModel) {
+    const model = upstreamModel ?? requestModel;
+    if (!model) {
         return textDim("-");
     }
+    const display = truncateProxyText(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH);
     if (requestModel && upstreamModel === requestModel) {
-        return textDim("[same]");
+        return textGreen(display);
     }
-    return textRed(truncateProxyText(formatProxyModelDisplayName(upstreamModel), PROXY_TABLE_MODEL_WIDTH));
+    if (requestModel && upstreamModel) {
+        return textRed(display);
+    }
+    return colorName(display);
+}
+export function formatProxyAttemptTokens(attempts, field) {
+    if (attempts.length === 0 || attempts.some((attempt) => attempt[field] === null)) {
+        return textDim("-");
+    }
+    return colorCount(formatProxyTokenCount(attempts.reduce((sum, attempt) => sum + (attempt[field] ?? 0), 0)));
+}
+export function formatProxyTokenCount(value) {
+    if (value < 1000)
+        return String(value);
+    const compact = Math.round(value / 100) / 10;
+    return `${Number.isInteger(compact) ? compact.toFixed(0) : compact.toFixed(1)}K`;
+}
+function normalizeProxyPricingTier(value) {
+    if (value === "default" || value === "standard")
+        return "standard";
+    if (value === "fast" || value === "priority")
+        return "fast";
+    return null;
+}
+export function formatProxyAttemptCosts(attempts, cache) {
+    if (!cache || attempts.length === 0) {
+        return missingProxyCosts();
+    }
+    let input = 0;
+    let output = 0;
+    let cached = 0;
+    let inputMissing = false;
+    let outputMissing = false;
+    let cachedMissing = false;
+    let invalid = false;
+    for (const attempt of attempts) {
+        const tier = normalizeProxyPricingTier(attempt.pricing_tier);
+        const prices = attempt.pricing_model && tier ? modelPriceParts(cache, attempt.pricing_model, tier) : null;
+        if (attempt.input_tokens !== null && attempt.cached_input_tokens !== null && attempt.cached_input_tokens > attempt.input_tokens) {
+            invalid = true;
+        }
+        else if (attempt.input_tokens === null || attempt.cached_input_tokens === null || !prices) {
+            inputMissing = true;
+        }
+        else {
+            const uncachedTokens = attempt.input_tokens - attempt.cached_input_tokens;
+            if (uncachedTokens > 0 && prices.input === null)
+                inputMissing = true;
+            else
+                input += uncachedTokens * (prices.input ?? 0);
+        }
+        if (attempt.output_tokens === null || !prices)
+            outputMissing = true;
+        else if (attempt.output_tokens > 0 && prices.output === null)
+            outputMissing = true;
+        else
+            output += attempt.output_tokens * (prices.output ?? 0);
+        if (attempt.cached_input_tokens === null || !prices)
+            cachedMissing = true;
+        else if (attempt.cached_input_tokens > 0 && prices.cacheRead === null)
+            cachedMissing = true;
+        else
+            cached += attempt.cached_input_tokens * (prices.cacheRead ?? 0);
+    }
+    const totalMissing = inputMissing || outputMissing || cachedMissing;
+    return {
+        input_cost: invalid ? textRed("invalid") : inputMissing ? textDim("-") : colorCost(formatProxyUsd(input)),
+        output_cost: outputMissing ? textDim("-") : colorCost(formatProxyUsd(output)),
+        cached_cost: cachedMissing ? textDim("-") : colorCost(formatProxyUsd(cached)),
+        total_cost: invalid ? textRed("invalid") : totalMissing ? textDim("missing") : colorCost(formatProxyUsd(input + output + cached)),
+    };
+}
+function missingProxyCosts() {
+    return { input_cost: textDim("-"), output_cost: textDim("-"), cached_cost: textDim("-"), total_cost: textDim("missing") };
+}
+export function formatProxyUsd(value) {
+    if (value === 0)
+        return "$0";
+    if (value < 0.0001)
+        return "<$0.0001";
+    if (value < 0.01)
+        return `$${value.toFixed(4)}`;
+    return `$${value.toFixed(2)}`;
 }
 function formatProxyError(record) {
     const prefix = formatProxyErrorPrefix(record);
@@ -1067,7 +1212,7 @@ function formatProxyUpstream(upstream, attempts) {
 export function resolveProxySwitchBaseUrl(state) {
     return state?.proxy_base_url ?? null;
 }
-function buildProxyStateFromProfiles(profiles, codexConfigText, listenHost, listenPort) {
+function buildProxyStateFromProfiles(profiles, codexConfigText, codexConfigFile, listenHost, listenPort) {
     const providerName = currentProviderName(codexConfigText);
     const originalBaseUrl = currentProviderBaseUrl(codexConfigText);
     if (!originalBaseUrl) {
@@ -1075,7 +1220,7 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, listenHost, list
     }
     return {
         installed_at: new Date().toISOString(),
-        codex_config_path: codexConfigPath(),
+        codex_config_path: codexConfigFile,
         provider_name: providerName,
         original_base_url: originalBaseUrl,
         proxy_base_url: proxyBaseUrl(listenHost, listenPort),
@@ -2038,7 +2183,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         });
     }
 }
-async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, attemptRecords, callbacks = {}) {
+async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, attemptRecords, endpointClass, callbacks = {}) {
     const attemptState = { attempts: 0, attemptRecords, attemptStartedAtMs: [] };
     if (callbacks.signal?.aborted) {
         throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
@@ -2051,16 +2196,25 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, at
         const response = await forwardRequest(request, upstream, body, callbacks.signal);
         markProxyAttemptHeaders(attemptState, response.status);
         await callbacks.onResponseStart?.(response.status, upstream.name);
+        const contentType = response.headers.get("content-type") ?? "";
+        const deferredInspection = response.clone().arrayBuffer().then((buffer) => {
+            const inspection = inspectProxyPayload(Buffer.from(buffer), contentType, endpointClass);
+            updateProxyAttemptInspection(attemptState, inspection);
+            return inspection;
+        });
         const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
         completeProxyAttemptRecord(attemptState, proxyUpstreamFinalAction(response.status), { failureSummary });
-        return createProxyOutcome({
-            response,
-            upstream: upstream.name,
-            upstreamStatus: response.status,
-            attempts: attemptState.attempts,
-            attemptRecords: attemptState.attemptRecords,
-            failureSummary,
-        });
+        return {
+            ...createProxyOutcome({
+                response,
+                upstream: upstream.name,
+                upstreamStatus: response.status,
+                attempts: attemptState.attempts,
+                attemptRecords: attemptState.attemptRecords,
+                failureSummary,
+            }),
+            deferredInspection,
+        };
     }
     catch (error) {
         if (isClientAbortError(error, callbacks.signal)) {
@@ -2676,39 +2830,119 @@ async function writeReadableResponse(res, stream, scanner, modelObserver) {
         stream.pipe(res);
     });
 }
-export async function installProxy(options) {
+async function buildProxyInstallPlan(options) {
     if (!fs.existsSync(options.codexConfigPath)) {
         throw new Error(`Codex config file was not found: ${options.codexConfigPath}`);
     }
+    if (await readProxyState(options.stateRoot)) {
+        throw new Error(`proxy state already exists: ${statePath(options.stateRoot)}`);
+    }
     const codexConfigText = await readFile(options.codexConfigPath, "utf8");
     const profiles = await readProfiles();
+    if (!profiles.current) {
+        throw new Error("profiles.current was not found");
+    }
+    if (!profiles.profiles?.[profiles.current]) {
+        throw new Error(`profiles.current ${profiles.current} was not found in profiles`);
+    }
     const backupPath = path.join(options.stateRoot, "backups", `config-${Date.now()}.toml`);
-    await mkdir(path.dirname(backupPath), { recursive: true });
-    await copyFile(options.codexConfigPath, backupPath);
     const state = {
-        ...buildProxyStateFromProfiles(profiles, codexConfigText, options.listenHost, options.listenPort),
+        ...buildProxyStateFromProfiles(profiles, codexConfigText, options.codexConfigPath, options.listenHost, options.listenPort),
         backup_path: backupPath,
     };
-    await writeProxyState(options.stateRoot, state);
-    await writeTextFile(options.codexConfigPath, updateTomlBaseUrl(codexConfigText, state.proxy_base_url));
     return {
         backupPath,
         statePath: statePath(options.stateRoot),
         state,
+        currentBaseUrl: state.original_base_url,
+        targetBaseUrl: state.proxy_base_url,
+        sourceConfig: codexConfigText,
+        targetConfig: updateTomlProviderBaseUrl(codexConfigText, state.provider_name, state.proxy_base_url),
     };
 }
-export async function restoreProxy(options) {
+async function applyProxyInstallPlan(options, plan) {
+    if (await readProxyState(options.stateRoot)) {
+        throw new Error(`proxy state already exists: ${statePath(options.stateRoot)}`);
+    }
+    if (await readFile(options.codexConfigPath, "utf8") !== plan.sourceConfig) {
+        throw new Error(`Codex config changed after preview: ${options.codexConfigPath}`);
+    }
+    await mkdir(path.dirname(plan.backupPath), { recursive: true });
+    await copyFile(options.codexConfigPath, plan.backupPath);
+    await writeProxyState(options.stateRoot, plan.state);
+    try {
+        const runtime = await ensureProxyRunning(options);
+        await writeTextFile(options.codexConfigPath, plan.targetConfig);
+        if (await readFile(options.codexConfigPath, "utf8") !== plan.targetConfig) {
+            throw new Error(`failed to verify proxy routing in Codex config: ${options.codexConfigPath}`);
+        }
+        return { ...plan, runtime };
+    }
+    catch (error) {
+        await shutdownProxyRuntime(options).catch(() => undefined);
+        await removeProxyState(options.stateRoot);
+        throw error;
+    }
+}
+export async function installProxy(options) {
+    return applyProxyInstallPlan(options, await buildProxyInstallPlan(options));
+}
+async function buildProxyRestorePlan(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
-    if (!state.backup_path || !fs.existsSync(state.backup_path)) {
-        throw new Error(`backup file was not found: ${state.backup_path}`);
+    if (!fs.existsSync(options.codexConfigPath)) {
+        throw new Error(`Codex config file was not found: ${options.codexConfigPath}`);
+    }
+    const profiles = await readProfiles();
+    const current = profiles.current;
+    if (!current) {
+        throw new Error("profiles.current was not found");
+    }
+    const targetBaseUrl = profiles.profiles?.[current]?.baseURL;
+    if (!targetBaseUrl) {
+        throw new Error(`profiles.current ${current} has no baseURL`);
+    }
+    const sourceConfig = await readFile(options.codexConfigPath, "utf8");
+    const currentBaseUrl = readTomlProviderBaseUrl(sourceConfig, state.provider_name);
+    if (currentBaseUrl === null) {
+        throw new Error(`base_url was not found in [model_providers.${state.provider_name}]`);
+    }
+    const targetConfig = updateTomlProviderBaseUrl(sourceConfig, state.provider_name, targetBaseUrl);
+    return {
+        backupPath: path.join(options.stateRoot, "backups", `config-restore-${Date.now()}.toml`),
+        state,
+        profileName: current,
+        currentBaseUrl,
+        targetBaseUrl,
+        sourceConfig,
+        targetConfig,
+    };
+}
+async function applyProxyRestorePlan(options, plan) {
+    const currentState = await readProxyState(options.stateRoot);
+    if (!currentState
+        || currentState.installed_at !== plan.state.installed_at
+        || currentState.provider_name !== plan.state.provider_name
+        || currentState.proxy_base_url !== plan.state.proxy_base_url) {
+        throw new Error(`proxy state changed after preview: ${statePath(options.stateRoot)}`);
+    }
+    if (await readFile(options.codexConfigPath, "utf8") !== plan.sourceConfig) {
+        throw new Error(`Codex config changed after preview: ${options.codexConfigPath}`);
+    }
+    await mkdir(path.dirname(plan.backupPath), { recursive: true });
+    await copyFile(options.codexConfigPath, plan.backupPath);
+    await writeTextFile(options.codexConfigPath, plan.targetConfig);
+    if (await readFile(options.codexConfigPath, "utf8") !== plan.targetConfig) {
+        throw new Error(`failed to verify direct routing in Codex config: ${options.codexConfigPath}`);
     }
     const stopped = await shutdownProxyRuntime(options);
-    await copyFile(state.backup_path, options.codexConfigPath);
     await removeProxyState(options.stateRoot);
     return stopped;
+}
+export async function restoreProxy(options) {
+    return applyProxyRestorePlan(options, await buildProxyRestorePlan(options));
 }
 function formatProxyRequestsSummary(metrics, profileOrder) {
     const statusCounts = formatExactProxyStatusCounts(metrics.status_counts);
@@ -2835,10 +3069,17 @@ function formatProxyLatencySummary(metrics) {
         `max=${textYellow(formatLatencyMs(metrics.latency_ms.max ?? 0))}`,
     ].join(" ");
 }
-function renderProxyRequestTable(rows) {
+export function proxyRequestTableColumns(view) {
+    if (view === "tokens")
+        return PROXY_TOKEN_TABLE_COLUMNS;
+    if (view === "cost")
+        return PROXY_COST_TABLE_COLUMNS;
+    return PROXY_OVERVIEW_TABLE_COLUMNS;
+}
+function renderProxyRequestTable(rows, view) {
     const columns = process.stdout.columns;
     const maxWidth = columns ? Math.max(1, columns - PROXY_REQUEST_TABLE_INDENT.length) : undefined;
-    return renderTable(PROXY_REQUEST_TABLE_COLUMNS, rows, {
+    return renderTable(proxyRequestTableColumns(view), rows, {
         gap: 1,
         maxWidth,
         boldHeader: false,
@@ -2875,27 +3116,27 @@ function resolveProxyHistoryRenderCount(metrics, options) {
         + 1;
     return Math.max(0, terminalRows - fixedLines);
 }
-function formatProxyActiveRows(metrics, now, count = PROXY_RECENT_RENDER_COUNT) {
+function formatProxyActiveRows(metrics, now, view, priceCache, count = PROXY_RECENT_RENDER_COUNT) {
     if (metrics.active_requests.length === 0) {
         return [
-            ...renderProxyRequestTable([]),
+            ...renderProxyRequestTable([], view),
             `  ${textDim("no active requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime())));
+    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), priceCache)), view);
 }
-function formatProxyHistoryRows(records, count) {
+function formatProxyHistoryRows(records, count, view, priceCache) {
     if (count === 0) {
-        return renderProxyRequestTable([]);
+        return renderProxyRequestTable([], view);
     }
     if (records.length === 0) {
         return [
-            ...renderProxyRequestTable([]),
+            ...renderProxyRequestTable([], view),
             `  ${textDim("no historical requests")}`,
         ];
     }
     const nowMs = Date.now();
-    return renderProxyRequestTable(records.slice(0, count).map((record) => formatProxyRequest(record, nowMs)));
+    return renderProxyRequestTable(records.slice(0, count).map((record) => formatProxyRequest(record, nowMs, priceCache)), view);
 }
 async function readProxyRequestTail(stateRoot, count) {
     if (count <= 0) {
@@ -2953,19 +3194,21 @@ async function renderProxyStatusLines(options) {
     const runtime = await ensureProxyRunning(options);
     const state = runtime?.state ?? await readProxyState(options.stateRoot);
     const profiles = await readProfiles();
+    const priceCache = options.view === "cost" ? await readModelPriceCache({ overrides: profiles.pricing?.overrides }) : undefined;
     const currentProfileOrder = buildProfileOrder(profiles);
     const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
     const metrics = state?.metrics ?? createProxyMetrics();
     const historyCount = resolveProxyHistoryRenderCount(metrics, options);
     const historyRecords = await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
-    return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords);
+    return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords, priceCache);
 }
-export function buildProxyStatusLines(now, state, profileOrder, runtime, options, historyRecords) {
+export function buildProxyStatusLines(now, state, profileOrder, runtime, options, historyRecords, priceCache) {
     const metrics = state?.metrics
         ? { ...state.metrics, ...proxyMetricsFromRecentRequests(state.metrics.recent_requests) }
         : createProxyMetrics();
     const historyCount = resolveProxyHistoryRenderCount(metrics, options);
     const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
+    const view = options.view ?? "overview";
     return [
         fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
         ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
@@ -2973,17 +3216,40 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         fitTerminalLine(formatProxyReasoningSummary(metrics)),
         fitTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
-        ...formatProxyActiveRows(metrics, now),
+        ...formatProxyActiveRows(metrics, now, view, priceCache),
         textBold("history"),
-        ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount),
-        fitTerminalLine(textDim("commands: ccs proxy | watch | mode [intercept|recovery] | install | restore | stop | serve")),
+        ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
+        fitTerminalLine(textDim("commands: ccs proxy [--view overview|tokens|cost] | watch | mode [intercept|recovery] | install | restore | stop | serve")),
     ];
 }
 async function runProxyStatusOnce(options) {
     console.log((await renderProxyStatusLines({ ...options, once: true })).join("\n"));
 }
 async function runProxyStatusWatch(options) {
-    await runLiveView(() => renderProxyStatusLines({ ...options, watch: true }), { intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000 });
+    let view = options.view ?? "overview";
+    await runLiveView(() => renderProxyStatusLines({ ...options, watch: true, view }), {
+        intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000,
+        onKey: (key, controls) => {
+            const result = proxyWatchKeyAction(key, view);
+            view = result.view;
+            if (result.action === "stop") {
+                controls.stop();
+            }
+            else if (result.action === "render") {
+                controls.render();
+            }
+        },
+    });
+}
+export function proxyWatchKeyAction(key, view) {
+    if (key === "q")
+        return { view, action: "stop" };
+    if (key !== "v")
+        return { view, action: "none" };
+    return {
+        view: view === "overview" ? "tokens" : view === "tokens" ? "cost" : "overview",
+        action: "render",
+    };
 }
 export async function shutdownProxyRuntime(options) {
     const state = await readProxyState(options.stateRoot);
@@ -3134,6 +3400,7 @@ export async function serveProxy(options) {
                     reasoning_tokens_source: null,
                     output_tokens: null,
                     total_tokens: null,
+                    usage_attempts: [],
                     reasoning_text_observed: false,
                     reasoning_text_source: null,
                     has_commentary: false,
@@ -3174,12 +3441,16 @@ export async function serveProxy(options) {
                 let errorText = null;
                 const attemptRecords = [];
                 let requestHeaders = {};
+                let requestServiceTier = null;
+                const requestStartConfig = (await readTextIfExists(options.codexConfigPath)) ?? "";
+                const configServiceTier = readTopLevelTomlString(requestStartConfig, "service_tier");
                 const endpointClass = route.endpointClass;
                 try {
                     const profiles = await readProfiles();
                     const upstreamProfile = resolveProxyUpstream(profiles);
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
+                    requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
@@ -3265,7 +3536,7 @@ export async function serveProxy(options) {
                         },
                     };
                     const outcome = mode === PROXY_MODE_PASSTHROUGH
-                        ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, attemptRecords, passthroughCallbacks)
+                        ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, attemptRecords, endpointClass, passthroughCallbacks)
                         : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, attemptRecords, mode === PROXY_MODE_INTERCEPT ? PROXY_MODE_INTERCEPT : PROXY_MODE_RECOVERY, guardedCallbacks);
                     status = outcome.response.status;
                     upstreamStatus = outcome.upstreamStatus;
@@ -3308,6 +3579,7 @@ export async function serveProxy(options) {
                     activeRecord.reasoning_tokens_source = reasoningTokensSource;
                     activeRecord.output_tokens = outputTokens;
                     activeRecord.total_tokens = totalTokens;
+                    activeRecord.usage_attempts = projectProxyUsageAttempts(attemptRecords, activeRecord.request_model, requestServiceTier, configServiceTier);
                     activeRecord.reasoning_text_observed = reasoningTextObserved;
                     activeRecord.reasoning_text_source = reasoningTextSource;
                     activeRecord.has_commentary = hasCommentary;
@@ -3328,8 +3600,29 @@ export async function serveProxy(options) {
                         },
                     };
                     responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver);
-                    upstreamModel = streamModelObserver.model;
-                    upstreamModelSource = streamModelObserver.source;
+                    if (outcome.deferredInspection) {
+                        const inspection = await outcome.deferredInspection;
+                        const deferred = createProxyOutcome({
+                            response: outcome.response,
+                            upstream: outcome.upstream,
+                            upstreamStatus: outcome.upstreamStatus,
+                            attempts: outcome.attempts,
+                            attemptRecords,
+                            inspection,
+                        });
+                        upstreamModel = deferred.upstreamModel;
+                        upstreamModelSource = deferred.upstreamModelSource;
+                        streamModel = deferred.streamModel;
+                        finalResponseModel = deferred.finalResponseModel;
+                        systemFingerprint = deferred.systemFingerprint;
+                        serviceTier = deferred.serviceTier;
+                        inputTokens = deferred.usage.inputTokens;
+                        cachedInputTokens = deferred.usage.cachedInputTokens;
+                        outputTokens = deferred.usage.outputTokens;
+                        totalTokens = deferred.usage.totalTokens;
+                    }
+                    upstreamModel = streamModelObserver.model ?? upstreamModel;
+                    upstreamModelSource = streamModelObserver.source ?? upstreamModelSource;
                     streamModel = upstreamModelSource?.startsWith("sse.") ? upstreamModel : streamModel;
                     finalResponseModel = upstreamModel ?? finalResponseModel;
                 }
@@ -3417,6 +3710,7 @@ export async function serveProxy(options) {
                     reasoning_tokens_source: reasoningTokensSource,
                     output_tokens: outputTokens,
                     total_tokens: totalTokens,
+                    usage_attempts: projectProxyUsageAttempts(attemptRecords, activeRecord.request_model, requestServiceTier, configServiceTier),
                     reasoning_text_observed: reasoningTextObserved,
                     reasoning_text_source: reasoningTextSource,
                     has_commentary: hasCommentary,
@@ -3463,10 +3757,12 @@ function usageHelpLines() {
         "Usage:",
         "  ccs proxy                                # print proxy status and active upstream once",
         "  ccs proxy --history N                    # print proxy status with N history rows",
+        "  ccs proxy --view overview|tokens|cost    # select the initial request-table view",
         "  ccs proxy --once                         # print proxy status and active upstream once",
         "  ccs proxy --once --history N             # print proxy status with N history rows",
         "  ccs proxy watch                          # watch proxy status and active upstream",
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
+        "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles and q exits",
         "  ccs proxy mode                           # print active proxy intervention mode",
         "  ccs proxy mode recovery                  # enable continuation recovery mode",
         "  ccs proxy mode intercept                 # enable guard intercept mode",
@@ -3485,16 +3781,27 @@ function parseProxyHistoryCount(rawCount) {
     }
     return Number(rawCount);
 }
-function parseProxyStatusHistoryArgs(args, commandName) {
-    if (args.length === 0) {
-        return {};
+function parseProxyView(value) {
+    if (value === "overview" || value === "tokens" || value === "cost")
+        return value;
+    throw new Error("ccs proxy --view requires overview, tokens, or cost");
+}
+export function parseProxyStatusArgs(args, commandName) {
+    let historyCount;
+    let view;
+    for (let index = 0; index < args.length; index += 2) {
+        const flag = args[index];
+        if (flag === "--history" && historyCount === undefined) {
+            historyCount = parseProxyHistoryCount(args[index + 1]);
+        }
+        else if (flag === "--view" && view === undefined) {
+            view = parseProxyView(args[index + 1]);
+        }
+        else {
+            throw new Error(`unknown argument for ${commandName}: ${flag}`);
+        }
     }
-    if (args[0] !== "--history") {
-        throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
-    }
-    const historyCount = parseProxyHistoryCount(args[1]);
-    rejectProxyCommandArgs(args.slice(2), `${commandName} --history`);
-    return { historyCount };
+    return { historyCount, view };
 }
 function rejectProxyCommandArgs(args, commandName) {
     if (args.length > 0) {
@@ -3530,20 +3837,19 @@ export async function runProxyCommand(args, options) {
         await runProxyStatusOnce(options);
         return;
     }
-    if (command === "--history") {
-        const historyCount = parseProxyHistoryCount(args[1]);
-        rejectProxyCommandArgs(args.slice(2), "ccs proxy --history");
-        await runProxyStatusOnce({ ...options, historyCount });
+    if (command === "--history" || command === "--view") {
+        const parsed = parseProxyStatusArgs(args, "ccs proxy");
+        await runProxyStatusOnce({ ...options, ...parsed });
         return;
     }
     if (command === "--once") {
-        const parsed = parseProxyStatusHistoryArgs(rest, "ccs proxy --once");
-        await runProxyStatusOnce(parsed.historyCount === undefined ? options : { ...options, historyCount: parsed.historyCount });
+        const parsed = parseProxyStatusArgs(rest, "ccs proxy --once");
+        await runProxyStatusOnce({ ...options, ...parsed });
         return;
     }
     if (command === "watch") {
-        const parsed = parseProxyStatusHistoryArgs(rest, "ccs proxy watch");
-        await runProxyStatusWatch(parsed.historyCount === undefined ? options : { ...options, historyCount: parsed.historyCount });
+        const parsed = parseProxyStatusArgs(rest, "ccs proxy watch");
+        await runProxyStatusWatch({ ...options, ...parsed });
         return;
     }
     if (command === "mode") {
@@ -3572,17 +3878,23 @@ export async function runProxyCommand(args, options) {
     if (command === "install") {
         rejectRemovedYesFlags(rest, "ccs proxy install");
         rejectProxyCommandArgs(rest, "ccs proxy install");
-        printKeyValue("plan:", `proxy ${options.listenHost}:${options.listenPort} -> ${formatProxyFilePath(options.codexConfigPath)}`, 5);
+        const plan = await buildProxyInstallPlan(options);
+        printKeyValue("config:", formatProxyFilePath(options.codexConfigPath), 8);
+        printKeyValue("provider:", plan.state.provider_name, 8);
+        printKeyValue("current:", colorUrl(plan.currentBaseUrl), 8);
+        printKeyValue("local:", colorUrl(plan.targetBaseUrl), 8);
+        printKeyValue("backup:", colorPath(formatProxyFilePath(plan.backupPath)), 8);
         printKeyValue("note:", "no changes are written unless you type yes", 5);
         if (!(await confirmApply())) {
             return;
         }
-        const plan = await installProxy(options);
-        const runtime = await ensureProxyRunning(options);
-        printKeyValue("backup:", textBlue(formatProxyFilePath(plan.backupPath)), 5);
-        printKeyValue("state:", textGreen(formatProxyFilePath(plan.statePath)), 5);
-        printKeyValue("proxy:", textGreen(plan.state.proxy_base_url), 5);
-        printKeyValue("mode:", textGreen(plan.state.mode), 5);
+        const applied = await applyProxyInstallPlan(options, plan);
+        const runtime = applied.runtime;
+        printKeyValue("backup:", textBlue(formatProxyFilePath(applied.backupPath)), 8);
+        printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
+        printKeyValue("state:", textGreen(formatProxyFilePath(applied.statePath)), 8);
+        printKeyValue("proxy:", textGreen(applied.state.proxy_base_url), 8);
+        printKeyValue("mode:", textGreen(applied.state.mode), 8);
         printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
         printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
         printKeyValue("server:", runtime?.version ? textGreen(runtime.version) : textDim("none"), 8);
@@ -3595,14 +3907,22 @@ export async function runProxyCommand(args, options) {
     if (command === "restore") {
         rejectRemovedYesFlags(rest, "ccs proxy restore");
         rejectProxyCommandArgs(rest, "ccs proxy restore");
-        printKeyValue("plan:", `restore ${formatProxyFilePath(options.codexConfigPath)} from proxy state`, 5);
+        const plan = await buildProxyRestorePlan(options);
+        printKeyValue("config:", formatProxyFilePath(options.codexConfigPath), 8);
+        printKeyValue("provider:", plan.state.provider_name, 8);
+        printKeyValue("current:", colorUrl(plan.currentBaseUrl), 8);
+        printKeyValue("target:", colorUrl(plan.targetBaseUrl), 8);
+        printKeyValue("profile:", colorName(plan.profileName), 8);
+        printKeyValue("backup:", colorPath(formatProxyFilePath(plan.backupPath)), 8);
         printKeyValue("note:", "no changes are written unless you type yes", 5);
         if (!(await confirmApply())) {
             return;
         }
-        const stopped = await restoreProxy(options);
+        const stopped = await applyProxyRestorePlan(options, plan);
+        printKeyValue("backup:", textBlue(formatProxyFilePath(plan.backupPath)), 8);
+        printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
         printKeyValue("runtime:", stopped, 8);
-        printKeyValue("state:", textGreen("removed"), 5);
+        printKeyValue("state:", textGreen("removed"), 8);
         return;
     }
     if (command === "stop") {

@@ -1,5 +1,9 @@
 export function updateTomlBaseUrl(content: string, baseUrl: string): string {
   const provider = readTopLevelTomlString(content, "model_provider") ?? "codex";
+  return updateTomlProviderBaseUrl(content, provider, baseUrl);
+}
+
+export function updateTomlProviderBaseUrl(content: string, provider: string, baseUrl: string): string {
   return upsertTomlKey(content, `model_providers.${provider}`, "base_url", JSON.stringify(baseUrl));
 }
 
@@ -9,6 +13,10 @@ export function updateTopLevelTomlString(content: string, key: string, value: st
 
 export function readTomlBaseUrl(content: string): string | null {
   const provider = readTopLevelTomlString(content, "model_provider") ?? "codex";
+  return readTomlProviderBaseUrl(content, provider);
+}
+
+export function readTomlProviderBaseUrl(content: string, provider: string): string | null {
   const sectionName = `model_providers.${provider}`;
   let currentSection = "";
   for (const line of content.split(/\r?\n/)) {
@@ -78,6 +86,130 @@ export function mergeTomlDefaults(template: string, existing: string): string {
   }
 
   return ensureTrailingNewline(next.join("\n"));
+}
+
+export type TomlTemplateSyncResult = {
+  content: string;
+  leafPaths: string[];
+  differentPaths: string[];
+  updatedPaths: string[];
+};
+
+type TomlLeaf = {
+  path: string;
+  line: string;
+  value: string;
+};
+
+export function syncTomlTemplate(
+  template: string,
+  existing: string,
+  replacePaths: ReadonlySet<string>,
+): TomlTemplateSyncResult {
+  const templateLeaves = parseTomlLeaves(template);
+  const existingLeaves = new Map(parseTomlLeaves(existing).map((leaf) => [leaf.path, leaf]));
+  const leafPaths = templateLeaves.map((leaf) => leaf.path);
+  const differentPaths = templateLeaves
+    .filter((leaf) => existingLeaves.get(leaf.path)?.value !== leaf.value)
+    .map((leaf) => leaf.path);
+  const different = new Set(differentPaths);
+  const updated = new Set(templateLeaves
+    .filter((leaf) => !existingLeaves.has(leaf.path) || (replacePaths.has(leaf.path) && existingLeaves.get(leaf.path)?.value !== leaf.value))
+    .map((leaf) => leaf.path));
+
+  let content = mergeTomlDefaults(template, existing);
+  if (replacePaths.size > 0) {
+    const templateByPath = new Map(templateLeaves.map((leaf) => [leaf.path, leaf]));
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    let section = "";
+    for (let index = 0; index < lines.length; index += 1) {
+      const sectionName = parseSectionHeader(lines[index]);
+      if (sectionName !== null) {
+        section = sectionName;
+        continue;
+      }
+      const key = parseTomlKey(lines[index]);
+      const path = key === null ? null : (section ? `${section}.${key}` : key);
+      if (path && replacePaths.has(path) && different.has(path)) {
+        lines[index] = templateByPath.get(path)?.line ?? lines[index];
+      }
+    }
+    content = ensureTrailingNewline(lines.join("\n"));
+  }
+
+  return {
+    content,
+    leafPaths,
+    differentPaths,
+    updatedPaths: leafPaths.filter((path) => updated.has(path)),
+  };
+}
+
+function parseTomlLeaves(content: string): TomlLeaf[] {
+  const leaves: TomlLeaf[] = [];
+  let section = "";
+  for (const line of content.replace(/\r\n/g, "\n").split("\n")) {
+    const sectionName = parseSectionHeader(line);
+    if (sectionName !== null) {
+      section = sectionName;
+      continue;
+    }
+    const key = parseTomlKey(line);
+    if (key === null) {
+      continue;
+    }
+    leaves.push({
+      path: section ? `${section}.${key}` : key,
+      line,
+      value: normalizeTomlValue(line.slice(line.indexOf("=") + 1)),
+    });
+  }
+  return leaves;
+}
+
+function normalizeTomlValue(value: string): string {
+  const withoutComment = stripTomlComment(value).trim();
+  if ((withoutComment.startsWith('"') && withoutComment.endsWith('"'))
+    || (withoutComment.startsWith("'") && withoutComment.endsWith("'"))) {
+    try {
+      return JSON.stringify(withoutComment.startsWith('"')
+        ? JSON.parse(withoutComment)
+        : withoutComment.slice(1, -1));
+    } catch {
+      return withoutComment;
+    }
+  }
+  let normalized = "";
+  let single = false;
+  let double = false;
+  for (let index = 0; index < withoutComment.length; index += 1) {
+    const char = withoutComment[index];
+    if (char === "'" && !double) {
+      single = !single;
+    } else if (char === '"' && !single && withoutComment[index - 1] !== "\\") {
+      double = !double;
+    }
+    if (!/\s/.test(char) || single || double) {
+      normalized += char;
+    }
+  }
+  return normalized;
+}
+
+function stripTomlComment(value: string): string {
+  let single = false;
+  let double = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "'" && !double) {
+      single = !single;
+    } else if (char === '"' && !single && value[index - 1] !== "\\") {
+      double = !double;
+    } else if (char === "#" && !single && !double) {
+      return value.slice(0, index);
+    }
+  }
+  return value;
 }
 
 function upsertTomlKey(content: string, sectionName: string, key: string, value: string): string {
