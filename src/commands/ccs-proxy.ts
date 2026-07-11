@@ -114,6 +114,7 @@ type ProxyRequestRecord = {
   system_fingerprint: string | null;
   service_tier: string | null;
   input_tokens: number | null;
+  cached_input_tokens: number | null;
   reasoning_tokens: number | null;
   reasoning_tokens_source: string | null;
   output_tokens: number | null;
@@ -154,6 +155,7 @@ type ProxyAttemptRecord = {
   system_fingerprint: string | null;
   service_tier: string | null;
   input_tokens: number | null;
+  cached_input_tokens: number | null;
   reasoning_tokens: number | null;
   reasoning_tokens_source: string | null;
   output_tokens: number | null;
@@ -249,6 +251,7 @@ type ProxyReasoningMetadata = {
 
 type ProxyUsageMetadata = {
   inputTokens: number | null;
+  cachedInputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
 };
@@ -279,7 +282,7 @@ type ProxyWriteModelObserver = ProxyModelExtraction & {
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
-const PROXY_HEALTH_PROTOCOL = 2;
+const PROXY_HEALTH_PROTOCOL = 3;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
 const PROXY_MODE_INTERCEPT = "intercept";
@@ -304,7 +307,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-const PROXY_REQUEST_SCHEMA_VERSION = 2;
+const PROXY_REQUEST_SCHEMA_VERSION = 3;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
 const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
@@ -806,7 +809,7 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
     ?? (collection === "history" ? nullableStringField(request.at) ?? startedAt : null);
   const status = Number.isInteger(request.status) ? Number(request.status) : null;
   return {
-    schema_version: Number.isInteger(request.schema_version) ? Number(request.schema_version) : PROXY_REQUEST_SCHEMA_VERSION,
+    schema_version: PROXY_REQUEST_SCHEMA_VERSION,
     id: stringField(request.id) || randomUUID(),
     started_at: startedAt,
     completed_at: completedAt,
@@ -840,6 +843,7 @@ function normalizeProxyRequestRecord(request: Record<string, unknown>, collectio
     system_fingerprint: nullableStringField(request.system_fingerprint),
     service_tier: nullableStringField(request.service_tier),
     input_tokens: isProxyTokenCount(request.input_tokens) ? Number(request.input_tokens) : null,
+    cached_input_tokens: isProxyTokenCount(request.cached_input_tokens) ? Number(request.cached_input_tokens) : null,
     reasoning_tokens: isReasoningTokenCount(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
     reasoning_tokens_source: nullableStringField(request.reasoning_tokens_source),
     output_tokens: isProxyTokenCount(request.output_tokens) ? Number(request.output_tokens) : null,
@@ -1474,6 +1478,7 @@ function createEmptyReasoningMetadata(): ProxyReasoningMetadata {
 function createEmptyProxyUsageMetadata(): ProxyUsageMetadata {
   return {
     inputTokens: null,
+    cachedInputTokens: null,
     outputTokens: null,
     totalTokens: null,
   };
@@ -1538,6 +1543,12 @@ function parseProxyUsageMetadata(payload: unknown): ProxyUsageMetadata {
     "/usage/prompt_tokens",
     "/response/usage/input_tokens",
     "/response/usage/prompt_tokens",
+  ]);
+  usage.cachedInputTokens = firstProxyTokenAt(payload, [
+    "/usage/input_tokens_details/cached_tokens",
+    "/usage/prompt_tokens_details/cached_tokens",
+    "/response/usage/input_tokens_details/cached_tokens",
+    "/response/usage/prompt_tokens_details/cached_tokens",
   ]);
   usage.outputTokens = firstProxyTokenAt(payload, [
     "/usage/output_tokens",
@@ -1666,6 +1677,7 @@ function isProxyFinalAnswerObject(
 function mergeProxyUsageMetadata(current: ProxyUsageMetadata, next: ProxyUsageMetadata): ProxyUsageMetadata {
   return {
     inputTokens: next.inputTokens ?? current.inputTokens,
+    cachedInputTokens: next.cachedInputTokens ?? current.cachedInputTokens,
     outputTokens: next.outputTokens ?? current.outputTokens,
     totalTokens: next.totalTokens ?? current.totalTokens,
   };
@@ -2917,6 +2929,7 @@ function createProxyAttemptRecord(attempt: number, upstream: string | null): Pro
     system_fingerprint: null,
     service_tier: null,
     input_tokens: null,
+    cached_input_tokens: null,
     reasoning_tokens: null,
     reasoning_tokens_source: null,
     output_tokens: null,
@@ -2961,6 +2974,7 @@ function updateProxyAttemptInspection(attemptState: ProxyAttemptState, inspectio
   attempt.system_fingerprint = inspection.upstreamMetadata.systemFingerprint;
   attempt.service_tier = inspection.upstreamMetadata.serviceTier;
   attempt.input_tokens = inspection.usage.inputTokens;
+  attempt.cached_input_tokens = inspection.usage.cachedInputTokens;
   attempt.reasoning_tokens = inspection.reasoning.reasoningTokens;
   attempt.reasoning_tokens_source = inspection.reasoning.reasoningTokensSource;
   attempt.output_tokens = inspection.usage.outputTokens;
@@ -3824,6 +3838,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           system_fingerprint: null,
           service_tier: null,
           input_tokens: null,
+          cached_input_tokens: null,
           reasoning_tokens: null,
           reasoning_tokens_source: null,
           output_tokens: null,
@@ -3853,6 +3868,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         let systemFingerprint: string | null = null;
         let serviceTier: string | null = null;
         let inputTokens: number | null = null;
+        let cachedInputTokens: number | null = null;
         let reasoningTokens: number | null = null;
         let reasoningTokensSource: string | null = null;
         let outputTokens: number | null = null;
@@ -3908,6 +3924,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
                 activeRecord.reasoning_tokens = null;
                 activeRecord.reasoning_tokens_source = null;
                 activeRecord.input_tokens = null;
+                activeRecord.cached_input_tokens = null;
                 activeRecord.output_tokens = null;
                 activeRecord.total_tokens = null;
                 activeRecord.reasoning_text_observed = false;
@@ -3983,6 +4000,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           systemFingerprint = outcome.systemFingerprint;
           serviceTier = outcome.serviceTier;
           inputTokens = outcome.usage.inputTokens;
+          cachedInputTokens = outcome.usage.cachedInputTokens;
           reasoningTokens = outcome.reasoningTokens;
           reasoningTokensSource = outcome.reasoningTokensSource;
           outputTokens = outcome.usage.outputTokens;
@@ -4007,6 +4025,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           activeRecord.system_fingerprint = systemFingerprint;
           activeRecord.service_tier = serviceTier;
           activeRecord.input_tokens = inputTokens;
+          activeRecord.cached_input_tokens = cachedInputTokens;
           activeRecord.reasoning_tokens = reasoningTokens;
           activeRecord.reasoning_tokens_source = reasoningTokensSource;
           activeRecord.output_tokens = outputTokens;
@@ -4071,6 +4090,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           systemFingerprint = activeRecord.system_fingerprint;
           serviceTier = activeRecord.service_tier;
           inputTokens = activeRecord.input_tokens;
+          cachedInputTokens = activeRecord.cached_input_tokens;
           reasoningTokens = activeRecord.reasoning_tokens;
           reasoningTokensSource = activeRecord.reasoning_tokens_source;
           outputTokens = activeRecord.output_tokens;
@@ -4121,6 +4141,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           system_fingerprint: systemFingerprint,
           service_tier: serviceTier,
           input_tokens: inputTokens,
+          cached_input_tokens: cachedInputTokens,
           reasoning_tokens: reasoningTokens,
           reasoning_tokens_source: reasoningTokensSource,
           output_tokens: outputTokens,

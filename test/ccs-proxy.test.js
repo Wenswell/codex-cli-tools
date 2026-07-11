@@ -221,6 +221,7 @@ test("proxy state persists request metrics", async () => {
     assert.deepEqual(state.metrics.status_counts, { "200": 1, "500": 1 });
     assert.deepEqual(state.metrics.reasoning_token_counts, {});
     assert.equal(state.metrics.active_requests.length, 1);
+    assert.equal(state.metrics.active_requests[0].schema_version, 3);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
     assert.equal(state.metrics.active_requests[0].completed_at, null);
     assert.equal(state.metrics.active_requests[0].status, null);
@@ -231,6 +232,7 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.active_requests[0].request_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model_source, null);
+    assert.equal(state.metrics.active_requests[0].cached_input_tokens, null);
     assert.equal(state.metrics.active_requests[0].reasoning_tokens, null);
     assert.equal(state.metrics.active_requests[0].reasoning_tokens_source, null);
     assert.equal(state.metrics.active_requests[0].reasoning_text_observed, false);
@@ -239,11 +241,13 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.active_requests[0].error, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
     assert.equal(state.metrics.recent_requests[0].upstream, "input");
+    assert.equal(state.metrics.recent_requests[0].schema_version, 3);
     assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
     assert.equal(state.metrics.recent_requests[0].response_bytes, 51);
     assert.equal(state.metrics.recent_requests[0].request_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
+    assert.equal(state.metrics.recent_requests[0].cached_input_tokens, null);
     assert.equal(state.metrics.recent_requests[0].reasoning_tokens, null);
     assert.equal(state.metrics.recent_requests[0].reasoning_tokens_source, null);
     assert.equal(state.metrics.recent_requests[0].reasoning_text_observed, false);
@@ -1621,6 +1625,7 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
       const body = successHits <= 3
         ? reasoningJson("json-guarded", 516)
         : { ok: true, response: { model: "json-ok" }, usage: { output_tokens_details: { reasoning_tokens: 42 } } };
+      body.usage.input_tokens_details = { cached_tokens: successHits <= 3 ? successHits : 0 };
       res.end(JSON.stringify(body));
       return;
     }
@@ -1652,7 +1657,14 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
       body: JSON.stringify({ model: "json-success" }),
     });
     assert.equal(success.status, 200);
-    assert.deepEqual(await success.json(), { ok: true, response: { model: "json-ok" }, usage: { output_tokens_details: { reasoning_tokens: 42 } } });
+    assert.deepEqual(await success.json(), {
+      ok: true,
+      response: { model: "json-ok" },
+      usage: {
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens_details: { reasoning_tokens: 42 },
+      },
+    });
 
     let state = await waitForState(
       stateRoot,
@@ -1671,10 +1683,17 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
     assert.deepEqual(record.guard_actions.map((action) => action.reasoning_tokens), [516, 516, 516]);
     assert.equal(record.error, null);
     assert.equal(record.upstream_model, "json-ok");
+    assert.equal(record.cached_input_tokens, 0);
     assert.equal(record.reasoning_tokens, 42);
     assert.equal(state.metrics.status_counts["200"], 4);
     assert.equal(state.metrics.reasoning_token_counts["42"], 1);
     assert.equal(state.metrics.reasoning_token_counts["516"], 3);
+    const successJsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .at(-1);
+    assert.deepEqual(successJsonl.attempt_records.map((attempt) => attempt.cached_input_tokens), [1, 2, 3, 0]);
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -2759,29 +2778,36 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     if (mode === "json-plus") {
       res.writeHead(200, { "content-type": "application/problem+json; charset=utf-8" });
       res.end(JSON.stringify({
-        response: { model: "json-plus" },
-        usage: { output_tokens_details: { reasoning_tokens: 42 } },
+        model: "json-plus",
+        usage: {
+          prompt_tokens_details: { cached_tokens: 0 },
+          output_tokens_details: { reasoning_tokens: 42 },
+        },
       }));
       return;
     }
     if (mode === "json-text") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
-        response: { model: "json-text" },
         delta: { reasoning_content: "visible thinking" },
         usage: { output_tokens_details: { reasoning_tokens: -1 } },
+        response: {
+          model: "json-text",
+          usage: { prompt_tokens_details: { cached_tokens: 13 } },
+        },
       }));
       return;
     }
     if (mode === "sse-latest") {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write(`data: ${JSON.stringify({ response: { model: "sse-latest" }, usage: { output_tokens_details: { reasoning_tokens: 41 } } })}\n\n`);
-      res.write(`data: ${JSON.stringify({ usage: { output_tokens_details: { reasoning_tokens: 42 } } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ response: { model: "sse-latest", usage: { input_tokens_details: { cached_tokens: 21 } } }, usage: { output_tokens_details: { reasoning_tokens: 41 } } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ usage: { input_tokens_details: { cached_tokens: 22 }, output_tokens_details: { reasoning_tokens: 42 } } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ usage: { input_tokens_details: { cached_tokens: -1 } } })}\n\n`);
       res.end("data: [DONE]\n\n");
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
-    res.write(`data: ${JSON.stringify({ response: { model: "glm-5.2" }, choices: [{ delta: { reasoning_content: "plan" } }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ model: "glm-5.2", choices: [{ delta: { reasoning_content: "plan" } }] })}\n\n`);
     res.end("data: [DONE]\n\n");
   });
 
@@ -2803,8 +2829,13 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     assert.equal(runtime.healthy, true);
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
-    for (const mode of ["json-plus", "json-text", "sse-latest", "glm-text"]) {
-      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=${mode}`, {
+    for (const [mode, path] of [
+      ["json-plus", "/v1/chat/completions"],
+      ["json-text", "/responses"],
+      ["sse-latest", "/v1/responses"],
+      ["glm-text", "/chat/completions"],
+    ]) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}${path}?case=${mode}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ model: mode }),
@@ -2822,6 +2853,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
 
     const jsonPlus = byModel.get("json-plus");
     assert.ok(jsonPlus);
+    assert.equal(jsonPlus.cached_input_tokens, 0);
     assert.equal(jsonPlus.reasoning_tokens, 42);
     assert.equal(jsonPlus.reasoning_tokens_source, "/usage/output_tokens_details/reasoning_tokens");
     assert.equal(jsonPlus.reasoning_text_observed, false);
@@ -2829,6 +2861,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
 
     const jsonText = byModel.get("json-text");
     assert.ok(jsonText);
+    assert.equal(jsonText.cached_input_tokens, 13);
     assert.equal(jsonText.reasoning_tokens, null);
     assert.equal(jsonText.reasoning_tokens_source, null);
     assert.equal(jsonText.reasoning_text_observed, true);
@@ -2836,6 +2869,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
 
     const sseLatest = byModel.get("sse-latest");
     assert.ok(sseLatest);
+    assert.equal(sseLatest.cached_input_tokens, 22);
     assert.equal(sseLatest.reasoning_tokens, 42);
     assert.equal(sseLatest.reasoning_tokens_source, "sse.data/usage/output_tokens_details/reasoning_tokens");
     assert.equal(state.metrics.reasoning_token_counts["41"], undefined);
@@ -2873,7 +2907,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
   }
 });
 
-test("proxy writes v2 request record facts with prompt and response text outside records", async () => {
+test("proxy writes v3 request record facts with prompt and response text outside records", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -2884,9 +2918,9 @@ test("proxy writes v2 request record facts with prompt and response text outside
       await readServerRequestBody(req);
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
-        id: "resp-v2",
-        model: "upstream-v2",
-        system_fingerprint: "fp-v2",
+        id: "resp-v3",
+        model: "upstream-v3",
+        system_fingerprint: "fp-v3",
         service_tier: "priority",
         output: [
           { type: "reasoning", encrypted_content: "encrypted-v2" },
@@ -2894,6 +2928,7 @@ test("proxy writes v2 request record facts with prompt and response text outside
         ],
         usage: {
           input_tokens: 11,
+          input_tokens_details: { cached_tokens: 7 },
           output_tokens: 13,
           total_tokens: 24,
           output_tokens_details: { reasoning_tokens: 5 },
@@ -2924,7 +2959,7 @@ test("proxy writes v2 request record facts with prompt and response text outside
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
     const requestBody = JSON.stringify({
-      model: "request-v2",
+      model: "request-v3",
       reasoning: { effort: "high" },
       input: "sensitive prompt text",
     });
@@ -2935,7 +2970,7 @@ test("proxy writes v2 request record facts with prompt and response text outside
         accept: "application/json",
         authorization: "Bearer secret",
         "x-api-key": "secret",
-        "x-codex-purpose": "v2-observability",
+        "x-codex-purpose": "v3-observability",
       },
       body: requestBody,
     });
@@ -2944,21 +2979,22 @@ test("proxy writes v2 request record facts with prompt and response text outside
 
     const state = await waitForState(
       stateRoot,
-      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-v2",
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-v3",
     );
     const record = state.metrics.recent_requests[0];
-    assert.equal(record.schema_version, 2);
+    assert.equal(record.schema_version, 3);
     assert.equal(record.final_action, "passed");
     assert.equal(record.client_status, 200);
     assert.equal(record.upstream_status, 200);
     assert.equal(record.failure_summary, null);
     assert.equal(record.request_reasoning_effort, "high");
     assert.equal(record.request_body_sha256, createHash("sha256").update(requestBody).digest("hex"));
-    assert.equal(record.upstream_model, "upstream-v2");
-    assert.equal(record.final_response_model, "upstream-v2");
-    assert.equal(record.system_fingerprint, "fp-v2");
+    assert.equal(record.upstream_model, "upstream-v3");
+    assert.equal(record.final_response_model, "upstream-v3");
+    assert.equal(record.system_fingerprint, "fp-v3");
     assert.equal(record.service_tier, "priority");
     assert.equal(record.input_tokens, 11);
+    assert.equal(record.cached_input_tokens, 7);
     assert.equal(record.reasoning_tokens, 5);
     assert.equal(record.output_tokens, 13);
     assert.equal(record.total_tokens, 24);
@@ -2976,9 +3012,10 @@ test("proxy writes v2 request record facts with prompt and response text outside
 
     const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const fullRecord = jsonl.at(-1);
+    assert.equal(fullRecord.cached_input_tokens, 7);
     assert.equal(fullRecord.request_headers["content-type"], "application/json");
     assert.equal(fullRecord.request_headers.accept, "application/json");
-    assert.equal(fullRecord.request_headers["x-codex-purpose"], "v2-observability");
+    assert.equal(fullRecord.request_headers["x-codex-purpose"], "v3-observability");
     assert.equal(Object.hasOwn(fullRecord.request_headers, "authorization"), false);
     assert.equal(Object.hasOwn(fullRecord.request_headers, "x-api-key"), false);
     assert.equal(fullRecord.attempt_records.length, 1);
@@ -2986,13 +3023,14 @@ test("proxy writes v2 request record facts with prompt and response text outside
       attempt: 1,
       upstream: "input",
       upstream_status: 200,
-      upstream_model: "upstream-v2",
+      upstream_model: "upstream-v3",
       upstream_model_source: "json.model",
       stream_model: null,
-      final_response_model: "upstream-v2",
-      system_fingerprint: "fp-v2",
+      final_response_model: "upstream-v3",
+      system_fingerprint: "fp-v3",
       service_tier: "priority",
       input_tokens: 11,
+      cached_input_tokens: 7,
       reasoning_tokens: 5,
       reasoning_tokens_source: "/usage/output_tokens_details/reasoning_tokens",
       output_tokens: 13,
@@ -3300,7 +3338,7 @@ test("proxy status table renders configured columns and compact units", () => {
       },
     },
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3380,7 +3418,7 @@ test("proxy status session column uses stable shallow colors in TTY output", asy
       new Date("2026-01-01T00:00:03.000Z"),
       state,
       ["input"],
-      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 2 },
+      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 3 },
       {
         codexConfigPath: "/home/test/.codex/config.toml",
         listenHost: "127.0.0.1",
@@ -3442,7 +3480,7 @@ test("proxy status error column stays single-line and expands with terminal widt
     new Date("2026-01-01T00:00:00.000Z"),
     state,
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3499,7 +3537,7 @@ test("proxy status summary renders exact status counts", () => {
       },
     },
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3551,7 +3589,7 @@ test("proxy status and reasoning summaries use event counts", () => {
       ],
     }),
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3584,7 +3622,7 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
     new Date("2026-01-01T00:00:00.000Z"),
     state,
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 2 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
@@ -3720,14 +3758,14 @@ test("proxy runtime restarts protocol mismatches", async () => {
     assert.ok(runtime);
     assert.equal(runtime.healthy, true);
     assert.equal(runtime.started, true);
-    assert.equal(runtime.protocol, 2);
+    assert.equal(runtime.protocol, 3);
     assert.notEqual(runtime.pid, oldProxyPid);
     await waitForChildExit(oldProxy);
     oldProxy = null;
 
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
     const healthPayload = await health.json();
-    assert.equal(healthPayload.protocol, 2);
+    assert.equal(healthPayload.protocol, 3);
     assert.equal(healthPayload.pid, runtime.pid);
     const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_protocol_restart"/);
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
@@ -3740,7 +3778,7 @@ test("proxy runtime restarts protocol mismatches", async () => {
       },
       {
         server_protocol: 1,
-        client_protocol: 2,
+        client_protocol: 3,
         pid: oldProxyPid,
       },
     );
@@ -3776,7 +3814,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 3 }));
       return;
     }
     res.writeHead(404);
@@ -3870,7 +3908,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 3 }));
       return;
     }
     res.writeHead(404);
@@ -3949,7 +3987,7 @@ test("proxy watch --history uses explicit history count", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 3 }));
       return;
     }
     res.writeHead(404);
@@ -4030,7 +4068,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 2 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 3 }));
       return;
     }
     res.writeHead(404);
@@ -4329,7 +4367,7 @@ test("proxy runtime starts in the background and restore stops it", async () => 
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
     assert.equal(healthPayload.version, packageJson.version);
-    assert.equal(healthPayload.protocol, 2);
+    assert.equal(healthPayload.protocol, 3);
     assert.equal(healthPayload.mode, "recovery");
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
@@ -4674,6 +4712,7 @@ function assertCompleteProxyAttemptRecord(record, expected) {
     "system_fingerprint",
     "service_tier",
     "input_tokens",
+    "cached_input_tokens",
     "reasoning_tokens",
     "reasoning_tokens_source",
     "output_tokens",

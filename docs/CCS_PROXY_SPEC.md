@@ -60,7 +60,7 @@ Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A pr
 
 Request records include:
 
-- `schema_version`: request record schema version. Current value is `2`.
+- `schema_version`: request record schema version. Current value is `3`.
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
@@ -94,6 +94,7 @@ Request records include:
 - `system_fingerprint`: upstream self-reported system fingerprint when present.
 - `service_tier`: upstream self-reported service tier when present.
 - `input_tokens`: explicit upstream input token count.
+- `cached_input_tokens`: explicit cached input token count from Responses `input_tokens_details.cached_tokens` or Chat Completions `prompt_tokens_details.cached_tokens`.
 - `reasoning_tokens`: latest explicit upstream reasoning token count.
 - `reasoning_tokens_source`: source path for `reasoning_tokens`.
 - `output_tokens`: explicit upstream output token count.
@@ -123,11 +124,11 @@ Request records include:
 
 `reasoning_text_observed` records reasoning text fields such as `delta.reasoning_content`, `message.reasoning_content`, and `delta.reasoning`. Text observations stay separate from token-count metrics and guard matching.
 
-`attempt_records` entries include `attempt`, `started_at`, `headers_at`, `completed_at`, `duration_ms`, `upstream`, `upstream_status`, timing fields, upstream model fields, upstream metadata, usage token fields, reasoning metadata, response shape fields, per-attempt `final_action`, `failure_summary`, and `remaining_retries`.
+`attempt_records` entries include `attempt`, `started_at`, `headers_at`, `completed_at`, `duration_ms`, `upstream`, `upstream_status`, timing fields, upstream model fields, upstream metadata, `input_tokens`, `cached_input_tokens`, `output_tokens`, `total_tokens`, reasoning metadata, response shape fields, per-attempt `final_action`, `failure_summary`, and `remaining_retries`.
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
 
-Old state files are normalized at read time. Missing `mode` normalizes to `recovery`. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing `client_turn_id` normalizes to `null`. Missing `client_request_attempt` normalizes to `1`. Missing nullable v2 fields normalize to `null`. Missing boolean v2 fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
+Old state files are normalized at read time and receive the current request schema version. Missing `mode` normalizes to `recovery`. Missing model fields render through the current `-` status display. Missing `request_kind` normalizes to `normal`. Missing `client_turn_id` normalizes to `null`. Missing `client_request_attempt` normalizes to `1`. Missing nullable request fields normalize to `null`. Missing boolean request fields normalize to `false`. Missing `retry_summary` normalizes to zero counters. Missing `guard_actions` fields normalize to `[]`.
 
 ## Upstream forwarding
 
@@ -237,7 +238,7 @@ The four paths map to two endpoint classes: `chat/completions` and `responses`.
 - `final_response_model`: model string on the accepted or final response payload.
 - `system_fingerprint`: upstream self-reported `system_fingerprint`.
 - `service_tier`: upstream self-reported `service_tier`.
-- `input_tokens`, `output_tokens`, and `total_tokens`: explicit upstream usage token fields.
+- `input_tokens`, `cached_input_tokens`, `output_tokens`, and `total_tokens`: explicit upstream usage token fields. Cached input remains `null` when the upstream omits or reports an invalid value.
 - `reasoning_tokens`: latest explicit upstream reasoning token count.
 - `reasoning_tokens_source`: JSON Pointer or SSE JSON Pointer that produced `reasoning_tokens`.
 - `reasoning_text_observed`: boolean marker for observed reasoning text.
@@ -265,6 +266,8 @@ Explicit token count paths:
 
 - `/usage/input_tokens`
 - `/usage/prompt_tokens`
+- `/usage/input_tokens_details/cached_tokens`
+- `/usage/prompt_tokens_details/cached_tokens`
 - `/usage/output_tokens`
 - `/usage/completion_tokens`
 - `/usage/total_tokens`
@@ -272,6 +275,8 @@ Explicit token count paths:
 - `/usage/completion_tokens_details/reasoning_tokens`
 - `/response/usage/input_tokens`
 - `/response/usage/prompt_tokens`
+- `/response/usage/input_tokens_details/cached_tokens`
+- `/response/usage/prompt_tokens_details/cached_tokens`
 - `/response/usage/output_tokens`
 - `/response/usage/completion_tokens`
 - `/response/usage/total_tokens`
@@ -294,9 +299,10 @@ Reasoning text observation paths:
 ### Lifecycle integration
 
 - Active request records include `request_model` after the request body is read.
-- History request records include model metadata and reasoning metadata.
+- History request records include model metadata, usage metadata, and reasoning metadata.
 - Non-stream JSON responses are already buffered for inspection, so metadata extraction runs before response forwarding.
-- SSE responses are fully buffered before client response headers, preserve accepted bytes, and scan SSE `data:` JSON frames for the first model value, latest explicit reasoning token count, and first reasoning text observation.
+- SSE responses are fully buffered before client response headers, preserve accepted bytes, and scan SSE `data:` JSON frames for the first model value, latest explicit usage token counts, latest explicit reasoning token count, and first reasoning text observation.
+- Compact request state, completed JSONL request records, and JSONL-only `attempt_records` preserve `cached_input_tokens` independently for each observed upstream response.
 - Missing model fields are stored as `null`.
 
 ### Status view
@@ -323,6 +329,9 @@ session time up reas./code lat. size model error
 - SSE responses extract `upstream_model` for all four concrete paths when present.
 - Non-stream JSON and `application/*+json` responses extract explicit `reasoning_tokens` and `reasoning_tokens_source`.
 - SSE responses keep the latest explicit `reasoning_tokens` value.
+- JSON and SSE responses extract cached input from the four supported usage paths and keep the latest valid SSE value.
+- Missing and invalid cached input values normalize to `null`; zero remains a valid explicit token count.
+- Compact state, completed JSONL records, and per-attempt JSONL records preserve cached input values.
 - GLM-style reasoning text fields render as `text/status` and leave token counters unchanged.
 - SSE forwarding preserves the exact client-visible response bytes after strict guard buffering.
 - Repeated transport `fetch failed` keeps `guard_actions[].status` as `null` and renders the terminal prefix with the final local request status, such as `[err:502 err:502]`.
