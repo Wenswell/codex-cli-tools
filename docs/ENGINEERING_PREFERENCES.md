@@ -11,6 +11,7 @@ This document records reusable project preferences that come from implementation
 - Long-running monitors avoid periodic history growth for unchanged samples. An idle empty sample is useful once; repeated identical samples belong in the live view, not in history.
 - Long-running status servers publish primary health and status endpoints before auxiliary derived-data refreshes. Auxiliary refresh failures should be logged without blocking the primary status surface.
 - Runtime records separate client-level repeated requests from tool-owned internal retries. Terminal status can show both, using distinct stored fields and distinct visible prefixes.
+- Upstream usage metadata preserves explicit non-negative token counts at both request and internal-attempt scope. Missing or invalid fields remain `null`, so downstream reports can distinguish unknown values from explicit zeroes.
 - Managed background processes with a health protocol treat protocol mismatch as a runtime replacement event: record a normalized event, stop the mismatched runtime, start the current entrypoint, and report a startup error when the current protocol remains unavailable.
 - Shared helpers own JSONL append, bounded retention, atomic state writes, and raw archive behavior. New runtime logs should reuse those helpers.
 - Status and watch renderers read compact state first. Larger history reads should be explicit and should use tail-oriented readers.
