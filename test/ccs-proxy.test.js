@@ -106,7 +106,7 @@ test("proxy install changes only the routed provider base_url after runtime heal
 
     const state = await readProxyState(stateRoot);
     assert.ok(state);
-    assert.equal(state.mode, "recovery");
+    assert.equal(state.mode, "passthrough");
     assert.deepEqual(state.profile_order, ["ciii"]);
     assert.equal(state.codex_config_path, codexConfigPath);
     assert.equal(installed.runtime?.healthy, true);
@@ -4500,7 +4500,7 @@ test("proxy restore uses the current profile and preserves unrelated config edit
     assert.equal(healthPayload.pid, runtime.pid);
     assert.equal(healthPayload.version, packageJson.version);
     assert.equal(healthPayload.protocol, 4);
-    assert.equal(healthPayload.mode, "recovery");
+    assert.equal(healthPayload.mode, "passthrough");
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
     assert.ok((await stat(join(stateRoot, "proxy-runtime.log"))).size <= 16 * 1024 * 1024);
