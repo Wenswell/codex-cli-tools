@@ -58,7 +58,7 @@ The current request is sufficient for implementation. No confirmation blockers r
 - format: one normalized `ProxyRequestRecord` JSON object per line
 - order: append in completion order
 - retention: newest complete JSONL records up to 64M
-- fields: all model API request table, metric, model, guard action, byte, latency, session, status, and error fields
+- fields: all model API request table, metric, model, guard action, byte, latency, client TTFB, session, status, and error fields
 
 `proxy.log` is the event log:
 

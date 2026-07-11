@@ -287,13 +287,14 @@ test("proxy state persists request metrics", async () => {
     assert.deepEqual(state.metrics.status_counts, { "200": 1, "500": 1 });
     assert.deepEqual(state.metrics.reasoning_token_counts, {});
     assert.equal(state.metrics.active_requests.length, 1);
-    assert.equal(state.metrics.active_requests[0].schema_version, 4);
+    assert.equal(state.metrics.active_requests[0].schema_version, 5);
     assert.equal(state.metrics.active_requests[0].session, "019f0eca");
     assert.equal(state.metrics.active_requests[0].completed_at, null);
     assert.equal(state.metrics.active_requests[0].status, null);
     assert.equal(state.metrics.active_requests[0].upstream, null);
     assert.equal(state.metrics.active_requests[0].attempts, 0);
     assert.equal(state.metrics.active_requests[0].latency_ms, 0);
+    assert.equal(state.metrics.active_requests[0].client_ttfb_ms, null);
     assert.equal(state.metrics.active_requests[0].response_bytes, 0);
     assert.equal(state.metrics.active_requests[0].request_model, null);
     assert.equal(state.metrics.active_requests[0].upstream_model, null);
@@ -307,9 +308,10 @@ test("proxy state persists request metrics", async () => {
     assert.equal(state.metrics.active_requests[0].error, null);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
     assert.equal(state.metrics.recent_requests[0].upstream, "input");
-    assert.equal(state.metrics.recent_requests[0].schema_version, 4);
+    assert.equal(state.metrics.recent_requests[0].schema_version, 5);
     assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
     assert.equal(state.metrics.recent_requests[0].response_bytes, 51);
+    assert.equal(state.metrics.recent_requests[0].client_ttfb_ms, null);
     assert.equal(state.metrics.recent_requests[0].request_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
@@ -1177,6 +1179,9 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     assert.equal(record.status, 429);
     assert.equal(record.final_action, "upstream_error");
     assert.equal(record.attempts, 1);
+    assert.equal(typeof record.client_ttfb_ms, "number");
+    assert.equal(record.client_ttfb_ms >= 0, true);
+    assert.equal(record.client_ttfb_ms <= record.latency_ms, true);
     assert.equal(record.error, null);
     assert.deepEqual(record.failure_summary, {
       type: "upstream_error",
@@ -1572,6 +1577,7 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
       .split("\n")
       .map((line) => JSON.parse(line))
       .at(-1);
+    assert.equal(fullRecord.client_ttfb_ms, record.client_ttfb_ms);
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.attempt), [1, 2]);
     assert.deepEqual(record.usage_attempts, fullRecord.attempt_records.map((attempt) => ({
       attempt: attempt.attempt,
@@ -2309,6 +2315,9 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     assert.equal(record.mode, "passthrough");
     assert.equal(record.status, 200);
     assert.equal(record.attempts, 1);
+    assert.equal(typeof record.client_ttfb_ms, "number");
+    assert.equal(record.client_ttfb_ms >= 0, true);
+    assert.equal(record.client_ttfb_ms <= record.latency_ms, true);
     assert.deepEqual(record.guard_actions, []);
     assert.equal(record.reasoning_tokens, 1552);
     assert.equal(record.reasoning_tokens_source, "/usage/output_tokens_details/reasoning_tokens");
@@ -2317,6 +2326,7 @@ test("proxy stop switches to passthrough and forwards the original request", asy
       .split("\n")
       .map((line) => JSON.parse(line))
       .at(-1);
+    assert.equal(fullRecord.client_ttfb_ms, record.client_ttfb_ms);
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.attempt), [1]);
     assert.deepEqual(record.usage_attempts, [{
       attempt: 1,
@@ -3063,7 +3073,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
   }
 });
 
-test("proxy writes v4 request record facts with prompt and response text outside records", async () => {
+test("proxy writes v5 request record facts with prompt and response text outside records", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -3138,7 +3148,7 @@ test("proxy writes v4 request record facts with prompt and response text outside
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-v3",
     );
     const record = state.metrics.recent_requests[0];
-    assert.equal(record.schema_version, 4);
+    assert.equal(record.schema_version, 5);
     assert.equal(record.final_action, "passed");
     assert.equal(record.client_status, 200);
     assert.equal(record.upstream_status, 200);
@@ -4886,6 +4896,7 @@ function proxyHistoryRecord(overrides) {
     upstream: "input",
     attempts: 1,
     latency_ms: 123,
+    client_ttfb_ms: null,
     request_bytes: 0,
     response_bytes: 0,
     session: "019f0df6",
@@ -5049,7 +5060,7 @@ async function closeServer(server) {
 // Sync/proxy refinement contract tests.
 
 test("proxy refinement uses request schema and health protocol version 4", () => {
-  assert.equal(PROXY_REQUEST_SCHEMA_VERSION, 4);
+  assert.equal(PROXY_REQUEST_SCHEMA_VERSION, 5);
   assert.equal(PROXY_HEALTH_PROTOCOL, 4);
 });
 

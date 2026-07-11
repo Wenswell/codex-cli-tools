@@ -60,7 +60,7 @@ Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A pr
 
 Request records include:
 
-- `schema_version`: request record schema version. Current value is `4`.
+- `schema_version`: request record schema version. Current value is `5`.
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
@@ -75,6 +75,7 @@ Request records include:
 - `upstream`: selected profile name.
 - `attempts`: upstream fetch attempt count.
 - `latency_ms`: completed request latency.
+- `client_ttfb_ms`: time from proxy request start to response headers written to the Codex client; `null` when the proxy writes no response headers.
 - `upstream_wait_ms`: time from upstream fetch start to upstream headers for the final attempt.
 - `time_to_first_chunk_ms`: streaming time from upstream fetch start to first upstream chunk for the final attempt.
 - `stream_duration_ms`: streaming time from first upstream chunk to final upstream chunk for the final attempt.

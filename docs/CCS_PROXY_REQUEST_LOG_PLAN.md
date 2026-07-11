@@ -89,7 +89,7 @@ Add these request record fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | `number` | Request record schema version. Start at `2`. |
+| `schema_version` | `number` | Request record schema version. Current value is `5`. |
 | `final_action` | `string` | Canonical completed outcome. |
 | `upstream_status` | `number \| null` | Last observed upstream HTTP status. |
 | `client_status` | `number \| null` | Status returned to the local Codex client. |
@@ -103,6 +103,7 @@ Add these request record fields:
 | `system_fingerprint` | `string \| null` | Upstream self-reported system fingerprint when present. |
 | `service_tier` | `string \| null` | Upstream self-reported service tier when present. |
 | `upstream_wait_ms` | `number \| null` | Time from upstream fetch start to upstream headers. |
+| `client_ttfb_ms` | `number \| null` | Time from proxy request start to response headers written to the Codex client. |
 | `time_to_first_chunk_ms` | `number \| null` | Streaming time from upstream fetch start to first chunk. |
 | `stream_duration_ms` | `number \| null` | Streaming time from first chunk to final chunk. |
 | `input_tokens` | `number \| null` | Explicit upstream input token count. |
@@ -355,6 +356,7 @@ Record:
 
 - `latency_ms`: existing full request duration.
 - `upstream_wait_ms`: upstream header wait time.
+- `client_ttfb_ms`: time until the proxy writes response headers to the Codex client.
 - `time_to_first_chunk_ms`: streaming first-chunk wait time.
 - `stream_duration_ms`: stream body duration.
 
@@ -463,7 +465,7 @@ These fields help distinguish:
 
 - `proxy-requests.jsonl` contains complete request records for recent completed model API requests.
 - `proxy.json.metrics.recent_requests` stores compact request records without `attempt_records` or `request_headers`.
-- Each completed record has `schema_version=2`.
+- Each completed record has `schema_version=5`.
 - Each completed record has a non-pending `final_action`.
 - `upstream_status` and `client_status` are explicit.
 - Upstream self-reported `system_fingerprint` and `service_tier` are stored when present.
