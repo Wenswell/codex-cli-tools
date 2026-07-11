@@ -966,7 +966,7 @@ function formatProxyRequest(record, nowMs, priceCache) {
         size: formatProxyBytes(size),
         session: formatProxySession(record.session),
         model: formatProxyModel(record.request_model, record.upstream_model),
-        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "input_tokens"),
+        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
         output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
         cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
         ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
@@ -1010,7 +1010,19 @@ export function formatProxyModel(requestModel, upstreamModel) {
     return colorName(display);
 }
 export function formatProxyAttemptTokens(attempts, field) {
-    if (attempts.length === 0 || attempts.some((attempt) => attempt[field] === null)) {
+    if (attempts.length === 0) {
+        return textDim("-");
+    }
+    if (field === "uncached_input_tokens") {
+        if (attempts.some((attempt) => attempt.input_tokens === null || attempt.cached_input_tokens === null)) {
+            return textDim("-");
+        }
+        if (attempts.some((attempt) => (attempt.cached_input_tokens ?? 0) > (attempt.input_tokens ?? 0))) {
+            return textRed("invalid");
+        }
+        return colorCount(formatProxyTokenCount(attempts.reduce((sum, attempt) => sum + (attempt.input_tokens ?? 0) - (attempt.cached_input_tokens ?? 0), 0)));
+    }
+    if (attempts.some((attempt) => attempt[field] === null)) {
         return textDim("-");
     }
     return colorCount(formatProxyTokenCount(attempts.reduce((sum, attempt) => sum + (attempt[field] ?? 0), 0)));
@@ -3220,7 +3232,9 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ...formatProxyActiveRows(metrics, now, view, priceCache),
         textBold("history"),
         ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
-        fitTerminalLine(textDim("commands: ccs proxy [--view overview|tokens|cost] | watch | mode [intercept|recovery] | install | restore | stop | serve")),
+        fitTerminalLine(textDim(options.watch
+            ? `view: ${view}  keys: v view  q/Ctrl-C exit`
+            : "commands: ccs proxy [--view overview|tokens|cost] | watch | mode [intercept|recovery] | install | restore | stop | serve")),
     ];
 }
 async function runProxyStatusOnce(options) {
@@ -3621,6 +3635,15 @@ export async function serveProxy(options) {
                         cachedInputTokens = deferred.usage.cachedInputTokens;
                         outputTokens = deferred.usage.outputTokens;
                         totalTokens = deferred.usage.totalTokens;
+                        reasoningTokens = deferred.reasoningTokens;
+                        reasoningTokensSource = deferred.reasoningTokensSource;
+                        reasoningTextObserved = deferred.reasoningTextObserved;
+                        reasoningTextSource = deferred.reasoningTextSource;
+                        hasCommentary = deferred.responseShape.hasCommentary;
+                        hasFinalAnswer = deferred.responseShape.hasFinalAnswer;
+                        finalAnswerOnly = isProxyFinalAnswerOnly(deferred.responseShape);
+                        hasToolCall = deferred.responseShape.hasToolCall;
+                        hasReasoningItem = deferred.responseShape.hasReasoningItem;
                     }
                     upstreamModel = streamModelObserver.model ?? upstreamModel;
                     upstreamModelSource = streamModelObserver.source ?? upstreamModelSource;
