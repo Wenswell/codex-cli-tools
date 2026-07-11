@@ -1054,7 +1054,27 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
   try {
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
-    await writeFile(join(stateRoot, "proxy.json"), "{}\n", "utf8");
+    await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
+      installed_at: "2026-01-01T00:00:00.000Z",
+      codex_config_path: join(home, ".codex", "config.toml"),
+      provider_name: "codex",
+      original_base_url: "https://proxy.example.com",
+      proxy_base_url: "http://127.0.0.1:4610",
+      mode: "recovery",
+      listen_host: "127.0.0.1",
+      listen_port: 4610,
+      profile_order: ["input"],
+      backup_path: join(stateRoot, "config.toml.backup"),
+      metrics: {
+        total_requests: 0,
+        active_requests: [],
+        status_counts: {},
+        reasoning_token_counts: {},
+        upstream_hit_counts: {},
+        latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
+        recent_requests: [],
+      },
+    }), "utf8");
     await assert.rejects(
       () => runCcsDirect(["sync", "--replace", "model_provider"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
       /cannot replace model_provider while proxy state exists/,

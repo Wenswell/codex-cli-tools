@@ -502,18 +502,16 @@ function proxyMetricsFromRecentRequests(recentRequests) {
         latency_ms: latency,
     };
 }
-function normalizeProxyMetrics(value) {
-    const raw = value && typeof value === "object" ? value : {};
-    const recentRequests = Array.isArray(raw.recent_requests)
-        ? raw.recent_requests.filter((item) => Boolean(item) && typeof item === "object")
-            .map(normalizeProxyHistoryRecord)
-            .slice(0, PROXY_RECENT_REQUEST_LIMIT)
-        : [];
-    const activeRequests = Array.isArray(raw.active_requests)
-        ? raw.active_requests.filter((item) => Boolean(item) && typeof item === "object")
-            .map((request) => normalizeProxyRequestRecord(request, "active"))
-            .slice(0, PROXY_ACTIVE_REQUEST_LIMIT)
-        : [];
+function parseProxyMetrics(value) {
+    const raw = requireProxyObject(value, "proxy.json.metrics");
+    const recent = requireProxyArray(raw.recent_requests, "proxy.json.metrics.recent_requests");
+    const active = requireProxyArray(raw.active_requests, "proxy.json.metrics.active_requests");
+    const recentRequests = recent
+        .map((request, index) => parseProxyRequestRecord(request, `proxy.json.metrics.recent_requests[${index}]`))
+        .slice(0, PROXY_RECENT_REQUEST_LIMIT);
+    const activeRequests = active
+        .map((request, index) => parseProxyRequestRecord(request, `proxy.json.metrics.active_requests[${index}]`))
+        .slice(0, PROXY_ACTIVE_REQUEST_LIMIT);
     const windowMetrics = proxyMetricsFromRecentRequests(recentRequests);
     return {
         ...windowMetrics,
@@ -521,141 +519,122 @@ function normalizeProxyMetrics(value) {
         recent_requests: recentRequests,
     };
 }
-function normalizeProxyHistoryRecord(request) {
-    return normalizeProxyRequestRecord(request, "history");
-}
-function normalizeProxyRequestRecord(request, collection) {
-    const startedAt = stringField(request.started_at) || stringField(request.at) || "";
-    const completedAt = nullableStringField(request.completed_at)
-        ?? (collection === "history" ? nullableStringField(request.at) ?? startedAt : null);
-    const status = Number.isInteger(request.status) ? Number(request.status) : null;
-    return {
-        schema_version: PROXY_REQUEST_SCHEMA_VERSION,
-        id: stringField(request.id) || randomUUID(),
-        started_at: startedAt,
-        completed_at: completedAt,
-        mode: normalizeProxyMode(request.mode) ?? PROXY_DEFAULT_MODE,
-        method: stringField(request.method),
-        path: stringField(request.path),
-        status,
-        upstream_status: Number.isInteger(request.upstream_status) ? Number(request.upstream_status) : status,
-        client_status: Number.isInteger(request.client_status) ? Number(request.client_status) : (collection === "history" ? status : null),
-        final_action: stringField(request.final_action) || (collection === "history" ? inferProxyFinalAction(status, nullableStringField(request.error)) : "pending"),
-        failure_summary: normalizeProxyFailureSummary(request.failure_summary),
-        upstream: nullableStringField(request.upstream),
-        attempts: Number.isInteger(request.attempts) ? Number(request.attempts) : 0,
-        latency_ms: numberField(request.latency_ms),
-        client_ttfb_ms: nullableNumberField(request.client_ttfb_ms),
-        upstream_wait_ms: nullableNumberField(request.upstream_wait_ms),
-        time_to_first_chunk_ms: nullableNumberField(request.time_to_first_chunk_ms),
-        stream_duration_ms: nullableNumberField(request.stream_duration_ms),
-        request_bytes: numberField(request.request_bytes),
-        response_bytes: numberField(request.response_bytes),
-        session: nullableStringField(request.session),
-        client_turn_id: nullableStringField(request.client_turn_id),
-        client_request_attempt: positiveIntegerField(request.client_request_attempt),
-        request_kind: normalizeProxyRequestKind(request.request_kind),
-        request_model: nullableStringField(request.request_model),
-        request_reasoning_effort: nullableStringField(request.request_reasoning_effort),
-        request_body_sha256: nullableStringField(request.request_body_sha256),
-        upstream_model: nullableStringField(request.upstream_model),
-        upstream_model_source: nullableStringField(request.upstream_model_source),
-        stream_model: nullableStringField(request.stream_model),
-        final_response_model: nullableStringField(request.final_response_model),
-        system_fingerprint: nullableStringField(request.system_fingerprint),
-        service_tier: nullableStringField(request.service_tier),
-        input_tokens: isProxyTokenCount(request.input_tokens) ? Number(request.input_tokens) : null,
-        cached_input_tokens: isProxyTokenCount(request.cached_input_tokens) ? Number(request.cached_input_tokens) : null,
-        reasoning_tokens: isReasoningTokenCount(request.reasoning_tokens) ? Number(request.reasoning_tokens) : null,
-        reasoning_tokens_source: nullableStringField(request.reasoning_tokens_source),
-        output_tokens: isProxyTokenCount(request.output_tokens) ? Number(request.output_tokens) : null,
-        total_tokens: isProxyTokenCount(request.total_tokens) ? Number(request.total_tokens) : null,
-        usage_attempts: normalizeProxyUsageAttempts(request.usage_attempts),
-        reasoning_text_observed: request.reasoning_text_observed === true,
-        reasoning_text_source: nullableStringField(request.reasoning_text_source),
-        has_commentary: request.has_commentary === true,
-        has_final_answer: request.has_final_answer === true,
-        final_answer_only: request.final_answer_only === true,
-        has_tool_call: request.has_tool_call === true,
-        has_reasoning_item: request.has_reasoning_item === true,
-        guard_actions: normalizeProxyGuardActions(request.guard_actions),
-        retry_summary: normalizeProxyRetrySummary(request.retry_summary),
-        error: nullableStringField(request.error),
-    };
-}
-function normalizeProxyUsageAttempts(value) {
-    if (!Array.isArray(value)) {
-        throw new Error("invalid proxy request usage_attempts");
+function parseProxyRequestRecord(value, source) {
+    const request = requireProxyObject(value, source);
+    requireProxyField(request, "schema_version", source, (field) => field === PROXY_REQUEST_SCHEMA_VERSION, `number ${PROXY_REQUEST_SCHEMA_VERSION}`);
+    for (const field of ["id", "started_at", "method", "path", "final_action"]) {
+        requireProxyField(request, field, source, (value) => typeof value === "string", "string");
     }
-    return value.map((entry) => {
-        const item = entry && typeof entry === "object" ? entry : {};
-        const modelSource = item.pricing_model_source === "upstream_model" || item.pricing_model_source === "request_model"
-            ? item.pricing_model_source
-            : null;
-        const tierSource = item.pricing_tier_source === "response" || item.pricing_tier_source === "request" || item.pricing_tier_source === "config"
-            ? item.pricing_tier_source
-            : null;
-        return {
-            attempt: positiveIntegerField(item.attempt),
-            input_tokens: isProxyTokenCount(item.input_tokens) ? Number(item.input_tokens) : null,
-            output_tokens: isProxyTokenCount(item.output_tokens) ? Number(item.output_tokens) : null,
-            cached_input_tokens: isProxyTokenCount(item.cached_input_tokens) ? Number(item.cached_input_tokens) : null,
-            pricing_model: nullableStringField(item.pricing_model),
-            pricing_model_source: modelSource,
-            pricing_tier: nullableStringField(item.pricing_tier),
-            pricing_tier_source: tierSource,
-        };
+    for (const field of [
+        "completed_at", "upstream", "session", "client_turn_id", "request_model", "request_reasoning_effort",
+        "request_body_sha256", "upstream_model", "upstream_model_source", "stream_model", "final_response_model",
+        "system_fingerprint", "service_tier", "reasoning_tokens_source", "reasoning_text_source", "error",
+    ]) {
+        requireProxyField(request, field, source, isNullableString, "string or null");
+    }
+    requireProxyField(request, "mode", source, (value) => normalizeProxyMode(value) !== null, "proxy mode");
+    requireProxyField(request, "request_kind", source, (value) => value === REQUEST_KIND_NORMAL || value === REQUEST_KIND_CONTEXT_COMPACTION, "request kind");
+    for (const field of ["status", "upstream_status", "client_status"]) {
+        requireProxyField(request, field, source, isNullableInteger, "integer or null");
+    }
+    requireProxyField(request, "attempts", source, isNonNegativeInteger, "non-negative integer");
+    requireProxyField(request, "client_request_attempt", source, isPositiveInteger, "positive integer");
+    for (const field of ["latency_ms", "request_bytes", "response_bytes"]) {
+        requireProxyField(request, field, source, isNonNegativeNumber, "non-negative number");
+    }
+    for (const field of ["client_ttfb_ms", "upstream_wait_ms", "time_to_first_chunk_ms", "stream_duration_ms"]) {
+        requireProxyField(request, field, source, isNullableNonNegativeNumber, "non-negative number or null");
+    }
+    for (const field of ["input_tokens", "cached_input_tokens", "reasoning_tokens", "output_tokens", "total_tokens"]) {
+        requireProxyField(request, field, source, (value) => value === null || isProxyTokenCount(value), "non-negative integer or null");
+    }
+    for (const field of ["reasoning_text_observed", "has_commentary", "has_final_answer", "final_answer_only", "has_tool_call", "has_reasoning_item"]) {
+        requireProxyField(request, field, source, (value) => typeof value === "boolean", "boolean");
+    }
+    parseProxyFailureSummary(requireProxyField(request, "failure_summary", source), `${source}.failure_summary`);
+    parseProxyUsageAttempts(requireProxyField(request, "usage_attempts", source), `${source}.usage_attempts`);
+    parseProxyGuardActions(requireProxyField(request, "guard_actions", source), `${source}.guard_actions`);
+    parseProxyRetrySummary(requireProxyField(request, "retry_summary", source), `${source}.retry_summary`);
+    return request;
+}
+function parseProxyUsageAttempts(value, source) {
+    requireProxyArray(value, source).forEach((value, index) => {
+        const itemSource = `${source}[${index}]`;
+        const item = requireProxyObject(value, itemSource);
+        requireProxyField(item, "attempt", itemSource, isPositiveInteger, "positive integer");
+        for (const field of ["input_tokens", "output_tokens", "cached_input_tokens"]) {
+            requireProxyField(item, field, itemSource, (value) => value === null || isProxyTokenCount(value), "non-negative integer or null");
+        }
+        for (const field of ["pricing_model", "pricing_tier"]) {
+            requireProxyField(item, field, itemSource, isNullableString, "string or null");
+        }
+        requireProxyField(item, "pricing_model_source", itemSource, (value) => value === null || value === "upstream_model" || value === "request_model", "pricing model source or null");
+        requireProxyField(item, "pricing_tier_source", itemSource, (value) => value === null || value === "response" || value === "request" || value === "config", "pricing tier source or null");
     });
 }
-function normalizeProxyFailureSummary(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-        return null;
+function parseProxyFailureSummary(value, source) {
+    if (value === null) {
+        return;
     }
-    const raw = value;
-    return {
-        type: nullableStringField(raw.type),
-        code: nullableStringField(raw.code),
-        message: nullableStringField(raw.message),
-    };
-}
-function normalizeProxyRetrySummary(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-        return createEmptyProxyRetrySummary();
+    const summary = requireProxyObject(value, source);
+    for (const field of ["type", "code", "message"]) {
+        requireProxyField(summary, field, source, isNullableString, "string or null");
     }
-    const raw = value;
-    return {
-        total: nonNegativeIntegerField(raw.total),
-        reasoning_guard: nonNegativeIntegerField(raw.reasoning_guard),
-        upstream_capacity: nonNegativeIntegerField(raw.upstream_capacity),
-        transport: nonNegativeIntegerField(raw.transport),
-    };
 }
-function normalizeProxyGuardActions(value) {
+function parseProxyRetrySummary(value, source) {
+    const summary = requireProxyObject(value, source);
+    for (const field of ["total", "reasoning_guard", "upstream_capacity", "transport"]) {
+        requireProxyField(summary, field, source, isNonNegativeInteger, "non-negative integer");
+    }
+}
+function parseProxyGuardActions(value, source) {
+    requireProxyArray(value, source).forEach((value, index) => {
+        const itemSource = `${source}[${index}]`;
+        const item = requireProxyObject(value, itemSource);
+        requireProxyField(item, "at", itemSource, (value) => typeof value === "string", "string");
+        requireProxyField(item, "action", itemSource, (value) => value === "internal_retry" || value === "continuation_recovery" || value === "return_status_502" || value === "upstream_error", "guard action");
+        requireProxyField(item, "upstream", itemSource, isNullableString, "string or null");
+        requireProxyField(item, "attempt", itemSource, isPositiveInteger, "positive integer");
+        requireProxyField(item, "status", itemSource, isNullableInteger, "integer or null");
+        requireProxyField(item, "reasoning_tokens", itemSource, (value) => value === null || isReasoningTokenCount(value), "non-negative integer or null");
+        requireProxyField(item, "error", itemSource, isNullableString, "string or null");
+    });
+}
+function requireProxyObject(value, source) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`invalid proxy request data at ${source}: expected object`);
+    }
+    return value;
+}
+function requireProxyArray(value, source) {
     if (!Array.isArray(value)) {
-        return [];
+        throw new Error(`invalid proxy request data at ${source}: expected array`);
     }
-    return value
-        .filter((item) => Boolean(item) && typeof item === "object")
-        .map((item) => ({
-        at: stringField(item.at) || new Date(0).toISOString(),
-        action: normalizeProxyGuardAction(item.action),
-        upstream: nullableStringField(item.upstream),
-        attempt: Number.isInteger(item.attempt) ? Number(item.attempt) : 0,
-        status: Number.isInteger(item.status) ? Number(item.status) : null,
-        reasoning_tokens: isReasoningTokenCount(item.reasoning_tokens) ? Number(item.reasoning_tokens) : null,
-        error: nullableStringField(item.error),
-    }));
+    return value;
 }
-function normalizeProxyGuardAction(value) {
-    return value === "internal_retry" || value === "continuation_recovery" || value === "return_status_502" || value === "upstream_error"
-        ? value
-        : "upstream_error";
+function requireProxyField(record, field, source, valid = () => true, expected = "field") {
+    if (!Object.hasOwn(record, field) || !valid(record[field])) {
+        throw new Error(`invalid proxy request data at ${source}.${field}: expected ${expected}`);
+    }
+    return record[field];
 }
-function normalizeProxyRequestKind(value) {
-    return value === REQUEST_KIND_CONTEXT_COMPACTION ? REQUEST_KIND_CONTEXT_COMPACTION : REQUEST_KIND_NORMAL;
+function isNullableString(value) {
+    return value === null || typeof value === "string";
 }
-function stringField(value) {
-    return typeof value === "string" ? value : "";
+function isNullableInteger(value) {
+    return value === null || Number.isInteger(value);
+}
+function isNonNegativeInteger(value) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+function isPositiveInteger(value) {
+    return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+function isNonNegativeNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+function isNullableNonNegativeNumber(value) {
+    return value === null || isNonNegativeNumber(value);
 }
 function nullableStringField(value) {
     if (value === null || value === undefined) {
@@ -664,35 +643,8 @@ function nullableStringField(value) {
     const text = `${value}`;
     return text.length > 0 ? text : null;
 }
-function numberField(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
 function nullableNumberField(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-function nonNegativeIntegerField(value) {
-    return Number.isInteger(value) && typeof value === "number" && value >= 0 ? value : 0;
-}
-function positiveIntegerField(value) {
-    return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : 1;
-}
-function inferProxyFinalAction(status, error) {
-    if (status === 499) {
-        return "client_aborted";
-    }
-    if (error?.includes("reasoning_guard_triggered")) {
-        return "blocked";
-    }
-    if (error?.includes("upstream_fetch_failed")) {
-        return "upstream_fetch_failed";
-    }
-    if (error) {
-        return "gateway_error";
-    }
-    if (status !== null && status >= 400) {
-        return "upstream_error";
-    }
-    return "passed";
 }
 function normalizeProxyState(state) {
     if (!state) {
@@ -702,7 +654,7 @@ function normalizeProxyState(state) {
         ...state,
         mode: normalizeProxyMode(state.mode) ?? PROXY_DEFAULT_MODE,
         profile_order: Array.isArray(state.profile_order) ? state.profile_order.filter((value) => typeof value === "string" && value.length > 0) : [],
-        metrics: normalizeProxyMetrics(state.metrics),
+        metrics: parseProxyMetrics(state.metrics),
     };
 }
 function normalizeProxyMode(value) {
@@ -3185,11 +3137,11 @@ async function readProxyRequestTail(stateRoot, count) {
                 if (!line) {
                     continue;
                 }
-                records.push(normalizeProxyHistoryRecord(parseJsonObject(line)));
+                records.push(parseProxyRequestRecord(parseJsonObject(line), `${proxyRequestsPath(stateRoot)}:${index + 1}`));
             }
         }
         if (position === 0 && carry.trim() && records.length < count) {
-            records.push(normalizeProxyHistoryRecord(parseJsonObject(carry.trim())));
+            records.push(parseProxyRequestRecord(parseJsonObject(carry.trim()), proxyRequestsPath(stateRoot)));
         }
         return records;
     }

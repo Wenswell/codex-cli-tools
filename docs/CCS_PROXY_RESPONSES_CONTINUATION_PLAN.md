@@ -34,7 +34,7 @@ Excluded:
 
 - `final_answer_only_high_xhigh` intercept mode.
 - New user-facing proxy configuration flags.
-- Compatibility shims for old record shapes beyond the existing normalizers.
+- Compatibility or migration for previous request-record schemas.
 - Request body text storage.
 - Guard matching formula changes.
 - Changes to non-Responses continuation behavior.

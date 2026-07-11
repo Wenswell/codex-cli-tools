@@ -134,6 +134,8 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 Request schema version `5` and health protocol version `4` are the sole supported contracts.
 
+Request-record readers require every schema `5` field with its documented type. Previous field names, missing fields, and retired values produce a schema error. An earlier request schema requires a clean proxy reinstall: restore the configured provider URL from the active profile, remove the proxy state directory, and run `ccs proxy install`. The reinstall creates current state and history records.
+
 ## Upstream forwarding
 
 The proxy resolves one active upstream from `profiles.current` for each client request. `ccs toggle` owns profile switching by changing `profiles.current`; the proxy reads that current value when forwarding a new request.
@@ -223,7 +225,7 @@ Active overview rows show elapsed time for `lat.`, known request bytes for `size
 ## Implementation notes
 
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
-- Active records are normalized through the same request-record normalizer as history records.
+- Active and history records pass through the same schema `5` validator. Pending values use the documented `null`, `0`, or empty collection value.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.

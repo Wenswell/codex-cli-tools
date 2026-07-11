@@ -57,7 +57,7 @@ Each retained test must have a distinct contract or regression reason. Candidate
 
 ## audit results
 
-The suite now contains 127 tests and 8,735 test/helper lines. Four whole tests and 171 test/helper lines were removed.
+The suite now contains 128 tests and 8,736 test/helper lines. Four whole tests were removed, and one strict proxy request-record contract test was added during the resolved schema review.
 
 ### removed tests
 
@@ -74,7 +74,7 @@ Deleting the two snapshot-wrapper tests left `buildModelPriceSnapshotPlan` witho
 
 | Group | Tests | Distinct failure signals |
 | --- | ---: | --- |
-| Proxy runtime and views | 50 | Routing, authentication, retries, continuation, modes, records, privacy, process lifecycle, status views, interaction, token projection, and costs. |
+| Proxy runtime and views | 51 | Routing, authentication, retries, continuation, modes, records, privacy, process lifecycle, status views, interaction, token projection, and costs. |
 | CCS commands | 34 | Public versions, model inventory, pricing and cost commands, runtime state, invalid arguments, and sync safety. |
 | CLVM commands and monitor | 24 | Config precedence, sampling, close behavior, runtime records, raw-data boundaries, retries, history growth, and terminal layout. |
 | Pricing selection | 5 | Cost calculation, built-in prices, local-only lookup, remote catalog parsing, and provider/pattern intersection. |
@@ -93,18 +93,13 @@ Every retained whole test maps to a current public contract, stored-data or safe
 - Removed stale schema suffixes and historical limit wording from active test names and fixtures.
 - Removed one unused proxy fixture parameter.
 
-## open decisions
+## resolved decisions
 
 ### previous proxy record shapes
 
-`proxy state persists request metrics` builds records without `schema_version`, uses the former `at` timestamp, and includes retired aggregate fields. `readProxyState` currently normalizes those records to schema `5` and supplies current defaults.
+Schema `5` is the sole proxy request-record contract. State snapshots and JSONL history require complete schema `5` records. Readers reject earlier schemas and missing fields instead of translating previous field names, synthesizing values, or silently removing invalid entries.
 
-Evidence supports two competing contracts:
-
-- `docs/CCS_PROXY_REASONING_OBSERVABILITY_PLAN.md` requires old records to receive new fields during reads, and current source implements this behavior.
-- `docs/CCS_SYNC_PROXY_REFINEMENT_PLAN.md` excludes compatibility and migration for previous proxy schemas. `docs/CCS_PROXY_SPEC.md` defines schema `5` as the sole supported request-record contract.
-
-Removing only the test would leave undocumented compatibility code. The recommended change is a coordinated production cleanup: remove previous-shape normalization, require schema `5`, and replace this test with a complete schema `5` state fixture if direct state-read coverage remains useful. This audit retains the test until that production contract is confirmed.
+`proxy state persists request metrics` now uses complete schema `5` fixtures. Dedicated rejection tests cover earlier schemas, incomplete state records, and incompatible JSONL history. Earlier request schemas require a clean proxy reinstall, which creates current metrics and history files.
 
 ## related source finding
 
@@ -112,8 +107,8 @@ A strict `tsc --noUnusedLocals --noUnusedParameters` audit also reports pre-exis
 
 ## verification
 
-- Focused module runs: 127 passed, 0 failed.
+- Focused module runs: 128 passed, 0 failed.
 - `pnpm check`: passed.
 - `pnpm build`: passed and refreshed tracked `dist` files.
 - Repository test-file search: exactly the 10 `test/*.test.js` files selected by `pnpm test`; `test/helpers/terminal.js` is the only supporting file.
-- Full configured `pnpm test`: 127 passed, 0 failed, 9.49 seconds.
+- Full configured `pnpm test`: 128 passed, 0 failed, 9.17 seconds.

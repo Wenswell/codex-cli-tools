@@ -202,82 +202,38 @@ test("proxy state persists request metrics", async () => {
 
     const statePath = join(stateRoot, "proxy.json");
     await mkdir(stateRoot, { recursive: true });
-    await writeFile(
-      statePath,
-      JSON.stringify(
-        {
-          installed_at: "2026-01-01T00:00:00.000Z",
-          codex_config_path: "/home/test/.codex/config.toml",
-          provider_name: "codex",
-          original_base_url: "https://proxy.example.com",
-          proxy_base_url: "http://127.0.0.1:4610",
-          listen_host: "127.0.0.1",
-          listen_port: 4610,
-          profile_order: ["input", "ciii"],
-          backup_path: "/tmp/backup.toml",
-          metrics: {
-            total_requests: 2,
-            active_requests: [
-              {
-                id: "active-1",
-                started_at: "2026-01-01T00:00:03.000Z",
-                method: "POST",
-                path: "/v1/chat/completions",
-                request_bytes: 12,
-                session: "019f0eca",
-                usage_attempts: [],
-              },
-            ],
-            successful_requests: 1,
-            failed_requests: 1,
-            upstream_hit_counts: {
-              input: 1,
-              ciii: 1,
-            },
-            latency_ms: {
-              count: 2,
-              sum: 300,
-              min: 100,
-              max: 200,
-              samples: [100, 200],
-            },
-            recent_requests: [
-              {
-                at: "2026-01-01T00:00:00.000Z",
-                method: "POST",
-                path: "/v1/responses",
-                status: 200,
-                upstream: "input",
-                attempts: 1,
-                latency_ms: 120,
-                request_bytes: 43,
-                response_bytes: 51,
-                session: "019eb0b9",
-                usage_attempts: [],
-                error: null,
-              },
-              {
-                at: "2026-01-01T00:00:01.000Z",
-                method: "POST",
-                path: "/v1/responses",
-                status: 500,
-                upstream: "ciii",
-                attempts: 2,
-                latency_ms: 180,
-                request_bytes: 44,
-                response_bytes: 52,
-                session: "019eb0ba",
-                usage_attempts: [],
-                error: "fallback",
-              },
-            ],
-          },
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
+    const active = proxyHistoryRecord({
+      id: "active-1",
+      started_at: "2026-01-01T00:00:03.000Z",
+      completed_at: null,
+      path: "/v1/chat/completions",
+      status: null,
+      upstream_status: null,
+      client_status: null,
+      final_action: "pending",
+      upstream: null,
+      attempts: 0,
+      latency_ms: 0,
+      request_bytes: 12,
+      session: "019f0eca",
+    });
+    const success = proxyHistoryRecord({ id: "history-1", latency_ms: 120, response_bytes: 51 });
+    const failure = proxyHistoryRecord({
+      id: "history-2",
+      started_at: "2026-01-01T00:00:01.000Z",
+      completed_at: "2026-01-01T00:00:01.000Z",
+      status: 500,
+      upstream_status: 500,
+      client_status: 500,
+      final_action: "upstream_error",
+      failure_summary: { type: "upstream_error", code: null, message: "capacity" },
+      upstream: "ciii",
+      attempts: 2,
+      latency_ms: 180,
+      response_bytes: 52,
+      session: "019eb0ba",
+    });
+    await writeFile(statePath, JSON.stringify(proxyStateFixture({ active_requests: [active], recent_requests: [success, failure] }), null, 2), "utf8");
 
     const state = await readProxyState(stateRoot);
     assert.ok(state);
@@ -285,40 +241,9 @@ test("proxy state persists request metrics", async () => {
     assert.deepEqual(state.metrics.status_counts, { "200": 1, "500": 1 });
     assert.deepEqual(state.metrics.reasoning_token_counts, {});
     assert.equal(state.metrics.active_requests.length, 1);
-    assert.equal(state.metrics.active_requests[0].schema_version, 5);
-    assert.equal(state.metrics.active_requests[0].session, "019f0eca");
-    assert.equal(state.metrics.active_requests[0].completed_at, null);
-    assert.equal(state.metrics.active_requests[0].status, null);
-    assert.equal(state.metrics.active_requests[0].upstream, null);
-    assert.equal(state.metrics.active_requests[0].attempts, 0);
-    assert.equal(state.metrics.active_requests[0].latency_ms, 0);
-    assert.equal(state.metrics.active_requests[0].client_ttfb_ms, null);
-    assert.equal(state.metrics.active_requests[0].response_bytes, 0);
-    assert.equal(state.metrics.active_requests[0].request_model, null);
-    assert.equal(state.metrics.active_requests[0].upstream_model, null);
-    assert.equal(state.metrics.active_requests[0].upstream_model_source, null);
-    assert.equal(state.metrics.active_requests[0].cached_input_tokens, null);
-    assert.equal(state.metrics.active_requests[0].reasoning_tokens, null);
-    assert.equal(state.metrics.active_requests[0].reasoning_tokens_source, null);
-    assert.equal(state.metrics.active_requests[0].reasoning_text_observed, false);
-    assert.equal(state.metrics.active_requests[0].reasoning_text_source, null);
-    assert.deepEqual(state.metrics.active_requests[0].guard_actions, []);
-    assert.equal(state.metrics.active_requests[0].error, null);
+    assert.deepEqual(state.metrics.active_requests[0], active);
     assert.equal(state.metrics.upstream_hit_counts.input, 1);
-    assert.equal(state.metrics.recent_requests[0].upstream, "input");
-    assert.equal(state.metrics.recent_requests[0].schema_version, 5);
-    assert.equal(state.metrics.recent_requests[0].completed_at, "2026-01-01T00:00:00.000Z");
-    assert.equal(state.metrics.recent_requests[0].response_bytes, 51);
-    assert.equal(state.metrics.recent_requests[0].client_ttfb_ms, null);
-    assert.equal(state.metrics.recent_requests[0].request_model, null);
-    assert.equal(state.metrics.recent_requests[0].upstream_model, null);
-    assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
-    assert.equal(state.metrics.recent_requests[0].cached_input_tokens, null);
-    assert.equal(state.metrics.recent_requests[0].reasoning_tokens, null);
-    assert.equal(state.metrics.recent_requests[0].reasoning_tokens_source, null);
-    assert.equal(state.metrics.recent_requests[0].reasoning_text_observed, false);
-    assert.equal(state.metrics.recent_requests[0].reasoning_text_source, null);
-    assert.deepEqual(state.metrics.recent_requests[0].guard_actions, []);
+    assert.deepEqual(state.metrics.recent_requests, [success, failure]);
     assert.equal(state.metrics.latency_ms.last, 120);
 
   } finally {
@@ -332,6 +257,23 @@ test("proxy state persists request metrics", async () => {
     } else {
       process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
     }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy state rejects old and incomplete request records", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  try {
+    const oldRecord = proxyHistoryRecord({ schema_version: 4 });
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, "proxy.json"), JSON.stringify(proxyStateFixture({ recent_requests: [oldRecord] })), "utf8");
+    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.schema_version: expected number 5/);
+
+    const incompleteRecord = proxyHistoryRecord();
+    delete incompleteRecord.final_action;
+    await writeFile(join(home, "proxy.json"), JSON.stringify(proxyStateFixture({ recent_requests: [incompleteRecord] })), "utf8");
+    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.final_action: expected string/);
+  } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -3999,6 +3941,16 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
     assert.match(jsonlOutput, /jsonl-1/);
     assert.doesNotMatch(jsonlOutput, /jsonl-0/);
     assert.doesNotMatch(jsonlOutput, /\/snapshot-/);
+
+    await writeFile(
+      join(stateRoot, "proxy-requests.jsonl"),
+      `${JSON.stringify(proxyHistoryRecord({ schema_version: 4 }))}\n`,
+      "utf8",
+    );
+    await assert.rejects(
+      runProxyCommand(["--history", "7"], proxyOptions),
+      /proxy-requests\.jsonl.*schema_version: expected number 5/,
+    );
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -4832,6 +4784,7 @@ function holdControl() {
 
 function proxyHistoryRecord(overrides) {
   return {
+    schema_version: 5,
     id: overrides?.id ?? "history-record",
     started_at: overrides?.started_at ?? "2026-01-01T00:00:00.000Z",
     completed_at: "2026-01-01T00:00:00.000Z",
@@ -4839,10 +4792,17 @@ function proxyHistoryRecord(overrides) {
     method: "POST",
     path: "/responses",
     status: 200,
+    upstream_status: 200,
+    client_status: 200,
+    final_action: "passed",
+    failure_summary: null,
     upstream: "input",
     attempts: 1,
     latency_ms: 123,
     client_ttfb_ms: null,
+    upstream_wait_ms: null,
+    time_to_first_chunk_ms: null,
+    stream_duration_ms: null,
     request_bytes: 0,
     response_bytes: 0,
     session: "019f0df6",
@@ -4850,14 +4810,35 @@ function proxyHistoryRecord(overrides) {
     client_request_attempt: 1,
     request_kind: "normal",
     request_model: null,
+    request_reasoning_effort: null,
+    request_body_sha256: null,
     upstream_model: null,
     upstream_model_source: null,
+    stream_model: null,
+    final_response_model: null,
+    system_fingerprint: null,
+    service_tier: null,
+    input_tokens: null,
+    cached_input_tokens: null,
     reasoning_tokens: null,
     reasoning_tokens_source: null,
+    output_tokens: null,
+    total_tokens: null,
     usage_attempts: [],
     reasoning_text_observed: false,
     reasoning_text_source: null,
+    has_commentary: false,
+    has_final_answer: false,
+    final_answer_only: false,
+    has_tool_call: false,
+    has_reasoning_item: false,
     guard_actions: [],
+    retry_summary: {
+      total: 0,
+      reasoning_guard: 0,
+      upstream_capacity: 0,
+      transport: 0,
+    },
     error: null,
     ...overrides,
   };
