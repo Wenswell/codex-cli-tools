@@ -20,7 +20,7 @@ import { buildModelPriceSnapshotPlanFromRemoteCatalog, calculateCodexCostUSD, li
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, padVisibleLeft, padVisibleRight, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
-import { mergeTomlDefaults, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
+import { syncTomlTemplate, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable, renderTable } from "../lib/table.js";
 import { fitTerminalLine } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
@@ -183,11 +183,14 @@ function formatTimestamp(date) {
         milliseconds,
     ].join("");
 }
-async function planCodexConfigSync() {
+async function planCodexConfigSync(replacePaths = new Set()) {
     const defaults = await readDefaultCodexConfig();
     const existing = (await readTextIfExists(codexConfigPath())) ?? "";
+    const sync = syncTomlTemplate(defaults, existing, replacePaths);
     return {
-        nextContent: mergeTomlDefaults(defaults, existing),
+        nextContent: sync.content,
+        differentPaths: sync.differentPaths,
+        updatedPaths: sync.updatedPaths,
     };
 }
 async function syncCodexConfigFromTemplate() {
@@ -768,9 +771,28 @@ async function buildInitPreviewPlan() {
         warnings,
     };
 }
-async function buildSyncPreviewPlan() {
+async function buildSyncPreviewPlan(options) {
     const nextProfiles = await planSyncProfiles();
-    const configPlan = await planCodexConfigSync();
+    const defaults = await readDefaultCodexConfig();
+    const template = syncTomlTemplate(defaults, "", new Set());
+    const selectedPaths = options.replaceAll
+        ? template.leafPaths.filter((path) => !isProviderBaseUrlPath(path))
+        : options.replacePaths;
+    const templatePaths = new Set(template.leafPaths);
+    for (const path of selectedPaths) {
+        if (isProviderBaseUrlPath(path)) {
+            throw new Error(`ccs sync cannot replace proxy routing field: ${path}`);
+        }
+        if (!templatePaths.has(path)) {
+            const prefix = `${path}.`;
+            const kind = template.leafPaths.some((candidate) => candidate.startsWith(prefix)) ? "non-leaf" : "unknown";
+            throw new Error(`${kind} TOML path for ccs sync --replace: ${path}`);
+        }
+    }
+    const configPlan = await planCodexConfigSync(new Set(selectedPaths));
+    if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await readProxyState()) {
+        throw new Error("ccs sync cannot replace model_provider while proxy state exists");
+    }
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
     const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
     const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
@@ -801,7 +823,34 @@ async function buildSyncPreviewPlan() {
         previewFiles,
         backupFiles,
         warnings: [],
+        configSync: configPlan,
     };
+}
+function isProviderBaseUrlPath(path) {
+    return /^model_providers\.[^.]+\.base_url$/.test(path);
+}
+function parseSyncOptions(args) {
+    const replacePaths = [];
+    for (let index = 0; index < args.length; index += 1) {
+        if (args[index] !== "--replace") {
+            throw new Error(`unknown argument for ccs sync: ${args[index]}`);
+        }
+        const path = args[index + 1];
+        if (!path || path === "--replace") {
+            throw new Error("ccs sync --replace requires a TOML path or all");
+        }
+        replacePaths.push(path);
+        index += 1;
+    }
+    const normalized = [...new Set(replacePaths)];
+    const replaceAll = normalized.includes("all");
+    if (replaceAll && normalized.length > 1) {
+        throw new Error("ccs sync --replace all cannot be combined with explicit paths");
+    }
+    return { replaceAll, replacePaths: replaceAll ? [] : normalized };
+}
+function formatSyncFieldSummary(label, paths) {
+    return `${label.padEnd(11)}${paths.length}  ${paths.join(", ")}`.trimEnd();
 }
 function buildWeztermStatusBlock() {
     return [
@@ -3619,7 +3668,8 @@ function usageLines() {
         "  ccs pricing provider add PROVIDER...  # add providers locally",
         "  ccs pricing provider remove PROVIDER... # remove providers and prune local models",
         "  ccs pricing refresh                   # rebuild prices from watched patterns and providers",
-        "  ccs proxy [--once|watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
+        "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
+        "  ccs proxy [watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
         "  ccs cost weekly                      # show Codex session weekly cost totals",
@@ -3646,7 +3696,9 @@ function usageLines() {
         "  ccs usage add [PROFILE]               # add or update a usage-only profile",
         "  ccs usage remove | rm | delete PROFILE # remove a usage-only profile",
         "  ccs init                             # preview, confirm, and create config",
-        "  ccs sync                             # preview, confirm, and sync config",
+        "  ccs sync                             # add missing template config fields",
+        "  ccs sync --replace TOML_PATH          # replace one repeatable template leaf field",
+        "  ccs sync --replace all                # replace every template leaf except provider base URLs",
         "  ccs add [PROFILE]                     # add or update a profile",
         "  ccs remove | rm | delete PROFILE      # remove a profile",
     ];
@@ -5463,7 +5515,7 @@ function roundCostUSD(value) {
     return Math.round(value * 1_000_000) / 1_000_000;
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--once|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync"));
+    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
@@ -5528,22 +5580,34 @@ export async function runCcs(argv) {
     }
     if (command === "sync") {
         rejectRemovedYesFlags(args, "ccs sync");
-        assertExactArgs(args, "sync", 0);
-        const previewPlan = await buildSyncPreviewPlan();
+        const previewPlan = await buildSyncPreviewPlan(parseSyncOptions(args));
+        console.log(formatSyncFieldSummary("different:", previewPlan.configSync.differentPaths));
+        console.log(formatSyncFieldSummary("update:", previewPlan.configSync.updatedPaths));
         printPreviewPlan(previewPlan, true);
         if (!(await confirmApply())) {
             return;
         }
         const backupDir = await backupCcsFiles(previewPlan.backupFiles);
-        const synced = await syncProfiles();
-        await syncCodexConfigFromTemplate();
-        await syncCodexAgentsFromTemplate();
+        await ensureDir(codexDir());
+        for (const file of previewPlan.previewFiles) {
+            if (file.path === profilesPath()) {
+                await writeTextFileAtomic(file.path, file.next, 0o600);
+            }
+            else {
+                await writeTextFile(file.path, file.next);
+            }
+            const applied = await readTextIfExists(file.path);
+            if (applied !== file.next) {
+                throw new Error(`ccs sync verification failed: ${file.path}`);
+            }
+        }
         if (backupDir) {
             console.log(`backup: ${textBlue(backupDir)}`);
         }
         console.log(`profiles synced: ${textGreen(profilesPath())}`);
         console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
         console.log(`codex agents synced: ${textGreen(codexAgentsPath())}`);
+        const synced = await readProfiles();
         for (const name of Object.keys(synced.profiles ?? {})) {
             console.log(`  ${textBlue(name)}`);
         }

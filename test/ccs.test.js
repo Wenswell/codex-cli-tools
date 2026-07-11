@@ -954,6 +954,134 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
   }
 });
 
+test("ccs sync stays additive by default and reports complete field summaries", async () => {
+  const home = await writeSyncFixture([
+    'model_provider = "codex"',
+    'model = "local-model"',
+    'local_only = true',
+    '',
+    '[model_providers.codex]',
+    'base_url = "https://local.example"',
+    '',
+    '[features]',
+    'goals = false',
+    '',
+  ].join("\n"));
+  try {
+    const output = await runCcsWithConfirmation(["sync"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    assert.match(output, /^different:\s+\d+\s+.*model.*features\.goals/m);
+    assert.match(output, /^update:\s+\d+\s+/m);
+    assert.match(config, /model = "local-model"/);
+    assert.match(config, /goals = false/);
+    assert.match(config, /local_only = true/);
+    assert.match(config, /personality = "pragmatic"/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync replaces repeated exact leaf paths once and applies its preview", async () => {
+  const home = await writeSyncFixture([
+    'model_provider = "codex"',
+    'model = "local-model"',
+    '',
+    '[model_providers.codex]',
+    'base_url = "https://local.example"',
+    '',
+    '[features]',
+    'goals = false',
+    '',
+  ].join("\n"));
+  try {
+    const output = await runCcsWithConfirmation([
+      "sync", "--replace", "model", "--replace", "features.goals", "--replace", "model",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    const updateLine = output.split("\n").find((line) => line.startsWith("update:"));
+    assert.ok(updateLine);
+    assert.equal((updateLine.match(/(?:^|, )model(?:,|$)/g) ?? []).length, 1);
+    assert.match(config, /model = "gpt-5\.6-sol"/);
+    assert.match(config, /goals = true/);
+    assert.match(config, /base_url = "https:\/\/local\.example"/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync --replace all preserves provider base URLs and local-only fields", async () => {
+  const home = await writeSyncFixture([
+    'model_provider = "codex"',
+    'model = "local-model"',
+    'local_only = true',
+    '',
+    '[model_providers.codex]',
+    'base_url = "https://local.example"',
+    'wire_api = "chat"',
+    '',
+  ].join("\n"));
+  try {
+    await runCcsWithConfirmation(["sync", "--replace", "all"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    assert.match(config, /model = "gpt-5\.6-sol"/);
+    assert.match(config, /wire_api = "responses"/);
+    assert.match(config, /base_url = "https:\/\/local\.example"/);
+    assert.match(config, /local_only = true/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync rejects invalid replacement selections before preview", async () => {
+  const home = await writeSyncFixture('model_provider = "codex"\n');
+  try {
+    const cases = [
+      [["sync", "--replace", "missing.path"], /unknown TOML path/],
+      [["sync", "--replace", "features"], /non-leaf TOML path/],
+      [["sync", "--replace", "model_providers.codex.base_url"], /cannot replace proxy routing field/],
+      [["sync", "--replace", "all", "--replace", "model"], /cannot be combined/],
+    ];
+    for (const [args, pattern] of cases) {
+      await assert.rejects(() => runCcsDirect(args, home, { XDG_CACHE_HOME: join(home, ".cache") }), pattern);
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync preserves proxy routing by rejecting a model_provider change", async () => {
+  const home = await writeSyncFixture('model_provider = "other"\n');
+  try {
+    const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(join(stateRoot, "proxy.json"), "{}\n", "utf8");
+    await assert.rejects(
+      () => runCcsDirect(["sync", "--replace", "model_provider"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
+      /cannot replace model_provider while proxy state exists/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync summaries compare TOML values semantically", async () => {
+  const template = await readFile(join(repoRoot, "config", "codex-config.toml"), "utf8");
+  const config = template.replace('model_provider = "codex"', "model_provider = 'codex' # local style");
+  const home = await writeSyncFixture(config);
+  try {
+    const output = await runCcsWithConfirmation(
+      ["sync", "--replace", "model_provider"],
+      home,
+      { XDG_CACHE_HOME: join(home, ".cache") },
+    );
+    assert.match(output, /^different:\s+0$/m);
+    assert.match(output, /^update:\s+0$/m);
+    assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /model_provider = 'codex' # local style/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 async function runTool(tool, args) {
   const home = await mkdtemp(join(tmpdir(), "ccs-version-home-"));
   try {
@@ -961,6 +1089,24 @@ async function runTool(tool, args) {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+}
+
+async function writeSyncFixture(config) {
+  const home = await mkdtemp(join(tmpdir(), "ccs-sync-home-"));
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+  await writeFile(join(home, ".codex", "config.toml"), config, "utf8");
+  await writeFile(
+    join(home, ".codex", "AGENTS.md"),
+    await readFile(join(repoRoot, "config", "codex-agents.md"), "utf8"),
+    "utf8",
+  );
+  await writeFile(
+    join(home, ".config", "codex-tools", "profiles.json"),
+    await readFile(join(repoRoot, "config", "ccs-profiles.json"), "utf8"),
+    "utf8",
+  );
+  return home;
 }
 
 function runCcs(args, home, env = {}) {

@@ -47,3 +47,9 @@ This document records reusable project preferences that come from implementation
 - Keep README content compact. Put durable contracts, plans, and review notes under `docs/`.
 - Convert repeated review feedback into reusable rules rather than single-incident notes.
 - Document the current contract separately from future schema and behavior plans.
+
+## Configuration And Runtime Views
+
+- File-changing previews should retain the exact source and target content. Apply verifies that the source remains current, writes the previewed target, and reads it back before reporting success.
+- Multi-attempt runtime records should project one compact attribution entry per owned attempt at request completion. Aggregate views require complete facts for each displayed component and preserve missing or invalid states explicitly.
+- Multi-view terminal tables should keep shared identity columns stable, derive every view from the same normalized records, and load local pricing or other frame dependencies once per rendered frame.
