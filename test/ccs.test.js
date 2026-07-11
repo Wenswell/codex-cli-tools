@@ -381,7 +381,7 @@ test("ccs pricing pattern watch confirmation rebuilds the selected cache", async
     });
     await writeModelPriceCache(home, {
       "kept-model": modelPriceValueFixture(0.000003),
-    }, { patterns: ["legacy-*"], providers: ["openai"] });
+    }, { patterns: ["existing-*"], providers: ["openai"] });
     globalThis.fetch = async () => {
       fetchCount += 1;
       return new Response(JSON.stringify({
@@ -395,7 +395,7 @@ test("ccs pricing pattern watch confirmation rebuilds the selected cache", async
     const cache = JSON.parse(await readFile(join(home, ".config", "codex-tools", "model-prices.json"), "utf8"));
 
     assert.match(output, /pricing cache updated/);
-    assert.deepEqual(cache.patterns, ["gpt-5.*", "legacy-*"]);
+    assert.deepEqual(cache.patterns, ["existing-*", "gpt-5.*"]);
     assert.deepEqual(cache.providers, ["openai"]);
     assert.equal(cache.models["gpt-5.4"].input_cost_per_token, 0.000004);
     assert.equal(cache.models["gpt-5.5"].input_cost_per_token, 0.000005);
@@ -593,7 +593,7 @@ test("ccs pricing refresh rebuilds every selected model and price", async () => 
   }
 });
 
-test("ccs pricing list rejects the removed all option", async () => {
+test("ccs pricing list rejects unsupported options", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
@@ -602,8 +602,8 @@ test("ccs pricing list rejects the removed all option", async () => {
   });
   try {
     await assert.rejects(
-      runCcsDirect(["pricing", "list", "--all"], home),
-      /unknown argument for ccs pricing list: --all/,
+      runCcsDirect(["pricing", "list", "--json"], home),
+      /unknown argument for ccs pricing list: --json/,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -644,7 +644,7 @@ test("ccs pricing refresh requires watched patterns and providers", async () => 
   }
 });
 
-test("ccs pricing rejects removed top-level pattern commands", async () => {
+test("ccs pricing rejects unknown subcommands", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
@@ -653,15 +653,15 @@ test("ccs pricing rejects removed top-level pattern commands", async () => {
   });
   try {
     await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "pricing", "watch", "gpt-5.*"], home),
-      /unknown argument for ccs pricing: watch/,
+      runCcs(["dist/bin/ccs.js", "pricing", "unknown"], home),
+      /unknown argument for ccs pricing: unknown/,
     );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("ccs cost pricing command is removed", async () => {
+test("ccs cost rejects unknown report commands", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
@@ -670,8 +670,8 @@ test("ccs cost pricing command is removed", async () => {
   });
   try {
     await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "cost", "pricing"], home),
-      /unknown argument for ccs cost: pricing/,
+      runCcs(["dist/bin/ccs.js", "cost", "unknown"], home),
+      /unknown argument for ccs cost: unknown/,
     );
   } finally {
     await rm(home, { recursive: true, force: true });

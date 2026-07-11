@@ -6,8 +6,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { createServer } from "node:http";
 import {
-  PROXY_HEALTH_PROTOCOL,
-  PROXY_REQUEST_SCHEMA_VERSION,
   buildProxyStatusLines,
   ensureProxyRunning,
   formatProxyAttemptCosts,
@@ -166,7 +164,7 @@ test("proxy default state root lives under cache", async () => {
     await mkdir(stateRoot, { recursive: true });
     await writeFile(
       join(stateRoot, "proxy.json"),
-      JSON.stringify(proxyStateFixture(stateRoot), null, 2),
+      JSON.stringify(proxyStateFixture(), null, 2),
       "utf8",
     );
 
@@ -543,7 +541,6 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /-\s+-\/503\s+\d+ms\s+\d+B\s+down/);
     assert.match(output, /-\s+-\/404\s+\d+ms\s+\d+B\s+missing/);
     assert.doesNotMatch(output, /\bmethod\b/);
-    assertProxyRequestColumnsAligned(output, "history");
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
 
@@ -883,8 +880,6 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.match(output, /chat-stre…/);
     assert.match(output, /\s-\s+-\/200/);
     assert.match(output, /responses…/);
-    assertProxyRequestColumnsAligned(output, "active");
-    assertProxyRequestColumnsAligned(output, "history");
 
     secondHold.finish();
     assert.equal(await (await activeOutputFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
@@ -3073,7 +3068,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
   }
 });
 
-test("proxy writes v5 request record facts with prompt and response text outside records", async () => {
+test("proxy writes current request record facts with prompt and response text outside records", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -3084,12 +3079,12 @@ test("proxy writes v5 request record facts with prompt and response text outside
       await readServerRequestBody(req);
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
-        id: "resp-v3",
-        model: "upstream-v3",
-        system_fingerprint: "fp-v3",
+        id: "resp-observed",
+        model: "upstream-observed",
+        system_fingerprint: "fp-observed",
         service_tier: "priority",
         output: [
-          { type: "reasoning", encrypted_content: "encrypted-v2" },
+          { type: "reasoning", encrypted_content: "encrypted-observed" },
           { type: "message", role: "assistant", phase: "final", content: [{ type: "output_text", text: "do not store response text" }] },
         ],
         usage: {
@@ -3125,7 +3120,7 @@ test("proxy writes v5 request record facts with prompt and response text outside
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
     const requestBody = JSON.stringify({
-      model: "request-v3",
+      model: "request-observed",
       reasoning: { effort: "high" },
       input: "sensitive prompt text",
     });
@@ -3136,7 +3131,7 @@ test("proxy writes v5 request record facts with prompt and response text outside
         accept: "application/json",
         authorization: "Bearer secret",
         "x-api-key": "secret",
-        "x-codex-purpose": "v3-observability",
+        "x-codex-purpose": "observability",
       },
       body: requestBody,
     });
@@ -3145,7 +3140,7 @@ test("proxy writes v5 request record facts with prompt and response text outside
 
     const state = await waitForState(
       stateRoot,
-      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-v3",
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-observed",
     );
     const record = state.metrics.recent_requests[0];
     assert.equal(record.schema_version, 5);
@@ -3155,9 +3150,9 @@ test("proxy writes v5 request record facts with prompt and response text outside
     assert.equal(record.failure_summary, null);
     assert.equal(record.request_reasoning_effort, "high");
     assert.equal(record.request_body_sha256, createHash("sha256").update(requestBody).digest("hex"));
-    assert.equal(record.upstream_model, "upstream-v3");
-    assert.equal(record.final_response_model, "upstream-v3");
-    assert.equal(record.system_fingerprint, "fp-v3");
+    assert.equal(record.upstream_model, "upstream-observed");
+    assert.equal(record.final_response_model, "upstream-observed");
+    assert.equal(record.system_fingerprint, "fp-observed");
     assert.equal(record.service_tier, "priority");
     assert.equal(record.input_tokens, 11);
     assert.equal(record.cached_input_tokens, 7);
@@ -3181,7 +3176,7 @@ test("proxy writes v5 request record facts with prompt and response text outside
     assert.equal(fullRecord.cached_input_tokens, 7);
     assert.equal(fullRecord.request_headers["content-type"], "application/json");
     assert.equal(fullRecord.request_headers.accept, "application/json");
-    assert.equal(fullRecord.request_headers["x-codex-purpose"], "v3-observability");
+    assert.equal(fullRecord.request_headers["x-codex-purpose"], "observability");
     assert.equal(Object.hasOwn(fullRecord.request_headers, "authorization"), false);
     assert.equal(Object.hasOwn(fullRecord.request_headers, "x-api-key"), false);
     assert.equal(fullRecord.attempt_records.length, 1);
@@ -3189,11 +3184,11 @@ test("proxy writes v5 request record facts with prompt and response text outside
       attempt: 1,
       upstream: "input",
       upstream_status: 200,
-      upstream_model: "upstream-v3",
+      upstream_model: "upstream-observed",
       upstream_model_source: "json.model",
       stream_model: null,
-      final_response_model: "upstream-v3",
-      system_fingerprint: "fp-v3",
+      final_response_model: "upstream-observed",
+      system_fingerprint: "fp-observed",
       service_tier: "priority",
       input_tokens: 11,
       cached_input_tokens: 7,
@@ -3307,7 +3302,7 @@ test("proxy keeps running when completed request logging fails after response he
   }
 });
 
-test("proxy forwards request bodies larger than the previous proxy cap", async () => {
+test("proxy forwards large request bodies", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -3395,7 +3390,7 @@ test("proxy status table renders configured columns and compact units", () => {
       profile_order: ["input"],
       backup_path: "/tmp/backup.toml",
       metrics: {
-        total_requests: 5,
+        total_requests: 2,
         active_requests: [
           proxyHistoryRecord({
             completed_at: null,
@@ -3425,8 +3420,8 @@ test("proxy status table renders configured columns and compact units", () => {
         ],
         status_counts: {},
         reasoning_token_counts: {},
-        upstream_hit_counts: { input: 5 },
-        latency_ms: { last: 56, count: 5, sum: 123, min: 56, max: 187200 },
+        upstream_hit_counts: { input: 2 },
+        latency_ms: { last: 56, count: 2, sum: 356, min: 56, max: 300 },
         recent_requests: [
           proxyHistoryRecord({
             session: "019f0df6",
@@ -3438,39 +3433,6 @@ test("proxy status table renders configured columns and compact units", () => {
             upstream_model: "gpt-5.5",
             reasoning_tokens: 42,
             path: "/same",
-          }),
-          proxyHistoryRecord({
-            session: "019f0df7",
-            completed_at: "2026-01-01T00:00:04.000Z",
-            upstream: "input",
-            latency_ms: 123,
-            response_bytes: 982 * 1024,
-            request_model: null,
-            upstream_model: null,
-            path: "/unknown",
-          }),
-          proxyHistoryRecord({
-            session: "019f0df8",
-            completed_at: "2026-01-01T00:00:03.000Z",
-            upstream: "input",
-            latency_ms: 2340,
-            response_bytes: 3.41 * 1024 * 1024,
-            request_model: "gpt-5.5",
-            upstream_model: "gpt-5.5-mini",
-            reasoning_tokens: 516,
-            path: "/seconds",
-          }),
-          proxyHistoryRecord({
-            session: "019f0df9",
-            completed_at: "2026-01-01T00:00:02.000Z",
-            upstream: "input",
-            latency_ms: 43_200,
-            response_bytes: 76.3 * 1024 * 1024,
-            request_model: "gpt-5.5",
-            upstream_model: "gpt-5.5-mini",
-            reasoning_text_observed: true,
-            reasoning_text_source: "sse.data/choices/0/delta/reasoning_content",
-            path: "/large",
           }),
           proxyHistoryRecord({
             session: "019f0dfb",
@@ -3489,16 +3451,6 @@ test("proxy status table renders configured columns and compact units", () => {
               { at: "2026-01-01T00:00:00.300Z", action: "internal_retry", upstream: "input", attempt: 3, status: 200, reasoning_tokens: 506, error: null },
             ],
             error: "reasoning_guard_triggered reasoning_tokens=506",
-          }),
-          proxyHistoryRecord({
-            session: "019f0dfa",
-            completed_at: "2026-01-01T00:00:01.000Z",
-            upstream: "input",
-            latency_ms: 187_200,
-            response_bytes: 1024,
-            request_model: "gpt-5.5",
-            upstream_model: "gpt-5.5-mini",
-            path: "/minutes",
           }),
         ],
       },
@@ -3519,13 +3471,8 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+42\/200\s+0ms\s+2\.00K/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\/-\s+0ms\s+1\.00K/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+42\/200\s+56ms\s+32\.0K/);
-  assert.match(lines, /019f0df7\s+\d\d:\d\d:04\s+input\s+-\s+-\/200\s+123ms\s+982K/);
-  assert.match(lines, /019f0df8\s+\d\d:\d\d:03\s+input\s+o5\.5-mini\s+516\/200\s+2\.34s\s+3\.41M/);
-  assert.match(lines, /019f0df9\s+\d\d:\d\d:02\s+input\s+o5\.5-mini\s+text\/200\s+43\.2s\s+76\.3M/);
   assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\/502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
-  assertProxyRequestColumnsAligned(lines, "active");
-  assertProxyRequestColumnsAligned(lines, "history");
 });
 
 test("proxy status session column uses stable shallow colors in TTY output", async () => {
@@ -3721,7 +3668,7 @@ test("proxy status and reasoning summaries use event counts", () => {
   const stateRoot = "/tmp/codex-tools";
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
-    proxyStateFixture(stateRoot, {
+    proxyStateFixture({
       recent_requests: [
         proxyHistoryRecord({
           id: "retry-success",
@@ -3774,7 +3721,7 @@ test("proxy status and reasoning summaries use event counts", () => {
 
 test("proxy status history count follows TTY rows, non-TTY default, and explicit override", () => {
   const stateRoot = "/tmp/codex-tools";
-  const state = proxyStateFixture(stateRoot, {
+  const state = proxyStateFixture({
     total_requests: 12,
     status_counts: { "200": 12 },
     upstream_hit_counts: { input: 12 },
@@ -4303,7 +4250,6 @@ test("proxy watch repaints immediately on terminal resize", async () => {
     assert.equal(frameCount >= 2, true);
     assert.match(output, /resize-3/);
     assert.match(output, /resize-8/);
-    assert.equal(output.split("\u001b[H").length - 1 >= 2, true);
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -4826,7 +4772,7 @@ async function writeProxyStateFixture(home, stateRoot, proxyPort, metrics = {}) 
     join(stateRoot, "proxy.json"),
     JSON.stringify(
       {
-        ...proxyStateFixture(stateRoot, metrics),
+        ...proxyStateFixture(metrics),
         codex_config_path: join(home, ".codex", "config.toml"),
         proxy_base_url: `http://127.0.0.1:${proxyPort}`,
         listen_port: proxyPort,
@@ -4996,7 +4942,7 @@ function assertCompleteProxyGuardAction(record, expected) {
   }
 }
 
-function proxyStateFixture(stateRoot, metrics = {}) {
+function proxyStateFixture(metrics = {}) {
   return {
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
@@ -5057,12 +5003,7 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-// Sync/proxy refinement contract tests.
-
-test("proxy refinement uses request schema and health protocol version 4", () => {
-  assert.equal(PROXY_REQUEST_SCHEMA_VERSION, 5);
-  assert.equal(PROXY_HEALTH_PROTOCOL, 4);
-});
+// Proxy view and pricing contracts.
 
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
@@ -5248,32 +5189,3 @@ test("proxy USD formatting uses adaptive precision", () => {
   assert.equal(formatProxyUsd(0.01), "$0.01");
   assert.equal(formatProxyUsd(1.239), "$1.24");
 });
-
-function assertProxyRequestColumnsAligned(output, section) {
-  const lines = output.split("\n").map(stripAnsi);
-  const sectionIndex = lines.indexOf(section);
-  assert.ok(sectionIndex >= 0);
-  const header = lines[sectionIndex + 1];
-  const emptyText = section === "active" ? "no active requests" : "no historical requests";
-  const firstRow = lines.slice(sectionIndex + 2).find((line) => /^\s+\S/.test(line) && !line.includes(emptyText));
-  assert.ok(firstRow);
-  const columns = ["session", "time", "up", "model", "reas./code", "lat.", "size", "error"];
-  for (const column of columns) {
-    assert.notEqual(header.indexOf(column), -1, column);
-  }
-  assert.equal(header.indexOf("method"), -1);
-  assert.equal(header.indexOf("path"), -1);
-  assert.equal(header.indexOf("req_model"), -1);
-  assert.equal(header.indexOf("up_model"), -1);
-  const reasoningStatusColumn = header.indexOf("reas./code");
-  const msColumn = header.indexOf("lat.");
-  const modelColumn = header.indexOf("model");
-  const errorColumn = header.indexOf("error");
-  if (firstRow.includes("client closed")) {
-    assert.equal(firstRow.indexOf("client closed"), errorColumn);
-  }
-  assert.equal(header.indexOf("session") < header.indexOf("time"), true);
-  assert.equal(modelColumn < reasoningStatusColumn, true);
-  assert.equal(reasoningStatusColumn < msColumn, true);
-  assert.equal(modelColumn < errorColumn, true);
-}

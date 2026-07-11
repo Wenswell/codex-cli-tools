@@ -1,8 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 
-export function stripAnsi(value) {
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
-}
+export { default as stripAnsi } from "strip-ansi";
 
 export function setStdoutProperties(properties) {
   for (const [key, value] of Object.entries(properties)) {
@@ -74,7 +72,7 @@ export async function captureStdout(run, options = {}) {
   );
 }
 
-export function execNode(args, options = {}) {
+function execNode(args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,

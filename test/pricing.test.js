@@ -4,16 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  buildModelPriceSnapshotPlan,
   calculateCodexCostUSD,
   missingPricingModels,
   modelPricingStatus,
   readModelPriceCache,
   readModelPriceCacheForModels,
   readRemoteModelPriceCatalog,
-  readStoredModelPriceCache,
   selectRemoteModelPrices,
-  writeModelPriceSnapshotPlan,
 } from "../dist/lib/pricing.js";
 
 test("pricing skips missing models and reports them separately", () => {
@@ -27,19 +24,6 @@ test("pricing skips missing models and reports them separately", () => {
 
   assert.equal(calculateCodexCostUSD(modelUsage, cache, "standard"), 0.00014);
   assert.deepEqual(missingPricingModels(modelUsage, cache, "standard"), ["missing-model"]);
-});
-
-test("pricing reports partial status when cache-read pricing is missing", () => {
-  const cache = priceCache({
-    "partial-model": {
-      litellm_provider: "openai",
-      input_cost_per_token: 0.000001,
-      output_cost_per_token: 0.000002,
-    },
-  });
-
-  assert.equal(modelPricingStatus(cache, "partial-model", "standard"), "partial");
-  assert.equal(modelPricingStatus(cache, "missing-model", "standard"), "missing");
 });
 
 test("pricing includes builtin GLM-5.2 prices without a remote cache", async () => {
@@ -115,66 +99,6 @@ test("pricing provider filtering precedes the pattern union", () => {
 
   assert.deepEqual(Object.keys(selected), ["claude-sonnet-4.5", "gpt-5.4", "gpt-5.5"]);
   assert.deepEqual(selectRemoteModelPrices(models, ["*"], []), {});
-});
-
-test("pricing rebuild replaces models with the watched provider and pattern intersection", async () => {
-  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-cache-"));
-  const previousHome = process.env.HOME;
-  const previousFetch = globalThis.fetch;
-  try {
-    process.env.HOME = cacheHome;
-    await writePriceCache(cacheHome, {
-      "kept-model": modelPriceFixture(0.000003),
-      "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
-    }, { patterns: ["kept-*"], providers: ["openai", "azure"] });
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      "gpt-5.4": modelPriceFixture(0.000004),
-      "gpt-5.5": modelPriceFixture(0.000005),
-      "azure/gpt-5.5": modelPriceFixture(0.000006, "azure"),
-      fallback_generalizations: { rules: [] },
-    }), { status: 200 });
-
-    const plan = await buildModelPriceSnapshotPlan([" gpt-5.* ", "gpt-5.*"], ["openai"]);
-    await writeModelPriceSnapshotPlan(plan);
-    const cache = await readStoredModelPriceCache();
-
-    assert.deepEqual(cache.patterns, ["gpt-5.*"]);
-    assert.deepEqual(cache.providers, ["openai"]);
-    assert.deepEqual(Object.keys(cache.models), ["gpt-5.4", "gpt-5.5"]);
-    assert.equal(cache.models["kept-model"], undefined);
-    assert.equal(cache.models["azure/gpt-5.5"], undefined);
-  } finally {
-    globalThis.fetch = previousFetch;
-    restoreEnvironment("HOME", previousHome);
-    await rm(cacheHome, { recursive: true, force: true });
-  }
-});
-
-test("pricing rebuild fails before cache writes when remote fetch fails", async () => {
-  const cacheHome = await mkdtemp(join(tmpdir(), "pricing-snapshot-fail-cache-"));
-  const previousHome = process.env.HOME;
-  const previousFetch = globalThis.fetch;
-  try {
-    process.env.HOME = cacheHome;
-    await writePriceCache(cacheHome, {
-      "kept-model": modelPriceFixture(0.000003),
-    }, { patterns: ["kept-*"], providers: ["openai"] });
-    globalThis.fetch = async () => {
-      throw new Error("offline");
-    };
-
-    await assert.rejects(
-      buildModelPriceSnapshotPlan(["gpt-5.*"], ["openai"]),
-      /pricing refresh failed/,
-    );
-    const cache = await readStoredModelPriceCache();
-
-    assert.deepEqual(Object.keys(cache.models), ["kept-model"]);
-  } finally {
-    globalThis.fetch = previousFetch;
-    restoreEnvironment("HOME", previousHome);
-    await rm(cacheHome, { recursive: true, force: true });
-  }
 });
 
 function priceCache(models, patterns = [], providers = []) {

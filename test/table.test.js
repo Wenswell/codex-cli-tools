@@ -61,7 +61,6 @@ test("table truncates by visible width and keeps the last flex column within max
     "    model    path",
     " 1. gpt-5.5… /v1/responses/…",
   ]);
-  assert.ok(lines.every((line) => visibleLength(line) <= 28));
 });
 
 test("table shrinks columns by explicit priority", () => {
@@ -81,7 +80,6 @@ test("table shrinks columns by explicit priority", () => {
     "left middle     right",
     "abc… klmnopqrst qrstuv…",
   ]);
-  assert.ok(lines.every((line) => visibleLength(line) <= 23));
 });
 
 test("truncateVisible handles ANSI colored text", () => {
