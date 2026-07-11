@@ -65,12 +65,12 @@ ccs proxy watch [--history N] [--view overview|tokens|cost]
 ```
 
 - `overview` is the default. `--view` selects the initial view.
-- TTY watch uses `v` to cycle `overview -> tokens -> cost -> overview` and `q` to exit cleanly.
+- TTY watch uses `v` to cycle `overview -> tokens -> cost -> overview`; `q` and `Ctrl-C` exit cleanly.
 - Shared columns begin `session time up model` and end with the flexible `error` column.
 
 ```text
 overview  session time up model reas./code lat. size error
-tokens    session time up model input_tokens output_tokens cached_input_tokens error
+tokens    session time up model input output cached error
 cost      session time up model input$ output$ cached$ total$ error
 ```
 
@@ -107,7 +107,7 @@ output$ = output_tokens * output_price
 total$  = input$ + cached$ + output$
 ```
 
-- Missing required usage or price renders that component as `-` and the total as `missing`.
+- Missing required usage or price renders that component and the total as `-`.
 - `cached_input_tokens > input_tokens` renders input and total as `invalid`.
 - Cost view reads the local price cache once per frame and performs no network refresh.
 - USD format is `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.

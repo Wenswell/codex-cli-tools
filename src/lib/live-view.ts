@@ -102,7 +102,12 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
   });
 
   const onInput = (value: Buffer | string): void => {
-    options.onKey?.(value.toString(), { stop: controller.stop, render: () => { void requestRender(); } });
+    const key = value.toString();
+    if (key === "\u0003") {
+      controller.stop();
+      return;
+    }
+    options.onKey?.(key, { stop: controller.stop, render: () => { void requestRender(); } });
   };
 
   const requestRender = async (): Promise<void> => {

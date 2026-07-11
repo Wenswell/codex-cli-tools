@@ -5028,7 +5028,7 @@ test("proxy refinement uses request schema and health protocol version 4", () =>
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
   assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "reas./code", "lat.", "size", "error"]);
-  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input_tokens", "output_tokens", "cached_input_tokens", "error"]);
+  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "error"]);
   assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "error"]);
 });
 
@@ -5177,7 +5177,7 @@ test("proxy attempt costs distinguish missing and invalid inputs", () => {
     { attempt: 1, input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, pricing_model: "missing", pricing_tier: "standard" },
   ], cache);
   assert.deepEqual(Object.fromEntries(Object.entries(missing).map(([key, value]) => [key, stripAnsi(value)])), {
-    input_cost: "-", output_cost: "-", cached_cost: "-", total_cost: "missing",
+    input_cost: "-", output_cost: "-", cached_cost: "-", total_cost: "-",
   });
   const invalid = formatProxyAttemptCosts([
     { attempt: 1, input_tokens: 2, cached_input_tokens: 3, output_tokens: 1, pricing_model: "known", pricing_tier: "default" },
@@ -5188,7 +5188,7 @@ test("proxy attempt costs distinguish missing and invalid inputs", () => {
   const unsupportedTier = formatProxyAttemptCosts([
     { attempt: 1, input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, pricing_model: "known", pricing_tier: "turbo" },
   ], cache);
-  assert.equal(stripAnsi(unsupportedTier.total_cost), "missing");
+  assert.equal(stripAnsi(unsupportedTier.total_cost), "-");
 });
 
 test("proxy USD formatting uses adaptive precision", () => {
