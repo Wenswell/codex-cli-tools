@@ -67,13 +67,6 @@ function parseModelPriceCache(text, path) {
         models: parsed.models,
     };
 }
-export async function buildModelPriceSnapshotPlan(patterns, providers) {
-    const remote = await readRemoteModelPriceCatalog();
-    if (!remote.models) {
-        throw new Error(`pricing refresh failed: ${modelPricesConfigPath()} (${remote.error})`);
-    }
-    return buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remote.models);
-}
 export async function buildModelPriceSnapshotPlanFromRemoteCatalog(patterns, providers, remoteModels) {
     const currentCache = await readStoredModelPriceCache();
     const nextPatterns = normalizeModelPricePatterns(patterns);

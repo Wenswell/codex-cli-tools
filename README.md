@@ -57,6 +57,7 @@ codex-rename
 - [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
 - [engineering preferences](docs/ENGINEERING_PREFERENCES.md)
 - [testing guidelines](docs/TESTING_GUIDELINES.md)
+- [test suite audit](docs/TEST_SUITE_AUDIT.md)
 - [runtime logging review](docs/RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](docs/RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](docs/CCS_COST_SPEC.md)

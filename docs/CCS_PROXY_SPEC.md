@@ -132,7 +132,7 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
 
-Request schema version `4` and health protocol version `4` are the sole supported contracts.
+Request schema version `5` and health protocol version `4` are the sole supported contracts.
 
 ## Upstream forwarding
 
