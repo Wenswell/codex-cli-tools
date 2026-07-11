@@ -41,7 +41,7 @@ GLM-style responses can stream reasoning text through fields such as `delta.reas
 - Token counts come only from explicit upstream token-count fields.
 - Add explicit reasoning text observation metadata as a separate concept from token-count metrics.
 - Keep the reasoning guard based on explicit `reasoning_tokens` counts only.
-- Normalize old records at read time with new metadata fields set to `null` or `false`.
+- Require complete schema `5` records at read time, including explicit reasoning metadata fields.
 
 ## Proposed request record fields
 
@@ -112,7 +112,7 @@ Reasoning summary counts explicit `reasoning_tokens` events only. Text observati
    - Non-negative integer token values are accepted.
    - GLM-style `delta.reasoning_content` renders `text/status`, and reasoning token counters stay unchanged.
    - `application/*+json` responses enter JSON inspection.
-   - Old state records normalize new fields correctly.
+   - Complete schema `5` state records preserve reasoning metadata fields.
 
 8. Update documentation:
    - `README.md`
