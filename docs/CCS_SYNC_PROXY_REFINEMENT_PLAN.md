@@ -95,6 +95,7 @@ Compact request records add one `usage_attempts` entry for every proxy-owned ups
 - Tier uses the first present source: response `service_tier`, request `service_tier`, then top-level config `service_tier` captured at request start.
 - `default|standard` maps to `standard`; `fast|priority` maps to `fast`; unsupported selected values make that attempt's cost unavailable.
 - Token columns sum all attempts only when every attempt has that token field; otherwise the column shows dim `-`.
+- The displayed `input` token column sums uncached input (`input_tokens - cached_input_tokens`) across attempts, matching the `input$` calculation; `cached` remains separate.
 - Token values use decimal `K` with at most one decimal place, from `0` through the confirmed maximum `999.9K`.
 - The model column describes the current/final attempt; token and cost columns describe all attempts.
 

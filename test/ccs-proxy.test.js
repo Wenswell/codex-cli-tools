@@ -2247,7 +2247,16 @@ test("proxy stop switches to passthrough and forwards the original request", asy
       requestBodies.push(JSON.parse(await readServerRequestBody(req)));
       hits += 1;
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      const payload = reasoningJson("passthrough-guarded", 1552);
+      const payload = req.url?.includes("case=passthrough-text")
+        ? {
+          response: {
+            model: "passthrough-text",
+            output: [{ content: [{ reasoning: "observed" }] }],
+            service_tier: "priority",
+          },
+          usage: { input_tokens: 20, output_tokens: 5, input_tokens_details: { cached_tokens: 4 } },
+        }
+        : reasoningJson("passthrough-guarded", 1552);
       payload.response.service_tier = "priority";
       payload.usage.input_tokens = 120;
       payload.usage.output_tokens = 30;
@@ -2301,7 +2310,8 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     assert.equal(record.status, 200);
     assert.equal(record.attempts, 1);
     assert.deepEqual(record.guard_actions, []);
-    assert.equal(record.reasoning_tokens, null);
+    assert.equal(record.reasoning_tokens, 1552);
+    assert.equal(record.reasoning_tokens_source, "/usage/output_tokens_details/reasoning_tokens");
     const fullRecord = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
       .trim()
       .split("\n")
@@ -2328,6 +2338,23 @@ test("proxy stop switches to passthrough and forwards the original request", asy
       pricing_tier: attempt.service_tier,
       pricing_tier_source: attempt.service_tier ? "response" : null,
     })));
+
+    const textResponse = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=passthrough-text`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "passthrough-text", input: "hello" }),
+    });
+    assert.equal(textResponse.status, 200);
+    await textResponse.arrayBuffer();
+    const textState = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "passthrough-text",
+    );
+    const textRecord = textState.metrics.recent_requests[0];
+    assert.equal(textRecord.reasoning_tokens, null);
+    assert.equal(textRecord.reasoning_text_observed, true);
+    assert.equal(textRecord.reasoning_text_source, "/response/output/0/content/0/reasoning");
+    assert.deepEqual(textRecord.guard_actions, []);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -4094,6 +4121,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
     assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
+    assert.match(output, /view: overview\s+keys: v view\s+q\/Ctrl-C exit/);
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -5129,6 +5157,16 @@ test("proxy token formatting covers the confirmed boundaries and unknown attempt
   assert.equal(stripAnsi(formatProxyAttemptTokens([usage(0), usage(1200)], "input_tokens")), "1.2K");
   assert.equal(stripAnsi(formatProxyAttemptTokens([usage(1000), usage(null)], "input_tokens")), "-");
   assert.equal(stripAnsi(formatProxyAttemptTokens([], "input_tokens")), "-");
+  assert.equal(stripAnsi(formatProxyAttemptTokens([
+    { input_tokens: 1200, cached_input_tokens: 200 },
+    { input_tokens: 800, cached_input_tokens: 300 },
+  ], "uncached_input_tokens")), "1.5K");
+  assert.equal(stripAnsi(formatProxyAttemptTokens([
+    { input_tokens: 1200, cached_input_tokens: null },
+  ], "uncached_input_tokens")), "-");
+  assert.equal(stripAnsi(formatProxyAttemptTokens([
+    { input_tokens: 100, cached_input_tokens: 101 },
+  ], "uncached_input_tokens")), "invalid");
 });
 
 test("proxy attempt costs use each model and tier, cached subtraction, and one final rounding", () => {

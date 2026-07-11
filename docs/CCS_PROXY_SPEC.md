@@ -155,7 +155,7 @@ In `recovery` and `intercept` modes, transport-level `TypeError: fetch failed` i
 
 ## Reasoning guard
 
-The reasoning guard is active in `recovery` and `intercept` modes for supported JSON and SSE response payloads. `passthrough` mode leaves response bodies uninspected.
+The reasoning guard is active in `recovery` and `intercept` modes for supported JSON and SSE response payloads. `passthrough` forwards the original response without guard decisions, retries, blocking, or rewriting. A response clone is inspected after forwarding begins solely to record model, usage, reasoning, and response-shape metadata.
 
 - `reasoning_equals`: `516`, `1034`, `1552`.
 - `guard_retry_attempts`: `3`.
@@ -195,7 +195,7 @@ History row count follows these rules:
 - Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
 - Explicit `--history N` reads the tail of `proxy-requests.jsonl` when `N` exceeds the snapshot length.
 
-`ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize. `--view overview|tokens|cost` selects the initial view. In a TTY, `v` cycles `overview -> tokens -> cost -> overview`; `q` and `Ctrl-C` exit cleanly.
+`ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize. Its footer shows the current view and `v view  q/Ctrl-C exit`. `--view overview|tokens|cost` selects the initial view. In a TTY, `v` cycles `overview -> tokens -> cost -> overview`; `q` and `Ctrl-C` exit cleanly.
 
 `status total` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. Upstream hit counters use the same event basis and count the upstream attached to each counted guard action or final response when present. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values. Unsupported paths are event-log facts and do not contribute status counters.
 
@@ -213,7 +213,7 @@ cost      session time up model input$ output$ cached$ total$ error
 
 The model column is 10 cells wide and describes the current or final attempt. Missing request and upstream models render dim `-`. A request-only or upstream-only model renders normally. Equal raw values render the upstream model green; different raw values render the actual upstream model red. Comparison precedes `gpt-` to `o` abbreviation and truncation, so raw `gpt-5.6-sol` and `o5.6-sol` display the same abbreviated text in red.
 
-Token and cost columns aggregate all `usage_attempts`; the model column remains attempt-local. A token column sums only when every attempt has that field, then uses decimal `K` with at most one decimal place. Missing attempt data renders dim `-`.
+Token and cost columns aggregate all `usage_attempts`; the model column remains attempt-local. `input` sums `input_tokens - cached_input_tokens` for every attempt, matching the `input$` pricing basis. `cached` sums cached input separately. A token column renders only when every attempt has the fields required by that calculation, then uses decimal `K` with at most one decimal place. Cached input above input tokens renders `input` as `invalid`. Missing attempt data renders dim `-`.
 
 Cost lookup reads the local model price cache once per frame, applies `profiles.json` overrides, and performs no network refresh. Each attempt uses its stored exact pricing model and normalized tier: `default|standard` selects standard pricing and `fast|priority` selects fast pricing. Input cost subtracts cached input before applying input price; cached and output components use their own prices. Components sum unrounded attempt values and format once. Missing usage, unsupported tiers, or missing prices render the affected component and total as `-`. Cached input above input tokens renders input and total as `invalid`. USD values render as `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.
 
