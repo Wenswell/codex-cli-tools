@@ -11,6 +11,7 @@ Project design specs:
 - [runtime logging review](./RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](./RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](./CCS_COST_SPEC.md)
+- [ccs cost model breakdown plan](./CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](./CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [ccs WezTerm current provider plan](./CCS_WEZTERM_CURRENT_PROVIDER_PLAN.md)
 - [ccs proxy spec](./CCS_PROXY_SPEC.md)

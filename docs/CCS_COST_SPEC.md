@@ -11,16 +11,17 @@ The report answers these questions:
 - Daily, weekly, monthly totals: how much Codex usage happened in each period.
 - Project totals: which projects consumed the most usage in the selected range.
 - One project by day: how one project changed over time.
+- Model totals: how token categories and costs differ by model.
 - One day by time: which time blocks consumed the most usage on a day.
 - One day by project: which projects consumed the most usage on a day.
 
 The user-facing metric set is intentionally small:
 
 ```text
-input  output  cost  share  bar
+input  output  cached  input$  output$  cached$  total$
 ```
 
-Terminal reports show the five columns listed above.
+`input` is uncached input. Terminal reports show the seven columns listed above.
 
 ## Command Surface
 
@@ -40,6 +41,7 @@ ccs cost weekly
 ccs cost monthly
 ccs cost projects
 ccs cost project PROJECT
+ccs cost models
 ccs cost day YYYY-MM-DD
 ccs cost push
 ccs cost central
@@ -48,6 +50,7 @@ ccs cost central weekly
 ccs cost central monthly
 ccs cost central projects
 ccs cost central project PROJECT
+ccs cost central models
 ccs cost central day YYYY-MM-DD
 ```
 
@@ -104,11 +107,11 @@ Output:
 
 ```text
 ccs cost daily  2026-05-01..2026-05-30  timezone Asia/Shanghai
-date        input  output  cost  share   bar
-2026-05-01  1.2M   46K     $1    25.0%   ████████
-2026-05-02  2.3M   57K     $3    75.0%   ███████████████████████
----------------------------------------------------------
-total       3.5M   103K    $4    100.0%  ██████████████████████████████
+date        input  output  cached  input$  output$  cached$  total$
+2026-05-01  1.2M   46K     3.4M    $1      $1       $0       $2
+2026-05-02  2.3M   57K     4.5M    $2      $1       $0       $3
+----------------------------------------------------------------
+total       3.5M   103K    7.9M    $3      $2       $0       $5
 ```
 
 ### Weekly Totals
@@ -122,11 +125,11 @@ ccs cost weekly --since 2026-05-01 --until 2026-05-30
 Weeks start on Monday. The `week` value is the local date of the week start.
 
 ```text
-week        input  output  cost  share   bar
-2026-04-27  3.5M   90K     $5    50.0%   ███████████████
-2026-05-04  4.6M   101K    $5    50.0%   ███████████████
-----------------------------------------------------
-total       8M     191K    $10   100.0%  ██████████████████████████████
+week        input  output  cached  input$  output$  cached$  total$
+2026-04-27  3.5M   90K     6.2M    $3      $2       $1       $6
+2026-05-04  4.6M   101K    8.1M    $4      $2       $1       $7
+----------------------------------------------------------------
+total       8M     191K    14M     $7      $4       $2       $13
 ```
 
 ### Monthly Totals
@@ -138,11 +141,11 @@ ccs cost monthly --since 2026-01-01
 ```
 
 ```text
-month    input  output  cost  share   bar
-2026-01  12M    457K    $12   33.3%   ██████████
-2026-02  23M    568K    $24   66.7%   ████████████████████
--------------------------------------------------
-total    35M    1M      $36   100.0%  ██████████████████████████████
+month    input  output  cached  input$  output$  cached$  total$
+2026-01  12M    457K    25M     $12     $5       $2       $19
+2026-02  23M    568K    41M     $23     $6       $4       $33
+-------------------------------------------------------------
+total    35M    1M      66M     $35     $11      $6       $52
 ```
 
 ### Project Totals
@@ -154,11 +157,11 @@ ccs cost projects --since 2026-05-01 --until 2026-05-30
 ```
 
 ```text
-project                                      input  output  cost  share   bar
-~/Documents/repos/codex-cli-tools            2.3M   57K     $2    66.7%   ████████████████████
-~/Documents/repos/work-doc-organize          1.2M   46K     $1    33.3%   ██████████
---------------------------------------------------------------------------------
-total                                        3.5M   103K    $3    100.0%  ██████████████████████████████
+project                                      input  output  cached  input$  output$  cached$  total$
+~/Documents/repos/codex-cli-tools            2.3M   57K     4.5M    $2      $1       $0       $3
+~/Documents/repos/work-doc-organize          1.2M   46K     3.4M    $1      $1       $0       $2
+-----------------------------------------------------------------------------------------
+total                                        3.5M   103K    7.9M    $3      $2       $0       $5
 ```
 
 Project sorting defaults to highest cost first.
@@ -173,11 +176,29 @@ ccs cost project ~/Documents/repos/codex-cli-tools --since 2026-05-01 --until 20
 
 ```text
 ccs cost project  ~/Documents/repos/codex-cli-tools
-date        input  output  cost  share   bar
-2026-05-01  123K   4.6K    $1    25.0%   ████████
-2026-05-02  235K   5.7K    $3    75.0%   ███████████████████████
----------------------------------------------------------
-total       358K   10K     $4    100.0%  ██████████████████████████████
+date        input  output  cached  input$  output$  cached$  total$
+2026-05-01  123K   4.6K    420K    $1      $1       $0       $2
+2026-05-02  235K   5.7K    680K    $2      $1       $0       $3
+----------------------------------------------------------------
+total       358K   10K     1.1M    $3      $2       $0       $5
+```
+
+### Models
+
+Command:
+
+```bash
+ccs cost models --since 2026-05-01 --until 2026-05-30
+```
+
+Rows aggregate token and cost categories independently for each model. Unrounded complete totals sort from highest to lowest. Incomplete-price rows follow and sort by model name.
+
+```text
+model       input  output  cached  input$  output$  cached$  total$
+gpt-5.5     1.2M   46K     3.4M    $6      $3       $1       $10
+gpt-5-mini  2.3M   57K     4.5M    $3      $2       $1       $6
+-----------------------------------------------------------------
+total       3.5M   103K    7.9M    $9      $5       $2       $16
 ```
 
 ### One Day By Time
@@ -192,17 +213,17 @@ The day report prints a total row, then time buckets, then projects.
 
 ```text
 ccs cost day  2026-05-29  bucket 1h  timezone Asia/Shanghai
-total  input 3.5M  output 103K  cost $3
+total  input 3.5M  output 103K  cached 7.9M  total$ $5
 
 by time
-time         input  output  cost  share  bar
-09:00-10:00 1.2M   46K     $1    33.3%  ██████████
-10:00-11:00 2.3M   57K     $2    66.7%  ████████████████████
+time         input  output  cached  input$  output$  cached$  total$
+09:00-10:00  1.2M   46K     3.4M    $1      $1       $0       $2
+10:00-11:00  2.3M   57K     4.5M    $2      $1       $0       $3
 
 by project
-project                                      input  output  cost  share  bar
-~/Documents/repos/codex-cli-tools            2.3M   57K     $2    66.7%  ████████████████████
-~/Documents/repos/work-doc-organize          1.2M   46K     $1    33.3%  ██████████
+project                                      input  output  cached  input$  output$  cached$  total$
+~/Documents/repos/codex-cli-tools            2.3M   57K     4.5M    $2      $1       $0       $3
+~/Documents/repos/work-doc-organize          1.2M   46K     3.4M    $1      $1       $0       $2
 ```
 
 ### One Day By Project
@@ -217,6 +238,7 @@ JSON uses stable lower camel case keys.
 
 ```json
 {
+  "version": 2,
   "report": "daily",
   "range": {
     "since": "2026-05-01",
@@ -228,13 +250,23 @@ JSON uses stable lower camel case keys.
       "date": "2026-05-01",
       "inputTokens": 1234567,
       "outputTokens": 45678,
-      "costUSD": 1.23
+      "cachedInputTokens": 3456789,
+      "inputCostUSD": 1.23,
+      "outputCostUSD": 0.46,
+      "cachedCostUSD": 0.35,
+      "costUSD": 2.04,
+      "missingPricingModels": []
     }
   ],
   "totals": {
     "inputTokens": 1234567,
     "outputTokens": 45678,
-    "costUSD": 1.23
+    "cachedInputTokens": 3456789,
+    "inputCostUSD": 1.23,
+    "outputCostUSD": 0.46,
+    "cachedCostUSD": 0.35,
+    "costUSD": 2.04,
+    "missingPricingModels": []
   }
 }
 ```
@@ -243,6 +275,7 @@ JSON uses stable lower camel case keys.
 
 ```json
 {
+  "version": 2,
   "report": "projects",
   "range": {
     "since": "2026-05-01",
@@ -254,13 +287,60 @@ JSON uses stable lower camel case keys.
       "project": "/home/ilove/Documents/repos/codex-cli-tools",
       "inputTokens": 2345678,
       "outputTokens": 56789,
-      "costUSD": 2.34
+      "cachedInputTokens": 4567890,
+      "inputCostUSD": 2.34,
+      "outputCostUSD": 0.57,
+      "cachedCostUSD": 0.46,
+      "costUSD": 3.37,
+      "missingPricingModels": []
     }
   ],
   "totals": {
     "inputTokens": 2345678,
     "outputTokens": 56789,
-    "costUSD": 2.34
+    "cachedInputTokens": 4567890,
+    "inputCostUSD": 2.34,
+    "outputCostUSD": 0.57,
+    "cachedCostUSD": 0.46,
+    "costUSD": 3.37,
+    "missingPricingModels": []
+  }
+}
+```
+
+### Models
+
+```json
+{
+  "version": 2,
+  "report": "models",
+  "range": {
+    "since": "2026-05-01",
+    "until": "2026-05-30",
+    "timezone": "Asia/Shanghai"
+  },
+  "rows": [
+    {
+      "model": "gpt-5.5",
+      "inputTokens": 1234567,
+      "outputTokens": 45678,
+      "cachedInputTokens": 3456789,
+      "inputCostUSD": 1.23,
+      "outputCostUSD": 0.46,
+      "cachedCostUSD": 0.35,
+      "costUSD": 2.04,
+      "missingPricingModels": []
+    }
+  ],
+  "totals": {
+    "inputTokens": 1234567,
+    "outputTokens": 45678,
+    "cachedInputTokens": 3456789,
+    "inputCostUSD": 1.23,
+    "outputCostUSD": 0.46,
+    "cachedCostUSD": 0.35,
+    "costUSD": 2.04,
+    "missingPricingModels": []
   }
 }
 ```
@@ -269,6 +349,7 @@ JSON uses stable lower camel case keys.
 
 ```json
 {
+  "version": 2,
   "report": "day",
   "date": "2026-05-29",
   "timezone": "Asia/Shanghai",
@@ -276,7 +357,12 @@ JSON uses stable lower camel case keys.
   "totals": {
     "inputTokens": 12345678,
     "outputTokens": 456789,
-    "costUSD": 12.34
+    "cachedInputTokens": 34567890,
+    "inputCostUSD": 12.34,
+    "outputCostUSD": 4.57,
+    "cachedCostUSD": 3.46,
+    "costUSD": 20.37,
+    "missingPricingModels": []
   },
   "timeBuckets": [
     {
@@ -284,7 +370,12 @@ JSON uses stable lower camel case keys.
       "end": "10:00",
       "inputTokens": 1234567,
       "outputTokens": 45678,
-      "costUSD": 1.23
+      "cachedInputTokens": 3456789,
+      "inputCostUSD": 1.23,
+      "outputCostUSD": 0.46,
+      "cachedCostUSD": 0.35,
+      "costUSD": 2.04,
+      "missingPricingModels": []
     }
   ],
   "projects": [
@@ -292,7 +383,12 @@ JSON uses stable lower camel case keys.
       "project": "/home/ilove/Documents/repos/codex-cli-tools",
       "inputTokens": 2345678,
       "outputTokens": 56789,
-      "costUSD": 2.34
+      "cachedInputTokens": 4567890,
+      "inputCostUSD": 2.34,
+      "outputCostUSD": 0.57,
+      "cachedCostUSD": 0.46,
+      "costUSD": 3.37,
+      "missingPricingModels": []
     }
   ]
 }
@@ -377,7 +473,7 @@ POST /ccs/top/resume
 POST /ccs/top/reset
 ```
 
-`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters and returns the same public metric shape as local `ccs cost --json`. Every metric record includes `missingPricingModels`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version. Startup publishes top HTTP endpoints before central cost derived refresh; cost refresh failures are logged and do not block `/health` or `/ccs/top/state`. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`; `pause` and `resume` use the same queued control path. Control and status HTTP clients use at least a five-second timeout.
+`/ccs/cost/status` returns uploaded machine summaries. `/ccs/cost/report` accepts `report`, `since`, `until`, `timezone`, `bucket`, `speed`, `project`, and `day` query parameters. Both transports use schema version `2` and the same metric fields as local `ccs cost --json`. The HTTP report envelope additionally includes `source`, `generatedAt`, and internal row `key` fields; the CLI JSON maps each row key to `date`, `week`, `month`, `project`, or `model`. Every metric record includes `missingPricingModels`. `/ccs/cost/refresh` schedules derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window delay the refresh, so a group of hourly uploads causes one scan. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; central status and report requests read the derived file rather than raw snapshot events. During the debounce window, status and reports keep serving the previous derived version. Startup publishes top HTTP endpoints before central cost derived refresh; cost refresh failures are logged and do not block `/health` or `/ccs/top/state`. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`; `pause` and `resume` use the same queued control path. Control and status HTTP clients use at least a five-second timeout.
 
 Central CLI:
 
@@ -385,6 +481,7 @@ Central CLI:
 ccs cost central
 ccs cost central daily --since 2026-05-01 --until 2026-05-30
 ccs cost central projects --since 2026-05-01 --until 2026-05-30
+ccs cost central models --since 2026-05-01 --until 2026-05-30
 ccs cost central day 2026-05-29 --bucket 1h
 ```
 
@@ -465,7 +562,7 @@ Adjacent duplicate token events are skipped when both the effective delta and `t
 Displayed `input`:
 
 ```text
-input_tokens
+input_tokens - cached_input_tokens
 ```
 
 Displayed `output`:
@@ -474,15 +571,24 @@ Displayed `output`:
 output_tokens
 ```
 
-Displayed `cost`:
+Displayed `cached`:
 
 ```text
-costUSD
+cached_input_tokens
 ```
 
-`cached_input_tokens` and `reasoning_output_tokens` are parsed for correct cost calculation and validation. Default tables omit them.
+Displayed cost columns:
 
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round displayed costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. A `pricing` column appears when any row has missing prices. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields and includes `missingPricingModels`.
+```text
+input$   = uncached input cost
+output$  = output cost
+cached$  = cached input cost
+total$   = complete sum of the three components
+```
+
+`reasoning_output_tokens` remains part of raw usage validation and is included in `output_tokens` billing according to the upstream usage fact.
+
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes and round complete costs to whole dollars. Headers and total rows use simple emphasis, and total rows are separated from body rows. A `pricing` column appears when any row has missing prices. `NO_COLOR=1` disables color. `--raw` prints full token counts with thousands separators and decimal costs. JSON output uses numeric token fields, nullable cost fields, and `missingPricingModels`.
 
 ## Cost Calculation
 
@@ -546,7 +652,7 @@ cache_read_input_token_cost_priority
 output_cost_per_token_priority
 ```
 
-Cost reporting calculates the known priced portion when pricing is incomplete. Missing model prices do not fail local reports, central reports, or central status. Metric JSON includes `missingPricingModels`, and terminal tables show `missing N` in the `pricing` column when a row excludes unpriced usage.
+Each component cost requires complete pricing for every model with usage in that component. An incomplete component is `null` in JSON and `-` in terminal output. `costUSD` is `null` when any component is incomplete. Missing model prices do not fail local reports, central reports, or central status. Metric JSON includes `missingPricingModels`, and terminal tables show `missing N` in the `pricing` column.
 
 Cost reporting, central reporting, and `ccs models` never write a full LiteLLM price cache automatically. They read the local cache, built-in supplemental prices, and manual overrides only. Missing prices are reported explicitly so cache writes stay tied to explicit `ccs pricing refresh` commands.
 
@@ -759,6 +865,7 @@ NO_COLOR=1 node dist/bin/ccs.js cost daily --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost weekly --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost monthly --since 2026-01-01
 NO_COLOR=1 node dist/bin/ccs.js cost projects --since 2026-05-01 --until 2026-05-30
+NO_COLOR=1 node dist/bin/ccs.js cost models --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --bucket 1h
 NO_COLOR=1 node dist/bin/ccs.js cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 --until 2026-05-30
 NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --json
@@ -767,7 +874,10 @@ NO_COLOR=1 node dist/bin/ccs.js cost day 2026-05-29 --raw
 
 Acceptance:
 
-- Default tables show `input`, `output`, `cost`, `share`, and `bar` columns.
+- Default tables show `input`, `output`, `cached`, `input$`, `output$`, `cached$`, and `total$` columns.
+- `ccs cost models` and `ccs cost central models` aggregate and display the selected range by model.
+- `input` is uncached input in terminal and JSON output.
+- Incomplete component prices produce `null` JSON costs and `-` terminal costs.
 - Default terminal tables use compact token units and whole-dollar costs.
 - `--raw` prints full token counts and decimal costs.
 - Daily, weekly, monthly, and project totals each include a total row.

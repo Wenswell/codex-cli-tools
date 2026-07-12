@@ -284,6 +284,63 @@ export function missingPricingModels(modelUsage, cache, speed) {
         .map(([model]) => model)
         .sort();
 }
+export function calculateCodexCostBreakdown(modelUsage, cache, speed) {
+    let inputCostUSD = 0;
+    let outputCostUSD = 0;
+    let cachedCostUSD = 0;
+    let inputMissing = false;
+    let outputMissing = false;
+    let cachedMissing = false;
+    const missingModels = new Set();
+    for (const [model, usage] of modelUsage) {
+        const nonCachedInputTokens = usage.inputTokens - usage.cachedInputTokens;
+        if (nonCachedInputTokens < 0) {
+            throw new Error(`cached input exceeds input for model: ${model}`);
+        }
+        const prices = modelPriceParts(cache, model, speed);
+        const inputPrice = prices?.input ?? null;
+        const outputPrice = prices?.output ?? null;
+        const cachedPrice = prices?.cacheRead ?? null;
+        if (nonCachedInputTokens > 0) {
+            if (inputPrice === null) {
+                inputMissing = true;
+                missingModels.add(model);
+            }
+            else {
+                inputCostUSD += nonCachedInputTokens * inputPrice;
+            }
+        }
+        if (usage.outputTokens > 0) {
+            if (outputPrice === null) {
+                outputMissing = true;
+                missingModels.add(model);
+            }
+            else {
+                outputCostUSD += usage.outputTokens * outputPrice;
+            }
+        }
+        if (usage.cachedInputTokens > 0) {
+            if (cachedPrice === null) {
+                cachedMissing = true;
+                missingModels.add(model);
+            }
+            else {
+                cachedCostUSD += usage.cachedInputTokens * cachedPrice;
+            }
+        }
+    }
+    const breakdown = {
+        inputCostUSD: inputMissing ? null : inputCostUSD,
+        outputCostUSD: outputMissing ? null : outputCostUSD,
+        cachedCostUSD: cachedMissing ? null : cachedCostUSD,
+        costUSD: null,
+        missingPricingModels: [...missingModels].sort(),
+    };
+    if (breakdown.inputCostUSD !== null && breakdown.outputCostUSD !== null && breakdown.cachedCostUSD !== null) {
+        breakdown.costUSD = breakdown.inputCostUSD + breakdown.outputCostUSD + breakdown.cachedCostUSD;
+    }
+    return breakdown;
+}
 export function calculateCodexCostUSD(modelUsage, cache, speed) {
     let cost = 0;
     for (const [model, usage] of modelUsage) {

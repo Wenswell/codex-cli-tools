@@ -61,6 +61,7 @@ codex-rename
 - [runtime logging review](docs/RUNTIME_LOGGING_REVIEW.md)
 - [runtime logging security plan](docs/RUNTIME_LOGGING_SECURITY_PLAN.md)
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
+- [ccs cost model breakdown plan](docs/CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 
@@ -187,7 +188,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--once] [--history N] [--view overview|tokens|cost] | proxy watch [--history N] [--view overview|tokens|cost] | proxy [mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace TOML_PATH|all]
+commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]
 ```
 
 Supported commands:
@@ -218,6 +219,7 @@ ccs cost weekly
 ccs cost monthly
 ccs cost projects
 ccs cost project PROJECT
+ccs cost models
 ccs cost day YYYY-MM-DD
 ccs cost push
 ccs cost central
@@ -226,6 +228,7 @@ ccs cost central weekly
 ccs cost central monthly
 ccs cost central projects
 ccs cost central project PROJECT
+ccs cost central models
 ccs cost central day YYYY-MM-DD
 ccs toggle [PROFILE]
 ccs top [--once] [--mark DURATION]
@@ -255,7 +258,7 @@ ccs remove | rm | delete PROFILE
 
 `ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint. Use an explicit report command to print usage tables.
 
-`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for current-thread `token_count` usage events. Forked rollout files can contain copied parent history; `ccs cost` starts counting at the rollout thread's own `task_started` boundary and keeps subagent fork usage when it belongs to the current rollout. Terminal tables show `input`, `output`, `cost`, `share`, and `bar` columns, and add a `pricing` column when any row has missing prices.
+`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, `models`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for current-thread `token_count` usage events. Forked rollout files can contain copied parent history; `ccs cost` starts counting at the rollout thread's own `task_started` boundary and keeps subagent fork usage when it belongs to the current rollout. Terminal tables use `input`, `output`, `cached`, `input$`, `output$`, `cached$`, and `total$`. `input` is uncached input. A `pricing` column appears when any required price is missing.
 
 ```bash
 ccs cost daily --since 2026-05-01 --until 2026-05-30
@@ -263,6 +266,7 @@ ccs cost weekly --since 2026-05-01 --until 2026-05-30
 ccs cost monthly --since 2026-01-01
 ccs cost projects --since 2026-05-01 --until 2026-05-30
 ccs cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 --until 2026-05-30
+ccs cost models --since 2026-05-01 --until 2026-05-30
 ccs cost day 2026-05-29 --bucket 1h
 ccs cost day 2026-05-29 --json
 ```
@@ -279,7 +283,7 @@ The fixed upload target is:
 ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
 ```
 
-The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` atomically replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly, triggers a debounced central cost refresh, and prints the remote file, machine name, event count, input, output totals, and refresh URL.
+The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` atomically replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly, triggers a debounced central cost refresh, and prints the remote file, machine name, event count, uncached input, output, cached input totals, and refresh URL.
 
 Install or update every reporting machine from the GitHub source before adding timers:
 
@@ -293,12 +297,13 @@ Linux user timers should run the global `ccs cost push` command with a PATH that
 /opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ```
 
-`ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central daily`, `weekly`, `monthly`, `projects`, `project`, and `day` render server-side aggregate reports from all uploaded machine snapshots:
+`ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central daily`, `weekly`, `monthly`, `projects`, `project`, `models`, and `day` render server-side aggregate reports from all uploaded machine snapshots:
 
 ```bash
 ccs cost central
 ccs cost central daily --since 2026-05-01 --until 2026-05-30
 ccs cost central projects --since 2026-05-01 --until 2026-05-30
+ccs cost central models --since 2026-05-01 --until 2026-05-30
 ccs cost central day 2026-05-29 --bucket 1h
 ```
 
@@ -312,7 +317,7 @@ POST /ccs/cost/refresh
 
 `POST /ccs/cost/refresh` schedules central derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window push the refresh later, so a group of hourly uploads causes one snapshot scan and one derived-data write. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; report requests read that file and do not parse raw snapshot events on the query path. During the debounce window, reports keep serving the previous derived version until the next derived file is written.
 
-Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report. Central status and report JSON include `missingPricingModels` when uploaded usage contains models without complete pricing.
+Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report. Central status and report payloads use schema version `2`. JSON includes `missingPricingModels` when uploaded usage contains models without complete pricing.
 
 Options:
 
@@ -326,9 +331,9 @@ Options:
 --speed auto|standard|fast
 ```
 
-Daily, weekly, monthly, project, and one-project reports include a `total` row. Weeks start on Monday. `ccs cost projects` sorts by highest cost first. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects sort by cost.
+Daily, weekly, monthly, project, one-project, and model reports include a `total` row. Weeks start on Monday. `ccs cost projects` and `ccs cost models` sort by unrounded complete cost from highest to lowest, followed by incomplete-price rows sorted by name. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects use the same cost ordering.
 
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes, round costs to whole dollars, and use simple colors for `input`, `output`, `cost`, and project paths. The `share` and `bar` columns compare each row's cost against the report total. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON output always keeps numeric token and cost fields and includes `missingPricingModels` for every metric record.
+Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes and round complete costs to whole dollars. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON metric records contain `inputTokens`, `outputTokens`, `cachedInputTokens`, `inputCostUSD`, `outputCostUSD`, `cachedCostUSD`, `costUSD`, and `missingPricingModels`. A missing required component price makes that component and total `null`; terminal output renders it as `-`.
 
 Costs use LiteLLM model pricing cached at `~/.config/codex-tools/model-prices.json`. Its `patterns`, `providers`, and `models` fields form one selection snapshot: `patterns` stores normalized model patterns, `providers` stores normalized LiteLLM `litellm_provider` names, and `models` maps exact selected model names to their price records. Remote selection first keeps watched providers and then applies the pattern union, so saved models always meet both filters. Entries without a string `litellm_provider` never enter the snapshot. `ccs cost`, `ccs cost central`, and `ccs models` read the local cache, built-in supplemental prices, and manual overrides. `ccs pricing` prints local selection state. `ccs pricing list` reads and prints selected local prices without a network request. `ccs pricing list --remote` fetches LiteLLM and prints every model from watched providers. Both modes use `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. `ccs pricing pattern` prints watched patterns and local matched-model counts. `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild the complete remote snapshot after exact `yes`. `ccs pricing provider` prints watched providers; `add PROVIDER...` and `remove PROVIDER...` modify only local cache state after exact `yes`, with removal pruning local models that no longer satisfy provider and pattern filters. `ccs pricing refresh` rebuilds the complete snapshot from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing. The built-in supplemental table covers GLM-5.2 names. Manual pricing overrides remain under `pricing.overrides` in `profiles.json` with `inputCostPerToken`, `outputCostPerToken`, and `cacheReadInputTokenCost` fields. Missing model prices are reported through terminal `pricing` status and JSON `missingPricingModels`. Cost speed resolution uses top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
 
