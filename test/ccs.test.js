@@ -240,6 +240,128 @@ test("ccs cost daily does not create a full pricing cache on missing prices", as
   }
 });
 
+test("ccs cost models separates uncached input, output, cache, and component costs", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      "model-a": modelPriceValueFixture(0.000001),
+      "model-b": modelPriceValueFixture(0.000002),
+    });
+    await writeCodexCostFixture(home, "model-a", [
+      { model: "model-a", input: 100, cached: 40, output: 10 },
+      { model: "model-b", input: 80, cached: 20, output: 5 },
+    ]);
+
+    const env = { XDG_CACHE_HOME: join(home, ".cache") };
+    const json = JSON.parse(await runCcs([
+      "dist/bin/ccs.js", "cost", "models", "--timezone", "UTC", "--json",
+    ], home, env));
+
+    assert.equal(json.version, 2);
+    assert.deepEqual(json.rows, [
+      {
+        model: "model-b",
+        inputTokens: 60,
+        outputTokens: 5,
+        cachedInputTokens: 20,
+        inputCostUSD: 0.00012,
+        outputCostUSD: 0.00002,
+        cachedCostUSD: 0.000004,
+        costUSD: 0.000144,
+        missingPricingModels: [],
+      },
+      {
+        model: "model-a",
+        inputTokens: 60,
+        outputTokens: 10,
+        cachedInputTokens: 40,
+        inputCostUSD: 0.00006,
+        outputCostUSD: 0.00002,
+        cachedCostUSD: 0.000004,
+        costUSD: 0.000084,
+        missingPricingModels: [],
+      },
+    ]);
+    assert.deepEqual(json.totals, {
+      inputTokens: 120,
+      outputTokens: 15,
+      cachedInputTokens: 60,
+      inputCostUSD: 0.00018,
+      outputCostUSD: 0.00004,
+      cachedCostUSD: 0.000008,
+      costUSD: 0.000228,
+      missingPricingModels: [],
+    });
+
+    const terminal = await runCcs(["dist/bin/ccs.js", "cost", "models", "--timezone", "UTC", "--raw"], home, env);
+    assert.match(terminal, /^model\s+input\s+output\s+cached\s+input\$\s+output\$\s+cached\$\s+total\$/m);
+  } finally {
+    if (home) await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs cost reports incomplete component and total costs as null", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      partial: { output_cost_per_token: 0.000002, cache_read_input_token_cost: 0.0000001 },
+    });
+    await writeCodexCostFixture(home, "partial", [
+      { model: "partial", input: 100, cached: 40, output: 10 },
+    ]);
+
+    const json = JSON.parse(await runCcs([
+      "dist/bin/ccs.js", "cost", "models", "--timezone", "UTC", "--json",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") }));
+    assert.equal(json.totals.inputCostUSD, null);
+    assert.equal(json.totals.outputCostUSD, 0.00002);
+    assert.equal(json.totals.cachedCostUSD, 0.000004);
+    assert.equal(json.totals.costUSD, null);
+    assert.deepEqual(json.totals.missingPricingModels, ["partial"]);
+    const terminal = await runCcs([
+      "dist/bin/ccs.js", "cost", "models", "--timezone", "UTC", "--raw",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    assert.match(terminal, /partial\s+60\s+10\s+40\s+-/);
+    assert.match(terminal, /missing 1/);
+  } finally {
+    if (home) await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs cost models sorts by unrounded total cost", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+      current: "input",
+    });
+    await writeModelPriceCache(home, {
+      "a-tiny": modelPriceValueFixture(0.0000004),
+      "z-tiny": modelPriceValueFixture(0.000000245),
+    });
+    await writeCodexCostFixture(home, "z-tiny", [
+      { model: "a-tiny", input: 1, output: 0 },
+      { model: "z-tiny", input: 2, output: 0 },
+    ]);
+
+    const json = JSON.parse(await runCcs([
+      "dist/bin/ccs.js", "cost", "models", "--timezone", "UTC", "--json",
+    ], home, { XDG_CACHE_HOME: join(home, ".cache") }));
+    assert.deepEqual(json.rows.map((row) => row.model), ["z-tiny", "a-tiny"]);
+    assert.deepEqual(json.rows.map((row) => row.costUSD), [0, 0]);
+  } finally {
+    if (home) await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs pricing prints local selection status", async () => {
   let home;
   try {
@@ -898,7 +1020,10 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
       fetchedAt: "2026-01-01T00:00:00.000Z",
       patterns: [],
       providers: [],
-      models: {},
+      models: {
+        "test-missing-model": { output_cost_per_token: 0.000002 },
+        "known-model": modelPriceValueFixture(0.000001),
+      },
     }), "utf8");
     await writeFile(join(cacheDir, "ccs-cost", "fixture.json"), JSON.stringify({
       version: 1,
@@ -919,6 +1044,17 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
           outputTokens: 5,
           reasoningOutputTokens: 0,
           totalTokens: 15,
+        },
+      }, {
+        timestampMs: Date.UTC(2026, 0, 1, 13, 0, 0),
+        project: "/tmp/project",
+        model: "known-model",
+        usage: {
+          inputTokens: 100,
+          cachedInputTokens: 40,
+          outputTokens: 10,
+          reasoningOutputTokens: 0,
+          totalTokens: 110,
         },
       }],
     }), "utf8");
@@ -941,8 +1077,25 @@ test("ccs top server starts when central cost pricing is incomplete", async () =
     assert.equal(snapshot.version, 1);
     assert.equal(snapshot.active, true);
     const statusResponse = await waitForJsonOk(`http://127.0.0.1:${port}/ccs/cost/status`);
-    assert.equal(statusResponse.version, 1);
+    assert.equal(statusResponse.version, 2);
+    assert.equal(statusResponse.machines[0].inputTokens, 70);
+    assert.equal(statusResponse.machines[0].outputCostUSD, 0.00003);
+    assert.equal(statusResponse.machines[0].cachedInputTokens, 40);
+    assert.equal(statusResponse.machines[0].cachedCostUSD, 0.000004);
+    assert.equal(statusResponse.machines[0].costUSD, null);
     assert.deepEqual(statusResponse.machines[0].missingPricingModels, ["test-missing-model"]);
+    const modelsResponse = await waitForJsonOk(
+      `http://127.0.0.1:${port}/ccs/cost/report?report=models&timezone=UTC&speed=auto`,
+    );
+    assert.equal(modelsResponse.version, 2);
+    assert.equal(modelsResponse.report, "models");
+    assert.deepEqual(modelsResponse.rows.map((row) => row.key), ["known-model", "test-missing-model"]);
+    assert.equal(modelsResponse.rows[0].inputTokens, 60);
+    assert.equal(modelsResponse.rows[0].cachedInputTokens, 40);
+    assert.equal(modelsResponse.rows[0].costUSD, 0.000084);
+    assert.equal(modelsResponse.rows[1].inputCostUSD, null);
+    assert.equal(modelsResponse.rows[1].outputCostUSD, 0.00001);
+    assert.equal(modelsResponse.rows[1].costUSD, null);
   } finally {
     if (child) {
       child.kill("SIGINT");
@@ -1252,7 +1405,7 @@ function modelPriceValueFixture(inputCostPerToken, provider = "openai") {
   };
 }
 
-async function writeCodexCostFixture(home, model) {
+async function writeCodexCostFixture(home, model, usages = [{ model, input: 100, output: 10 }]) {
   const timestampMs = Date.parse("2026-01-01T12:00:00.000Z");
   const codexDir = join(home, ".codex");
   const sessionsDir = join(codexDir, "sessions", "2026", "01", "01");
@@ -1261,7 +1414,11 @@ async function writeCodexCostFixture(home, model) {
   await writeFile(rolloutPath, `${[
     taskStarted(uuidV7At(timestampMs), timestampMs),
     turnContext(uuidV7At(timestampMs + 1), "/tmp/ccs-cost-project", model),
-    tokenCount("2026-01-01T12:00:02.000Z", model, { input: 100, output: 10 }),
+    ...usages.map((usage, index) => tokenCount(
+      new Date(timestampMs + 2000 + index * 1000).toISOString(),
+      usage.model,
+      usage,
+    )),
   ].map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
 
   await sqliteRun(join(codexDir, "state.sqlite"), `

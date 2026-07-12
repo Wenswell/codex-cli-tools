@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  calculateCodexCostBreakdown,
   calculateCodexCostUSD,
   missingPricingModels,
   modelPricingStatus,
@@ -12,6 +13,82 @@ import {
   readRemoteModelPriceCatalog,
   selectRemoteModelPrices,
 } from "../dist/lib/pricing.js";
+
+test("pricing calculates strict input, output, cached, and total cost components", () => {
+  const modelUsage = new Map([
+    ["model-a", usage(100, 20, 40)],
+    ["model-b", usage(50, 10, 10)],
+  ]);
+  const cache = priceCache({
+    "model-a": modelPriceFixture(1),
+    "model-b": modelPriceFixture(2),
+  });
+
+  assert.deepEqual(calculateCodexCostBreakdown(modelUsage, cache, "standard"), {
+    inputCostUSD: 140,
+    outputCostUSD: 80,
+    cachedCostUSD: 6,
+    costUSD: 226,
+    missingPricingModels: [],
+  });
+});
+
+test("pricing breakdown preserves complete components when one price category is missing", () => {
+  const modelUsage = new Map([
+    ["partial-model", usage(100, 20, 40)],
+  ]);
+  const cache = priceCache({
+    "partial-model": { output_cost_per_token: 2, cache_read_input_token_cost: 0.1 },
+  });
+
+  assert.deepEqual(calculateCodexCostBreakdown(modelUsage, cache, "standard"), {
+    inputCostUSD: null,
+    outputCostUSD: 40,
+    cachedCostUSD: 4,
+    costUSD: null,
+    missingPricingModels: ["partial-model"],
+  });
+});
+
+test("pricing breakdown sorts and deduplicates models missing any required category", () => {
+  const modelUsage = new Map([
+    ["missing-output", usage(0, 10)],
+    ["missing-cache-and-input", usage(10, 0, 5)],
+  ]);
+
+  assert.deepEqual(calculateCodexCostBreakdown(modelUsage, priceCache({}), "standard").missingPricingModels, [
+    "missing-cache-and-input",
+    "missing-output",
+  ]);
+});
+
+test("pricing breakdown keeps unused price categories complete", () => {
+  const modelUsage = new Map([
+    ["input-only", usage(10, 0)],
+  ]);
+  const cache = priceCache({
+    "input-only": { input_cost_per_token: 1 },
+  });
+
+  assert.deepEqual(calculateCodexCostBreakdown(modelUsage, cache, "standard"), {
+    inputCostUSD: 10,
+    outputCostUSD: 0,
+    cachedCostUSD: 0,
+    costUSD: 10,
+    missingPricingModels: [],
+  });
+});
+
+test("pricing breakdown rejects cached input above total input", () => {
+  const modelUsage = new Map([
+    ["invalid-model", usage(10, 0, 11)],
+  ]);
+
+  assert.throws(
+    () => calculateCodexCostBreakdown(modelUsage, priceCache({}), "standard"),
+    /cached input exceeds input for model: invalid-model/,
+  );
+});
 
 test("pricing skips missing models and reports them separately", () => {
   const modelUsage = new Map([
@@ -111,10 +188,10 @@ function priceCache(models, patterns = [], providers = []) {
   };
 }
 
-function usage(inputTokens, outputTokens) {
+function usage(inputTokens, outputTokens, cachedInputTokens = 0) {
   return {
     inputTokens,
-    cachedInputTokens: 0,
+    cachedInputTokens,
     outputTokens,
     reasoningOutputTokens: 0,
     totalTokens: inputTokens + outputTokens,

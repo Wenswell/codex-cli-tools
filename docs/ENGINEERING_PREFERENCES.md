@@ -32,7 +32,7 @@ This document records reusable project preferences that come from implementation
 
 ## Cost And Pricing
 
-- Cost reports should calculate the known priced portion and expose missing model prices as structured status. A missing price for one model should not fail unrelated rows, central status, or central reports.
+- Cost reports separate uncached input, output, and cached input tokens and costs. Each cost component requires complete pricing for every model with usage in that category; incomplete components and totals remain `null`, while `missingPricingModels` provides structured diagnosis. A missing price does not fail unrelated rows, central status, or central reports.
 - Pricing lookup reads the shared local cache, built-in supplemental prices, and explicit config overrides. Missing models remain in `missingPricingModels` and terminal pricing status. Remote cache writes belong to explicit `ccs pricing` commands.
 - Model inventory commands that list available models should show whether each model has pricing with `ok`, `partial`, or `missing` status.
 
