@@ -54,7 +54,7 @@ ccs cost central models
 ccs cost central day YYYY-MM-DD
 ```
 
-`ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and compact command/options hints. Local reports require an explicit subcommand such as `ccs cost daily`.
+`ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and compact command/options hints. Its command hint lists only the `ccs cost` command family. Local reports require an explicit subcommand such as `ccs cost daily`.
 
 `ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 

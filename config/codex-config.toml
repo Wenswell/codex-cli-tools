@@ -46,32 +46,6 @@ memories = false # 启用记忆能力
 max_threads = 12 # 最大并行代理线程数
 max_depth = 2 # 子代理递归派生最大深度
 
-[agents.default] # 默认通用代理
-description = "General-purpose helper." # 代理用途说明
-model = "gpt-5.6-terra" # 默认代理模型
-model_reasoning_effort = "high" # 默认代理推理强度
-
-[agents.worker] # 执行型代理
-description = "Execution-focused role for implementation and fixes." # 负责实现和修复
-model = "gpt-5.6-sol" # worker 使用的模型
-model_reasoning_effort = "medium" # worker 推理强度
-
-[agents.explorer] # 探索型代理
-description = "Fast codebase explorer for read-heavy tasks." # 负责代码库阅读和定位
-model = "gpt-5.6-sol" # explorer 使用的模型
-model_reasoning_effort = "high" # explorer 推理强度
-sandbox_mode = "read-only" # explorer 只读沙箱
-
-[agents.awaiter] # 等待/监控型代理
-description = "Long-running command and task monitoring role." # 负责长任务监控
-model = "gpt-5.6-terra" # awaiter 使用的模型
-model_reasoning_effort = "medium" # awaiter 推理强度
-
-[agents.reviewer] # 审查型代理
-description = "Reviewer agent for code reviews and feedback." # 负责代码审查和反馈
-model = "gpt-5.6-sol" # reviewer 使用的模型
-model_reasoning_effort = "high" # reviewer 推理强度
-
 [tui] # 终端 UI 配置
 show_tooltips = false # 是否显示工具提示
 status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "context-window-size", "total-input-tokens", "total-output-tokens", "fast-mode"] # 状态栏展示项

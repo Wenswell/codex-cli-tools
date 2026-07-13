@@ -16,6 +16,10 @@ This document records reusable project preferences that come from implementation
 - Shared helpers own JSONL append, bounded retention, atomic state writes, and raw archive behavior. New runtime logs should reuse those helpers.
 - Status and watch renderers read compact state first. Larger history reads should be explicit and should use tail-oriented readers.
 
+## CLI Output
+
+- Nested command status pages limit their compact `commands:` summary to the current command family.
+
 ## Terminal Monitor Output
 
 - Monitor headers use a compact command label plus a bare `HH:mm:ss` clock.
