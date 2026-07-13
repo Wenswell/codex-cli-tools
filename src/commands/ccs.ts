@@ -4783,7 +4783,7 @@ async function printCcsCostStatus(profiles: ProfilesFile): Promise<void> {
   printKeyValue("upload:", colorPath(ccsCostRemoteDisplay), 9);
   printKeyValue("timezone:", systemTimezone(), 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs cost | ccs pricing | ccs pricing list [--remote] | ccs pricing pattern [watch|unwatch] | ccs pricing provider [add|remove] | ccs pricing refresh | ccs cost push | ccs cost [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD] | ccs cost central [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD]"));
+  console.log(textDim("commands: ccs cost push | ccs cost [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD] | ccs cost central [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD]"));
   console.log(textDim("options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast"));
 }
 

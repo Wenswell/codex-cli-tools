@@ -205,6 +205,22 @@ test("ccs cost daily reports missing pricing without failing", async () => {
   }
 });
 
+test("ccs cost status omits pricing commands", async () => {
+  let home;
+  try {
+    home = await writeProfiles({
+      profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+      current: "input",
+    });
+    const output = await runCcs(["dist/bin/ccs.js", "cost"], home, {
+      XDG_CACHE_HOME: join(home, ".cache"),
+    });
+    assert.doesNotMatch(output, /ccs pricing/);
+  } finally {
+    if (home) await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs cost daily does not create a full pricing cache on missing prices", async () => {
   let home;
   try {
