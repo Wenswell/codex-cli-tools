@@ -37,7 +37,7 @@ async function reservePort() {
   return port;
 }
 
-test("proxy install changes only the routed provider base_url after runtime health", async () => {
+test("proxy install replaces a direct current URL with the local proxy URL", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -58,7 +58,7 @@ test("proxy install changes only the routed provider base_url after runtime heal
         "",
         "[model_providers.codex]",
         'name = "OpenAI"',
-        'base_url = "https://proxy.example.com"',
+        'base_url = "https://codex.ciii.club"',
         'wire_api = "responses"',
         "",
         "[model_providers.other]",
@@ -94,7 +94,7 @@ test("proxy install changes only the routed provider base_url after runtime heal
     };
     const preview = stripAnsi(await captureStdout(() => runProxyCommand(["install"], options)));
     assert.match(preview, /provider:\s+codex/);
-    assert.match(preview, /current:\s+https:\/\/proxy\.example\.com/);
+    assert.match(preview, /current:\s+https:\/\/codex\.ciii\.club/);
     assert.match(preview, new RegExp(`local:\\s+http://127\\.0\\.0\\.1:${listenPort}`));
     assert.match(preview, /backup:\s+.*config-\d+\.toml/);
     assert.match(preview, /no changes are written unless you type yes/);
@@ -128,7 +128,7 @@ test("proxy install changes only the routed provider base_url after runtime heal
       "",
       "[model_providers.codex]",
       'name = "OpenAI"',
-      'base_url = "https://proxy.example.com"',
+      'base_url = "https://codex.ciii.club"',
       'wire_api = "responses"',
       "",
       "[model_providers.other]",
@@ -137,6 +137,69 @@ test("proxy install changes only the routed provider base_url after runtime heal
     ].join("\n"));
     await shutdownProxyRuntime({ codexConfigPath, listenHost: "127.0.0.1", listenPort, stateRoot });
   } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousStateRoot === undefined) {
+      delete process.env.CCS_PROXY_STATE_ROOT;
+    } else {
+      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy install keeps direct routing when proxy startup fails", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const listenPort = await reservePort();
+  const blocked = createServer((_req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const codexConfigPath = join(home, ".codex", "config.toml");
+  const sourceConfig = [
+    'model_provider = "codex"',
+    "",
+    "[model_providers.codex]",
+    'base_url = "https://codex.ciii.club"',
+    "",
+  ].join("\n");
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(codexConfigPath, sourceConfig, "utf8");
+    await writeFile(
+      join(home, ".config", "codex-tools", "profiles.json"),
+      JSON.stringify({
+        profiles: { ciii: { baseURL: "https://codex.ciii.club", apiKey: "ciii-key" } },
+        current: "ciii",
+      }),
+      "utf8",
+    );
+    await listenServer(blocked, listenPort);
+
+    await assert.rejects(
+      installProxy({
+        codexConfigPath,
+        listenHost: "127.0.0.1",
+        listenPort,
+        stateRoot,
+      }),
+      /proxy did not become healthy/,
+    );
+    assert.equal(await readFile(codexConfigPath, "utf8"), sourceConfig);
+    assert.equal(await readProxyState(stateRoot), null);
+    assert.equal((await readdir(join(stateRoot, "backups"))).length, 1);
+    assert.match(await readFile(join(stateRoot, "proxy-runtime.log"), "utf8"), /EADDRINUSE|address already in use/i);
+  } finally {
+    await closeServer(blocked);
     if (previousHome === undefined) {
       delete process.env.HOME;
     } else {
