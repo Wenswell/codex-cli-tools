@@ -1198,6 +1198,12 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, codexConfigFile,
         metrics: createProxyMetrics(),
     };
 }
+function assertProxyInstallTarget(configText, providerName, targetBaseUrl) {
+    const actualBaseUrl = readTomlProviderBaseUrl(configText, providerName);
+    if (actualBaseUrl !== targetBaseUrl) {
+        throw new Error(`failed to prepare proxy routing in [model_providers.${providerName}]: expected ${targetBaseUrl}, got ${actualBaseUrl ?? "missing"}`);
+    }
+}
 function createEmptyReasoningMetadata() {
     return {
         reasoningTokens: null,
@@ -2818,6 +2824,8 @@ async function buildProxyInstallPlan(options) {
         ...buildProxyStateFromProfiles(profiles, codexConfigText, options.codexConfigPath, options.listenHost, options.listenPort),
         backup_path: backupPath,
     };
+    const targetConfig = updateTomlProviderBaseUrl(codexConfigText, state.provider_name, state.proxy_base_url);
+    assertProxyInstallTarget(targetConfig, state.provider_name, state.proxy_base_url);
     return {
         backupPath,
         statePath: statePath(options.stateRoot),
@@ -2825,7 +2833,7 @@ async function buildProxyInstallPlan(options) {
         currentBaseUrl: state.original_base_url,
         targetBaseUrl: state.proxy_base_url,
         sourceConfig: codexConfigText,
-        targetConfig: updateTomlProviderBaseUrl(codexConfigText, state.provider_name, state.proxy_base_url),
+        targetConfig,
     };
 }
 async function applyProxyInstallPlan(options, plan) {
@@ -2838,17 +2846,53 @@ async function applyProxyInstallPlan(options, plan) {
     await mkdir(path.dirname(plan.backupPath), { recursive: true });
     await copyFile(options.codexConfigPath, plan.backupPath);
     await writeProxyState(options.stateRoot, plan.state);
+    let configWriteStarted = false;
     try {
         const runtime = await ensureProxyRunning(options);
+        configWriteStarted = true;
         await writeTextFile(options.codexConfigPath, plan.targetConfig);
-        if (await readFile(options.codexConfigPath, "utf8") !== plan.targetConfig) {
+        const installedConfig = await readFile(options.codexConfigPath, "utf8");
+        if (installedConfig !== plan.targetConfig) {
             throw new Error(`failed to verify proxy routing in Codex config: ${options.codexConfigPath}`);
         }
+        assertProxyInstallTarget(installedConfig, plan.state.provider_name, plan.state.proxy_base_url);
         return { ...plan, runtime };
     }
     catch (error) {
-        await shutdownProxyRuntime(options).catch(() => undefined);
-        await removeProxyState(options.stateRoot);
+        const rollbackErrors = [];
+        if (configWriteStarted) {
+            try {
+                const currentConfig = await readFile(options.codexConfigPath, "utf8");
+                if (currentConfig === plan.targetConfig) {
+                    await writeTextFile(options.codexConfigPath, plan.sourceConfig);
+                    if (await readFile(options.codexConfigPath, "utf8") !== plan.sourceConfig) {
+                        throw new Error(`failed to verify config rollback: ${options.codexConfigPath}`);
+                    }
+                }
+                else if (currentConfig !== plan.sourceConfig) {
+                    throw new Error(`Codex config changed during failed install: ${options.codexConfigPath}`);
+                }
+            }
+            catch (rollbackError) {
+                rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
+            }
+        }
+        try {
+            await shutdownProxyRuntime(options);
+        }
+        catch (shutdownError) {
+            rollbackErrors.push(shutdownError instanceof Error ? shutdownError.message : String(shutdownError));
+        }
+        try {
+            await removeProxyState(options.stateRoot);
+        }
+        catch (stateError) {
+            rollbackErrors.push(stateError instanceof Error ? stateError.message : String(stateError));
+        }
+        if (rollbackErrors.length > 0) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`${message}; install cleanup failed: ${rollbackErrors.join("; ")}`);
+        }
         throw error;
     }
 }
