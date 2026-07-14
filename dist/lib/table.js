@@ -1,4 +1,10 @@
 import { padVisibleLeft, padVisibleRight, textBold, truncateVisible, visibleLength } from "./text.js";
+export function styleTableRow(row, style) {
+    return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+        key,
+        value === null || value === undefined ? value : style(String(value)),
+    ]));
+}
 const DEFAULT_GAP = 2;
 export function renderTable(columns, rows, options = {}) {
     const header = options.header ?? true;

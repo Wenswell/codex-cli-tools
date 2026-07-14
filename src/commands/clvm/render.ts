@@ -1,5 +1,5 @@
 import { formatCompactBytes, formatCompactRate } from "../../lib/format.js";
-import { renderTable, type TableColumn } from "../../lib/table.js";
+import { renderTable, styleTableRow, type TableColumn } from "../../lib/table.js";
 import { createTextStyle, type TextStyle } from "../../lib/style.js";
 import { bgDarkBlue } from "../../lib/text.js";
 import { fitTerminalLine, terminalColumns } from "../../lib/terminal.js";
@@ -170,7 +170,7 @@ function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Moni
   }
 
   stream.write(`\n${style.bold("recent closed")}\n`);
-  const rows = closedHistory.slice(0, layout.closedHistoryRenderCount).map((connection) => ({
+  const rows = closedHistory.slice(0, layout.closedHistoryRenderCount).map((connection) => styleTableRow({
     closedAt: formatLocalTimestamp(connection.closedAt),
     endpoint: style.cyan(connection.endpoint),
     zeroFor: zeroForCell(connection.observedIdleMs, style),
@@ -178,7 +178,7 @@ function printClosedHistory(closedHistory: ClosedConnectionEntry[], layout: Moni
     download: bytesCell(connection.downloadTotal, style),
     chain: style.magenta(connection.chains.join(" > ")),
     rule: style.dim(connection.rule),
-  }));
+  }, style.dim));
   stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
 }
 
