@@ -484,7 +484,10 @@ test("proxy records active and history request lifecycle", async () => {
 
     const streamFetch = fetch(`http://127.0.0.1:${proxyPort}/responses?case=stream`, { method: "POST", body: "{}" });
     await streamStarted;
-    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests[0]?.status === 200);
+    await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests[0]?.response_bytes === Buffer.byteLength("data: one\n\n"),
+    );
     state = await readProxyState(stateRoot);
     assert.ok(state);
     assert.equal(state.metrics.active_requests[0].path, "/responses");
@@ -492,7 +495,10 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.active_requests[0].status, 200);
     assert.equal(state.metrics.active_requests[0].upstream, "input");
     assert.equal(state.metrics.active_requests[0].attempts, 1);
+    assert.equal(state.metrics.active_requests[0].response_bytes, Buffer.byteLength("data: one\n\n"));
     assert.equal(state.metrics.recent_requests[0].path, "/responses");
+    const activeOutput = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    assert.match(activeOutput, /\b11B\b/);
 
     finishStream();
     const streamResponse = await streamFetch;
@@ -3404,7 +3410,7 @@ test("proxy status table renders configured columns and compact units", () => {
             upstream: "input",
             latency_ms: 0,
             request_bytes: 2048,
-            response_bytes: 0,
+            response_bytes: 2048,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5",
             reasoning_tokens: 42,
@@ -3474,7 +3480,7 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
   assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+42\/200\s+0ms\s+2\.00K/);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\/-\s+0ms\s+1\.00K/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\/-\s+0ms\s+-/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+42\/200\s+56ms\s+32\.0K/);
   assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\/502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
   assert.doesNotMatch(lines, /gpt-5\.5/);

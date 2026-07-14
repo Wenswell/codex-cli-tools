@@ -909,7 +909,7 @@ function formatProxyRequest(record, nowMs, priceCache) {
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
     const time = formatProxyTime(record.completed_at ?? record.started_at);
     const latencyMs = completed ? record.latency_ms : elapsedMs;
-    const size = completed ? record.response_bytes : record.request_bytes;
+    const size = record.response_bytes;
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
@@ -2169,8 +2169,8 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, at
         markProxyAttemptHeaders(attemptState, response.status);
         await callbacks.onResponseStart?.(response.status, upstream.name);
         const contentType = response.headers.get("content-type") ?? "";
-        const deferredInspection = response.clone().arrayBuffer().then((buffer) => {
-            const inspection = inspectProxyPayload(Buffer.from(buffer), contentType, endpointClass);
+        const deferredInspection = readProxyResponseBody(response.clone(), contentType, endpointClass, currentProxyAttemptStartedAtMs(attemptState), callbacks).then(({ buffer }) => {
+            const inspection = inspectProxyPayload(buffer, contentType, endpointClass);
             updateProxyAttemptInspection(attemptState, inspection);
             return inspection;
         });
@@ -2217,8 +2217,10 @@ async function readProxyResponseBody(response, contentType, endpointClass, attem
     }
     if (!isStreamContentType(contentType)) {
         try {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            await callbacks.onResponseBytes?.(buffer.length);
             return {
-                buffer: Buffer.from(await response.arrayBuffer()),
+                buffer,
                 timeToFirstChunkMs: null,
                 streamDurationMs: null,
             };
@@ -2258,6 +2260,7 @@ async function readProxyResponseBody(response, contentType, endpointClass, attem
             lastChunkAtMs = nowMs;
             chunks.push(value);
             responseBytes += value.length;
+            await callbacks.onResponseBytes?.(responseBytes);
             scanner.push(value);
             await emitModelIfChanged(scanner.current());
             await emitReasoningIfChanged(scanner.currentReasoningMetadata());
@@ -2709,7 +2712,7 @@ function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten) {
     res.end(payload);
     return true;
 }
-async function writeResponse(res, response, endpointClass, modelObserver, onHeadersWritten) {
+async function writeResponse(res, response, endpointClass, modelObserver, onHeadersWritten, onResponseBytes) {
     res.writeHead(response.status, responseHeadersToObject(response.headers));
     onHeadersWritten?.();
     if (!response.body) {
@@ -2718,7 +2721,7 @@ async function writeResponse(res, response, endpointClass, modelObserver, onHead
     const scanner = isStreamContentType(`${response.headers.get("content-type") || ""}`)
         ? new ProxySseModelScanner(endpointClass)
         : null;
-    return writeReadableResponse(res, Readable.fromWeb(response.body), scanner, modelObserver);
+    return writeReadableResponse(res, Readable.fromWeb(response.body), scanner, modelObserver, onResponseBytes);
 }
 async function endEmptyResponse(res) {
     return new Promise((resolve, reject) => {
@@ -2747,12 +2750,13 @@ function updateProxyModelObserver(modelObserver, extraction) {
     modelObserver.source = extraction.source;
     return Promise.resolve(modelObserver.update?.(extraction));
 }
-async function writeReadableResponse(res, stream, scanner, modelObserver) {
+async function writeReadableResponse(res, stream, scanner, modelObserver, onResponseBytes) {
     return new Promise((resolve, reject) => {
         let responseBytes = 0;
         let settled = false;
         let finished = false;
         let modelUpdateQueue = Promise.resolve();
+        let responseBytesUpdateQueue = Promise.resolve();
         const finish = (error = null) => {
             if (settled) {
                 return;
@@ -2769,9 +2773,18 @@ async function writeReadableResponse(res, stream, scanner, modelObserver) {
             modelUpdateQueue = modelUpdateQueue.then(() => updateProxyModelObserver(modelObserver, extraction));
             return modelUpdateQueue;
         };
+        const queueResponseBytesUpdate = (observedBytes) => {
+            responseBytesUpdateQueue = responseBytesUpdateQueue.then(async () => {
+                await onResponseBytes?.(observedBytes);
+            });
+            return responseBytesUpdateQueue;
+        };
         stream.on("data", (chunk) => {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             responseBytes += value.length;
+            void queueResponseBytesUpdate(responseBytes).catch((error) => {
+                stream.destroy(error instanceof Error ? error : new Error(String(error)));
+            });
             if (scanner) {
                 scanner.push(value);
                 void queueModelObserverUpdate(scanner.current()).catch((error) => {
@@ -2795,6 +2808,7 @@ async function writeReadableResponse(res, stream, scanner, modelObserver) {
                 else {
                     await modelUpdateQueue;
                 }
+                await responseBytesUpdateQueue;
                 finish();
             })().catch((error) => {
                 const message = error instanceof Error ? error.message : String(error);
@@ -3497,6 +3511,10 @@ export async function serveProxy(options) {
                             activeRecord.upstream = upstreamName;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
+                        onResponseBytes: async (receivedBytes) => {
+                            activeRecord.response_bytes = receivedBytes;
+                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                        },
                     };
                     const guardedCallbacks = {
                         ...passthroughCallbacks,
@@ -3623,7 +3641,10 @@ export async function serveProxy(options) {
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                     };
-                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb);
+                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, async (receivedBytes) => {
+                        activeRecord.response_bytes = receivedBytes;
+                        await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+                    });
                     if (outcome.deferredInspection) {
                         const inspection = await outcome.deferredInspection;
                         const deferred = createProxyOutcome({

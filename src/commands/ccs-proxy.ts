@@ -312,6 +312,8 @@ type ProxyWriteModelObserver = ProxyModelExtraction & {
   update?: (extraction: ProxyModelExtraction) => void | Promise<void>;
 };
 
+type ProxyResponseBytesObserver = (responseBytes: number) => void | Promise<void>;
+
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
@@ -1308,7 +1310,7 @@ function formatProxyRequest(record: ProxyRequestRecord, nowMs: number, priceCach
   const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
   const time = formatProxyTime(record.completed_at ?? record.started_at);
   const latencyMs = completed ? record.latency_ms : elapsedMs;
-  const size = completed ? record.response_bytes : record.request_bytes;
+  const size = record.response_bytes;
   const upstream = formatProxyUpstream(record.upstream, record.attempts);
   return {
     time: textDim(time),
@@ -2475,6 +2477,7 @@ type ProxyForwardCallbacks = {
   signal?: AbortSignal;
   onAttempt?: (attempts: number, upstream: string) => void | Promise<void>;
   onResponseStart?: (status: number, upstream: string) => void | Promise<void>;
+  onResponseBytes?: (responseBytes: number) => void | Promise<void>;
   onUpstreamModel?: (extraction: ProxyModelExtraction) => void | Promise<void>;
   onReasoningMetadata?: (metadata: ProxyReasoningMetadata) => void | Promise<void>;
   onGuardAction?: (action: ProxyGuardActionRecord) => void | Promise<void>;
@@ -2780,8 +2783,14 @@ async function proxyThroughActiveUpstreamPassthrough(
     markProxyAttemptHeaders(attemptState, response.status);
     await callbacks.onResponseStart?.(response.status, upstream.name);
     const contentType = response.headers.get("content-type") ?? "";
-    const deferredInspection = response.clone().arrayBuffer().then((buffer) => {
-      const inspection = inspectProxyPayload(Buffer.from(buffer), contentType, endpointClass);
+    const deferredInspection = readProxyResponseBody(
+      response.clone(),
+      contentType,
+      endpointClass,
+      currentProxyAttemptStartedAtMs(attemptState),
+      callbacks,
+    ).then(({ buffer }) => {
+      const inspection = inspectProxyPayload(buffer, contentType, endpointClass);
       updateProxyAttemptInspection(attemptState, inspection);
       return inspection;
     });
@@ -2834,8 +2843,10 @@ async function readProxyResponseBody(
   }
   if (!isStreamContentType(contentType)) {
     try {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      await callbacks.onResponseBytes?.(buffer.length);
       return {
-        buffer: Buffer.from(await response.arrayBuffer()),
+        buffer,
         timeToFirstChunkMs: null,
         streamDurationMs: null,
       };
@@ -2876,6 +2887,7 @@ async function readProxyResponseBody(
       lastChunkAtMs = nowMs;
       chunks.push(value);
       responseBytes += value.length;
+      await callbacks.onResponseBytes?.(responseBytes);
       scanner.push(value);
       await emitModelIfChanged(scanner.current());
       await emitReasoningIfChanged(scanner.currentReasoningMetadata());
@@ -3409,6 +3421,7 @@ async function writeResponse(
   endpointClass: ProxyEndpointClass | null,
   modelObserver: ProxyWriteModelObserver,
   onHeadersWritten?: () => void,
+  onResponseBytes?: ProxyResponseBytesObserver,
 ): Promise<number> {
   res.writeHead(response.status, responseHeadersToObject(response.headers));
   onHeadersWritten?.();
@@ -3418,7 +3431,7 @@ async function writeResponse(
   const scanner = isStreamContentType(`${response.headers.get("content-type") || ""}`)
     ? new ProxySseModelScanner(endpointClass)
     : null;
-  return writeReadableResponse(res, Readable.fromWeb(response.body as never), scanner, modelObserver);
+  return writeReadableResponse(res, Readable.fromWeb(response.body as never), scanner, modelObserver, onResponseBytes);
 }
 
 async function endEmptyResponse(res: ServerResponse): Promise<number> {
@@ -3455,12 +3468,14 @@ async function writeReadableResponse(
   stream: Readable,
   scanner: ProxySseModelScanner | null,
   modelObserver: ProxyWriteModelObserver,
+  onResponseBytes?: ProxyResponseBytesObserver,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let responseBytes = 0;
     let settled = false;
     let finished = false;
     let modelUpdateQueue: Promise<void> = Promise.resolve();
+    let responseBytesUpdateQueue: Promise<void> = Promise.resolve();
 
     const finish = (error: ProxyResponseWriteError | null = null): void => {
       if (settled) {
@@ -3478,10 +3493,19 @@ async function writeReadableResponse(
       modelUpdateQueue = modelUpdateQueue.then(() => updateProxyModelObserver(modelObserver, extraction));
       return modelUpdateQueue;
     };
+    const queueResponseBytesUpdate = (observedBytes: number): Promise<void> => {
+      responseBytesUpdateQueue = responseBytesUpdateQueue.then(async () => {
+        await onResponseBytes?.(observedBytes);
+      });
+      return responseBytesUpdateQueue;
+    };
 
     stream.on("data", (chunk: Buffer | string) => {
       const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       responseBytes += value.length;
+      void queueResponseBytesUpdate(responseBytes).catch((error: unknown) => {
+        stream.destroy(error instanceof Error ? error : new Error(String(error)));
+      });
       if (scanner) {
         scanner.push(value);
         void queueModelObserverUpdate(scanner.current()).catch((error: unknown) => {
@@ -3504,6 +3528,7 @@ async function writeReadableResponse(
         } else {
           await modelUpdateQueue;
         }
+        await responseBytesUpdateQueue;
         finish();
       })().catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -4254,6 +4279,10 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               activeRecord.upstream = upstreamName;
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
+            onResponseBytes: async (receivedBytes) => {
+              activeRecord.response_bytes = receivedBytes;
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
           };
           const guardedCallbacks: ProxyForwardCallbacks = {
             ...passthroughCallbacks,
@@ -4397,7 +4426,17 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           };
-          responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb);
+          responseBytes = await writeResponse(
+            res,
+            outcome.response,
+            endpointClass,
+            streamModelObserver,
+            recordClientTtfb,
+            async (receivedBytes) => {
+              activeRecord.response_bytes = receivedBytes;
+              await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
+            },
+          );
           if (outcome.deferredInspection) {
             const inspection = await outcome.deferredInspection;
             const deferred = createProxyOutcome({
