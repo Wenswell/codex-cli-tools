@@ -38,6 +38,17 @@ pnpm build
 pnpm link --global
 ```
 
+To update an existing installation:
+
+- Local linked clone: run `git pull --ff-only`, `pnpm install`, and `pnpm build` in the linked clone. The global link continues to use that clone; run `pnpm link --global` again only if the link was removed.
+- Global GitHub install: rerun `pnpm add -g github:Wenswell/codex-cli-tools`.
+
+Verify either update with:
+
+```bash
+ccs version
+```
+
 ## Commands
 
 ```bash
@@ -64,6 +75,7 @@ codex-rename
 - [ccs cost model breakdown plan](docs/CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
+- [ccs proxy install fix plan](docs/CCS_PROXY_INSTALL_FIX_PLAN.md)
 
 ## CLI conventions
 
@@ -629,9 +641,38 @@ ccs proxy serve
 ccs proxy stop
 ```
 
+### Proxy lifecycle
+
+For a first installation, confirm the current direct provider URL and run:
+
+```bash
+ccs proxy
+ccs proxy install
+```
+
+The command previews the config change and writes only after exact `yes` confirmation. A successful install starts the proxy in `passthrough` mode. Use `ccs proxy mode recovery` or `ccs proxy mode intercept` only when intervention is needed, then use `ccs proxy watch` to monitor it.
+
+For a normal tool update and proxy reinstall:
+
+1. Run `ccs proxy restore` and confirm it. This restores the active profile URL, stops the proxy, and removes `proxy.json`.
+2. Update the tool using one of the `Install` update procedures above.
+3. Run `ccs proxy install` and confirm it.
+
+`ccs proxy stop` is not a reinstall step. It only changes the running proxy to `passthrough` and keeps the local proxy URL in `config.toml`. When the state file is absent, do not chain `stop; restore`; inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
+
+For a request-schema or protocol update that requires a clean state, restore first, update the tool, then remove the proxy state directory before installing:
+
+```bash
+ccs proxy restore
+rm -rf "${CCS_PROXY_STATE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tools/proxy}"
+ccs proxy install
+```
+
+The clean step removes proxy history, logs, and config backups. Copy any files that must be retained before removing the directory. It does not remove `~/.codex/config.toml`; the restore step has already returned the provider to the active profile URL.
+
 Behavior:
 
-- Updates the current provider's `base_url` in `~/.codex/config.toml`.
+- `ccs proxy install` and `ccs proxy restore` semantically modify only `model_providers.<provider>.base_url` in `~/.codex/config.toml`. Install points it to `http://127.0.0.1:4610`; restore resolves `profiles.current` and points it to that profile's `baseURL`. Other TOML fields, profiles, authentication, and unrelated config text remain unchanged.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary `-c model_providers.<current>.base_url=...` and `-c model_providers.<current>.env_key=...` overrides, so it does not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` requires explicit `model_provider`, its existing `base_url`, a current profile, and absent proxy state. It previews the current and proxy URLs plus backup path, backs up the current config, starts and health-checks the proxy, then changes and verifies that provider's `base_url` is the local proxy URL. If apply fails after routing is written, it restores the preview source, removes proxy state, and keeps the backup. Mode starts as `passthrough`; use `ccs proxy mode recovery` or `ccs proxy mode intercept` to enable intervention.
@@ -648,6 +689,7 @@ Behavior:
 - Guard actions are recorded in request history under `guard_actions` and as JSON lines in `~/.cache/codex-tools/proxy/proxy.log`. Each action stores `action`, `upstream`, `attempt`, `status`, `reasoning_tokens`, and `error`; `continuation_recovery` marks a Responses continuation retry.
 - `ccs proxy` starts the background proxy when proxy state exists and a current-protocol healthy proxy process is unavailable. If the health endpoint reports a different protocol, it records `ccs_proxy_protocol_restart` with `server_protocol`, `client_protocol`, and `pid` in `proxy.log`, stops that process, and starts the current proxy.
 - Proxy runtime files live beside the proxy state under `~/.cache/codex-tools/proxy/`: `proxy.pid` stores the background process id, `proxy-runtime.log` stores recent background stdout/stderr up to 16M, `proxy.log` stores recent guard, unsupported-path, and proxy error events up to 16M, and `proxy-requests.jsonl` stores recent completed model API requests with JSONL-only `attempt_records` and sanitized `request_headers` up to 64M.
+- `backups/config-<timestamp>.toml` is a complete `config.toml` snapshot made before install; `backups/config-restore-<timestamp>.toml` is a complete snapshot made before restore. They are archives for manual inspection or recovery, are not automatically selected by `restore`, and are not automatically deleted.
 - A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
 - `ccs proxy` without arguments prints runtime state, paths, summaries, active requests, and completed history once and exits. `--view overview|tokens|cost` selects the request table; overview is the default. `ccs proxy watch` refreshes the selected view in the terminal alternate screen and shows its current view plus shortcut keys in the footer. Press `v` to cycle overview, tokens, and cost; press `q` or `Ctrl-C` to exit cleanly.
 - Every view begins with `session time up model` and ends with `error`. Overview adds `reas./code lat. size`; tokens adds `input output cached`; cost adds `input$ output$ cached$ total$`. The 10-cell model column shows the available actual model, colors equal request/upstream models green and differing actual upstream models red, then abbreviates `gpt-` to `o` and truncates.
