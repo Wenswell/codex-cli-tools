@@ -1,6 +1,6 @@
 # ccs proxy spec
 
-`ccs proxy` reports proxy runtime state and HTTP request state from `~/.cache/codex-tools/proxy/proxy.json`.
+`ccs proxy` reports proxy runtime state and HTTP request state from `~/.cache/codex-tools/proxy/proxy.json`. `CCS_PROXY_STATE_ROOT` overrides the default proxy state directory.
 
 ## Storage files
 
@@ -11,6 +11,8 @@ Proxy state lives under `~/.cache/codex-tools/proxy`:
 - `proxy.log`: bounded guard, unsupported-path, upstream-error, and local proxy error events as JSONL up to 16M.
 - `proxy-runtime.log`: bounded background process stdout and stderr up to 16M.
 - `proxy.pid`: background process id.
+- `backups/config-<timestamp>.toml`: complete `config.toml` snapshot made before `ccs proxy install`; the path is stored in `proxy.json.backup_path` while the install is active.
+- `backups/config-restore-<timestamp>.toml`: complete `config.toml` snapshot made before `ccs proxy restore`.
 
 ## Route boundary
 
@@ -32,6 +34,48 @@ Only these model API paths enter upstream forwarding and request metrics:
 Unsupported paths return local `404` JSON with `code: "unsupported_proxy_path"`, write one `ccs_proxy_unsupported_path` event to `proxy.log`, and do not update `active_requests`, `recent_requests`, `proxy-requests.jsonl`, status counters, latency counters, reasoning counters, or upstream hit counters.
 
 Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A protocol mismatch records `ccs_proxy_protocol_restart` with `server_protocol`, `client_protocol`, and `pid`, stops that proxy process, and starts the current proxy. A remaining mismatch after restart is a startup error with a restart message.
+
+## Configuration lifecycle
+
+`ccs proxy install` and `ccs proxy restore` semantically change only one TOML value: `model_providers.<provider>.base_url` in `~/.codex/config.toml`. Install targets `http://127.0.0.1:4610`; restore resolves `profiles.current` and targets that profile's `baseURL`. The operations preserve other TOML fields, profile data, authentication, and unrelated config text.
+
+Each operation creates a complete config snapshot before writing. The install snapshot is named `backups/config-<timestamp>.toml`; the restore snapshot is named `backups/config-restore-<timestamp>.toml`. These files are archives, not an automatic restore source. `ccs proxy restore` computes the target from the active profile instead of copying the install snapshot, so a profile change is respected. Backups are retained until the state directory is removed.
+
+### First install
+
+The state file must be absent, and the configured provider must have an existing direct `base_url`. Run:
+
+```bash
+ccs proxy install
+```
+
+The command prints the same plan for preview and apply, then requires exact `yes`. Apply creates the install backup, writes proxy state, starts and health-checks the runtime in `passthrough`, writes the local provider URL, and verifies the parsed config value. A failed apply removes the state and restores the source config when the file still contains the planned local target; the backup remains for diagnosis.
+
+### Update and reinstall
+
+For a normal tool update, use `restore` as the boundary between the old proxy runtime and the new CLI:
+
+```bash
+ccs proxy restore
+# update the package or rebuild the linked clone
+ccs proxy install
+```
+
+Confirm both write prompts. `restore` stops the runtime and removes `proxy.json` only after its direct config write has been verified. `ccs proxy stop` is not equivalent: it keeps the local URL and only switches the running proxy to `passthrough`.
+
+If `restore` reports `proxy state file was not found`, the state-based restore operation cannot run. Do not repeat `stop; restore`; inspect the current provider URL and use a known profile or backup to return it to a direct URL before running `ccs proxy install`.
+
+### Clean reinstall
+
+An earlier request-record schema requires a clean state. After restoring the direct URL and updating the tool, remove the state directory and install again:
+
+```bash
+ccs proxy restore
+rm -rf "${CCS_PROXY_STATE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tools/proxy}"
+ccs proxy install
+```
+
+Removing the directory deletes `proxy.json`, request history, event/runtime logs, and all config backups. Preserve any required archives before this step. It does not modify `~/.codex/config.toml`; that file is handled by `restore` and `install`.
 
 ## Request lifecycle
 
