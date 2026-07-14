@@ -3486,7 +3486,7 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.doesNotMatch(lines, /gpt-5\.5/);
 });
 
-test("proxy status session column uses stable shallow colors in TTY output", async () => {
+test("proxy status keeps active rows bright and dims history rows in TTY output", async () => {
   const script = `
     ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 180 })}
     const { buildProxyStatusLines } = await import("./dist/commands/ccs-proxy.js");
@@ -3554,10 +3554,19 @@ test("proxy status session column uses stable shallow colors in TTY output", asy
     process.stdout.write(JSON.stringify(lines));
   `;
   const { stdout } = await execNodeScript(script);
-  const output = JSON.parse(stdout).join("\n");
+  const renderedLines = JSON.parse(stdout);
+  const output = renderedLines.join("\n");
+  const activeIndex = renderedLines.findIndex((line) => stripAnsi(line) === "active");
+  const historyIndex = renderedLines.findIndex((line) => stripAnsi(line) === "history");
+  const activeRow = renderedLines.slice(activeIndex + 1, historyIndex).find((line) => line.includes("019f0df6"));
+  const historyRow = renderedLines.slice(historyIndex + 1).find((line) => line.includes("019f0df6"));
   const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m019f0df6\u001b\[0m)/g)].map((match) => match[1]);
   const otherSession = output.match(/(\u001b\[[0-9;]*m019f0df7\u001b\[0m)/)?.[1];
 
+  assert.ok(activeRow);
+  assert.ok(historyRow);
+  assert.doesNotMatch(activeRow, /^\s*\u001b\[2m/);
+  assert.match(historyRow, /^\s*\u001b\[2m/);
   assert.equal(sameSession.length, 2);
   assert.equal(sameSession[0], sameSession[1]);
   assert.ok(otherSession);

@@ -1074,6 +1074,58 @@ test("monitor recent closed rows follow TTY height and non-TTY default", () => {
   assert.doesNotMatch(tiny, /recent closed/);
 });
 
+test("monitor keeps current rows bright and dims recent closed rows in TTY output", async () => {
+  const script = `
+    ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 140, rows: 20 })}
+    const { buildRuntimeConfig, renderMonitorResultLines } = await import("./dist/commands/clvm.js");
+    const config = buildRuntimeConfig({
+      baseUrl: "http://127.0.0.1:9090",
+      secret: "",
+      domains: ["example.com"],
+      interval: "1s",
+      zeroSpeedThreshold: 0,
+      closeZeroForSeconds: 0.5,
+      rawArchive: false,
+    }, { color: true }, { autoCloseEnabled: true, clear: false, once: true });
+    const connection = {
+      id: "current",
+      endpoint: "current.example.com:443",
+      process: "",
+      rule: "DOMAIN-SUFFIX:example.com",
+      chains: ["Proxy", "HK-01"],
+      matchedDomain: "example.com",
+      matchedValue: "current.example.com",
+      ageMs: 2000,
+      observedIdleMs: 1000,
+      uploadTotal: 1024,
+      downloadTotal: 2048,
+      uploadBytesPerSecond: 128,
+      downloadBytesPerSecond: 256,
+      totalBytesPerSecond: 384,
+      isIdle: false,
+      status: "active",
+    };
+    const lines = renderMonitorResultLines({
+      timestamp: "2026-06-10T00:01:00.000Z",
+      totalConnections: 1,
+      matchedConnections: [connection],
+      closedConnections: [],
+      closeFailures: [],
+      closedHistory: [{ ...connection, id: "closed", endpoint: "closed.example.com:443", closedAt: "2026-06-10T00:00:30.000Z" }],
+      closedTotal: 1,
+    }, config);
+    process.stdout.write(JSON.stringify(lines));
+  `;
+  const lines = JSON.parse((await execNodeScript(script)).stdout);
+  const currentRow = lines.find((line) => line.includes("current.example.com:443"));
+  const closedRow = lines.find((line) => line.includes("closed.example.com:443"));
+
+  assert.ok(currentRow);
+  assert.ok(closedRow);
+  assert.doesNotMatch(currentRow, /^\u001b\[2m/);
+  assert.match(closedRow, /^\u001b\[2m/);
+});
+
 test("monitor headers fit TTY width", () => {
   const config = buildRuntimeConfig(
     {

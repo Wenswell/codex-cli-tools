@@ -19,7 +19,7 @@ import { runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
-import { renderTable } from "../lib/table.js";
+import { renderTable, styleTableRow } from "../lib/table.js";
 import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
@@ -3162,7 +3162,7 @@ function formatProxyHistoryRows(records, count, view, priceCache) {
         ];
     }
     const nowMs = Date.now();
-    return renderProxyRequestTable(records.slice(0, count).map((record) => formatProxyRequest(record, nowMs, priceCache)), view);
+    return renderProxyRequestTable(records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, priceCache), textDim)), view);
 }
 async function readProxyRequestTail(stateRoot, count) {
     if (count <= 0) {

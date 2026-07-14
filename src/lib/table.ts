@@ -23,6 +23,13 @@ export type RenderTableOptions = {
   boldHeader?: boolean;
 };
 
+export function styleTableRow(row: TableRow, style: (value: string) => string): TableRow {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+    key,
+    value === null || value === undefined ? value : style(String(value)),
+  ]));
+}
+
 const DEFAULT_GAP = 2;
 
 export function renderTable(columns: TableColumn[], rows: TableRow[], options: RenderTableOptions = {}): string[] {
