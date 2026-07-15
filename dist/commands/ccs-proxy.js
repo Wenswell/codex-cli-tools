@@ -200,17 +200,23 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
         return { healthy: false, pid: null, version: null, protocol: null, mode: null };
     }
 }
-function assertProxyHealthProtocol(health) {
+function assertProxyHealthRuntime(health) {
     if (!health.healthy) {
-        return;
+        throw new Error("proxy runtime is not healthy after start");
     }
     if (health.protocol !== PROXY_HEALTH_PROTOCOL) {
         const current = health.protocol === null ? "unknown" : String(health.protocol);
         throw new Error(`proxy protocol mismatch: server=${current} client=${PROXY_HEALTH_PROTOCOL}; restart ccs proxy`);
     }
+    const currentVersion = packageVersion();
+    if (health.version !== currentVersion) {
+        throw new Error(`proxy version mismatch: server=${health.version ?? "unknown"} client=${currentVersion}; restart ccs proxy`);
+    }
 }
-function proxyHealthProtocolMatches(health) {
-    return health.healthy && health.protocol === PROXY_HEALTH_PROTOCOL;
+function proxyHealthRuntimeMatches(health) {
+    return health.healthy
+        && health.protocol === PROXY_HEALTH_PROTOCOL
+        && health.version === packageVersion();
 }
 async function isProxyHealthy(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
     return (await readProxyHealth(state, timeoutMs)).healthy;
@@ -250,7 +256,7 @@ async function acquireProxyStartLock(stateRoot) {
             const state = await readProxyState(stateRoot);
             if (state) {
                 const health = await readProxyHealth(state);
-                if (proxyHealthProtocolMatches(health)) {
+                if (proxyHealthRuntimeMatches(health)) {
                     return null;
                 }
             }
@@ -350,8 +356,7 @@ export async function ensureProxyRunning(options) {
     const logPath = proxyRuntimeLogPath(options.stateRoot);
     const initialPid = await readProxyPid(options.stateRoot);
     const initialHealth = await readProxyHealth(initialState);
-    if (proxyHealthProtocolMatches(initialHealth)) {
-        assertProxyHealthProtocol(initialHealth);
+    if (proxyHealthRuntimeMatches(initialHealth)) {
         const state = await readProxyState(options.stateRoot) ?? initialState;
         return {
             state,
@@ -374,7 +379,7 @@ export async function ensureProxyRunning(options) {
         if (!health.healthy) {
             return ensureProxyRunning(options);
         }
-        assertProxyHealthProtocol(health);
+        assertProxyHealthRuntime(health);
         return {
             state,
             pid: health.pid ?? pid.pid,
@@ -391,8 +396,7 @@ export async function ensureProxyRunning(options) {
             return null;
         }
         const health = await readProxyHealth(state);
-        if (proxyHealthProtocolMatches(health)) {
-            assertProxyHealthProtocol(health);
+        if (proxyHealthRuntimeMatches(health)) {
             const pid = await readProxyPid(options.stateRoot);
             return {
                 state,
@@ -406,9 +410,12 @@ export async function ensureProxyRunning(options) {
         }
         if (health.healthy) {
             await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
-                event: "ccs_proxy_protocol_restart",
-                server_protocol: health.protocol,
-                client_protocol: PROXY_HEALTH_PROTOCOL,
+                event: "ccs_proxy_runtime_restart",
+                reason: "runtime_mismatch",
+                old_protocol: health.protocol,
+                new_protocol: PROXY_HEALTH_PROTOCOL,
+                old_version: health.version,
+                new_version: packageVersion(),
                 pid: health.pid,
             });
             await shutdownProxyRuntime(options);
@@ -417,7 +424,7 @@ export async function ensureProxyRunning(options) {
         const pid = startProxyBackgroundProcess(options, state);
         await waitForProxyHealth(state, options.stateRoot);
         const startedHealth = await readProxyHealth(state);
-        assertProxyHealthProtocol(startedHealth);
+        assertProxyHealthRuntime(startedHealth);
         return {
             state,
             pid,
@@ -4095,6 +4102,67 @@ export async function shutdownProxyRuntime(options) {
     await rm(file, { force: true });
     return `Proxy stopped. PID=${targetPid}`;
 }
+async function buildProxyRestartPlan(options) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state) {
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    }
+    if (state.metrics.active_requests.length > 0) {
+        throw new Error(`proxy restart requires no active requests; active=${state.metrics.active_requests.length}`);
+    }
+    return {
+        installedAt: state.installed_at,
+        providerName: state.provider_name,
+        proxyBaseUrl: state.proxy_base_url,
+        mode: state.mode,
+        current: await readProxyHealth(state),
+        targetVersion: packageVersion(),
+        targetProtocol: PROXY_HEALTH_PROTOCOL,
+    };
+}
+export async function restartProxyRuntime(options, plan) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state
+        || state.installed_at !== plan.installedAt
+        || state.provider_name !== plan.providerName
+        || state.proxy_base_url !== plan.proxyBaseUrl
+        || state.mode !== plan.mode) {
+        throw new Error(`proxy state changed after preview: ${statePath(options.stateRoot)}`);
+    }
+    if (state.metrics.active_requests.length > 0) {
+        throw new Error(`proxy restart requires no active requests; active=${state.metrics.active_requests.length}`);
+    }
+    const current = await readProxyHealth(state);
+    if (current.healthy !== plan.current.healthy
+        || current.pid !== plan.current.pid
+        || current.version !== plan.current.version
+        || current.protocol !== plan.current.protocol) {
+        throw new Error("proxy runtime changed after preview; run ccs proxy restart again");
+    }
+    if (current.healthy) {
+        await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+            event: "ccs_proxy_runtime_restart",
+            reason: "explicit",
+            old_protocol: current.protocol,
+            new_protocol: plan.targetProtocol,
+            old_version: current.version,
+            new_version: plan.targetVersion,
+            pid: current.pid,
+        });
+    }
+    const stopped = await shutdownProxyRuntime(options);
+    const runtime = await ensureProxyRunning(options);
+    if (!runtime) {
+        throw new Error(`proxy state file was not found after restart: ${statePath(options.stateRoot)}`);
+    }
+    if (runtime.version !== plan.targetVersion || runtime.protocol !== plan.targetProtocol) {
+        throw new Error(`proxy restart verification failed: server=${runtime.version ?? "unknown"} protocol=${runtime.protocol ?? "unknown"}`);
+    }
+    if (plan.current.pid !== null && runtime.pid === plan.current.pid) {
+        throw new Error(`proxy restart verification failed: PID did not change (${runtime.pid})`);
+    }
+    return { stopped, runtime };
+}
 export async function setProxyMode(options, mode) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
@@ -4632,7 +4700,8 @@ function usageHelpLines() {
         "  ccs proxy config latency off             # disable latency deadlines after confirmation",
         "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
-        "  ccs proxy restore                        # restore config from the saved backup",
+        "  ccs proxy restart                        # restart the installed background proxy after confirmation",
+        "  ccs proxy restore                        # restore active profile routing and remove proxy state",
         "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
     ];
 }
@@ -4843,6 +4912,31 @@ export async function runProxyCommand(args, options) {
         printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
         printKeyValue("runtime:", stopped, 8);
         printKeyValue("state:", textGreen("removed"), 8);
+        return;
+    }
+    if (command === "restart") {
+        rejectRemovedYesFlags(rest, "ccs proxy restart");
+        rejectProxyCommandArgs(rest, "ccs proxy restart");
+        const plan = await buildProxyRestartPlan(options);
+        printKeyValue("provider:", plan.providerName, 9);
+        printKeyValue("routing:", `${colorUrl(plan.proxyBaseUrl)} (unchanged)`, 9);
+        printKeyValue("mode:", `${colorName(plan.mode)} (unchanged)`, 9);
+        printKeyValue("current:", plan.current.healthy
+            ? `PID=${plan.current.pid ?? "unknown"} server=${plan.current.version ?? "unknown"} protocol=${plan.current.protocol ?? "unknown"}`
+            : textDim("not running"), 9);
+        printKeyValue("target:", `server=${plan.targetVersion} protocol=${plan.targetProtocol}`, 9);
+        printKeyValue("requests:", textGreen("active=0"), 9);
+        printKeyValue("note:", "new requests are briefly unavailable during restart", 9);
+        printKeyValue("confirm:", "no changes are written unless you type yes", 9);
+        if (!(await confirmApply())) {
+            return;
+        }
+        const result = await restartProxyRuntime(options, plan);
+        printKeyValue("stopped:", result.stopped, 9);
+        printKeyValue("started:", textGreen("healthy"), 9);
+        printKeyValue("pid:", result.runtime.pid === null ? textDim("none") : textGreen(String(result.runtime.pid)), 9);
+        printKeyValue("server:", result.runtime.version ? textGreen(result.runtime.version) : textDim("none"), 9);
+        printKeyValue("protocol:", result.runtime.protocol === null ? textDim("none") : textGreen(String(result.runtime.protocol)), 9);
         return;
     }
     if (command === "serve") {

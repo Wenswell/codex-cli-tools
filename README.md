@@ -49,6 +49,17 @@ Verify either update with:
 ccs version
 ```
 
+Running foreground commands keep the code loaded when they start. Stop them before updating, then restart and verify them afterward:
+
+| Command | Stop | Restart after update | Verify |
+| --- | --- | --- | --- |
+| `ccs s server [PORT]` | `Ctrl-C` | rerun with the same port | `curl http://127.0.0.1:8765/health` for the default port |
+| `ccs s agent` | `Ctrl-C` | `ccs s agent` | confirm `~/.cache/codex-tools/ccs-top-status.txt` keeps updating |
+| `ccs top` | `q` or `Ctrl-C` | rerun `ccs top` | confirm the live line refreshes |
+| `clvm monitor` | `q` or `Ctrl-C` | rerun `clvm monitor` | confirm the monitor refreshes successfully |
+
+An installed `ccs proxy` runs in the background. Update the package first, then run `ccs proxy restart`, confirm with exact `yes`, and verify with `ccs proxy`. If the WezTerm managed status block changed in an update, rerun `ccs s wezterm` and confirm the preview to replace it.
+
 ## Commands
 
 ```bash
@@ -79,6 +90,7 @@ codex-rename
 - [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
 - [Codex remote commands plan](docs/CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
+- [CLI lifecycle plan](docs/CLI_LIFECYCLE_PLAN.md)
 - [ccs proxy install fix plan](docs/CCS_PROXY_INSTALL_FIX_PLAN.md)
 
 ## CLI conventions
@@ -119,7 +131,23 @@ Equivalent to:
 codex --search ARGS...
 ```
 
-`cxr` uses the local app-server daemon through its Unix socket.
+`cxr`, `cxxr`, and `cxxsr` use the Codex CLI local app-server daemon through its Unix socket. Codex CLI owns this daemon. Bootstrap it once, then verify it before first use:
+
+```bash
+codex app-server daemon bootstrap
+codex app-server daemon version
+```
+
+Manage it directly through Codex CLI:
+
+```bash
+codex app-server daemon start
+codex app-server daemon restart
+codex app-server daemon stop
+codex app-server daemon version
+```
+
+After updating Codex CLI, run `codex app-server daemon restart`, then verify that `version` reports `running` and the expected app-server version. `ccs r` prints the same daemon status and running version in compact form.
 
 ```bash
 cxr ARGS...
@@ -448,6 +476,12 @@ ccs s server
 ccs s server 8765
 ```
 
+The server runs in the foreground. Stop it with `Ctrl-C`; after updating, rerun it with the same port and verify the new process through its local health endpoint:
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
 The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves compact aggregated history for a requested window, `/ccs/cost/status` serves uploaded cost snapshot status, `/ccs/cost/report` serves central cost reports from uploaded snapshots, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Startup publishes the top HTTP endpoints before refreshing central cost derived data; cost refresh failures are logged and the top endpoints stay available. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`. Control and status HTTP clients use at least a five-second timeout. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line and central cost clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
 
 `ccs s server` listens on `0.0.0.0`; expose it only on a trusted network or behind an access-controlled proxy.
@@ -494,7 +528,7 @@ time          total  input  ciii  |  time          total  input  ciii
 20:00-20:30  +$0.2  +$0.2    $0  |
 ```
 
-For WezTerm, keep `ccs s agent` running in one terminal. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries and reloads `profiles.json` so the `*` marker follows profile switches. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
+For WezTerm, keep `ccs s agent` running in one terminal. It runs in the foreground; stop it with `Ctrl-C` and rerun `ccs s agent` after updating. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries and reloads `profiles.json` so the `*` marker follows profile switches. Verify it by confirming that file keeps updating. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
 
 Install the WezTerm status bar integration with the project command:
 
@@ -504,6 +538,8 @@ ccs s wezterm remove
 ```
 
 `ccs s wezterm` previews the `~/.wezterm.lua` change, then writes after you type exact `yes`; it backs up the existing file under `~/.config/codex-tools/backups/` and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block, then removes it after the same confirmation. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`, renders the clock locally, and hides stale status after a short freshness window; override the file path with `CCS_WEZTERM_STATUS_FILE`.
+
+Rerun `ccs s wezterm` after an update when the managed block needs refreshing. The command replaces the existing managed block after showing the exact preview and receiving `yes`.
 
 Example:
 
@@ -688,28 +724,32 @@ ccs proxy config
 ccs proxy config latency off
 ccs proxy config latency FIRST TOTAL [return_502|retry_then_502]
 ccs proxy install
+ccs proxy restart
 ccs proxy restore
 ccs proxy serve
 ```
 
 ### Proxy lifecycle
 
-For a first installation, confirm the current direct provider URL and run:
+For a first installation, use `ccs` to confirm the active profile and inspect `model_provider` plus `model_providers.<model_provider>.base_url` in `~/.codex/config.toml`. The URL must still be the direct provider URL. Then run:
 
 ```bash
 ccs proxy
 ccs proxy install
+ccs proxy
 ```
 
-The command previews the config change and writes only after exact `yes` confirmation. A successful install starts the proxy in `passthrough` mode. Use `ccs proxy mode recovery` or `ccs proxy mode intercept` only when intervention is needed, then use `ccs proxy watch` to monitor it.
+`install` previews the config change and writes only after exact `yes` confirmation. A successful install starts the proxy in `passthrough` mode. The final `ccs proxy` verifies the active URL, PID, version, protocol, and mode. Use `ccs proxy mode recovery` or `ccs proxy mode intercept` only when intervention is needed, then use `ccs proxy watch` to monitor it.
 
-For a normal tool update and proxy reinstall:
+For a normal tool update, leave the installed routing and state in place:
 
-1. Run `ccs proxy restore` and confirm it. This restores the active profile URL, stops the proxy, and removes `proxy.json`.
-2. Update the tool using one of the `Install` update procedures above.
-3. Run `ccs proxy install` and confirm it.
+1. Update the tool using one of the `Install` procedures above.
+2. Run `ccs proxy restart` and confirm it with exact `yes`.
+3. Run `ccs proxy` and verify the new PID, current package version, health protocol, and preserved mode/history.
 
-`ccs proxy mode passthrough` keeps the local proxy URL in `config.toml` while disabling proxy intervention. When the state file is absent, inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
+`restart` preserves `config.toml` routing, proxy state, mode, and history. It refuses to restart while requests are active. Running `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI.
+
+Use `ccs proxy restore` when removing the proxy or before a clean reinstall. It restores the active profile URL, stops the runtime, and removes `proxy.json`. `ccs proxy mode passthrough` instead keeps the local proxy URL and runtime while disabling proxy intervention. When the state file is absent, inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
 
 For a request-schema or protocol update that requires a clean state, restore first, update the tool, then remove the proxy state directory before installing:
 

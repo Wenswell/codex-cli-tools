@@ -33,7 +33,7 @@ Only these model API paths enter upstream forwarding and request metrics:
 
 Unsupported paths return local `404` JSON with `code: "unsupported_proxy_path"`, write one `ccs_proxy_unsupported_path` event to `proxy.log`, and do not update `active_requests`, `recent_requests`, `proxy-requests.jsonl`, status counters, latency counters, reasoning counters, or upstream hit counters.
 
-Proxy startup validates the health `protocol` from `/__codex_proxy/health`. A protocol mismatch records `ccs_proxy_protocol_restart` with `server_protocol`, `client_protocol`, and `pid`, stops that proxy process, and starts the current proxy. A remaining mismatch after restart is a startup error with a restart message.
+Proxy startup reuses a healthy runtime only when its health `protocol` and `version` match the current CLI protocol and package version. A mismatch records one `ccs_proxy_runtime_restart` event with `reason=runtime_mismatch`, `old_protocol`, `new_protocol`, `old_version`, `new_version`, and the replaced process `pid`, then stops that process and starts the current proxy. Explicit replacement records the same event with `reason=explicit`. A remaining protocol or version mismatch after restart is a startup error.
 
 ## Configuration lifecycle
 
@@ -53,19 +53,20 @@ ccs proxy install
 
 The command prints the same plan for preview and apply, then requires exact `yes`. Apply creates the install backup, writes proxy state, starts and health-checks the runtime in `passthrough`, writes the local provider URL, and verifies the parsed config value. A failed apply removes the state and restores the source config when the file still contains the planned local target; the backup remains for diagnosis.
 
-### Update and reinstall
+### Update and restart
 
-For a normal tool update, use `restore` as the boundary between the old proxy runtime and the new CLI:
+For a normal tool update, update the package or linked clone, then restart the installed proxy:
 
 ```bash
-ccs proxy restore
 # update the package or rebuild the linked clone
-ccs proxy install
+ccs proxy restart
 ```
 
-Confirm both write prompts. `restore` stops the runtime and removes `proxy.json` only after its direct config write has been verified. `ccs proxy mode passthrough` keeps the local URL while disabling intervention.
+`restart` prints the current and target runtime details and states that nothing changes unless exact `yes` is entered. Apply refuses while `metrics.active_requests` is non-empty, gracefully stops the current runtime, starts the current package version, and verifies the health protocol and version. It preserves proxy routing, mode, latency configuration, counters, and completed history. When a runtime was running, the replacement has a different PID.
 
-If `restore` reports `proxy state file was not found`, inspect the current provider URL and use a known profile or backup to return it to a direct URL before running `ccs proxy install`.
+Running `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while disabling intervention; it does not stop the runtime.
+
+If `restart` reports `proxy state file was not found`, inspect the current provider URL. Use `ccs proxy install` only when the provider has a direct URL and no proxy state exists. If the provider still points to the local proxy, restore its direct URL from a known profile or config archive first.
 
 ### Clean reinstall
 
@@ -79,11 +80,17 @@ ccs proxy install
 
 Removing the directory deletes `proxy.json`, request history, event/runtime logs, and all config backups. Preserve any required archives before this step. It does not modify `~/.codex/config.toml`; that file is handled by `restore` and `install`.
 
+### Explicit restart
+
+`ccs proxy restart` is the only public runtime replacement command. There are no separate `start` or `stop` commands: installed proxy status commands start a missing compatible runtime automatically, and stopping while the configured provider still points to the local URL would break routing.
+
+Restart requires installed proxy state. Preview prints the active PID, protocol, and package version plus the target protocol and package version, then requires exact `yes`. Apply rechecks that `metrics.active_requests` is empty before stopping the runtime. It preserves `proxy.json`, `proxy-requests.jsonl`, routing, mode, policy configuration, counters, and completed history, then verifies the new PID and matching health contract. An explicit restart with active requests fails without stopping the runtime or changing state.
+
 ## Request lifecycle
 
 - A supported model API request enters `metrics.active_requests` after the proxy accepts the request.
 - Active records use the same request record schema as history records. Pending-only fields use `null` or `0` until completion.
-- Proxy process startup clears any persisted `metrics.active_requests` entries before accepting new requests.
+- Proxy process startup clears stale persisted `metrics.active_requests` entries before accepting new requests. Explicit restart refuses live active requests before startup.
 - A request moves to `metrics.recent_requests` when the upstream response is fully written, the request fails, or the response stream ends.
 - History records are the completed form of the same request record and include completion time, mode, status code, request kind, reasoning token count metadata, reasoning text observation metadata, upstream, proxy-internal attempts, client request attempt, latency, request bytes, response bytes, session short id, model metadata, guard actions, failure summary, and error text.
 - `proxy-requests.jsonl` records include JSONL-only `attempt_records` with complete upstream attempt facts. `proxy.json.metrics.recent_requests` keeps compact records without `attempt_records`.
@@ -194,7 +201,7 @@ The proxy owns upstream authentication in proxy mode. It removes incoming `Autho
 
 `ccs proxy mode passthrough|recovery|intercept` previews the current and target values and requires exact `yes`. `passthrough` performs one upstream fetch and skips proxy policy, retries, waits, deadlines, response inspection, and rewriting. `recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `intercept` disables continuation recovery and uses ordinary guard retry.
 
-`ccs proxy restore` resolves `profiles.current` while building its preview and targets that profile's `baseURL`. Apply rejects config or proxy-state changes after preview, backs up the current config, changes and verifies only `state.provider_name`'s `base_url`, then stops the proxy and removes state. Install and restore backups remain available. Every other TOML field, `profiles.json`, and authentication data remain unchanged.
+`ccs proxy restore` resolves `profiles.current` while building its preview and targets that profile's `baseURL`. Apply rejects config or proxy-state changes after preview, backs up the current config, changes and verifies only `state.provider_name`'s `base_url`, then stops the proxy and removes state. Install and restore backups remain available. Every other TOML field, `profiles.json`, and authentication data remain unchanged. Restore is for returning to direct routing or preparing a clean reinstall; an ordinary package update uses `ccs proxy restart`.
 
 Upstream HTTP responses are upstream facts. In `recovery` and `intercept` modes, the proxy returns the original upstream status and body when the local reasoning guard accepts the response, including `401`, `403`, `408`, `429`, and `5xx`. Upstream `4xx` and `5xx` responses record `final_action=upstream_error`, `failure_summary.type=upstream_error`, and `error=null`. JSON error bodies populate `failure_summary.code/message`; non-JSON error bodies use `upstream_http_<status>` and `upstream returned HTTP <status>`.
 
@@ -286,7 +293,7 @@ Active overview rows show elapsed time for `dur.`, known response bytes for `siz
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
 - Active and history records pass through the same schema `6` validator. Pending values use the documented `null`, `0`, or empty collection value.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
-- Persisted `active_requests` entries never survive a proxy restart. A new proxy process resets `active_requests` to `[]` before serving traffic.
+- Explicit restart refuses while `active_requests` is non-empty. A new proxy process clears stale persisted active entries before serving traffic, so active entries never carry across process replacement.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
 - Completed model API requests append to bounded `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
 - State-file counters are recomputed from `metrics.recent_requests` after every completed request and when state files are read.

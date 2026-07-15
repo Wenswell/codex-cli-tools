@@ -3670,7 +3670,7 @@ function usageLines() {
         "  ccs pricing provider remove PROVIDER... # remove providers and prune local models",
         "  ccs pricing refresh                   # rebuild prices from watched patterns and providers",
         "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
-        "  ccs proxy [watch|mode|config|install|restore|serve] # manage proxy state and runtime",
+        "  ccs proxy [watch|mode|config|install|restart|restore|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
         "  ccs cost weekly                      # show Codex session weekly cost totals",

@@ -14,7 +14,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
-  assert.match(output, /ccs proxy \[watch\|mode\|config\|install\|restore\|serve\]/);
+  assert.match(output, /ccs proxy \[watch\|mode\|config\|install\|restart\|restore\|serve\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
 });
 
