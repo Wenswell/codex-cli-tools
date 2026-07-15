@@ -1,23 +1,62 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile, access } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
-import { captureStdout, execNodeStdout, spawnNode } from "./helpers/terminal.js";
+import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
 test("tools print package version", async () => {
   const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxx", "cxxs", "senv", "codex-rename"];
+  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxr", "cxx", "cxxr", "cxxs", "cxxsr", "senv", "codex-rename"];
   for (const tool of tools) {
     assert.equal(await runTool(tool, ["version"]), `${tool} ${packageJson.version}\n`);
     assert.equal(await runTool(tool, ["-v"]), `${tool} ${packageJson.version}\n`);
+  }
+});
+
+test("remote Codex wrappers add the Unix socket option before resume", async () => {
+  const binDir = await createFakeCodex("console.log(JSON.stringify(process.argv.slice(2)));\n");
+  const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+  try {
+    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxr.js", "hello"], { cwd: repoRoot, env })), [
+      "--search", "--remote", "unix://", "hello",
+    ]);
+    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxxr.js", "hello"], { cwd: repoRoot, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "hello",
+    ]);
+    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxxsr.js", "thread"], { cwd: repoRoot, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "resume", "thread",
+    ]);
+  } finally {
+    await rm(binDir, { recursive: true, force: true });
+  }
+});
+
+test("ccs r prints colored app-server daemon status and version", async () => {
+  const binDir = await createFakeCodex(`console.log(JSON.stringify({
+    status: "running",
+    appServerVersion: "0.144.3",
+  }));\n`);
+  try {
+    const script = `${stdoutPropertiesScript({ isTTY: true })}
+      const { runCcs } = await import("./dist/commands/ccs.js");
+      await runCcs(["r"]);
+    `;
+    const { stdout } = await execNodeScript(script, {
+      cwd: repoRoot,
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, NO_COLOR: "" },
+    });
+    assert.match(stdout, /status:\s+\u001b\[38;5;114mrunning\u001b\[0m/);
+    assert.match(stdout, /version:\s+\u001b\[38;5;81m0\.144\.3\u001b\[0m/);
+  } finally {
+    await rm(binDir, { recursive: true, force: true });
   }
 });
 
@@ -1278,6 +1317,14 @@ async function runTool(tool, args) {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+}
+
+async function createFakeCodex(source) {
+  const binDir = await mkdtemp(join(tmpdir(), "fake-codex-bin-"));
+  const codexPath = join(binDir, "codex");
+  await writeFile(codexPath, `#!/usr/bin/env node\n${source}`, "utf8");
+  await chmod(codexPath, 0o755);
+  return binDir;
 }
 
 async function writeSyncFixture(config) {

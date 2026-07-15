@@ -8,7 +8,7 @@ TTY output uses color for status, paths, warnings, and summaries. Set `NO_COLOR=
 
 - Node.js 20+
 - pnpm
-- `codex` CLI for `cx`, `cxx`, and `cxxs`
+- `codex` CLI for `cx`, `cxr`, `cxx`, `cxxr`, `cxxs`, and `cxxsr`
 - `claude` CLI for `ccx` and `ccxs`
 - `sqlite3` CLI for `codex-rename`
 
@@ -57,8 +57,11 @@ ccx
 ccxs
 clvm
 cx
+cxr
 cxx
+cxxr
 cxxs
+cxxsr
 senv
 codex-rename
 ```
@@ -74,6 +77,7 @@ codex-rename
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
 - [ccs cost model breakdown plan](docs/CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
+- [Codex remote commands plan](docs/CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 - [ccs proxy install fix plan](docs/CCS_PROXY_INSTALL_FIX_PLAN.md)
 
@@ -99,7 +103,7 @@ codex-rename
 - Public tools support `version` and `-v`, and every tool reads the shared `package.json` version.
 - Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. Columns can declare shrink priority so lower-value labels or endpoints compress before dense numeric details. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
 
-## cx / cxx / cxxs
+## cx / cxr / cxx / cxxr / cxxs / cxxsr
 
 `cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
 
@@ -113,6 +117,20 @@ Equivalent to:
 
 ```bash
 codex --search ARGS...
+```
+
+`cxr` uses the local app-server daemon through its Unix socket.
+
+```bash
+cxr ARGS...
+cxr version
+cxr -v
+```
+
+Equivalent to:
+
+```bash
+codex --search --remote unix:// ARGS...
 ```
 
 `cxx` also bypasses approvals and sandboxing.
@@ -129,6 +147,20 @@ Equivalent to:
 codex --search --dangerously-bypass-approvals-and-sandbox ARGS...
 ```
 
+`cxxr` adds the same Unix-socket remote connection to `cxx`.
+
+```bash
+cxxr ARGS...
+cxxr version
+cxxr -v
+```
+
+Equivalent to:
+
+```bash
+codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// ARGS...
+```
+
 `cxxs` resumes a Codex session with the same `cxx` flags.
 
 ```bash
@@ -143,7 +175,21 @@ Equivalent to:
 codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
 ```
 
-Use `cxx` and `cxxs` only in directories and tasks you trust.
+`cxxsr` adds the Unix-socket remote connection before the `resume` subcommand.
+
+```bash
+cxxsr ARGS...
+cxxsr version
+cxxsr -v
+```
+
+Equivalent to:
+
+```bash
+codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// resume ARGS...
+```
+
+Use `cxx`, `cxxr`, `cxxs`, and `cxxsr` only in directories and tasks you trust.
 
 ## ccx / ccxs
 
@@ -200,7 +246,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]
+commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]
 ```
 
 Supported commands:
@@ -209,6 +255,7 @@ Supported commands:
 ccs
 ccs version
 ccs -v
+ccs r
 ccs PROFILE
 ccs run PROFILE [CODEX_ARGS...]
 ccs models [--json]
@@ -265,6 +312,8 @@ ccs sync --replace all
 ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
+
+`ccs r` runs `codex app-server daemon version` and prints the daemon status and running app-server version. Status and version values use semantic TTY colors.
 
 `ccs models` requests `GET BASE_URL/v1/models` for every configured switching profile in `profiles.profiles`, using each profile API key as a Bearer token. Default output is a horizontal table with one provider column and one adjacent `price` column per provider. Price status is `ok` when input, output, and cache-read pricing are present, `partial` when input/output pricing exists without cache-read pricing, and `missing` when base pricing is unavailable. A provider request failure is shown in that provider column, and successful provider columns still show their model ids. `ccs models --json` prints stable JSON with each profile's `name`, `models`, `pricing`, and `error`, plus top-level pricing cache metadata.
 

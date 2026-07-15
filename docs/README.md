@@ -13,6 +13,7 @@ Project design specs:
 - [ccs cost spec](./CCS_COST_SPEC.md)
 - [ccs cost model breakdown plan](./CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](./CCS_PRICING_REMOTE_MODELS_PLAN.md)
+- [Codex remote commands plan](./CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs WezTerm current provider plan](./CCS_WEZTERM_CURRENT_PROVIDER_PLAN.md)
 - [ccs proxy spec](./CCS_PROXY_SPEC.md)
 - [ccs proxy route boundary plan](./CCS_PROXY_ROUTE_BOUNDARY_PLAN.md)
