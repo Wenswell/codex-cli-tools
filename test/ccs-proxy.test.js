@@ -24,6 +24,7 @@ import {
   setProxyMode,
   shutdownProxyRuntime,
 } from "../dist/commands/ccs-proxy.js";
+import { packageVersion } from "../dist/lib/version.js";
 import { captureStdout, execNodeScript, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
@@ -4202,6 +4203,7 @@ test("proxy rejects invalid --history values", async () => {
   };
   const help = await captureConsole(() => runProxyCommand(["help"], options));
   assert.match(help, /ccs proxy mode passthrough/);
+  assert.match(help, /ccs proxy restart/);
   assert.doesNotMatch(help, /ccs proxy --once|ccs proxy stop/);
   for (const args of [
     ["--history"],
@@ -4222,6 +4224,7 @@ test("proxy rejects invalid --history values", async () => {
     ["watch", "--once"],
     ["watch", "--history", "2", "--once"],
     ["mode", "recovery", "extra"],
+    ["restart", "extra"],
     ["install", "extra"],
     ["restore", "extra"],
   ]) {
@@ -4232,6 +4235,10 @@ test("proxy rejects invalid --history values", async () => {
   }
   await assert.rejects(() => runProxyCommand(["--once"], options), /unknown argument/);
   await assert.rejects(() => runProxyCommand(["stop"], options), /unknown argument/);
+  await assert.rejects(
+    () => runProxyCommand(["restart"], options),
+    /proxy state file was not found/,
+  );
   await assert.rejects(
     () => runProxyCommand(["install", "--yes"], options),
     /ccs proxy install no longer accepts -y\/--yes/,
@@ -4311,18 +4318,22 @@ test("proxy runtime restarts protocol mismatches", async () => {
     const healthPayload = await health.json();
     assert.equal(healthPayload.protocol, 5);
     assert.equal(healthPayload.pid, runtime.pid);
-    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_protocol_restart"/);
+    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_runtime_restart"/);
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
-    const restartEvent = events.find((event) => event.event === "ccs_proxy_protocol_restart");
+    const restartEvent = events.find((event) => event.event === "ccs_proxy_runtime_restart");
     assert.deepEqual(
       {
-        server_protocol: restartEvent?.server_protocol,
-        client_protocol: restartEvent?.client_protocol,
+        old_protocol: restartEvent?.old_protocol,
+        new_protocol: restartEvent?.new_protocol,
+        old_version: restartEvent?.old_version,
+        new_version: restartEvent?.new_version,
         pid: restartEvent?.pid,
       },
       {
-        server_protocol: 1,
-        client_protocol: 5,
+        old_protocol: 1,
+        new_protocol: 5,
+        old_version: "0.1.0",
+        new_version: healthPayload.version,
         pid: oldProxyPid,
       },
     );
@@ -4351,6 +4362,216 @@ test("proxy runtime restarts protocol mismatches", async () => {
   }
 });
 
+test("proxy runtime restarts a healthy current-protocol server from an older package", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  let oldProxy = null;
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
+    await writeProxyStateFixture(home, stateRoot, proxyPort);
+
+    oldProxy = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { createServer } from "node:http";
+
+          const port = Number(process.env.CCS_TEST_PROXY_PORT);
+          const server = createServer((req, res) => {
+            if (req.url === "/__codex_proxy/health") {
+              res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+              res.end(JSON.stringify({ status: "ok", pid: process.pid, version: "0.1.0", protocol: 5, mode: "recovery" }));
+              return;
+            }
+            res.writeHead(404);
+            res.end();
+          });
+
+          const close = () => server.close(() => process.exit(0));
+          process.once("SIGINT", close);
+          process.once("SIGTERM", close);
+          server.listen(port, "127.0.0.1", () => process.stdout.write("old-proxy-ready\\n"));
+        `,
+      ],
+      {
+        env: {
+          ...process.env,
+          CCS_TEST_PROXY_PORT: String(proxyPort),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    await waitForChildStdout(oldProxy, /old-proxy-ready/);
+    const oldProxyPid = oldProxy.pid;
+    assert.ok(oldProxyPid);
+
+    const options = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    const runtime = await ensureProxyRunning(options);
+    assert.ok(runtime);
+    assert.equal(runtime.started, true);
+    assert.equal(runtime.protocol, 5);
+    assert.notEqual(runtime.pid, oldProxyPid);
+    await waitForChildExit(oldProxy);
+    oldProxy = null;
+
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    assert.equal(runtime.version, packageJson.version);
+    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_runtime_restart"/);
+    const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
+    const restartEvent = events.find((event) => event.event === "ccs_proxy_runtime_restart");
+    assert.deepEqual(
+      {
+        old_protocol: restartEvent?.old_protocol,
+        new_protocol: restartEvent?.new_protocol,
+        old_version: restartEvent?.old_version,
+        new_version: restartEvent?.new_version,
+        pid: restartEvent?.pid,
+      },
+      {
+        old_protocol: 5,
+        new_protocol: 5,
+        old_version: "0.1.0",
+        new_version: packageJson.version,
+        pid: oldProxyPid,
+      },
+    );
+  } finally {
+    if (oldProxy) {
+      oldProxy.kill();
+      await waitForChildExit(oldProxy).catch(() => null);
+    }
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy restart previews, requires yes, preserves state, and rejects active requests", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-restart-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const stateRoot = join(home, ".config", "codex-tools");
+  const codexConfigPath = join(home, ".codex", "config.toml");
+  const options = { codexConfigPath, listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    const configText = [
+      'model_provider = "codex"',
+      "",
+      "[model_providers.codex]",
+      `base_url = "http://127.0.0.1:${proxyPort}"`,
+      "",
+    ].join("\n");
+    await writeFile(codexConfigPath, configText, "utf8");
+    const history = proxyHistoryRecord({ id: "restart-history", path: "/v1/responses" });
+    await writeProxyStateFixture(home, stateRoot, proxyPort, { recent_requests: [history] });
+    const initialRuntime = await ensureProxyRunning(options);
+    assert.ok(initialRuntime?.pid);
+    const initialPid = initialRuntime.pid;
+
+    const active = proxyHistoryRecord({
+      id: "restart-active",
+      completed_at: null,
+      status: null,
+      upstream_status: null,
+      client_status: null,
+      final_action: "pending",
+      upstream: null,
+      attempts: 0,
+      latency_ms: 0,
+    });
+    const activeState = await readProxyState(stateRoot);
+    await writeFile(
+      join(stateRoot, "proxy.json"),
+      JSON.stringify({ ...activeState, metrics: { ...activeState.metrics, active_requests: [active] } }, null, 2),
+      "utf8",
+    );
+    await assert.rejects(
+      () => runProxyCommand(["restart"], options),
+      /restart requires no active requests/i,
+    );
+    assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
+
+    const readyState = await readProxyState(stateRoot);
+    await writeFile(
+      join(stateRoot, "proxy.json"),
+      JSON.stringify({ ...readyState, metrics: { ...readyState.metrics, active_requests: [] } }, null, 2),
+      "utf8",
+    );
+    const preservedState = await readProxyState(stateRoot);
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["restart"], options)));
+    assert.match(preview, /restart/i);
+    assert.match(preview, /no changes are written unless you type yes/);
+    assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
+    assert.deepEqual(await readProxyState(stateRoot), preservedState);
+    assert.equal(await readFile(codexConfigPath, "utf8"), configText);
+
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+    let answered = false;
+    let output;
+    try {
+      output = stripAnsi(await captureStdout(() => runProxyCommand(["restart"], options), {
+        isTTY: true,
+        onWrite(currentOutput) {
+          if (!answered && currentOutput.includes("Apply changes?")) {
+            answered = true;
+            process.stdin.emit("data", Buffer.from("yes\n"));
+          }
+        },
+      }));
+    } finally {
+      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
+      else delete process.stdin.isTTY;
+    }
+
+    assert.equal(answered, true);
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    assert.notEqual(health.pid, initialPid);
+    assert.equal(health.version, packageJson.version);
+    assert.equal(health.protocol, 5);
+    assert.match(output, new RegExp(`server:\\s+${packageJson.version.replaceAll(".", "\\.")}`));
+    assert.match(output, /protocol:\s+5/);
+    const restartedState = await readProxyState(stateRoot);
+    assert.equal(restartedState.mode, preservedState.mode);
+    assert.deepEqual(restartedState.metrics.recent_requests, preservedState.metrics.recent_requests);
+    assert.equal(await readFile(codexConfigPath, "utf8"), configText);
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy --history uses snapshot rows until explicit count needs JSONL tail", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -4358,7 +4579,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: packageVersion(), protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4462,7 +4683,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: packageVersion(), protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4545,7 +4766,7 @@ test("proxy watch --history uses explicit history count", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: packageVersion(), protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4626,7 +4847,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: packageVersion(), protocol: 5 }));
       return;
     }
     res.writeHead(404);
