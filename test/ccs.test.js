@@ -1271,6 +1271,12 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
       mode: "recovery",
       listen_host: "127.0.0.1",
       listen_port: 4610,
+      latency_guard: {
+        enabled: false,
+        first_progress_timeout_ms: 0,
+        first_progress_action: "return_502",
+        total_timeout_ms: 0,
+      },
       profile_order: ["input"],
       backup_path: join(stateRoot, "config.toml.backup"),
       metrics: {

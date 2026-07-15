@@ -327,15 +327,77 @@ test("proxy state persists request metrics", async () => {
 test("proxy state rejects old and incomplete request records", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   try {
-    const oldRecord = proxyHistoryRecord({ schema_version: 4 });
+    const oldRecord = proxyHistoryRecord({ schema_version: 5 });
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "proxy.json"), JSON.stringify(proxyStateFixture({ recent_requests: [oldRecord] })), "utf8");
-    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.schema_version: expected number 5/);
+    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.schema_version: expected number 6/);
 
     const incompleteRecord = proxyHistoryRecord();
     delete incompleteRecord.final_action;
     await writeFile(join(home, "proxy.json"), JSON.stringify(proxyStateFixture({ recent_requests: [incompleteRecord] })), "utf8");
     await assert.rejects(readProxyState(home), /recent_requests\[0\]\.final_action: expected string/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy config prints latency state and writes only after exact confirmation", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-config-"));
+  const statePath = join(home, "proxy.json");
+  const options = {
+    codexConfigPath: join(home, "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: 4610,
+    stateRoot: home,
+  };
+  try {
+    await writeFile(statePath, JSON.stringify(proxyStateFixture(), null, 2), "utf8");
+
+    const status = stripAnsi(await captureStdout(() => runProxyCommand(["config"], options)));
+    assert.match(status, /latency:\s+disabled/);
+    assert.match(status, /first_progress:\s+0ms/);
+    assert.match(status, /first_action:\s+return_502/);
+    assert.match(status, /total:\s+0ms/);
+
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(
+      ["config", "latency", "1500", "9000", "retry_then_502"],
+      options,
+    )));
+    assert.match(preview, /latency:\s+enabled/);
+    assert.match(preview, /no changes are written unless you type yes/);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).latency_guard, proxyStateFixture().latency_guard);
+
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+    let answered = false;
+    try {
+      await captureStdout(
+        () => runProxyCommand(["config", "latency", "1500", "9000", "retry_then_502"], options),
+        {
+          isTTY: true,
+          onWrite(output) {
+            if (!answered && output.includes("Apply changes?")) {
+              answered = true;
+              process.stdin.emit("data", Buffer.from("yes\n"));
+            }
+          },
+        },
+      );
+    } finally {
+      if (stdinIsTty) {
+        Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
+      } else {
+        delete process.stdin.isTTY;
+      }
+    }
+
+    assert.equal(answered, true);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).latency_guard, {
+      enabled: true,
+      first_progress_timeout_ms: 1500,
+      first_progress_action: "retry_then_502",
+      total_timeout_ms: 9000,
+    });
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -416,6 +478,7 @@ test("proxy records active and history request lifecycle", async () => {
           original_base_url: "https://proxy.example.com",
           proxy_base_url: `http://127.0.0.1:${proxyPort}`,
           mode: "recovery",
+          latency_guard: disabledLatencyGuard(),
           listen_host: "127.0.0.1",
           listen_port: proxyPort,
           profile_order: ["input"],
@@ -1053,7 +1116,7 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
     if (url.searchParams.get("case") === "capacity") {
       capacityHits += 1;
       if (capacityHits <= 3) {
-        res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+        res.writeHead(429, { "content-type": "application/json; charset=utf-8", "retry-after": "0" });
         res.end(JSON.stringify({
           error: {
             code: "model_at_capacity",
@@ -1069,7 +1132,7 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
 
     if (url.searchParams.get("case") === "exhausted-capacity") {
       exhaustedCapacityHits += 1;
-      res.writeHead(429, { "content-type": "application/json; charset=utf-8" });
+      res.writeHead(429, { "content-type": "application/json; charset=utf-8", "retry-after": "0" });
       res.end(JSON.stringify({
         error: {
           code: "model_at_capacity",
@@ -1123,6 +1186,8 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
       total: 3,
       reasoning_guard: 0,
       upstream_capacity: 3,
+      http_429: 0,
+      timeout: 0,
       transport: 0,
     });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
@@ -1158,6 +1223,8 @@ test("proxy retries upstream capacity error text and passes through ordinary 429
       total: 3,
       reasoning_guard: 0,
       upstream_capacity: 3,
+      http_429: 0,
+      timeout: 0,
       transport: 0,
     });
     assert.deepEqual(record.failure_summary, {
@@ -1573,6 +1640,8 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
       total: 1,
       reasoning_guard: 0,
       upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
       transport: 1,
     });
     assert.equal(record.guard_actions.length, 1);
@@ -1600,9 +1669,17 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
       attempt.output_tokens,
       attempt.cached_input_tokens,
     ]), [[null, null, null], [null, null, null]]);
+    assert.deepEqual(fullRecord.attempt_records.map((attempt) => [
+      attempt.retry_budget_used,
+      attempt.retry_budget_remaining,
+    ]), [[0, 3], [0, 3]]);
     const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_guard_action"]);
+    assert.deepEqual(events.map((event) => event.event), [
+      "ccs_proxy_guard_action",
+      "ccs_proxy_attempt_completed",
+      "ccs_proxy_attempt_completed",
+    ]);
     assert.equal(events[0].request_id, record.id);
     assert.equal(events[0].path, "/responses");
     assert.equal(events[0].action, "upstream_error");
@@ -1676,6 +1753,8 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
       total: 1,
       reasoning_guard: 0,
       upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
       transport: 1,
     });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["upstream_error", "upstream_error"]);
@@ -1776,6 +1855,8 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
       total: 3,
       reasoning_guard: 3,
       upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
       transport: 0,
     });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry"]);
@@ -1827,6 +1908,8 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
       total: 3,
       reasoning_guard: 3,
       upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
       transport: 0,
     });
     assert.deepEqual(record.guard_actions.map((action) => action.action), ["internal_retry", "internal_retry", "internal_retry", "return_status_502"]);
@@ -2113,7 +2196,7 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
       reasoning_text_source: null,
       final_action: "passed",
       failure_summary: null,
-      remaining_retries: null,
+      remaining_retries: 2,
     });
     await waitForLogIncludes(
       join(stateRoot, "proxy.log"),
@@ -2938,6 +3021,269 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
   }
 });
 
+test("proxy latency guard returns 502 before forwarding and disconnects after forwarding", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-latency-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let deadlineHits = 0;
+  const upstream = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.searchParams.get("case") === "deadline") deadlineHits += 1;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    if (url.searchParams.get("case") === "after") {
+      res.write('data: {"type":"response.output_text.delta","delta":"hello"}\n\n');
+    }
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    configured.latency_guard = {
+      enabled: true,
+      first_progress_timeout_ms: 80,
+      first_progress_action: "retry_then_502",
+      total_timeout_ms: 1000,
+    };
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const before = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=before`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "timeout-before", stream: true }),
+    });
+    assert.equal(before.status, 502);
+    assert.equal(before.headers.get("x-codex-retry-gateway-reason"), "upstream-first-progress-timeout");
+    assert.equal((await before.json()).error.code, "upstream_first_progress_timeout");
+
+    const beforeState = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "timeout-before",
+    );
+    const deadlineConfig = JSON.parse(await readFile(statePath, "utf8"));
+    deadlineConfig.latency_guard = {
+      enabled: true,
+      first_progress_timeout_ms: 80,
+      first_progress_action: "retry_then_502",
+      total_timeout_ms: 120,
+    };
+    deadlineConfig.metrics = beforeState.metrics;
+    await writeFile(statePath, JSON.stringify(deadlineConfig, null, 2), "utf8");
+    const deadline = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=deadline`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "timeout-deadline", stream: true }),
+    });
+    assert.equal(deadline.status, 502);
+    assert.equal(deadline.headers.get("x-codex-retry-gateway-reason"), "upstream-total-timeout");
+    const deadlineState = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "timeout-deadline",
+    );
+    const deadlineRecord = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((record) => record.request_model === "timeout-deadline");
+    assert.equal(deadlineRecord.attempt_records.length, deadlineHits);
+    assert.equal(deadlineHits <= 2, true);
+
+    const afterConfig = JSON.parse(await readFile(statePath, "utf8"));
+    afterConfig.latency_guard = {
+      enabled: true,
+      first_progress_timeout_ms: 80,
+      first_progress_action: "return_502",
+      total_timeout_ms: 300,
+    };
+    afterConfig.metrics = deadlineState.metrics;
+    await writeFile(statePath, JSON.stringify(afterConfig, null, 2), "utf8");
+
+    const after = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=after`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "timeout-after", stream: true }),
+    });
+    assert.equal(after.status, 200);
+    await assert.rejects(after.text());
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests.some((record) => record.request_model === "timeout-after"),
+    );
+    const records = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const beforeRecord = records.find((record) => record.request_model === "timeout-before");
+    const afterRecord = records.find((record) => record.request_model === "timeout-after");
+    assert.equal(beforeRecord.final_action, "timeout_returned_502");
+    assert.equal(beforeRecord.attempt_records.length, 4);
+    assert.equal(beforeRecord.retry_summary.timeout, 3);
+    assert.equal(beforeRecord.attempt_records[0].timeout_response_control_lost, false);
+    assert.equal(afterRecord.final_action, "timeout_disconnected_after_forward");
+    assert.equal(afterRecord.attempt_records.length, 1);
+    assert.equal(afterRecord.attempt_records[0].timeout_response_control_lost, true);
+    assert.equal(afterRecord.attempt_records[0].upstream_stream_terminated, true);
+    assert.equal(state.metrics.recent_requests.some((record) => record.request_model === "timeout-after"), true);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy incremental SSE inspection preserves mixed framing and rejects oversized events", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-sse-framing-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const framed = Buffer.concat([
+    Buffer.from([0xef]),
+    Buffer.from([0xbb, 0xbf]),
+    Buffer.from('data: {"response":{"model":"mixed-model"}}\r\n\r'),
+    Buffer.from('\ndata: {"usage":{"output_tokens_details":{"reasoning_tokens":42}}}\n\r\n'),
+    Buffer.from('data: [DONE]\r\r'),
+  ]);
+  let releaseOversizedAfter = () => {};
+  const oversizedAfterRelease = new Promise((resolve) => {
+    releaseOversizedAfter = resolve;
+  });
+  const upstream = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    if (url.searchParams.get("case") === "oversized") {
+      res.end(Buffer.concat([Buffer.from("data: "), Buffer.alloc(1024 * 1024 + 1, 0x78)]));
+      return;
+    }
+    if (url.searchParams.get("case") === "oversized-after") {
+      res.socket?.setNoDelay(true);
+      res.flushHeaders();
+      res.write('data: {"type":"response.output_text.delta","delta":"hello"}\n\n');
+      const keepalive = setInterval(() => res.write(": keepalive\n\n"), 10);
+      res.once("close", () => clearInterval(keepalive));
+      void oversizedAfterRelease.then(() => {
+        clearInterval(keepalive);
+        res.end(Buffer.concat([Buffer.from("data: "), Buffer.alloc(1024 * 1024 + 1, 0x78)]));
+      });
+      return;
+    }
+    res.write(framed.subarray(0, 1));
+    res.write(framed.subarray(1, 19));
+    res.end(framed.subarray(19));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const accepted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=mixed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mixed-framing", stream: true }),
+    });
+    assert.deepEqual(Buffer.from(await accepted.arrayBuffer()), framed);
+    const acceptedState = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "mixed-framing",
+    );
+    assert.equal(acceptedState.metrics.recent_requests[0].upstream_model, "mixed-model");
+    assert.equal(acceptedState.metrics.recent_requests[0].reasoning_tokens, 42);
+
+    configured.mode = "intercept";
+    configured.metrics = acceptedState.metrics;
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    const oversized = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=oversized`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "oversized-event", stream: true }),
+    });
+    assert.equal(oversized.status, 502);
+    assert.equal(oversized.headers.get("x-codex-retry-gateway-reason"), "response-inspection-limit-exceeded");
+    assert.equal((await oversized.json()).error.code, "response_inspection_limit_exceeded");
+
+    const afterOversizedConfig = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "oversized-event",
+    );
+    afterOversizedConfig.mode = "passthrough";
+    await writeFile(statePath, JSON.stringify(afterOversizedConfig, null, 2), "utf8");
+    const oversizedAfter = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=oversized-after`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "oversized-after", stream: true }),
+    });
+    releaseOversizedAfter();
+    assert.equal(oversizedAfter.status, 200);
+    await assert.rejects(oversizedAfter.text());
+    await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.recent_requests[0]?.request_model === "oversized-after",
+    );
+    const afterRecord = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((record) => record.request_model === "oversized-after");
+    assert.equal(afterRecord.final_action, "response_inspection_limit_disconnected_after_forward");
+    assert.equal(afterRecord.attempt_records[0].timeout_response_control_lost, true);
+    assert.equal(afterRecord.attempt_records[0].upstream_stream_terminated, true);
+  } finally {
+    releaseOversizedAfter();
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy records reasoning token sources and reasoning text observations separately", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -3154,7 +3500,7 @@ test("proxy writes current request record facts with prompt and response text ou
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-observed",
     );
     const record = state.metrics.recent_requests[0];
-    assert.equal(record.schema_version, 5);
+    assert.equal(record.schema_version, 6);
     assert.equal(record.final_action, "passed");
     assert.equal(record.client_status, 200);
     assert.equal(record.upstream_status, 200);
@@ -3216,7 +3562,7 @@ test("proxy writes current request record facts with prompt and response text ou
       has_reasoning_item: true,
       final_action: "passed",
       failure_summary: null,
-      remaining_retries: null,
+      remaining_retries: 3,
     });
 
     const fullRecordText = JSON.stringify(fullRecord);
@@ -3396,6 +3742,12 @@ test("proxy status table renders configured columns and compact units", () => {
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
       mode: "recovery",
+      latency_guard: {
+        enabled: false,
+        first_progress_timeout_ms: 0,
+        first_progress_action: "return_502",
+        total_timeout_ms: 0,
+      },
       listen_host: "127.0.0.1",
       listen_port: 4610,
       profile_order: ["input"],
@@ -3521,6 +3873,12 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
+      latency_guard: {
+        enabled: false,
+        first_progress_timeout_ms: 0,
+        first_progress_action: "return_502",
+        total_timeout_ms: 0,
+      },
       listen_host: "127.0.0.1",
       listen_port: 4610,
       profile_order: ["input"],
@@ -3582,6 +3940,7 @@ test("proxy status error column stays single-line and expands with terminal widt
     provider_name: "codex",
     original_base_url: "https://proxy.example.com",
     proxy_base_url: "http://127.0.0.1:4610",
+    latency_guard: disabledLatencyGuard(),
     listen_host: "127.0.0.1",
     listen_port: 4610,
     profile_order: ["input"],
@@ -3645,6 +4004,7 @@ test("proxy status summary renders exact status counts", () => {
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
+      latency_guard: disabledLatencyGuard(),
       listen_host: "127.0.0.1",
       listen_port: 4610,
       profile_order: ["input"],
@@ -3892,14 +4252,14 @@ test("proxy runtime restarts protocol mismatches", async () => {
     assert.ok(runtime);
     assert.equal(runtime.healthy, true);
     assert.equal(runtime.started, true);
-    assert.equal(runtime.protocol, 4);
+    assert.equal(runtime.protocol, 5);
     assert.notEqual(runtime.pid, oldProxyPid);
     await waitForChildExit(oldProxy);
     oldProxy = null;
 
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
     const healthPayload = await health.json();
-    assert.equal(healthPayload.protocol, 4);
+    assert.equal(healthPayload.protocol, 5);
     assert.equal(healthPayload.pid, runtime.pid);
     const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_protocol_restart"/);
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
@@ -3912,7 +4272,7 @@ test("proxy runtime restarts protocol mismatches", async () => {
       },
       {
         server_protocol: 1,
-        client_protocol: 4,
+        client_protocol: 5,
         pid: oldProxyPid,
       },
     );
@@ -3948,7 +4308,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 4 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4022,12 +4382,12 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
 
     await writeFile(
       join(stateRoot, "proxy-requests.jsonl"),
-      `${JSON.stringify(proxyHistoryRecord({ schema_version: 4 }))}\n`,
+      `${JSON.stringify(proxyHistoryRecord({ schema_version: 5 }))}\n`,
       "utf8",
     );
     await assert.rejects(
       runProxyCommand(["--history", "7"], proxyOptions),
-      /proxy-requests\.jsonl.*schema_version: expected number 5/,
+      /proxy-requests\.jsonl.*schema_version: expected number 6/,
     );
   } finally {
     await closeServer(health);
@@ -4052,7 +4412,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 4 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4135,7 +4495,7 @@ test("proxy watch --history uses explicit history count", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 4 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4216,7 +4576,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
   const health = createServer((req, res) => {
     if (req.url === "/__codex_proxy/health") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 4 }));
+      res.end(JSON.stringify({ status: "ok", pid: 1234, version: "0.1.12", protocol: 5 }));
       return;
     }
     res.writeHead(404);
@@ -4355,6 +4715,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
           provider_name: "codex",
           original_base_url: "https://proxy.example.com",
           proxy_base_url: `http://127.0.0.1:${listenPort}`,
+          latency_guard: disabledLatencyGuard(),
           listen_host: "127.0.0.1",
           listen_port: listenPort,
           profile_order: ["input"],
@@ -4516,7 +4877,7 @@ test("proxy restore uses the current profile and preserves unrelated config edit
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
     assert.equal(healthPayload.version, packageJson.version);
-    assert.equal(healthPayload.protocol, 4);
+    assert.equal(healthPayload.protocol, 5);
     assert.equal(healthPayload.mode, "passthrough");
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
@@ -4763,6 +5124,8 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
         provider_name: "codex",
         original_base_url: "https://proxy.example.com",
         proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+        mode: "recovery",
+        latency_guard: disabledLatencyGuard(),
         listen_host: "127.0.0.1",
         listen_port: proxyPort,
         profile_order: [current],
@@ -4808,6 +5171,7 @@ async function writeProxyStateFixture(home, stateRoot, proxyPort, metrics = {}) 
         ...proxyStateFixture(metrics),
         codex_config_path: join(home, ".codex", "config.toml"),
         proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+        latency_guard: disabledLatencyGuard(),
         listen_port: proxyPort,
       },
       null,
@@ -4865,7 +5229,7 @@ function holdControl() {
 
 function proxyHistoryRecord(overrides) {
   return {
-    schema_version: 5,
+    schema_version: 6,
     id: overrides?.id ?? "history-record",
     started_at: overrides?.started_at ?? "2026-01-01T00:00:00.000Z",
     completed_at: "2026-01-01T00:00:00.000Z",
@@ -4918,6 +5282,8 @@ function proxyHistoryRecord(overrides) {
       total: 0,
       reasoning_guard: 0,
       upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
       transport: 0,
     },
     error: null,
@@ -4940,7 +5306,14 @@ function proxyGuardAction(overrides) {
 
 function assertCompleteProxyAttemptRecord(record, expected) {
   assert.deepEqual(Object.keys(record), [
+    "gateway_request_id",
+    "attempt_id",
     "attempt",
+    "attempt_dispatched",
+    "upstream_fetch_started_at",
+    "upstream_headers_at",
+    "first_progress_at",
+    "time_to_first_progress_ms",
     "started_at",
     "headers_at",
     "completed_at",
@@ -4970,9 +5343,25 @@ function assertCompleteProxyAttemptRecord(record, expected) {
     "has_tool_call",
     "has_reasoning_item",
     "final_action",
+    "policy_trigger",
+    "policy_action",
+    "retry_trigger",
+    "retry_after_ms",
+    "retry_delay_ms",
+    "retry_budget_used",
+    "retry_budget_remaining",
+    "timeout_phase",
+    "timeout_limit_ms",
+    "timeout_response_control_lost",
+    "upstream_stream_terminated",
+    "client_http_status",
     "failure_summary",
     "remaining_retries",
   ]);
+  assert.equal(typeof record.gateway_request_id, "string");
+  assert.equal(typeof record.attempt_id, "string");
+  assert.equal(record.attempt_dispatched, true);
+  assertValidIsoTimestamp(record.upstream_fetch_started_at);
   assertValidIsoTimestamp(record.started_at);
   assertValidIsoTimestamp(record.headers_at);
   assertValidIsoTimestamp(record.completed_at);
@@ -5013,6 +5402,7 @@ function proxyStateFixture(metrics = {}) {
     proxy_base_url: "http://127.0.0.1:4610",
     listen_host: "127.0.0.1",
     listen_port: 4610,
+    latency_guard: disabledLatencyGuard(),
     profile_order: ["input"],
     backup_path: "/tmp/backup.toml",
     metrics: {
@@ -5025,6 +5415,15 @@ function proxyStateFixture(metrics = {}) {
       recent_requests: [],
       ...metrics,
     },
+  };
+}
+
+function disabledLatencyGuard() {
+  return {
+    enabled: false,
+    first_progress_timeout_ms: 0,
+    first_progress_action: "return_502",
+    total_timeout_ms: 0,
   };
 }
 
@@ -5103,7 +5502,7 @@ test("proxy watch hidden history omits the section and reports footer state", ()
     new Date("2026-01-01T00:00:00.000Z"),
     proxyStateFixture({ recent_requests: [proxyHistoryRecord()] }),
     ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.2.43", protocol: 4 },
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.2.43", protocol: 5 },
     {
       codexConfigPath: "/home/test/.codex/config.toml",
       listenHost: "127.0.0.1",
