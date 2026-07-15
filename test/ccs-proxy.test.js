@@ -23,7 +23,6 @@ import {
   runProxyCommand,
   setProxyMode,
   shutdownProxyRuntime,
-  stopProxy,
 } from "../dist/commands/ccs-proxy.js";
 import { captureStdout, execNodeScript, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
@@ -560,7 +559,7 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.active_requests[0].attempts, 1);
     assert.equal(state.metrics.active_requests[0].response_bytes, Buffer.byteLength("data: one\n\n"));
     assert.equal(state.metrics.recent_requests[0].path, "/responses");
-    const activeOutput = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    const activeOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(activeOutput, /\b11B\b/);
 
     finishStream();
@@ -606,12 +605,13 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /runtime: ~\/\.config\/codex-tools\/proxy-runtime\.log/);
     assert.match(output, /config: ~\/\.codex\/config\.toml/);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(output, /status total=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
+    assert.match(output, /status events=10 active=0 200=8 404=1 503=1 upstreams=input=10/);
+    assert.match(output, /policy retries=0 capacity=0 429=0 reasoning=0 timeout=0 transport=0/);
     assert.match(output, /reasoning total=0 max=-/);
     assert.doesNotMatch(output, /0=0|516=0|1034=0|1552=0|other=0/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error\n\s+no active requests/);
-    assert.match(output, /history\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
     assert.match(output, /-\s+-\/503\s+\d+ms\s+\d+B\s+down/);
     assert.match(output, /-\s+-\/404\s+\d+ms\s+\d+B\s+missing/);
     assert.doesNotMatch(output, /\bmethod\b/);
@@ -947,10 +947,10 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     await delay(100);
     assert.equal(activeOutputResolved, false);
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
+    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
     assert.match(output, /chat-stre…/);
     assert.match(output, /\s-\s+-\/200/);
     assert.match(output, /responses…/);
@@ -1076,7 +1076,7 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     assert.equal(state.metrics.recent_requests[0].upstream, "ciii");
     assert.equal(state.metrics.recent_requests[0].attempts, 1);
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /upstreams=ciii=5/);
   } finally {
     await shutdownProxyRuntime({
@@ -1366,7 +1366,7 @@ test("proxy records upstream http failures and client request attempts separatel
 
     const output = await withStdoutProperties(
       { isTTY: false, columns: 180, rows: 40 },
-      () => captureConsole(() => runProxyCommand(["--once", "--history", "2"], proxyOptions)),
+      () => captureConsole(() => runProxyCommand(["--history", "2"], proxyOptions)),
     );
     assert.match(output, /\[client:2\] upstream_http_502: upstream returned HTTP 502/);
 
@@ -1708,7 +1708,7 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
   }
 });
 
-test("proxy returns upstream_fetch_failed after repeated transport failure", async () => {
+test("proxy passthrough returns upstream_fetch_failed without transport retry", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -1720,6 +1720,10 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
     const stateRoot = join(home, ".config", "codex-tools");
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
     await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
 
     const proxyOptions = {
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1747,24 +1751,22 @@ test("proxy returns upstream_fetch_failed after repeated transport failure", asy
     );
     const record = state.metrics.recent_requests[0];
     assert.equal(record.status, 502);
-    assert.equal(record.attempts, 2);
+    assert.equal(record.attempts, 1);
     assert.match(record.error, /upstream_fetch_failed: fetch failed/);
     assert.deepEqual(record.retry_summary, {
-      total: 1,
+      total: 0,
       reasoning_guard: 0,
       upstream_capacity: 0,
       http_429: 0,
       timeout: 0,
-      transport: 1,
+      transport: 0,
     });
-    assert.deepEqual(record.guard_actions.map((action) => action.action), ["upstream_error", "upstream_error"]);
-    assert.deepEqual(record.guard_actions.map((action) => action.status), [null, null]);
+    assert.deepEqual(record.guard_actions, []);
     const output = await withStdoutProperties(
       { isTTY: false, columns: 160, rows: 40 },
-      () => captureConsole(() => runProxyCommand(["--once", "--history", "1"], proxyOptions)),
+      () => captureConsole(() => runProxyCommand(["--history", "1"], proxyOptions)),
     );
-    assert.match(output, /\[err:502 err:502\] upstream_fetch_failed: fetch failed/);
-    await waitForLogIncludes(join(stateRoot, "proxy.log"), /"action":"upstream_error".*"upstream_fetch_failed: fetch failed"/);
+    assert.match(output, /upstream_fetch_failed: fetch failed/);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -2203,7 +2205,7 @@ test("proxy recovers guarded Responses streams with continuation", async () => {
       /"path":"\/v1\/responses".*"action":"continuation_recovery".*"attempt":1.*"reasoning_tokens":1552/,
     );
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /reasoning .*recovery=1 recovered=1 exhausted=0/);
     assert.match(output, /\[rec:1552\]/);
   } finally {
@@ -2329,7 +2331,7 @@ test("proxy mode intercept disables continuation recovery", async () => {
   }
 });
 
-test("proxy stop switches to passthrough and forwards the original request", async () => {
+test("proxy passthrough forwards one untouched upstream response without policy", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -2341,7 +2343,11 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     void (async () => {
       requestBodies.push(JSON.parse(await readServerRequestBody(req)));
       hits += 1;
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      const passthroughPolicyEvidence = new URL(req.url ?? "/", "http://localhost").searchParams.get("case") === "passthrough";
+      res.writeHead(passthroughPolicyEvidence ? 429 : 200, {
+        "content-type": "application/json; charset=utf-8",
+        "x-upstream-byte-contract": "unchanged",
+      });
       const payload = req.url?.includes("case=passthrough-text")
         ? {
           response: {
@@ -2351,7 +2357,10 @@ test("proxy stop switches to passthrough and forwards the original request", asy
           },
           usage: { input_tokens: 20, output_tokens: 5, input_tokens_details: { cached_tokens: 4 } },
         }
-        : reasoningJson("passthrough-guarded", 1552);
+        : {
+          ...reasoningJson("passthrough-guarded", 1552),
+          error: { message: "Selected model is at capacity. Please try a different model." },
+        };
       payload.response.service_tier = "priority";
       payload.usage.input_tokens = 120;
       payload.usage.output_tokens = 30;
@@ -2368,6 +2377,15 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     const stateRoot = join(home, ".config", "codex-tools");
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
     await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.latency_guard = {
+      enabled: true,
+      first_progress_timeout_ms: 1,
+      first_progress_action: "retry_then_502",
+      total_timeout_ms: 1,
+    };
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
     await listenServer(upstream, upstreamPort);
 
     const proxyOptions = {
@@ -2376,9 +2394,30 @@ test("proxy stop switches to passthrough and forwards the original request", asy
       listenPort: proxyPort,
       stateRoot,
     };
-    const modeResult = await stopProxy(proxyOptions);
-    assert.equal(modeResult.mode, "passthrough");
-    assert.equal(modeResult.runtime?.healthy, true);
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["mode", "passthrough"], proxyOptions)));
+    assert.match(preview, /proxy mode recovery -> passthrough/);
+    assert.match(preview, /no changes are written unless you type yes/);
+    assert.equal((await readProxyState(stateRoot)).mode, "recovery");
+
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+    let answered = false;
+    try {
+      await captureStdout(() => runProxyCommand(["mode", "passthrough"], proxyOptions), {
+        isTTY: true,
+        onWrite(output) {
+          if (!answered && output.includes("Apply changes?")) {
+            answered = true;
+            process.stdin.emit("data", Buffer.from("yes\n"));
+          }
+        },
+      });
+    } finally {
+      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
+      else delete process.stdin.isTTY;
+    }
+    assert.equal(answered, true);
+    assert.equal((await readProxyState(stateRoot)).mode, "passthrough");
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
     const healthPayload = await health.json();
     assert.equal(healthPayload.mode, "passthrough");
@@ -2389,7 +2428,8 @@ test("proxy stop switches to passthrough and forwards the original request", asy
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("x-upstream-byte-contract"), "unchanged");
     const payload = await response.json();
     assert.equal(payload.response.model, "passthrough-guarded");
     assert.equal(payload.usage.output_tokens_details.reasoning_tokens, 1552);
@@ -2402,14 +2442,14 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     assert.equal(hits, 1);
     assert.deepEqual(requestBodies, [body]);
     assert.equal(record.mode, "passthrough");
-    assert.equal(record.status, 200);
+    assert.equal(record.status, 429);
     assert.equal(record.attempts, 1);
     assert.equal(typeof record.client_ttfb_ms, "number");
     assert.equal(record.client_ttfb_ms >= 0, true);
     assert.equal(record.client_ttfb_ms <= record.latency_ms, true);
     assert.deepEqual(record.guard_actions, []);
-    assert.equal(record.reasoning_tokens, 1552);
-    assert.equal(record.reasoning_tokens_source, "/usage/output_tokens_details/reasoning_tokens");
+    assert.equal(record.reasoning_tokens, null);
+    assert.equal(record.reasoning_tokens_source, null);
     const fullRecord = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
       .trim()
       .split("\n")
@@ -2419,13 +2459,13 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.attempt), [1]);
     assert.deepEqual(record.usage_attempts, [{
       attempt: 1,
-      input_tokens: 120,
-      output_tokens: 30,
-      cached_input_tokens: 20,
+      input_tokens: null,
+      output_tokens: null,
+      cached_input_tokens: null,
       pricing_model: "passthrough-guarded",
-      pricing_model_source: "upstream_model",
-      pricing_tier: "priority",
-      pricing_tier_source: "response",
+      pricing_model_source: "request_model",
+      pricing_tier: null,
+      pricing_tier_source: null,
     }]);
     assert.deepEqual(record.usage_attempts, fullRecord.attempt_records.map((attempt) => ({
       attempt: attempt.attempt,
@@ -2451,8 +2491,8 @@ test("proxy stop switches to passthrough and forwards the original request", asy
     );
     const textRecord = textState.metrics.recent_requests[0];
     assert.equal(textRecord.reasoning_tokens, null);
-    assert.equal(textRecord.reasoning_text_observed, true);
-    assert.equal(textRecord.reasoning_text_source, "/response/output/0/content/0/reasoning");
+    assert.equal(textRecord.reasoning_text_observed, false);
+    assert.equal(textRecord.reasoning_text_source, null);
     assert.deepEqual(textRecord.guard_actions, []);
   } finally {
     await shutdownProxyRuntime({
@@ -2578,7 +2618,7 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
       });
     });
 
-    const output = await captureConsole(() => runProxyCommand(["--once"], proxyOptions));
+    const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /reasoning .*recovery=3 recovered=0 exhausted=1/);
     assert.match(output, /\[rec:1552 rec:1552 rec:1552 block:1552\] reasoning_guard_triggered reasoning_tokens=1552/);
   } finally {
@@ -3021,7 +3061,7 @@ test("proxy returns reasoning_guard_triggered after exhausted SSE guard retries"
   }
 });
 
-test("proxy latency guard returns 502 before forwarding and disconnects after forwarding", async () => {
+test("proxy latency guard returns 502 before forwarding", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-latency-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -3044,7 +3084,7 @@ test("proxy latency guard returns 502 before forwarding and disconnects after fo
     await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
     const statePath = join(stateRoot, "proxy.json");
     const configured = JSON.parse(await readFile(statePath, "utf8"));
-    configured.mode = "passthrough";
+    configured.mode = "intercept";
     configured.latency_guard = {
       enabled: true,
       first_progress_timeout_ms: 80,
@@ -3091,7 +3131,7 @@ test("proxy latency guard returns 502 before forwarding and disconnects after fo
     });
     assert.equal(deadline.status, 502);
     assert.equal(deadline.headers.get("x-codex-retry-gateway-reason"), "upstream-total-timeout");
-    const deadlineState = await waitForState(
+    await waitForState(
       stateRoot,
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "timeout-deadline",
     );
@@ -3103,43 +3143,15 @@ test("proxy latency guard returns 502 before forwarding and disconnects after fo
     assert.equal(deadlineRecord.attempt_records.length, deadlineHits);
     assert.equal(deadlineHits <= 2, true);
 
-    const afterConfig = JSON.parse(await readFile(statePath, "utf8"));
-    afterConfig.latency_guard = {
-      enabled: true,
-      first_progress_timeout_ms: 80,
-      first_progress_action: "return_502",
-      total_timeout_ms: 300,
-    };
-    afterConfig.metrics = deadlineState.metrics;
-    await writeFile(statePath, JSON.stringify(afterConfig, null, 2), "utf8");
-
-    const after = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=after`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "timeout-after", stream: true }),
-    });
-    assert.equal(after.status, 200);
-    await assert.rejects(after.text());
-
-    const state = await waitForState(
-      stateRoot,
-      (candidate) => candidate.metrics.recent_requests.some((record) => record.request_model === "timeout-after"),
-    );
     const records = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
     const beforeRecord = records.find((record) => record.request_model === "timeout-before");
-    const afterRecord = records.find((record) => record.request_model === "timeout-after");
     assert.equal(beforeRecord.final_action, "timeout_returned_502");
     assert.equal(beforeRecord.attempt_records.length, 4);
     assert.equal(beforeRecord.retry_summary.timeout, 3);
     assert.equal(beforeRecord.attempt_records[0].timeout_response_control_lost, false);
-    assert.equal(afterRecord.final_action, "timeout_disconnected_after_forward");
-    assert.equal(afterRecord.attempt_records.length, 1);
-    assert.equal(afterRecord.attempt_records[0].timeout_response_control_lost, true);
-    assert.equal(afterRecord.attempt_records[0].upstream_stream_terminated, true);
-    assert.equal(state.metrics.recent_requests.some((record) => record.request_model === "timeout-after"), true);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -3226,8 +3238,8 @@ test("proxy incremental SSE inspection preserves mixed framing and rejects overs
       stateRoot,
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "mixed-framing",
     );
-    assert.equal(acceptedState.metrics.recent_requests[0].upstream_model, "mixed-model");
-    assert.equal(acceptedState.metrics.recent_requests[0].reasoning_tokens, 42);
+    assert.equal(acceptedState.metrics.recent_requests[0].upstream_model, null);
+    assert.equal(acceptedState.metrics.recent_requests[0].reasoning_tokens, null);
 
     configured.mode = "intercept";
     configured.metrics = acceptedState.metrics;
@@ -3254,7 +3266,9 @@ test("proxy incremental SSE inspection preserves mixed framing and rejects overs
     });
     releaseOversizedAfter();
     assert.equal(oversizedAfter.status, 200);
-    await assert.rejects(oversizedAfter.text());
+    const oversizedAfterBody = await oversizedAfter.text();
+    assert.match(oversizedAfterBody, /^data: \{"type":"response\.output_text\.delta"/);
+    assert.equal(oversizedAfterBody.endsWith("x".repeat(1024 * 1024 + 1)), true);
     await waitForState(
       stateRoot,
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "oversized-after",
@@ -3264,9 +3278,16 @@ test("proxy incremental SSE inspection preserves mixed framing and rejects overs
       .split("\n")
       .map((line) => JSON.parse(line))
       .find((record) => record.request_model === "oversized-after");
-    assert.equal(afterRecord.final_action, "response_inspection_limit_disconnected_after_forward");
-    assert.equal(afterRecord.attempt_records[0].timeout_response_control_lost, true);
-    assert.equal(afterRecord.attempt_records[0].upstream_stream_terminated, true);
+    assert.equal(afterRecord.final_action, "passed");
+    assert.equal(afterRecord.attempts, 1);
+    assert.deepEqual(afterRecord.retry_summary, {
+      total: 0,
+      reasoning_guard: 0,
+      upstream_capacity: 0,
+      http_429: 0,
+      timeout: 0,
+      transport: 0,
+    });
   } finally {
     releaseOversizedAfter();
     await shutdownProxyRuntime({
@@ -3400,7 +3421,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     assert.equal(glmText.reasoning_text_observed, true);
     assert.equal(glmText.reasoning_text_source, "sse.data/choices/0/delta/reasoning_content");
 
-    const output = await captureConsole(() => runProxyCommand(["--once", "--history", "4"], proxyOptions));
+    const output = await captureConsole(() => runProxyCommand(["--history", "4"], proxyOptions));
     assert.match(output, /glm-5\.2\s+text\/200/);
     assert.match(output, /text\/200/);
   } finally {
@@ -3828,10 +3849,10 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
+  assert.match(lines, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+42\/200\s+0ms\s+2\.00K/);
+  assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+42\/200\s+0ms\s+2\.00K/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\/-\s+0ms\s+-/);
   assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+42\/200\s+56ms\s+32\.0K/);
   assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\/502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
@@ -3863,9 +3884,17 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
         reasoning_tokens_source: null,
         usage_attempts: [],
         reasoning_text_observed: false,
-      reasoning_text_source: null,
-      guard_actions: [],
-      error: null,
+        reasoning_text_source: null,
+        guard_actions: [],
+        retry_summary: {
+          total: 0,
+          reasoning_guard: 0,
+          upstream_capacity: 0,
+          http_429: 0,
+          timeout: 0,
+          transport: 0,
+        },
+        error: null,
     });
     const state = {
       installed_at: "2026-01-01T00:00:00.000Z",
@@ -3932,7 +3961,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   assert.match(output, /\u001b\[2m-\u001b\[0m/);
 });
 
-test("proxy status error column stays single-line and expands with terminal width", () => {
+test("proxy status result column stays single-line and expands with terminal width", () => {
   const stateRoot = "/tmp/codex-tools";
   const state = {
     installed_at: "2026-01-01T00:00:00.000Z",
@@ -4004,7 +4033,12 @@ test("proxy status summary renders exact status counts", () => {
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
-      latency_guard: disabledLatencyGuard(),
+      latency_guard: {
+        enabled: true,
+        first_progress_timeout_ms: 30_000,
+        first_progress_action: "retry_then_502",
+        total_timeout_ms: 600_000,
+      },
       listen_host: "127.0.0.1",
       listen_port: 4610,
       profile_order: ["input"],
@@ -4040,7 +4074,9 @@ test("proxy status summary renders exact status counts", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /status total=1 active=0 200=1 upstreams=input=1/);
+  assert.match(lines, /status events=1 active=0 200=1 upstreams=input=1/);
+  assert.match(lines, /deadline: 30\.0s\/10\.0m retry_then_502/);
+  assert.match(lines, /policy retries=0 capacity=0 429=0 reasoning=0 timeout=0 transport=0/);
   assert.match(lines, /reasoning total=0 max=-/);
 });
 
@@ -4060,6 +4096,14 @@ test("proxy status and reasoning summaries use event counts", () => {
             proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 516 }),
             proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 516 }),
           ],
+          retry_summary: {
+            total: 99,
+            reasoning_guard: 2,
+            upstream_capacity: 1,
+            http_429: 0,
+            timeout: 0,
+            transport: 0,
+          },
         }),
         proxyHistoryRecord({
           id: "guard-exhausted",
@@ -4073,6 +4117,14 @@ test("proxy status and reasoning summaries use event counts", () => {
             proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 1034 }),
             proxyGuardAction({ action: "return_status_502", attempt: 4, status: 502, reasoning_tokens: 1034 }),
           ],
+          retry_summary: {
+            total: 99,
+            reasoning_guard: 0,
+            upstream_capacity: 0,
+            http_429: 3,
+            timeout: 4,
+            transport: 5,
+          },
         }),
         proxyHistoryRecord({
           id: "text-only",
@@ -4089,10 +4141,12 @@ test("proxy status and reasoning summaries use event counts", () => {
       listenHost: "127.0.0.1",
       listenPort: 4610,
       stateRoot,
+      historyCount: 1,
     },
   ).join("\n");
 
-  assert.match(lines, /status total=9 active=0 200=8 502=1 upstreams=input=9/);
+  assert.match(lines, /status events=9 active=0 200=8 502=1 upstreams=input=9/);
+  assert.match(lines, /policy retries=15 capacity=1 429=3 reasoning=2 timeout=4 transport=5/);
   assert.match(lines, /reasoning total=8 max=1034/);
   assert.match(lines, /516=3/);
   assert.match(lines, /1034=4/);
@@ -4130,7 +4184,7 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(nonTty), 5);
 
   const ttyTall = render({}, { isTTY: true, columns: 140, rows: 24 });
-  assert.equal(countHistoryRows(ttyTall), 9);
+  assert.equal(countHistoryRows(ttyTall), 8);
 
   const ttyTiny = render({}, { isTTY: true, columns: 140, rows: 8 });
   assert.equal(countHistoryRows(ttyTiny), 0);
@@ -4146,13 +4200,15 @@ test("proxy rejects invalid --history values", async () => {
     listenPort: 4610,
     stateRoot: "/tmp/codex-tools",
   };
+  const help = await captureConsole(() => runProxyCommand(["help"], options));
+  assert.match(help, /ccs proxy mode passthrough/);
+  assert.doesNotMatch(help, /ccs proxy --once|ccs proxy stop/);
   for (const args of [
     ["--history"],
     ["--history", "abc"],
     ["--history", "1.5"],
     ["--history", "0"],
     ["--history", "-1"],
-    ["--once", "--history", "0"],
     ["watch", "--history", "-1"],
   ]) {
     await assert.rejects(
@@ -4174,17 +4230,11 @@ test("proxy rejects invalid --history values", async () => {
       /unknown argument/,
     );
   }
-  await assert.rejects(
-    () => runProxyCommand(["mode", "passthrough"], options),
-    /ccs proxy mode requires intercept or recovery/,
-  );
+  await assert.rejects(() => runProxyCommand(["--once"], options), /unknown argument/);
+  await assert.rejects(() => runProxyCommand(["stop"], options), /unknown argument/);
   await assert.rejects(
     () => runProxyCommand(["install", "--yes"], options),
     /ccs proxy install no longer accepts -y\/--yes/,
-  );
-  await assert.rejects(
-    () => runProxyCommand(["stop", "--yes"], options),
-    /ccs proxy stop no longer accepts -y\/--yes/,
   );
 });
 
@@ -4363,7 +4413,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
     assert.match(defaultOutput, /snapshot-4/);
     assert.doesNotMatch(defaultOutput, /\/jsonl-/);
 
-    const onceOutput = await captureConsole(() => runProxyCommand(["--once", "--history", "3"], proxyOptions));
+    const onceOutput = await captureConsole(() => runProxyCommand(["--history", "3"], proxyOptions));
     assert.equal(countHistoryRows(onceOutput), 3);
     assert.match(onceOutput, /snapshot-2/);
     assert.doesNotMatch(onceOutput, /snapshot-3/);
@@ -4467,7 +4517,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /ccs proxy/);
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
-    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
+    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
     assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
     assert.match(output, /view: overview\s+history:on\s+keys: v view\s+t history\s+q\/Ctrl-C exit/);
     const frame = output.split("\u001b[H")[1]?.split("\u001b[J")[0] ?? "";
@@ -5468,9 +5518,9 @@ async function closeServer(server) {
 
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
-  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "reas./code", "lat.", "size", "error"]);
-  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "error"]);
-  assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "error"]);
+  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "reas./code", "dur.", "size", "result"]);
+  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "result"]);
+  assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "result"]);
 });
 
 test("proxy view argument parsing accepts one initial view with optional history", () => {

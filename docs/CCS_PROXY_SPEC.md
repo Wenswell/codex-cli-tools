@@ -63,9 +63,9 @@ ccs proxy restore
 ccs proxy install
 ```
 
-Confirm both write prompts. `restore` stops the runtime and removes `proxy.json` only after its direct config write has been verified. `ccs proxy stop` is not equivalent: it keeps the local URL and only switches the running proxy to `passthrough`.
+Confirm both write prompts. `restore` stops the runtime and removes `proxy.json` only after its direct config write has been verified. `ccs proxy mode passthrough` keeps the local URL while disabling intervention.
 
-If `restore` reports `proxy state file was not found`, the state-based restore operation cannot run. Do not repeat `stop; restore`; inspect the current provider URL and use a known profile or backup to return it to a direct URL before running `ccs proxy install`.
+If `restore` reports `proxy state file was not found`, inspect the current provider URL and use a known profile or backup to return it to a direct URL before running `ccs proxy install`.
 
 ### Clean reinstall
 
@@ -176,7 +176,7 @@ Request records include:
 
 `retry_summary` contains `total`, `reasoning_guard`, `upstream_capacity`, `http_429`, `timeout`, and `transport` counts derived from completed attempts.
 
-Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `pricing_model`, `pricing_model_source`, `pricing_tier`, and `pricing_tier_source`. Every detailed attempt projects exactly once, including attempts without usage and passthrough responses that expose usage. Pricing model uses upstream model first and request model second. Pricing tier uses response `service_tier`, request `service_tier`, then the top-level config value captured when the request starts.
+Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `pricing_model`, `pricing_model_source`, `pricing_tier`, and `pricing_tier_source`. Every detailed attempt projects exactly once, including attempts without usage. Passthrough entries keep response-derived fields empty because the body is not inspected. Pricing model uses upstream model first and request model second. Pricing tier uses response `service_tier`, request `service_tier`, then the top-level config value captured when the request starts.
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
 
@@ -192,7 +192,7 @@ The proxy owns upstream authentication in proxy mode. It removes incoming `Autho
 
 `ccs proxy install` requires absent proxy state and an explicit `model_provider` with an existing `base_url`. Its preview captures the source config, provider, current URL, proxy URL, and backup path. Apply rejects source changes after preview, backs up the config, starts and health-checks the proxy in `passthrough` mode, changes only the routed provider's `base_url`, and verifies both the exact target content and the parsed local routing value. If apply fails after config writing starts, it restores the source only when the file still contains the planned target, stops the runtime, removes proxy state, and keeps the backup. Intervention begins only after an explicit `ccs proxy mode recovery` or `ccs proxy mode intercept` command.
 
-`ccs proxy mode recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `ccs proxy mode intercept` disables continuation recovery and uses ordinary guard retry. `ccs proxy stop` switches to `passthrough` and keeps the proxy URL active. Passthrough disables reasoning guard, continuation recovery, and recovery-owned body rewriting only; Capacity, HTTP 429, transport, and enabled latency policies remain independent of mode.
+`ccs proxy mode passthrough|recovery|intercept` previews the current and target values and requires exact `yes`. `passthrough` performs one upstream fetch and skips proxy policy, retries, waits, deadlines, response inspection, and rewriting. `recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `intercept` disables continuation recovery and uses ordinary guard retry.
 
 `ccs proxy restore` resolves `profiles.current` while building its preview and targets that profile's `baseURL`. Apply rejects config or proxy-state changes after preview, backs up the current config, changes and verifies only `state.provider_name`'s `base_url`, then stops the proxy and removes state. Install and restore backups remain available. Every other TOML field, `profiles.json`, and authentication data remain unchanged.
 
@@ -202,13 +202,13 @@ Capacity is a narrow response-body fact: an upstream error body contains `Select
 
 Capacity, HTTP 429, reasoning, and first-progress retries consume one shared three-retry budget. A retry is charged only when its next fetch is dispatched. Transport retry is independent. Retryable responses parse `Retry-After` as seconds or an HTTP date: values through 60 seconds are used, values above the limit do not wait, and missing or invalid values use bounded jitter. Waiting is abortable by the client and cannot cross the absolute total deadline. Capacity exhaustion passes through the final upstream response; reasoning and `retry_then_502` timeout exhaustion return local `502`.
 
-Transport-level `TypeError: fetch failed` is retried once for the same upstream in every mode. A repeated transport failure returns local status `502` with error type `upstream_error`, code `upstream_fetch_failed`, and a request `guard_actions` entry with action `upstream_error`.
+Transport-level `TypeError: fetch failed` is retried once in `recovery` and `intercept`. `passthrough` does not retry. A terminal transport failure returns local status `502` with error type `upstream_error` and code `upstream_fetch_failed`; intervention modes also record an `upstream_error` guard action.
 
 `attempts` counts upstream fetch attempts inside one proxy-handled client request. It includes the initial fetch, the single transport retry when used, upstream capacity retries, and reasoning-guard retry fetches. `retry_summary` counts these proxy-internal retries. `client_request_attempt` counts repeated Codex client requests with the same turn id and request body hash inside the compact state window.
 
 ## Reasoning guard
 
-The reasoning guard is active in `recovery` and `intercept` modes for supported JSON and SSE response payloads. `passthrough` skips reasoning decisions and recovery rewriting while the other policy families remain active.
+Capacity, HTTP 429, reasoning, transport retry, latency, and inspection policies are active only in `recovery` and `intercept`. `passthrough` records status, duration, and forwarded bytes without inspecting response content.
 
 - `reasoning_equals`: `516`, `1034`, `1552`.
 - `guard_retry_attempts`: `3`.
@@ -235,11 +235,12 @@ Before client headers are committed, total timeout, first-progress timeout, or t
 
 ## Status view
 
-`ccs proxy` and `ccs proxy --once` print a full snapshot:
+`ccs proxy` prints a full snapshot:
 
-- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, mode, pid, server version, protocol, proxy URL, and trailing refresh interval.
+- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, mode, `deadline: off` or compact first/total values plus the full action, pid, server version, protocol, proxy URL, and trailing refresh interval.
 - Path lines: state, requests, events, runtime, and config paths.
-- Summary line: `status total=... active=... 200=... 404=... 502=... upstreams=...`.
+- Summary line: `status events=... active=... 200=... 404=... 502=... upstreams=...`.
+- Policy line: `policy retries=... capacity=... 429=... reasoning=... timeout=... transport=...`.
 - Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups. When continuation recovery activity exists, the line also renders `recovery=... recovered=... exhausted=...`.
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
@@ -250,7 +251,7 @@ History row count follows these rules:
 - TTY output computes the count from `process.stdout.rows` after title, path, summary, active, history header, and command footer lines are reserved.
 - Tiny terminals can render zero history rows.
 - Non-TTY output renders 5 history rows for deterministic piped output.
-- `--history N` overrides adaptive sizing for `ccs proxy`, `ccs proxy --once`, and `ccs proxy watch`.
+- `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch`.
 - `N` is a positive integer.
 - Default rendering reads completed history from `proxy.json.metrics.recent_requests`.
 - Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
@@ -258,18 +259,18 @@ History row count follows these rules:
 
 `ccs proxy watch` renders the same live status in the terminal alternate screen, repaints each frame from the home cursor position, clears rewritten lines and the remaining screen tail, hides the cursor while active, and restores the main screen on exit. The watch view keeps the proxy URL on the title line, omits path lines, and repaints immediately on terminal resize. Its footer is pinned to the last terminal row and shows the current view, `history:on|off`, and `v view  t history  q/Ctrl-C exit`. Short frames are padded before the footer; explicit overflowing output is preserved and scrolls naturally. `--view overview|tokens|cost` selects the initial view. History starts visible. In a TTY, `v` cycles `overview -> tokens -> cost -> overview`, `t` hides or shows the complete history section, and `q` or `Ctrl-C` exits cleanly. Hidden history is not rendered, and explicit JSONL tail reads are skipped.
 
-`status total` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. Upstream hit counters use the same event basis and count the upstream attached to each counted guard action or final response when present. Status counters render as exact HTTP codes in ascending numeric order and omit codes with zero count. Failed request records such as client aborts still keep their exact status code values. Unsupported paths are event-log facts and do not contribute status counters.
+`status events` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. The policy line sums the five retry categories from every `retry_summary` in the complete recent-request window and is independent of rendered rows and `--history`. Status counters render in ascending numeric order and omit zero counts.
 
 Continuation recovery counters use the same `proxy.json.metrics.recent_requests` window and the same `guard_actions` fact source. `recovery` counts `continuation_recovery` actions. `recovered` counts requests with at least one continuation recovery action that finish with an accepted status below `400`. `exhausted` counts requests with at least one continuation recovery action and a final `return_status_502` guard action.
 
 `reasoning total` is the sum of explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count and `recovery` count render yellow. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
-Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final error column takes remaining width and is left-aligned. `overview` is the default. The three visible column sets are:
+Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. The three visible column sets are:
 
 ```text
-overview  session time up model reas./code lat. size error
-tokens    session time up model input output cached error
-cost      session time up model input$ output$ cached$ total$ error
+overview  session time up model reas./code dur. size result
+tokens    session time up model input output cached result
+cost      session time up model input$ output$ cached$ total$ result
 ```
 
 The model column is 10 cells wide and describes the current or final attempt. Missing request and upstream models render dim `-`. A request-only or upstream-only model renders normally. Equal raw values render the upstream model green; different raw values render the actual upstream model red. Comparison precedes `gpt-` to `o` abbreviation and truncation, so raw `gpt-5.6-sol` and `o5.6-sol` display the same abbreviated text in red.
@@ -278,7 +279,7 @@ Token and cost columns aggregate all `usage_attempts`; the model column remains 
 
 Cost lookup reads the local model price cache once per frame, applies `profiles.json` overrides, and performs no network refresh. Each attempt uses its stored exact pricing model and normalized tier: `default|standard` selects standard pricing and `fast|priority` selects fast pricing. Input cost subtracts cached input before applying input price; cached and output components use their own prices. Components sum unrounded attempt values and format once. Missing usage, unsupported tiers, or missing prices render the affected component and total as `-`. Cached input above input tokens renders input and total as `invalid`. USD values render as `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.
 
-Active overview rows show elapsed time for `lat.`, known request bytes for `size`, and observed attempt facts. `session` uses a stable small bright palette. `reas./code` renders `reasoning_tokens/status`, `text/status`, or `-/status`. History overview rows show completed response bytes. Proxy-internal attempts greater than one append a yellow count to the upstream name. The `error` column retains client and guard prefixes plus full stored error details, truncated only for the current terminal width. Time, latency, and size retain compact three-significant-digit units.
+Active overview rows show elapsed time for `dur.`, known response bytes for `size`, and observed attempt facts. History `dur.` is total request time. The `result` column retains client and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
 
 ## Implementation notes
 
@@ -386,21 +387,21 @@ Reasoning text observation paths:
 The status command provides three request-table views:
 
 ```text
-overview  session time up model reas./code lat. size error
-tokens    session time up model input output cached error
-cost      session time up model input$ output$ cached$ total$ error
+overview  session time up model reas./code dur. size result
+tokens    session time up model input output cached result
+cost      session time up model input$ output$ cached$ total$ result
 ```
 
 - `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.
 - `reas./code`: explicit `reasoning_tokens`, `text` for observed reasoning text with absent token count, and HTTP status code. Missing reasoning metadata renders dim `-`; HTTP status keeps the existing status color.
-- `lat.`: elapsed time for active rows and completed latency for history rows.
+- `dur.`: elapsed time for active rows and completed duration for history rows.
 - Token columns require the field from every attempt and sum all attempt values.
 - Cost columns calculate each attempt with its own model and tier, sum full-precision values, and format once.
 - Active rows follow the shared `model` rendering rules; SSE streams update active rows after the first model frame is observed.
 - Retry attempts clear active-row `reas./code` and upstream model before the new attempt observes response metadata.
 - History rows show status-normalized model fields.
 - `up`: upstream name plus yellow attempt count when attempts are greater than one.
-- `error`: optional bracketed local-action prefix from `guard_actions`, then request error text, left-aligned in the final remaining-width column and rendered as one current-width line.
+- `result`: optional bracketed local-action prefix from `guard_actions`, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
 
@@ -418,7 +419,7 @@ cost      session time up model input$ output$ cached$ total$ error
 - Streaming Responses guard matches can recover through continuation when encrypted reasoning items are available.
 - Continuation recovery uses the guard retry budget and returns `502 reasoning_guard_triggered` when the budget is exhausted.
 - `intercept` mode disables continuation recovery and uses ordinary guard retry.
-- `ccs proxy stop` switches to `passthrough` and forwards guarded upstream responses without guard actions.
+- `ccs proxy mode passthrough` switches to a single-fetch transparent path without guard actions.
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - Compact state history is updated before appending the complete JSONL request record.
@@ -437,11 +438,11 @@ cost      session time up model input$ output$ cached$ total$ error
 - Background stdout/stderr are written to `proxy-runtime.log`.
 - Status history count follows TTY rows, non-TTY fixed 5, and explicit `--history N`.
 - Watch repaints on terminal resize.
-- Guard action prefixes render in the status table `error` column.
+- Guard action prefixes render in the status table `result` column.
 - Model rendering covers missing, request-only, upstream-only, equal, different, raw comparison before abbreviation, width, and ANSI color semantics.
 - Token rendering covers missing attempt data, zero, decimal `K` boundaries, and the confirmed `999.9K` maximum.
 - Cost rendering covers per-attempt model and tier selection, cached subtraction, missing facts and prices, invalid cached counts, standard and fast prices, full-precision sums, and adaptive USD output.
-- Status tables right-align fixed columns, left-align the final `error` column as one current-width line, and format time/size with compact 3-significant-digit units after the base unit.
+- Status tables right-align fixed columns, left-align the final `result` column as one current-width line, and format time/size with compact 3-significant-digit units after the base unit.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
 ### Decisions

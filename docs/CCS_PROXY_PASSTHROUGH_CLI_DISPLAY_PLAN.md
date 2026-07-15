@@ -2,7 +2,9 @@
 
 ## Status
 
-Ready for implementation.
+Implemented in `0.2.47`.
+
+The proxy now uses a single-fetch transparent path for `passthrough`; the CLI and status views follow the confirmed command, deadline, event, policy, duration, and result contracts below.
 
 ## Goal
 

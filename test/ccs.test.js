@@ -12,6 +12,12 @@ import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropert
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
+test("ccs help lists the current proxy command surface", async () => {
+  const output = await captureStdout(() => runCcsCommand(["help"]));
+  assert.match(output, /ccs proxy \[watch\|mode\|config\|install\|restore\|serve\]/);
+  assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
+});
+
 test("tools print package version", async () => {
   const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxr", "cxx", "cxxr", "cxxs", "cxxsr", "senv", "codex-rename"];
