@@ -103,4 +103,6 @@ Included:
 - `latency_guard` 已加入 proxy 状态和 `ccs proxy config`，默认关闭；`passthrough` 仅关闭 reasoning/recovery，其他策略独立运行。
 - 请求契约已升级为 schema 6、健康协议升级为 5；每个真实 attempt 记录策略、预算、超时和收口事实，并输出规范化策略/完成事件。
 
+已识别回归：上述 `passthrough` 行为违反原有透明转发契约。后续修复以 [ccs proxy passthrough and CLI display plan](./CCS_PROXY_PASSTHROUGH_CLI_DISPLAY_PLAN.md) 为准；本节保留为本次提交的历史实施记录。
+
 验收：定向 policy 与 proxy 测试已通过；最终 `pnpm test` 通过 148 项测试。
