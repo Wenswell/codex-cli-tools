@@ -3656,6 +3656,7 @@ function usageLines() {
         "  ccs                                  # show current profile and usage",
         "  ccs version                          # print package version",
         "  ccs -v                               # print package version",
+        "  ccs r                                # show app-server daemon status and version",
         "  ccs PROFILE                          # show profile details and usage",
         "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
         "  ccs models [--json]                  # list profile models from /v1/models",
@@ -5597,7 +5598,19 @@ function roundNullableCostUSD(value) {
     return value === null ? null : roundCostUSD(value);
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | version|-v | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
+    console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
+}
+async function printAppServerDaemonVersion() {
+    const { stdout } = await execFile("codex", ["app-server", "daemon", "version"]);
+    const response = parseJsonObject(stdout);
+    const status = response.status;
+    const version = response.appServerVersion;
+    if (typeof status !== "string" || typeof version !== "string") {
+        throw new Error("invalid codex app-server daemon version response");
+    }
+    console.log(textBold("codex app-server daemon"));
+    printKeyValue("status:", status === "running" ? textGreen(status) : textYellow(status));
+    printKeyValue("version:", textBlue(version));
 }
 function printStatusUsageHelp() {
     console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
@@ -5619,6 +5632,16 @@ export async function runCcs(argv) {
     }
     if (command === "pricing") {
         await runCcsPricing(args);
+        return;
+    }
+    if (command === "r") {
+        if (isHelpArgument(args[0])) {
+            assertExactArgs(args.slice(1), "r help", 0);
+            printHelp();
+            return;
+        }
+        assertExactArgs(args, "r", 0);
+        await printAppServerDaemonVersion();
         return;
     }
     const profiles = await readProfiles();

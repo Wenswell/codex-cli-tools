@@ -16,6 +16,9 @@ export function runCodexSearch(args, options = {}) {
     if (options.bypassSandbox) {
         codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
     }
+    if (options.remote) {
+        codexArgs.push("--remote", "unix://");
+    }
     if (options.resume) {
         codexArgs.push("resume");
     }
