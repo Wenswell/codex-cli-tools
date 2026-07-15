@@ -1,9 +1,17 @@
 export type LiveViewRender = () => string[] | Promise<string[]>;
 
+export type LiveViewKeyControls = {
+  stop: () => void;
+  render: () => void;
+};
+
 export type LiveViewControllerOptions = {
   stream?: NodeJS.WriteStream;
+  input?: NodeJS.ReadStream;
   enabled?: boolean;
+  pinFooter?: boolean;
   onStop?: () => void;
+  onKey?: (key: string, controls: LiveViewKeyControls) => void;
 };
 
 export type LiveViewController = {
@@ -17,18 +25,35 @@ export type LiveViewController = {
 export type RunLiveViewOptions = LiveViewControllerOptions & {
   intervalMs: number;
   onceWhenDisabled?: boolean;
-  onKey?: (key: string, controls: { stop: () => void; render: () => void }) => void;
 };
 
 export function writeLiveFrame(lines: string[], stream: NodeJS.WriteStream = process.stdout): void {
   stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 
+export function pinLiveViewFooter(lines: string[], rows: number | undefined): string[] {
+  if (lines.length === 0 || !Number.isInteger(rows) || !rows || rows <= 0) {
+    return lines;
+  }
+  if (lines.length >= rows) {
+    return lines;
+  }
+  const footer = lines.at(-1) ?? "";
+  const body = lines.slice(0, -1);
+  return [
+    ...body,
+    ...Array(Math.max(0, rows - body.length - 1)).fill(""),
+    footer,
+  ];
+}
+
 export function createLiveViewController(options: LiveViewControllerOptions = {}): LiveViewController {
   const stream = options.stream ?? process.stdout;
+  const input = options.input ?? process.stdin;
   const enabled = options.enabled ?? Boolean(stream.isTTY);
   let started = false;
   let stopped = false;
+  let inputStarted = false;
   let resizeRender: (() => void) | null = null;
 
   const restoreTerminal = (): void => {
@@ -44,11 +69,25 @@ export function createLiveViewController(options: LiveViewControllerOptions = {}
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     stream.off("resize", repaintOnResize);
+    if (inputStarted) {
+      input.off("data", onInput);
+      input.setRawMode(false);
+      input.pause();
+      inputStarted = false;
+    }
     restoreTerminal();
     options.onStop?.();
   };
   const repaintOnResize = (): void => {
     resizeRender?.();
+  };
+  const onInput = (value: Buffer | string): void => {
+    const key = value.toString();
+    if (key === "\u0003") {
+      stop();
+      return;
+    }
+    options.onKey?.(key, { stop, render: () => resizeRender?.() });
   };
 
   return {
@@ -65,11 +104,17 @@ export function createLiveViewController(options: LiveViewControllerOptions = {}
       if (enabled) {
         stream.write("\u001b[?1049h\u001b[?25l");
         stream.on("resize", repaintOnResize);
+        if (options.onKey && input.isTTY) {
+          input.setRawMode(true);
+          input.resume();
+          input.on("data", onInput);
+          inputStarted = true;
+        }
       }
     },
     stop,
     writeFrame(lines: string[]) {
-      writeLiveFrame(lines, stream);
+      writeLiveFrame(options.pinFooter ? pinLiveViewFooter(lines, stream.rows) : lines, stream);
     },
     setResizeRender(render: (() => void) | null) {
       resizeRender = render;
@@ -85,6 +130,9 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
   let resolveStopped: (() => void) | null = null;
   const controller = createLiveViewController({
     ...options,
+    onKey: options.onKey
+      ? (key, controls) => options.onKey?.(key, { stop: controls.stop, render: () => { void requestRender(); } })
+      : undefined,
     onStop: () => {
       stopped = true;
       if (timer) {
@@ -92,23 +140,9 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
         timer = null;
       }
       options.onStop?.();
-      if (options.onKey && process.stdin.isTTY) {
-        process.stdin.off("data", onInput);
-        process.stdin.setRawMode(false);
-        process.stdin.pause();
-      }
       resolveStopped?.();
     },
   });
-
-  const onInput = (value: Buffer | string): void => {
-    const key = value.toString();
-    if (key === "\u0003") {
-      controller.stop();
-      return;
-    }
-    options.onKey?.(key, { stop: controller.stop, render: () => { void requestRender(); } });
-  };
 
   const requestRender = async (): Promise<void> => {
     if (stopped) {
@@ -137,11 +171,6 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
 
   controller.start();
   try {
-    if (controller.enabled && options.onKey && process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.on("data", onInput);
-    }
     await requestRender();
     if (!controller.enabled && options.onceWhenDisabled !== false) {
       controller.stop();
@@ -150,6 +179,10 @@ export async function runLiveView(render: LiveViewRender, options: RunLiveViewOp
 
     await new Promise<void>((resolve) => {
       resolveStopped = resolve;
+      if (stopped) {
+        resolve();
+        return;
+      }
       timer = setInterval(() => {
         void requestRender();
       }, options.intervalMs);

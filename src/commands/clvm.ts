@@ -621,15 +621,25 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
   const closedHistory: ClosedConnectionEntry[] = [];
   let closedTotal = 0;
   let stopped = false;
+  let historyVisible = true;
   let retryAttempt = 0;
   let stopDelay: (() => void) | null = null;
   let renderLatestFrame: (() => void) | null = null;
   const runtimeDedupe: ClvmRuntimeRecordDedupe = { lastFingerprint: null };
   const liveView = createLiveViewController({
     enabled: config.clear && Boolean(process.stdout.isTTY),
+    pinFooter: true,
     onStop: () => {
       stopped = true;
       stopDelay?.();
+    },
+    onKey: (key, controls) => {
+      if (key === "q") {
+        controls.stop();
+      } else if (key === "t") {
+        historyVisible = !historyVisible;
+        controls.render();
+      }
     },
   });
   liveView.setResizeRender(() => {
@@ -664,7 +674,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
         result.closedTotal = closedTotal;
         await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
         if (liveView.enabled) {
-          renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config));
+          renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config, { historyVisible, interactive: true }));
           renderLatestFrame();
         } else {
           printMonitorResult(result, config);
@@ -682,7 +692,7 @@ async function runMonitor(config: RuntimeConfig): Promise<void> {
         const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
         await recordClvmFailure("monitor", config, failure, runtimeDedupe);
         if (liveView.enabled) {
-          renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config));
+          renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config, { historyVisible, interactive: true }));
           renderLatestFrame();
         } else {
           printMonitorFailure(failure, config);

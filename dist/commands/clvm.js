@@ -471,15 +471,26 @@ async function runMonitor(config) {
     const closedHistory = [];
     let closedTotal = 0;
     let stopped = false;
+    let historyVisible = true;
     let retryAttempt = 0;
     let stopDelay = null;
     let renderLatestFrame = null;
     const runtimeDedupe = { lastFingerprint: null };
     const liveView = createLiveViewController({
         enabled: config.clear && Boolean(process.stdout.isTTY),
+        pinFooter: true,
         onStop: () => {
             stopped = true;
             stopDelay?.();
+        },
+        onKey: (key, controls) => {
+            if (key === "q") {
+                controls.stop();
+            }
+            else if (key === "t") {
+                historyVisible = !historyVisible;
+                controls.render();
+            }
         },
     });
     liveView.setResizeRender(() => {
@@ -510,7 +521,7 @@ async function runMonitor(config) {
                 result.closedTotal = closedTotal;
                 await recordClvmSample("monitor", config, result, payload.raw, runtimeDedupe);
                 if (liveView.enabled) {
-                    renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config));
+                    renderLatestFrame = () => liveView.writeFrame(renderMonitorResultLines(result, config, { historyVisible, interactive: true }));
                     renderLatestFrame();
                 }
                 else {
@@ -528,7 +539,7 @@ async function runMonitor(config) {
                 const failure = buildMonitorFailure(error, buildRetryState(retryAttempt, retryIntervalMs), config.rawArchive);
                 await recordClvmFailure("monitor", config, failure, runtimeDedupe);
                 if (liveView.enabled) {
-                    renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config));
+                    renderLatestFrame = () => liveView.writeFrame(renderMonitorFailureLines(failure, config, { historyVisible, interactive: true }));
                     renderLatestFrame();
                 }
                 else {

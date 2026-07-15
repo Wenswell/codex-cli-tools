@@ -7,7 +7,7 @@ import { formatDuration, formatSeconds } from "./config.js";
 import { toJsonFailure, toJsonResult } from "./records.js";
 const closedHistoryDefaultRenderCount = 5;
 const closedHistorySectionFixedLines = 3;
-export function printMonitorResult(result, config, stream = process.stdout) {
+export function printMonitorResult(result, config, stream = process.stdout, options = {}) {
     if (config.json) {
         stream.write(`${JSON.stringify(toJsonResult(result))}\n`);
         return;
@@ -17,7 +17,8 @@ export function printMonitorResult(result, config, stream = process.stdout) {
     }
     const closed = result.closedConnections ?? [];
     const closeFailures = result.closeFailures ?? [];
-    const closedHistory = result.closedHistory ?? [];
+    const historyVisible = options.historyVisible ?? true;
+    const closedHistory = historyVisible ? result.closedHistory ?? [] : [];
     const closedTotal = result.closedTotal ?? 0;
     const shownConnections = sortConnections(result.matchedConnections);
     const style = createTextStyle(config.color);
@@ -51,7 +52,7 @@ export function printMonitorResult(result, config, stream = process.stdout) {
         }
     }
     stream.write(`${fitTerminalLine(header.join(" "), { stream })}\n`);
-    const layout = buildMonitorLayout(stream, shownConnections.length, closedHistory.length);
+    const layout = buildMonitorLayout(stream, shownConnections.length, closedHistory.length, options.interactive ?? false);
     if (shownConnections.length === 0) {
         stream.write("no current connections for configured domains\n");
     }
@@ -59,8 +60,9 @@ export function printMonitorResult(result, config, stream = process.stdout) {
         printCurrentConnections(shownConnections, layout, style, stream);
     }
     printClosedHistory(closedHistory, layout, style, stream);
+    printMonitorFooter(historyVisible, options.interactive ?? false, style, stream);
 }
-export function printMonitorFailure(failure, config, stream = process.stdout) {
+export function printMonitorFailure(failure, config, stream = process.stdout, options = {}) {
     if (config.json) {
         stream.write(`${JSON.stringify(toJsonFailure(failure))}\n`);
         return;
@@ -83,15 +85,16 @@ export function printMonitorFailure(failure, config, stream = process.stdout) {
     }
     stream.write(`${fitTerminalLine(header.join(" "), { stream })}\n`);
     stream.write(`${style.red("error:")} ${failure.error.message}\n`);
+    printMonitorFooter(options.historyVisible ?? true, options.interactive ?? false, style, stream);
 }
-export function renderMonitorResultLines(result, config) {
+export function renderMonitorResultLines(result, config, options = {}) {
     return captureMonitorLines((stream) => {
-        printMonitorResult(result, { ...config, clear: false }, stream);
+        printMonitorResult(result, { ...config, clear: false }, stream, options);
     });
 }
-export function renderMonitorFailureLines(failure, config) {
+export function renderMonitorFailureLines(failure, config, options = {}) {
     return captureMonitorLines((stream) => {
-        printMonitorFailure(failure, { ...config, clear: false }, stream);
+        printMonitorFailure(failure, { ...config, clear: false }, stream, options);
     });
 }
 export function formatUnavailableStatus(failure, style) {
@@ -151,6 +154,12 @@ function printClosedHistory(closedHistory, layout, style, stream) {
         rule: style.dim(connection.rule),
     }, style.dim));
     stream.write(`${renderTable(closedConnectionColumns(layout), rows, { gap: 1, maxWidth: layout.maxWidth }).join("\n")}\n`);
+}
+function printMonitorFooter(historyVisible, interactive, style, stream) {
+    if (!interactive) {
+        return;
+    }
+    stream.write(`${fitTerminalLine(style.dim(`history:${historyVisible ? "on" : "off"}  keys: t history  q/Ctrl-C exit`), { stream })}\n`);
 }
 function formatBytes(bytes) {
     if (bytes === null) {
@@ -234,13 +243,13 @@ function bytesCell(bytes, style) {
     }
     return text;
 }
-function buildMonitorLayout(stream, currentConnectionCount, closedHistoryCount) {
+function buildMonitorLayout(stream, currentConnectionCount, closedHistoryCount, interactive) {
     return {
         ...buildLayout(stream),
-        closedHistoryRenderCount: resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedHistoryCount),
+        closedHistoryRenderCount: resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedHistoryCount, interactive),
     };
 }
-function resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedHistoryCount) {
+function resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedHistoryCount, interactive) {
     if (closedHistoryCount === 0) {
         return 0;
     }
@@ -252,7 +261,7 @@ function resolveClosedHistoryRenderCount(stream, currentConnectionCount, closedH
         return Math.min(closedHistoryCount, closedHistoryDefaultRenderCount);
     }
     const currentSectionLines = currentConnectionCount === 0 ? 1 : 1 + currentConnectionCount;
-    const fixedLines = 1 + currentSectionLines + closedHistorySectionFixedLines;
+    const fixedLines = 1 + currentSectionLines + closedHistorySectionFixedLines + (interactive ? 1 : 0);
     return Math.min(closedHistoryCount, Math.max(0, rows - fixedLines));
 }
 function terminalRows(stream) {

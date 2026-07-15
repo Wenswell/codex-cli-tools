@@ -261,6 +261,7 @@ type ProxyOptions = {
   once?: boolean;
   watch?: boolean;
   view?: ProxyView;
+  historyVisible?: boolean;
 };
 
 type ProxyEndpointClass = "chat/completions" | "responses";
@@ -3865,6 +3866,9 @@ function proxyPathLineCount(options: ProxyOptions): number {
 }
 
 function resolveProxyHistoryRenderCount(metrics: ProxyMetrics, options: ProxyOptions): number {
+  if (options.historyVisible === false) {
+    return 0;
+  }
   if (options.historyCount !== undefined) {
     return options.historyCount;
   }
@@ -3974,7 +3978,9 @@ async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> 
   const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
   const metrics = state?.metrics ?? createProxyMetrics();
   const historyCount = resolveProxyHistoryRenderCount(metrics, options);
-  const historyRecords = await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
+  const historyRecords = options.historyVisible === false
+    ? []
+    : await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
   return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords, priceCache);
 }
 
@@ -3993,6 +3999,7 @@ export function buildProxyStatusLines(
   const historyCount = resolveProxyHistoryRenderCount(metrics, options);
   const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
   const view = options.view ?? "overview";
+  const historyVisible = options.historyVisible ?? true;
   return [
     fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
     ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
@@ -4001,10 +4008,12 @@ export function buildProxyStatusLines(
     fitTerminalLine(formatProxyLatencySummary(metrics)),
     textBold("active"),
     ...formatProxyActiveRows(metrics, now, view, priceCache),
-    textBold("history"),
-    ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
+    ...(historyVisible ? [
+      textBold("history"),
+      ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
+    ] : []),
     fitTerminalLine(textDim(options.watch
-      ? `view: ${view}  keys: v view  q/Ctrl-C exit`
+      ? `view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`
       : "commands: ccs proxy [--view overview|tokens|cost] | watch | mode [intercept|recovery] | install | restore | stop | serve")),
   ];
 }
@@ -4015,13 +4024,16 @@ async function runProxyStatusOnce(options: ProxyOptions): Promise<void> {
 
 async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   let view = options.view ?? "overview";
+  let historyVisible = true;
   await runLiveView(
-    () => renderProxyStatusLines({ ...options, watch: true, view }),
+    () => renderProxyStatusLines({ ...options, watch: true, view, historyVisible }),
     {
       intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000,
+      pinFooter: true,
       onKey: (key, controls) => {
-        const result = proxyWatchKeyAction(key, view);
+        const result = proxyWatchKeyAction(key, view, historyVisible);
         view = result.view;
+        historyVisible = result.historyVisible;
         if (result.action === "stop") {
           controls.stop();
         } else if (result.action === "render") {
@@ -4032,11 +4044,13 @@ async function runProxyStatusWatch(options: ProxyOptions): Promise<void> {
   );
 }
 
-export function proxyWatchKeyAction(key: string, view: ProxyView): { view: ProxyView; action: "none" | "render" | "stop" } {
-  if (key === "q") return { view, action: "stop" };
-  if (key !== "v") return { view, action: "none" };
+export function proxyWatchKeyAction(key: string, view: ProxyView, historyVisible: boolean): { view: ProxyView; historyVisible: boolean; action: "none" | "render" | "stop" } {
+  if (key === "q") return { view, historyVisible, action: "stop" };
+  if (key === "t") return { view, historyVisible: !historyVisible, action: "render" };
+  if (key !== "v") return { view, historyVisible, action: "none" };
   return {
     view: view === "overview" ? "tokens" : view === "tokens" ? "cost" : "overview",
+    historyVisible,
     action: "render",
   };
 }

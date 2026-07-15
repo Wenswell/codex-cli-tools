@@ -4094,6 +4094,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
       {
         isTTY: true,
         columns: 180,
+        rows: 12,
         onWrite: (output) => {
           if (output.includes("\u001b[J")) {
             setImmediate(() => process.emit("SIGINT"));
@@ -4108,7 +4109,9 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
     assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+lat\.\s+size\s+error/);
     assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
-    assert.match(output, /view: overview\s+keys: v view\s+q\/Ctrl-C exit/);
+    assert.match(output, /view: overview\s+history:on\s+keys: v view\s+t history\s+q\/Ctrl-C exit/);
+    const frame = output.split("\u001b[H")[1]?.split("\u001b[J")[0] ?? "";
+    assert.equal((frame.match(/\u001b\[2K/g) ?? []).length, 12);
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -5081,16 +5084,38 @@ test("proxy view argument parsing accepts one initial view with optional history
 });
 
 test("proxy watch keys cycle views and exit", () => {
-  const tokens = proxyWatchKeyAction("v", "overview");
-  const cost = proxyWatchKeyAction("v", tokens.view);
-  const overview = proxyWatchKeyAction("v", cost.view);
+  const tokens = proxyWatchKeyAction("v", "overview", true);
+  const cost = proxyWatchKeyAction("v", tokens.view, tokens.historyVisible);
+  const overview = proxyWatchKeyAction("v", cost.view, cost.historyVisible);
   assert.deepEqual([tokens, cost, overview], [
-    { view: "tokens", action: "render" },
-    { view: "cost", action: "render" },
-    { view: "overview", action: "render" },
+    { view: "tokens", historyVisible: true, action: "render" },
+    { view: "cost", historyVisible: true, action: "render" },
+    { view: "overview", historyVisible: true, action: "render" },
   ]);
-  assert.deepEqual(proxyWatchKeyAction("q", "cost"), { view: "cost", action: "stop" });
-  assert.deepEqual(proxyWatchKeyAction("x", "tokens"), { view: "tokens", action: "none" });
+  assert.deepEqual(proxyWatchKeyAction("t", "cost", true), { view: "cost", historyVisible: false, action: "render" });
+  assert.deepEqual(proxyWatchKeyAction("t", "cost", false), { view: "cost", historyVisible: true, action: "render" });
+  assert.deepEqual(proxyWatchKeyAction("q", "cost", false), { view: "cost", historyVisible: false, action: "stop" });
+  assert.deepEqual(proxyWatchKeyAction("x", "tokens", true), { view: "tokens", historyVisible: true, action: "none" });
+});
+
+test("proxy watch hidden history omits the section and reports footer state", () => {
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    proxyStateFixture({ recent_requests: [proxyHistoryRecord()] }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.2.43", protocol: 4 },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot: "/tmp/codex-tools",
+      watch: true,
+      historyVisible: false,
+    },
+  );
+
+  assert.equal(lines.some((line) => stripAnsi(line) === "history"), false);
+  assert.match(stripAnsi(lines.at(-1)), /history:off\s+keys: v view\s+t history\s+q\/Ctrl-C exit/);
 });
 
 test("proxy model rendering compares raw values before abbreviation and truncation", async () => {
