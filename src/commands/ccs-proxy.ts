@@ -439,9 +439,9 @@ const PROXY_OVERVIEW_TABLE_COLUMNS: TableColumn[] = [
   { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
   { key: "model", title: "model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
   { key: "reasoning_status", title: "reas./code", width: PROXY_TABLE_REASONING_STATUS_WIDTH, align: "right" },
-  { key: "ms", title: "lat.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
+  { key: "ms", title: "dur.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
   { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-  { key: "error", title: "error", flex: true, minWidth: 12, align: "left" },
+  { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
 ];
 const PROXY_TOKEN_TABLE_COLUMNS: TableColumn[] = [
   ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
@@ -1379,15 +1379,15 @@ function formatProxyStatusLine(now: Date, state: ProxyState | null, runtime: Pro
     : colorCount(String(runtime.protocol));
   const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
   const mode = state ? colorName(state.mode) : textDim("unset");
-  const latency = state?.latency_guard.enabled
-    ? colorCount(`${state.latency_guard.first_progress_timeout_ms}/${state.latency_guard.total_timeout_ms}ms`)
+  const deadline = state?.latency_guard.enabled
+    ? `${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
     : textDim("off");
   return [
     bgDarkBlue(" ccs proxy "),
     textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
     `runtime: ${state ? runtimeLabel : textRed("missing")}`,
     `mode: ${mode}`,
-    `latency: ${latency}`,
+    `deadline: ${deadline}`,
     `pid: ${pid}`,
     `server: ${version}`,
     `protocol: ${protocol}`,
@@ -3688,6 +3688,60 @@ async function fetchUpstreamWithTransportRetry(
   }
 }
 
+async function proxyThroughActiveUpstreamPassthrough(
+  request: IncomingMessage,
+  upstream: ProxyUpstream,
+  body: Buffer,
+  gatewayRequestId: string,
+  attemptRecords: ProxyAttemptRecord[],
+  callbacks: ProxyForwardCallbacks,
+): Promise<ProxyOutcome> {
+  const attemptState: ProxyAttemptState = {
+    gatewayRequestId,
+    attempts: 1,
+    attemptRecords,
+    attemptStartedAtMs: [performance.now()],
+  };
+  attemptRecords.push(createProxyAttemptRecord(gatewayRequestId, 1, upstream.name));
+  await callbacks.onAttempt?.(1, upstream.name);
+  try {
+    const response = await forwardRequest(request, upstream, body, callbacks.signal);
+    markProxyAttemptHeaders(attemptState, response.status);
+    await callbacks.onResponseStart?.(response.status, upstream.name);
+    const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
+    const attempt = currentProxyAttemptRecord(attemptState)!;
+    attempt.client_http_status = response.status;
+    completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
+    return createProxyOutcome({
+      response,
+      upstream: upstream.name,
+      upstreamStatus: response.status,
+      attempts: 1,
+      attemptRecords,
+      failureSummary,
+    });
+  } catch (error) {
+    if (isClientAbortError(error, callbacks.signal)) {
+      throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const code = isFetchFailedError(error) ? "upstream_fetch_failed" : "upstream_error";
+    const failureSummary = proxyFailureSummaryFromError(code, error);
+    const attempt = currentProxyAttemptRecord(attemptState)!;
+    attempt.client_http_status = NON_STREAM_STATUS_CODE;
+    completeProxyAttempt(attempt, code, { failureSummary, remainingRetries: 0 });
+    return createProxyOutcome({
+      response: createUpstreamErrorResponse(message, code),
+      upstream: upstream.name,
+      upstreamStatus: null,
+      attempts: 1,
+      attemptRecords,
+      failureSummary,
+      error: `${code}: ${message}`,
+    });
+  }
+}
+
 function isFetchFailedError(error: unknown): boolean {
   return error instanceof TypeError && error.message === "fetch failed";
 }
@@ -4189,13 +4243,14 @@ async function writeResponse(
   onHeadersWritten?: () => void,
   onResponseBytes?: ProxyResponseBytesObserver,
   existingScanner?: ProxySseScanner,
+  inspectStream = true,
 ): Promise<number> {
   res.writeHead(response.status, responseHeadersToObject(response.headers));
   onHeadersWritten?.();
   if (!response.body) {
     return endEmptyResponse(res);
   }
-  const scanner = existingScanner ?? (isStreamContentType(`${response.headers.get("content-type") || ""}`)
+  const scanner = existingScanner ?? (inspectStream && isStreamContentType(`${response.headers.get("content-type") || ""}`)
     ? new ProxySseScanner(endpointClass)
     : null);
   return writeReadableResponse(res, Readable.fromWeb(response.body as never), scanner, modelObserver, onResponseBytes);
@@ -4475,11 +4530,23 @@ export async function restoreProxy(options: ProxyOptions): Promise<string> {
 function formatProxyRequestsSummary(metrics: ProxyMetrics, profileOrder: string[]): string {
   const statusCounts = formatExactProxyStatusCounts(metrics.status_counts);
   return [
-    `status total=${colorCount(String(totalProxyStatusCounts(metrics.status_counts)))}`,
+    `status events=${colorCount(String(totalProxyStatusCounts(metrics.status_counts)))}`,
     `active=${metrics.active_requests.length === 0 ? textDim("0") : textYellow(String(metrics.active_requests.length))}`,
     ...statusCounts,
     `upstreams=${formatProxyUpstreamHits(profileOrder, metrics)}`,
   ].join(" ");
+}
+
+function formatProxyPolicySummary(records: ProxyRequestRecord[]): string {
+  const totals = records.reduce((summary, record) => ({
+    upstream_capacity: summary.upstream_capacity + record.retry_summary.upstream_capacity,
+    http_429: summary.http_429 + record.retry_summary.http_429,
+    reasoning_guard: summary.reasoning_guard + record.retry_summary.reasoning_guard,
+    timeout: summary.timeout + record.retry_summary.timeout,
+    transport: summary.transport + record.retry_summary.transport,
+  }), { upstream_capacity: 0, http_429: 0, reasoning_guard: 0, timeout: 0, transport: 0 });
+  const retries = totals.upstream_capacity + totals.http_429 + totals.reasoning_guard + totals.timeout + totals.transport;
+  return `policy retries=${retries} capacity=${totals.upstream_capacity} 429=${totals.http_429} reasoning=${totals.reasoning_guard} timeout=${totals.timeout} transport=${totals.transport}`;
 }
 
 function formatProxyReasoningSummary(metrics: ProxyMetrics): string {
@@ -4659,7 +4726,7 @@ function resolveProxyHistoryRenderCount(metrics: ProxyMetrics, options: ProxyOpt
   }
   const fixedLines = 1
     + proxyPathLineCount(options)
-    + 3
+    + 4
     + proxyActiveSectionLineCount(metrics)
     + 1
     + 1
@@ -4782,6 +4849,7 @@ export function buildProxyStatusLines(
     fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
     ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
     fitTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
+    fitTerminalLine(formatProxyPolicySummary(metrics.recent_requests)),
     fitTerminalLine(formatProxyReasoningSummary(metrics)),
     fitTerminalLine(formatProxyLatencySummary(metrics)),
     textBold("active"),
@@ -4792,7 +4860,7 @@ export function buildProxyStatusLines(
     ] : []),
     fitTerminalLine(textDim(options.watch
       ? `view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`
-      : "commands: ccs proxy [--view overview|tokens|cost] | watch | mode [intercept|recovery] | install | restore | stop | serve")),
+      : "commands: ccs proxy [--view overview|tokens|cost] | watch | mode [passthrough|recovery|intercept] | config | install | restore | serve")),
   ];
 }
 
@@ -4895,10 +4963,6 @@ export async function setProxyMode(options: ProxyOptions, mode: ProxyMode): Prom
   }
   const runtime = await ensureProxyRunning(options);
   return { previousMode, mode, runtime };
-}
-
-export async function stopProxy(options: ProxyOptions): Promise<ProxyModeChangeResult> {
-  return setProxyMode(options, PROXY_MODE_PASSTHROUGH);
 }
 
 export async function serveProxy(options: ProxyOptions): Promise<void> {
@@ -5142,20 +5206,31 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           };
-          const outcome = await proxyThroughActiveUpstreamWithStats(
-            req,
-            upstreamProfile,
-            body,
-            endpointClass,
-            activeRecord.request_kind,
-            requestJson,
-            activeRecord.id,
-            attemptRecords,
-            mode,
-            requestState.latency_guard,
-            guardedCallbacks,
-          );
-          enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
+          const outcome = mode === PROXY_MODE_PASSTHROUGH
+            ? await proxyThroughActiveUpstreamPassthrough(
+              req,
+              upstreamProfile,
+              body,
+              activeRecord.id,
+              attemptRecords,
+              passthroughCallbacks,
+            )
+            : await proxyThroughActiveUpstreamWithStats(
+              req,
+              upstreamProfile,
+              body,
+              endpointClass,
+              activeRecord.request_kind,
+              requestJson,
+              activeRecord.id,
+              attemptRecords,
+              mode,
+              requestState.latency_guard,
+              guardedCallbacks,
+            );
+          if (mode !== PROXY_MODE_PASSTHROUGH) {
+            enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
+          }
           status = outcome.response.status;
           upstreamStatus = outcome.upstreamStatus;
           upstream = outcome.upstream;
@@ -5233,6 +5308,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
             outcome.streamScanner,
+            mode !== PROXY_MODE_PASSTHROUGH,
           );
           if (outcome.streamScanner) {
             const inspection = outcome.streamScanner.currentInspection();
@@ -5460,12 +5536,11 @@ function usageHelpLines(): string[] {
     "  ccs proxy                                # print proxy status and active upstream once",
     "  ccs proxy --history N                    # print proxy status with N history rows",
     "  ccs proxy --view overview|tokens|cost    # select the initial request-table view",
-    "  ccs proxy --once                         # print proxy status and active upstream once",
-    "  ccs proxy --once --history N             # print proxy status with N history rows",
     "  ccs proxy watch                          # watch proxy status and active upstream",
     "  ccs proxy watch --history N              # watch proxy status with N history rows",
     "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
     "  ccs proxy mode                           # print active proxy intervention mode",
+    "  ccs proxy mode passthrough               # disable proxy policy after confirmation",
     "  ccs proxy mode recovery                  # enable continuation recovery mode",
     "  ccs proxy mode intercept                 # enable guard intercept mode",
     "  ccs proxy config                         # print active proxy policy configuration",
@@ -5473,7 +5548,6 @@ function usageHelpLines(): string[] {
     "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
     "  ccs proxy install                        # back up config, install routing, and start background proxy",
     "  ccs proxy restore                        # restore config from the saved backup",
-    "  ccs proxy stop                           # stop intervention and directly forward through the proxy",
     "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
   ];
 }
@@ -5515,14 +5589,17 @@ function rejectProxyCommandArgs(args: string[], commandName: string): void {
   }
 }
 
-function parseProxyUserMode(value: string | undefined): Exclude<ProxyMode, "passthrough"> {
+function parseProxyUserMode(value: string | undefined): ProxyMode {
+  if (value === PROXY_MODE_PASSTHROUGH) {
+    return PROXY_MODE_PASSTHROUGH;
+  }
   if (value === PROXY_MODE_INTERCEPT) {
     return PROXY_MODE_INTERCEPT;
   }
   if (value === PROXY_MODE_RECOVERY) {
     return PROXY_MODE_RECOVERY;
   }
-  throw new Error("ccs proxy mode requires intercept or recovery");
+  throw new Error("ccs proxy mode requires passthrough, recovery, or intercept");
 }
 
 function formatProxyModeChange(result: ProxyModeChangeResult): string {
@@ -5589,11 +5666,6 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
   }
   if (command === "--history" || command === "--view") {
     const parsed = parseProxyStatusArgs(args, "ccs proxy");
-    await runProxyStatusOnce({ ...options, ...parsed });
-    return;
-  }
-  if (command === "--once") {
-    const parsed = parseProxyStatusArgs(rest, "ccs proxy --once");
     await runProxyStatusOnce({ ...options, ...parsed });
     return;
   }
@@ -5694,23 +5766,6 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
     printKeyValue("runtime:", stopped, 8);
     printKeyValue("state:", textGreen("removed"), 8);
-    return;
-  }
-  if (command === "stop") {
-    rejectRemovedYesFlags(rest, "ccs proxy stop");
-    rejectProxyCommandArgs(rest, "ccs proxy stop");
-    const state = await readProxyState(options.stateRoot);
-    if (!state) {
-      throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
-    }
-    printKeyValue("plan:", `proxy mode ${state.mode} -> ${PROXY_MODE_PASSTHROUGH}`, 5);
-    printKeyValue("note:", "no changes are written unless you type yes", 5);
-    if (!(await confirmApply())) {
-      return;
-    }
-    const result = await stopProxy(options);
-    printKeyValue("mode:", formatProxyModeChange(result), 5);
-    printProxyModeRuntime(result.runtime);
     return;
   }
   if (command === "serve") {

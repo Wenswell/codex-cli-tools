@@ -3670,7 +3670,7 @@ function usageLines() {
         "  ccs pricing provider remove PROVIDER... # remove providers and prune local models",
         "  ccs pricing refresh                   # rebuild prices from watched patterns and providers",
         "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
-        "  ccs proxy [watch|mode|install|restore|stop|serve] # manage proxy state and runtime",
+        "  ccs proxy [watch|mode|config|install|restore|serve] # manage proxy state and runtime",
         "  ccs cost                             # show cost data source and commands",
         "  ccs cost daily                       # show Codex session daily cost totals",
         "  ccs cost weekly                      # show Codex session weekly cost totals",
@@ -5598,7 +5598,7 @@ function roundNullableCostUSD(value) {
     return value === null ? null : roundCostUSD(value);
 }
 function printUsageHelp() {
-    console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|install|restore|stop|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
+    console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|config|install|restore|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
 }
 async function printAppServerDaemonVersion() {
     const { stdout } = await execFile("codex", ["app-server", "daemon", "version"]);
