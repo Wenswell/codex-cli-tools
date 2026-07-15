@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { runLiveView } from "../dist/lib/live-view.js";
+import { pinLiveViewFooter, runLiveView } from "../dist/lib/live-view.js";
+
+test("live view footer fills short frames and preserves overflowing body lines", () => {
+  assert.deepEqual(pinLiveViewFooter(["header", "body", "footer"], 6), [
+    "header",
+    "body",
+    "",
+    "",
+    "",
+    "footer",
+  ]);
+  assert.deepEqual(pinLiveViewFooter(["header", "one", "two", "three", "footer"], 3), [
+    "header",
+    "one",
+    "two",
+    "three",
+    "footer",
+  ]);
+  assert.deepEqual(pinLiveViewFooter(["header", "footer"], undefined), ["header", "footer"]);
+});
 
 test("live view Ctrl-C restores raw TTY state and exits", async () => {
   const stdin = process.stdin;

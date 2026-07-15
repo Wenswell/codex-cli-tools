@@ -951,7 +951,7 @@ test("monitor skips duplicate idle runtime records", async () => {
   }
 });
 
-test("monitor uses alternate screen and repaints on resize in TTY clear mode", async () => {
+test("monitor handles resize, history, and exit keys in TTY clear mode", async () => {
   const server = createServer((req, res) => {
     if (req.url === "/connections" && req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -981,7 +981,13 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
     );
 
     const script = `
-      ${stdoutPropertiesScript({ noColor: true, isTTY: true, columns: 100 })}
+      ${stdoutPropertiesScript({ noColor: true, isTTY: true, columns: 100, rows: 12 })}
+      Object.defineProperties(process.stdin, {
+        isTTY: { configurable: true, value: true },
+        setRawMode: { configurable: true, value: () => process.stdin },
+        resume: { configurable: true, value: () => process.stdin },
+        pause: { configurable: true, value: () => process.stdin },
+      });
       const originalWrite = process.stdout.write.bind(process.stdout);
       let frames = 0;
       process.stdout.write = (chunk, encoding, callback) => {
@@ -995,8 +1001,11 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
               process.stdout.emit("resize");
             });
           }
-          if (frames >= 2) {
-            setImmediate(() => process.emit("SIGINT"));
+          if (frames === 2) {
+            setImmediate(() => process.stdin.emit("data", Buffer.from("t")));
+          }
+          if (frames >= 3) {
+            setImmediate(() => process.stdin.emit("data", Buffer.from("q")));
           }
         }
         return result;
@@ -1012,9 +1021,13 @@ test("monitor uses alternate screen and repaints on resize in TTY clear mode", a
     });
 
     assert.match(stdout, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
-    assert.equal((stdout.match(/\u001b\[H/g) ?? []).length, 2);
+    assert.equal((stdout.match(/\u001b\[H/g) ?? []).length, 3);
     assert.match(stdout, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.doesNotMatch(stdout, /\u001b\[2J/);
+    assert.match(stdout, /history:on\s+keys: t history\s+q\/Ctrl-C exit/);
+    assert.match(stdout, /history:off\s+keys: t history\s+q\/Ctrl-C exit/);
+    const frames = stdout.split("\u001b[H").slice(1).map((frame) => frame.split("\u001b[J")[0]);
+    assert.ok(frames.every((frame) => (frame.match(/\u001b\[2K/g) ?? []).length === 12));
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(home, { recursive: true, force: true });
@@ -1072,6 +1085,20 @@ test("monitor recent closed rows follow TTY height and non-TTY default", () => {
   const tiny = render({ isTTY: true, columns: 140, rows: 4 });
   assert.equal(countClosedRows(tiny), 0);
   assert.doesNotMatch(tiny, /recent closed/);
+
+  const hidden = withStdoutProperties(
+    { isTTY: true, columns: 140, rows: 14 },
+    () => renderMonitorResultLines(result, config, { historyVisible: false, interactive: true }).join("\n"),
+  );
+  assert.equal(countClosedRows(hidden), 0);
+  assert.doesNotMatch(hidden, /recent closed/);
+  assert.match(hidden, /history:off\s+keys: t history\s+q\/Ctrl-C exit/);
+
+  const narrowFooter = withStdoutProperties(
+    { isTTY: true, columns: 30, rows: 14 },
+    () => renderMonitorResultLines(result, config, { historyVisible: false, interactive: true }).at(-1),
+  );
+  assert.ok(visibleLength(narrowFooter) <= 30);
 });
 
 test("monitor keeps current rows bright and dims recent closed rows in TTY output", async () => {
