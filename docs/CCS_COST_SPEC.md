@@ -54,21 +54,20 @@ ccs cost central models
 ccs cost central day YYYY-MM-DD
 ```
 
-`ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and compact command/options hints. Its command hint lists only the `ccs cost` command family. Local reports require an explicit subcommand such as `ccs cost daily`.
+`ccs cost` without arguments prints the local session source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and its immediate commands. Local reports require an explicit subcommand such as `ccs cost daily`; complete syntax and options live under `ccs cost --help`.
 
 ```text
-commands: ccs cost | ccs cost push | ccs cost [daily|weekly|monthly|projects|models] | ccs cost project PROJECT | ccs cost day YYYY-MM-DD | ccs cost central [daily|weekly|monthly|projects|models|project PROJECT|day YYYY-MM-DD]
-options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast
+commands: daily | weekly | monthly | projects | project | models | day | push | central | --help
 ```
 
 The options apply to local and central report forms. `ccs cost push` accepts no additional arguments and uploads this machine's complete normalized token-event snapshot to the LAN server over SSH. `ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central REPORT` renders the server-side aggregate report from uploaded machine snapshots.
 
 `ccs pricing` prints local pricing selection state. `ccs pricing list` prints local snapshot models and prices without a network request. `ccs pricing list --remote` prints LiteLLM models filtered to watched providers. Both tables use `model`, `status`, `input/M`, `cache/M`, and `output/M`. `ccs pricing pattern` prints watched patterns with local matched-model counts. `ccs pricing pattern watch PATTERN...` and `ccs pricing pattern unwatch PATTERN...` fetch LiteLLM, preview the full provider-and-pattern filtered model table, then write the rebuilt snapshot after exact `yes`. `ccs pricing provider` prints watched providers. `provider add PROVIDER...` and `provider remove PROVIDER...` modify local selection state after exact `yes`; removal prunes local model records that no longer satisfy both filters. `ccs pricing refresh` fetches LiteLLM and rebuilds every selected model and price from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing.
 
-The no-argument pricing status ends with the complete namespace summary:
+The no-argument pricing status ends with its immediate commands:
 
 ```text
-commands: ccs pricing | ccs pricing list [--remote] | ccs pricing pattern | ccs pricing pattern watch PATTERN... | ccs pricing pattern unwatch PATTERN... | ccs pricing provider | ccs pricing provider add PROVIDER... | ccs pricing provider remove PROVIDER... | ccs pricing refresh
+commands: list | pattern | provider | refresh | --help
 ```
 
 Options:
