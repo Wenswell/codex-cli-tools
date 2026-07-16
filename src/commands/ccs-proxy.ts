@@ -19,7 +19,7 @@ import { modelPriceParts, readModelPriceCache, type ModelPriceCache, type ModelP
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow, type TableColumn, type TableRow } from "../lib/table.js";
-import { fitTerminalLine } from "../lib/terminal.js";
+import { fitTerminalLine, formatCommandFooterLines } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 import {
   ProxyRetryBudget,
@@ -4875,9 +4875,12 @@ export function buildProxyStatusLines(
       textBold("history"),
       ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
     ] : []),
-    options.watch
-      ? fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))
-      : textDim("commands: ccs proxy [--history N] [--view overview|tokens|cost] | watch [--history N] [--view overview|tokens|cost] | mode [passthrough|recovery|intercept] | config [latency off|latency FIRST TOTAL [return_502|retry_then_502]] | install | restart | restore | serve"),
+    ...(options.watch
+      ? [fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))]
+      : formatCommandFooterLines([{
+        label: "commands:",
+        commands: ["watch", "mode", "config", "install", "restart", "restore", "serve", "--help"],
+      }]).map(textDim)),
   ];
 }
 

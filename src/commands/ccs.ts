@@ -107,7 +107,7 @@ import {
   updateTopLevelTomlString,
 } from "../lib/toml.js";
 import { printTable, renderTable, type TableColumn, type TableRow } from "../lib/table.js";
-import { fitTerminalLine } from "../lib/terminal.js";
+import { fitTerminalLine, formatCommandFooterLines, type CommandFooterRow } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
 
 type Profile = {
@@ -823,7 +823,16 @@ function printConfigSyncStatus(local: ConfigFileSummary): void {
   printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 9);
   printKeyValue("remote:", colorPath(configSyncRemoteDisplay), 9);
   printKeyValue("action:", "status only", 9);
-  console.log(textDim("commands: ccs config | ccs config push | ccs config pull"));
+  printCommandFooter([{ label: "commands:", commands: ["push", "pull", "--help"] }]);
+}
+
+function printConfigSyncHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    "  ccs config       # show local and remote config status",
+    "  ccs config push  # preview, confirm, and upload local config",
+    "  ccs config pull  # preview, confirm, and download remote config",
+  ].join("\n"));
 }
 
 async function pushConfigToServer(local: ConfigFileSummary, remote: ConfigFileSummary): Promise<void> {
@@ -889,7 +898,7 @@ async function pullConfigFromServer(local: ConfigFileSummary, remote: ConfigFile
 async function runConfigSync(args: string[]): Promise<void> {
   if (isHelpArgument(args[0])) {
     assertExactArgs(args.slice(1), "config help", 0);
-    printHelp();
+    printConfigSyncHelp();
     return;
   }
 
@@ -2003,7 +2012,16 @@ async function printUsageTargets(profiles: ProfilesFile): Promise<void> {
       ...usageTableValues(row.usage),
     })), { header: false });
   }
-  console.log(textDim("commands: ccs usage | ccs usage add [PROFILE] | ccs usage [remove|rm|delete] PROFILE"));
+  printCommandFooter([{ label: "commands:", commands: ["add", "remove", "--help"] }]);
+}
+
+function printUsageTargetsHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    "  ccs usage                              # list usage-only profiles",
+    "  ccs usage add [PROFILE]                # add or update a usage-only profile",
+    "  ccs usage remove | rm | delete PROFILE # remove a usage-only profile",
+  ].join("\n"));
 }
 
 async function printModels(profiles: ProfilesFile, args: string[]): Promise<void> {
@@ -4431,7 +4449,7 @@ async function runCcsStatus(profiles: ProfilesFile, args: string[]): Promise<voi
 
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
     assertExactArgs(subargs, "s help", 0);
-    printHelp();
+    printStatusHelp();
     return;
   }
 
@@ -4784,8 +4802,10 @@ async function printCcsCostStatus(profiles: ProfilesFile): Promise<void> {
   printKeyValue("upload:", colorPath(ccsCostRemoteDisplay), 9);
   printKeyValue("timezone:", systemTimezone(), 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs cost | ccs cost push | ccs cost [daily|weekly|monthly|projects|models] | ccs cost project PROJECT | ccs cost day YYYY-MM-DD | ccs cost central [daily|weekly|monthly|projects|models|project PROJECT|day YYYY-MM-DD]"));
-  console.log(textDim("options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast"));
+  printCommandFooter([{
+    label: "commands:",
+    commands: ["daily", "weekly", "monthly", "projects", "project", "models", "day", "push", "central", "--help"],
+  }]);
 }
 
 async function runCcsCost(args: string[], profiles: ProfilesFile): Promise<void> {
@@ -4853,7 +4873,10 @@ async function printCcsPricingStatus(): Promise<void> {
   printKeyValue("source:", cache.source === "builtin" ? textDim(cache.source) : colorUrl(cache.source), 9);
   printKeyValue("fetched:", cache.fetchedAt, 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs pricing | ccs pricing list [--remote] | ccs pricing pattern | ccs pricing pattern watch PATTERN... | ccs pricing pattern unwatch PATTERN... | ccs pricing provider | ccs pricing provider add PROVIDER... | ccs pricing provider remove PROVIDER... | ccs pricing refresh"));
+  printCommandFooter([{
+    label: "commands:",
+    commands: ["list", "pattern", "provider", "refresh", "--help"],
+  }]);
 }
 
 function printCcsPricingHelp(): void {
@@ -6909,8 +6932,21 @@ function roundNullableCostUSD(value: number | null): number | null {
   return value === null ? null : roundCostUSD(value);
 }
 
+function printCommandFooter(rows: CommandFooterRow[]): void {
+  console.log(formatCommandFooterLines(rows).map(textDim).join("\n"));
+}
+
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing | proxy | cost | toggle [PROFILE] | add [PROFILE] | [remove|rm|delete] PROFILE | top [--once] [--mark DURATION] | config | s | list|l [-u|--usage] | usage | init | sync [--replace TOML_PATH [--replace TOML_PATH ...]|--replace all]"));
+  printCommandFooter([
+    {
+      label: "commands:",
+      commands: ["version", "r", "PROFILE", "run", "models", "toggle", "top", "list", "init", "sync", "add", "remove"],
+    },
+    {
+      label: "namespaces:",
+      commands: ["pricing", "proxy", "cost", "config", "s", "usage", "--help"],
+    },
+  ]);
 }
 
 async function printAppServerDaemonVersion(): Promise<void> {
@@ -6928,7 +6964,26 @@ async function printAppServerDaemonVersion(): Promise<void> {
 }
 
 function printStatusUsageHelp(): void {
-  console.log(textDim("commands: ccs s | ccs s line | ccs s agent | ccs s server [PORT] | ccs s history [PROFILE] | ccs s pause | ccs s resume | ccs s reset | ccs s wezterm | ccs s wezterm remove"));
+  printCommandFooter([{
+    label: "commands:",
+    commands: ["line", "agent", "server", "history", "pause", "resume", "reset", "wezterm", "--help"],
+  }]);
+}
+
+function printStatusHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    "  ccs s                   # print compact status from configured top state",
+    "  ccs s line              # print compact status without a command footer",
+    "  ccs s agent             # write local status text for WezTerm",
+    "  ccs s server [PORT]     # serve top state on 0.0.0.0",
+    "  ccs s history [PROFILE] # show today's usage history",
+    "  ccs s pause             # pause the first reachable top server",
+    "  ccs s resume            # resume the first reachable top server",
+    "  ccs s reset             # refresh the server and reset polling",
+    "  ccs s wezterm           # preview, confirm, and install WezTerm integration",
+    "  ccs s wezterm remove    # preview, confirm, and remove WezTerm integration",
+  ].join("\n"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
@@ -7096,6 +7151,12 @@ export async function runCcs(argv: string[]): Promise<void> {
   if (command === "usage") {
     const subcommand = args[0] ?? "";
     const subargs = args.slice(1);
+
+    if (isHelpArgument(subcommand)) {
+      assertExactArgs(subargs, "usage help", 0);
+      printUsageTargetsHelp();
+      return;
+    }
 
     if (!subcommand) {
       await printUsageTargets(profiles);

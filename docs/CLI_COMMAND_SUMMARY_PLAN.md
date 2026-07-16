@@ -1,62 +1,72 @@
-# CLI Command Summary Plan
+# CLI Command Footer Plan
 
-Status: implemented in `0.2.49`
+Status: implemented in `0.2.50`
 
 ## Goal
 
-Make no-argument `commands:` summaries follow the CLI hierarchy: the `ccs`
-status shows only immediate commands, while each command namespace shows its
-complete accepted command and parameter surface.
+Keep no-argument status output compact while preserving a clear route to the
+complete command reference.
 
 ## Contract
 
-### `ccs`
+### Root footer
 
-- Keep direct top-level parameters such as `run PROFILE [ARGS]`,
-  `models [--json]`, and `sync [--replace ...]`.
-- Show namespaces only as `pricing`, `proxy`, `cost`, `config`, `s`, and
-  `usage`; do not expand their subcommands at the root.
-- Keep aliases that are directly accepted at the root.
+The `ccs` footer separates direct commands from command namespaces:
 
-### Namespaces
+```text
+commands:   version | r | PROFILE | run | models | toggle | top | list | init | sync | add | remove
+namespaces: pricing | proxy | cost | config | s | usage | --help
+```
 
-- `ccs proxy`: include status/watch history and view options, every mode,
-  latency configuration forms, install, restart, restore, and serve.
-- `ccs pricing`: include list options, pattern/provider status and mutation
-  arguments, and refresh.
-- `ccs cost`: include every local and central report form plus the existing
-  report options line.
-- Keep `ccs cost push` as the documented full-snapshot command and reject the
-  parser's accidental report/options suffix.
-- `ccs config`: include status, push, and pull.
-- `ccs s`: include line, agent, server port, history profile, controls, and
-  both WezTerm forms.
-- `ccs usage`: include status, add, and all remove aliases with arguments.
-- Keep each no-argument summary compact at the bottom of state/results.
+- `commands` lists primary direct commands only.
+- `namespaces` lists first-level commands that also own subcommands.
+- Aliases, parameters, and nested commands remain in explicit help.
+- `--help` is the canonical complete-help entry and stays at the end.
+
+### Namespace footer
+
+A namespace status lists only its immediate primary subcommands. For example:
+
+```text
+commands: list | pattern | provider | refresh | --help
+```
+
+Every namespace accepts `help`, `-h`, and `--help` and prints its complete
+syntax, parameters, aliases, and command comments.
+
+### Width
+
+- Separate entries with ` | `.
+- Wrap only between entries when output exceeds the terminal width.
+- Continuation lines use hanging indentation aligned with the first entry.
+- Preserve every entry; do not truncate or add an ellipsis.
 
 ## Implementation
 
-1. Replace the root summary with immediate command syntax only.
-2. Complete each namespace summary from its actual parser contract.
-3. Add the missing usage summary after the usage target list.
-4. Update README examples and the relevant proxy/cost/pricing specifications.
-5. Reject arguments after `ccs cost push` so the parser and summary agree.
-6. Update focused display-contract tests, build `dist`, bump the patch version,
-   run focused tests, then run the full suite once.
+1. Add one structured footer renderer for labeled command rows.
+2. Replace root and namespace status summaries with primary command names.
+3. Add dedicated help for `ccs config`, `ccs s`, and `ccs usage`.
+4. Keep existing complete help for `ccs pricing`, `ccs proxy`, and `ccs cost`.
+5. Update README examples, focused display tests, built output, and version.
 
 ## Acceptance
 
-- Root output contains `ccs proxy` but not `ccs proxy [...]`; the same rule
-  applies to every namespace.
-- Each namespace no-argument output includes every supported leaf command,
-  positional placeholder, and documented option relevant to that namespace.
-- Runtime state/results remain above the summary.
-- Explicit `help` behavior and command parsing outside `ccs cost push` do not
-  change.
-- README, source, built output, and tests agree.
+- Root no-argument output has separate `commands` and `namespaces` rows.
+- Root aliases and parameter syntax appear in `ccs --help`, not the footer.
+- Namespace no-argument output ends with its immediate commands and `--help`.
+- Every namespace help entry prints namespace-local help.
+- An 80-column footer wraps at entry boundaries and every visible line fits.
+- Status and result content above each footer is unchanged.
 
 ## Non-goals
 
-- No parser changes except removing accidental arguments after `ccs cost push`.
-- No redesign of explicit `help` output.
-- No multiline help framework or new rendering abstraction.
+- No parser or command behavior changes outside help routing.
+- No redesign of full help content beyond adding missing namespace-local help.
+- No footer changes for tools outside the `ccs` command family.
+
+## Outcome
+
+Compact footers work when they act as navigation rather than full syntax
+references. Separating direct commands from namespaces preserves hierarchy,
+while namespace-local help keeps detailed syntax available without repeating it
+after every status result.

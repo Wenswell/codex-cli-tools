@@ -4194,7 +4194,7 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(explicit), 7);
 });
 
-test("proxy status footer summarizes the complete command surface", () => {
+test("proxy status footer lists immediate commands within terminal width", () => {
   const lines = withStdoutProperties({ isTTY: true, noColor: true, columns: 60 }, () =>
     buildProxyStatusLines(
       new Date("2026-01-01T00:00:00.000Z"),
@@ -4209,13 +4209,14 @@ test("proxy status footer summarizes the complete command surface", () => {
       },
     ),
   );
-  const footer = stripAnsi(lines.at(-1));
+  const plainLines = lines.map(stripAnsi);
+  const footerLines = plainLines.slice(plainLines.findIndex((line) => line.startsWith("commands:")));
 
-  assert.match(footer, /^commands: ccs proxy \[--history N\] \[--view overview\|tokens\|cost\]/);
-  assert.match(footer, /watch \[--history N\] \[--view overview\|tokens\|cost\]/);
-  assert.match(footer, /mode \[passthrough\|recovery\|intercept\]/);
-  assert.match(footer, /config \[latency off\|latency FIRST TOTAL \[return_502\|retry_then_502\]\]/);
-  assert.match(footer, /\| install \| restart \| restore \| serve$/);
+  assert.equal(
+    footerLines.join(" ").replace(/\s+/g, " ").trim(),
+    "commands: watch | mode | config | install | restart | restore | serve | --help",
+  );
+  assert.ok(footerLines.every((line) => line.length <= 60));
 });
 
 test("proxy rejects invalid --history values", async () => {
