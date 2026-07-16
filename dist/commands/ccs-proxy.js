@@ -4018,9 +4018,9 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
             textBold("history"),
             ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
         ] : []),
-        fitTerminalLine(textDim(options.watch
-            ? `view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`
-            : "commands: ccs proxy [--view overview|tokens|cost] | watch | mode [passthrough|recovery|intercept] | config | install | restore | serve")),
+        options.watch
+            ? fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))
+            : textDim("commands: ccs proxy [--history N] [--view overview|tokens|cost] | watch [--history N] [--view overview|tokens|cost] | mode [passthrough|recovery|intercept] | config [latency off|latency FIRST TOTAL [return_502|retry_then_502]] | install | restart | restore | serve"),
     ];
 }
 async function runProxyStatusOnce(options) {
