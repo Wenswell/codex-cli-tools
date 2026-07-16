@@ -102,7 +102,7 @@ codex-rename
 - The root `ccs` footer separates direct commands from command namespaces. Both lists use primary names only.
 - A namespace footer lists its immediate primary subcommands and ends with `--help`.
 - Explicit help contains parameters, aliases, nested commands, and command comments.
-- Command footers wrap at ` | ` boundaries with hanging indentation and never truncate entries.
+- Each labeled command footer row is emitted as one line without width-dependent formatting.
 - At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
 - Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
