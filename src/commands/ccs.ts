@@ -1990,20 +1990,20 @@ async function printUsageTargets(profiles: ProfilesFile): Promise<void> {
 
   if (rows.length === 0) {
     console.log(textDim("no usage profiles"));
-    return;
+  } else {
+    printTable([
+      { key: "name", title: "" },
+      { key: "url", title: "" },
+      { key: "key", title: "" },
+      ...usageTableColumns(),
+    ], rows.map((row) => ({
+      name: colorName(row.name),
+      url: colorUrl(row.profile.baseURL),
+      key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+      ...usageTableValues(row.usage),
+    })), { header: false });
   }
-
-  printTable([
-    { key: "name", title: "" },
-    { key: "url", title: "" },
-    { key: "key", title: "" },
-    ...usageTableColumns(),
-  ], rows.map((row) => ({
-    name: colorName(row.name),
-    url: colorUrl(row.profile.baseURL),
-    key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-    ...usageTableValues(row.usage),
-  })), { header: false });
+  console.log(textDim("commands: ccs usage | ccs usage add [PROFILE] | ccs usage [remove|rm|delete] PROFILE"));
 }
 
 async function printModels(profiles: ProfilesFile, args: string[]): Promise<void> {
@@ -4784,7 +4784,7 @@ async function printCcsCostStatus(profiles: ProfilesFile): Promise<void> {
   printKeyValue("upload:", colorPath(ccsCostRemoteDisplay), 9);
   printKeyValue("timezone:", systemTimezone(), 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs cost push | ccs cost [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD] | ccs cost central [daily|weekly|monthly|projects|project PROJECT|models|day YYYY-MM-DD]"));
+  console.log(textDim("commands: ccs cost | ccs cost push | ccs cost [daily|weekly|monthly|projects|models] | ccs cost project PROJECT | ccs cost day YYYY-MM-DD | ccs cost central [daily|weekly|monthly|projects|models|project PROJECT|day YYYY-MM-DD]"));
   console.log(textDim("options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast"));
 }
 
@@ -4853,7 +4853,7 @@ async function printCcsPricingStatus(): Promise<void> {
   printKeyValue("source:", cache.source === "builtin" ? textDim(cache.source) : colorUrl(cache.source), 9);
   printKeyValue("fetched:", cache.fetchedAt, 9);
   printKeyValue("speed:", `auto -> ${speed}`, 9);
-  console.log(textDim("commands: ccs pricing list [--remote] | ccs pricing pattern [watch|unwatch] | ccs pricing provider [add|remove] | ccs pricing refresh"));
+  console.log(textDim("commands: ccs pricing | ccs pricing list [--remote] | ccs pricing pattern | ccs pricing pattern watch PATTERN... | ccs pricing pattern unwatch PATTERN... | ccs pricing provider | ccs pricing provider add PROVIDER... | ccs pricing provider remove PROVIDER... | ccs pricing refresh"));
 }
 
 function printCcsPricingHelp(): void {
@@ -5183,11 +5183,8 @@ function parseCcsCostCommandArgs(args: string[]): CcsCostParsedArgs {
 
   const first = args[0];
   if (first === "push") {
-    const reportArgs = args.slice(1);
-    return {
-      command: "push",
-      options: reportArgs.length > 0 ? parseCcsCostReportArgs(reportArgs) : undefined,
-    };
+    assertExactArgs(args.slice(1), "cost push", 0);
+    return { command: "push" };
   }
 
   if (first === "central") {
@@ -6913,7 +6910,7 @@ function roundNullableCostUSD(value: number | null): number | null {
 }
 
 function printUsageHelp(): void {
-  console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|config|install|restore|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]"));
+  console.log(textDim("commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing | proxy | cost | toggle [PROFILE] | add [PROFILE] | [remove|rm|delete] PROFILE | top [--once] [--mark DURATION] | config | s | list|l [-u|--usage] | usage | init | sync [--replace TOML_PATH [--replace TOML_PATH ...]|--replace all]"));
 }
 
 async function printAppServerDaemonVersion(): Promise<void> {
@@ -6931,7 +6928,7 @@ async function printAppServerDaemonVersion(): Promise<void> {
 }
 
 function printStatusUsageHelp(): void {
-  console.log(textDim("commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]"));
+  console.log(textDim("commands: ccs s | ccs s line | ccs s agent | ccs s server [PORT] | ccs s history [PROFILE] | ccs s pause | ccs s resume | ccs s reset | ccs s wezterm | ccs s wezterm remove"));
 }
 
 export async function runCcs(argv: string[]): Promise<void> {

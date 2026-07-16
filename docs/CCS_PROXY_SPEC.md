@@ -252,6 +252,11 @@ Before client headers are committed, total timeout, first-progress timeout, or t
 - Latency line: `latency last=... avg=... min=... max=...`.
 - `active`: up to 5 current requests rendered by the shared request-row formatter.
 - `history`: completed requests rendered by the shared request-row formatter.
+- Command footer: the complete proxy namespace surface, including status/watch history and view options, every mode, both latency configuration forms, install, restart, restore, and serve.
+
+```text
+commands: ccs proxy [--history N] [--view overview|tokens|cost] | watch [--history N] [--view overview|tokens|cost] | mode [passthrough|recovery|intercept] | config [latency off|latency FIRST TOTAL [return_502|retry_then_502]] | install | restart | restore | serve
+```
 
 History row count follows these rules:
 

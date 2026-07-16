@@ -18,6 +18,49 @@ test("ccs help lists the current proxy command surface", async () => {
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
 });
 
+test("ccs status footer keeps namespaces at the root level", async () => {
+  const home = await writeProfiles({
+    profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+    current: "input",
+  });
+  try {
+    const output = await runCcs(["dist/bin/ccs.js"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const footer = output.split("\n").find((line) => line.startsWith("commands:"));
+    assert.ok(footer);
+    for (const namespace of ["pricing", "proxy", "cost", "config", "s", "usage"]) {
+      assert.match(footer, new RegExp(`(?:^|\\| )${namespace}(?: \\||$)`));
+      assert.doesNotMatch(footer, new RegExp(`(?:^|\\| )${namespace} \\[`));
+    }
+    assert.match(footer, /run PROFILE \[ARGS\]/);
+    assert.match(footer, /models \[--json\]/);
+    assert.match(footer, /sync \[--replace TOML_PATH/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs config, status, and usage footers include their complete parameters", async () => {
+  const home = await writeProfiles({
+    profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+    current: "input",
+  });
+  const env = { XDG_CACHE_HOME: join(home, ".cache") };
+  try {
+    await writeUsageTopState(home, [{ name: "input", used: 1 }]);
+    const configOutput = await runCcs(["dist/bin/ccs.js", "config"], home, env);
+    const statusOutput = await runCcs(["dist/bin/ccs.js", "s"], home, env);
+    const usageOutput = await runCcs(["dist/bin/ccs.js", "usage"], home, env);
+
+    assert.match(configOutput, /commands: ccs config \| ccs config push \| ccs config pull/);
+    assert.match(statusOutput, /ccs s server \[PORT\]/);
+    assert.match(statusOutput, /ccs s history \[PROFILE\]/);
+    assert.match(statusOutput, /ccs s wezterm \| ccs s wezterm remove/);
+    assert.match(usageOutput, /commands: ccs usage \| ccs usage add \[PROFILE\] \| ccs usage \[remove\|rm\|delete\] PROFILE/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("tools print package version", async () => {
   const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxr", "cxx", "cxxr", "cxxs", "cxxsr", "senv", "codex-rename"];
@@ -261,6 +304,15 @@ test("ccs cost status omits pricing commands", async () => {
       XDG_CACHE_HOME: join(home, ".cache"),
     });
     assert.doesNotMatch(output, /ccs pricing/);
+    assert.match(output, /commands: ccs cost \| ccs cost push/);
+    assert.match(output, /ccs cost project PROJECT/);
+    assert.match(output, /ccs cost day YYYY-MM-DD/);
+    assert.match(output, /ccs cost central \[daily\|weekly\|monthly\|projects\|models\|project PROJECT\|day YYYY-MM-DD\]/);
+    assert.match(output, /options: --since YYYY-MM-DD .* --speed auto\|standard\|fast/);
+    await assert.rejects(
+      runCcs(["dist/bin/ccs.js", "cost", "push", "daily"], home),
+      /usage: ccs cost push/,
+    );
   } finally {
     if (home) await rm(home, { recursive: true, force: true });
   }
@@ -443,7 +495,10 @@ test("ccs pricing prints local selection status", async () => {
     assert.match(output, /providers:\s+1/);
     assert.match(output, /models:\s+1/);
     assert.match(output, /source:\s+test/);
-    assert.match(output, /commands: ccs pricing list \[--remote\] \| ccs pricing pattern \[watch\|unwatch\] \| ccs pricing provider \[add\|remove\] \| ccs pricing refresh/);
+    assert.match(output, /commands: ccs pricing \| ccs pricing list \[--remote\]/);
+    assert.match(output, /ccs pricing pattern watch PATTERN\.\.\. \| ccs pricing pattern unwatch PATTERN\.\.\./);
+    assert.match(output, /ccs pricing provider add PROVIDER\.\.\. \| ccs pricing provider remove PROVIDER\.\.\./);
+    assert.match(output, /ccs pricing refresh/);
   } finally {
     if (home) {
       await rm(home, { recursive: true, force: true });

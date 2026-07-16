@@ -4194,6 +4194,30 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(explicit), 7);
 });
 
+test("proxy status footer summarizes the complete command surface", () => {
+  const lines = withStdoutProperties({ isTTY: true, noColor: true, columns: 60 }, () =>
+    buildProxyStatusLines(
+      new Date("2026-01-01T00:00:00.000Z"),
+      proxyStateFixture(),
+      ["input"],
+      { healthy: true, started: false, pid: 1234, state: null, version: packageVersion(), protocol: 3 },
+      {
+        codexConfigPath: "/home/test/.codex/config.toml",
+        listenHost: "127.0.0.1",
+        listenPort: 4610,
+        stateRoot: "/tmp/codex-tools",
+      },
+    ),
+  );
+  const footer = stripAnsi(lines.at(-1));
+
+  assert.match(footer, /^commands: ccs proxy \[--history N\] \[--view overview\|tokens\|cost\]/);
+  assert.match(footer, /watch \[--history N\] \[--view overview\|tokens\|cost\]/);
+  assert.match(footer, /mode \[passthrough\|recovery\|intercept\]/);
+  assert.match(footer, /config \[latency off\|latency FIRST TOTAL \[return_502\|retry_then_502\]\]/);
+  assert.match(footer, /\| install \| restart \| restore \| serve$/);
+});
+
 test("proxy rejects invalid --history values", async () => {
   const options = {
     codexConfigPath: "/tmp/config.toml",

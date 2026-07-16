@@ -91,6 +91,7 @@ codex-rename
 - [Codex remote commands plan](docs/CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 - [CLI lifecycle plan](docs/CLI_LIFECYCLE_PLAN.md)
+- [CLI command summary plan](docs/CLI_COMMAND_SUMMARY_PLAN.md)
 - [ccs proxy install fix plan](docs/CCS_PROXY_INSTALL_FIX_PLAN.md)
 
 ## CLI conventions
@@ -98,6 +99,8 @@ codex-rename
 - No-argument/status commands print active configuration values, not just file paths.
 - New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
 - No-argument output combines compact status with a compact command/help line when the tool has user-facing commands.
+- The root `ccs` summary expands only direct root parameters. Command namespaces appear as bare entries such as `proxy`, meaning `ccs proxy`.
+- A namespace summary lists its complete accepted subcommands, positional parameters, and options.
 - At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
 - Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
@@ -274,7 +277,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and one compact command line:
 
 ```text
-commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing [list|pattern|provider|refresh] | proxy [--view VIEW|watch|mode|config|install|restore|serve] | cost [push|central|daily|weekly|monthly|projects|project|models|day] | [toggle|add|rm] [PROFILE] | top | config [push|pull] | s [line|agent|server|history|pause|resume|reset|wezterm] | list [-u] | usage | init | sync [--replace PATH|all]
+commands: ccs | version|-v | r | PROFILE | run PROFILE [ARGS] | models [--json] | pricing | proxy | cost | toggle [PROFILE] | add [PROFILE] | [remove|rm|delete] PROFILE | top [--once] [--mark DURATION] | config | s | list|l [-u|--usage] | usage | init | sync [--replace TOML_PATH [--replace TOML_PATH ...]|--replace all]
 ```
 
 Supported commands:
@@ -347,6 +350,13 @@ ccs remove | rm | delete PROFILE
 `ccs models` requests `GET BASE_URL/v1/models` for every configured switching profile in `profiles.profiles`, using each profile API key as a Bearer token. Default output is a horizontal table with one provider column and one adjacent `price` column per provider. Price status is `ok` when input, output, and cache-read pricing are present, `partial` when input/output pricing exists without cache-read pricing, and `missing` when base pricing is unavailable. A provider request failure is shown in that provider column, and successful provider columns still show their model ids. `ccs models --json` prints stable JSON with each profile's `name`, `models`, `pricing`, and `error`, plus top-level pricing cache metadata.
 
 `ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and one compact command/options hint containing only `ccs cost` commands. Use an explicit report command to print usage tables.
+
+```text
+commands: ccs cost | ccs cost push | ccs cost [daily|weekly|monthly|projects|models] | ccs cost project PROJECT | ccs cost day YYYY-MM-DD | ccs cost central [daily|weekly|monthly|projects|models|project PROJECT|day YYYY-MM-DD]
+options: --since YYYY-MM-DD | --until YYYY-MM-DD | --timezone IANA_NAME | --bucket 15m|30m|1h|2h | --json | --raw | --speed auto|standard|fast
+```
+
+The options apply to local and central report forms. `ccs cost push` accepts no additional arguments and always uploads the complete machine snapshot.
 
 `ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, `models`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for current-thread `token_count` usage events. Forked rollout files can contain copied parent history; `ccs cost` starts counting at the rollout thread's own `task_started` boundary and keeps subagent fork usage when it belongs to the current rollout. Terminal tables use `input`, `output`, `cached`, `input$`, `output$`, `cached$`, and `total$`. `input` is uncached input. A `pricing` column appears when any required price is missing.
 
@@ -427,6 +437,12 @@ Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes 
 
 Costs use LiteLLM model pricing cached at `~/.config/codex-tools/model-prices.json`. Its `patterns`, `providers`, and `models` fields form one selection snapshot: `patterns` stores normalized model patterns, `providers` stores normalized LiteLLM `litellm_provider` names, and `models` maps exact selected model names to their price records. Remote selection first keeps watched providers and then applies the pattern union, so saved models always meet both filters. Entries without a string `litellm_provider` never enter the snapshot. `ccs cost`, `ccs cost central`, and `ccs models` read the local cache, built-in supplemental prices, and manual overrides. `ccs pricing` prints local selection state. `ccs pricing list` reads and prints selected local prices without a network request. `ccs pricing list --remote` fetches LiteLLM and prints every model from watched providers. Both modes use `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. `ccs pricing pattern` prints watched patterns and local matched-model counts. `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild the complete remote snapshot after exact `yes`. `ccs pricing provider` prints watched providers; `add PROVIDER...` and `remove PROVIDER...` modify only local cache state after exact `yes`, with removal pruning local models that no longer satisfy provider and pattern filters. `ccs pricing refresh` rebuilds the complete snapshot from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing. The built-in supplemental table covers GLM-5.2 names. Manual pricing overrides remain under `pricing.overrides` in `profiles.json` with `inputCostPerToken`, `outputCostPerToken`, and `cacheReadInputTokenCost` fields. Missing model prices are reported through terminal `pricing` status and JSON `missingPricingModels`. Cost speed resolution uses top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
 
+The no-argument pricing status ends with its complete namespace summary:
+
+```text
+commands: ccs pricing | ccs pricing list [--remote] | ccs pricing pattern | ccs pricing pattern watch PATTERN... | ccs pricing pattern unwatch PATTERN... | ccs pricing provider | ccs pricing provider add PROVIDER... | ccs pricing provider remove PROVIDER... | ccs pricing refresh
+```
+
 ```bash
 ccs pricing provider add openai
 ccs pricing pattern watch 'gpt-5.*'
@@ -437,6 +453,12 @@ ccs pricing provider remove openai
 ```
 
 `ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
+
+`ccs usage` prints the usage-only profiles followed by its complete namespace summary:
+
+```text
+commands: ccs usage | ccs usage add [PROFILE] | ccs usage [remove|rm|delete] PROFILE
+```
 
 `ccs top` prints all `profiles` and `usage` costs in one terminal line. Each profile refreshes independently: it starts at 25 seconds, backs off by 30 seconds when the cost does not change, caps at 300 seconds, and resets to 25 seconds when the cost changes.
 
@@ -458,7 +480,7 @@ Run `ccs s` to print the same compact status plus one compact command line:
 
 ```text
 22:52:22 r7s | *input 181.9 | ciii 161.3 | oops ? | input-cc 0
-commands: ccs s [line|agent|server|history|pause|resume|reset|wezterm]
+commands: ccs s | ccs s line | ccs s agent | ccs s server [PORT] | ccs s history [PROFILE] | ccs s pause | ccs s resume | ccs s reset | ccs s wezterm | ccs s wezterm remove
 ```
 
 Use `ccs s line` from terminal status bars or shell prompts. It reads configured top state, prints one compact line, and exits:
@@ -666,6 +688,10 @@ ccs config pull
 
 Run `ccs config` without arguments to print the local file summary, fixed LAN target, and a compact command line without connecting to the server.
 
+```text
+commands: ccs config | ccs config push | ccs config pull
+```
+
 `push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Only `push` and `pull` connect to the server and compare files. Both commands preview first and apply only after you type exact `yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
@@ -727,6 +753,12 @@ ccs proxy install
 ccs proxy restart
 ccs proxy restore
 ccs proxy serve
+```
+
+The no-argument proxy snapshot ends with the same complete surface in compact form:
+
+```text
+commands: ccs proxy [--history N] [--view overview|tokens|cost] | watch [--history N] [--view overview|tokens|cost] | mode [passthrough|recovery|intercept] | config [latency off|latency FIRST TOTAL [return_502|retry_then_502]] | install | restart | restore | serve
 ```
 
 ### Proxy lifecycle
