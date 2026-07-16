@@ -19,7 +19,7 @@ import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.
 import { buildModelPriceSnapshotPlanFromRemoteCatalog, calculateCodexCostBreakdown, litellmPricingUrl, matchingModelNames, missingPricingModels, modelPriceParts, modelPricingStatus, normalizeModelPricePatterns, normalizeModelPriceProviders, pruneModelPriceCache, readModelPriceCache, readModelPriceCacheForModels, readRemoteModelPriceCatalog, readStoredModelPriceCache, resolveCodexCostSpeed, selectRemoteModelPrices, writeModelPriceCache, writeModelPriceSnapshotPlan, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, padVisibleLeft, padVisibleRight, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
-import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { syncTomlTemplate, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable, renderTable } from "../lib/table.js";
 import { fitTerminalLine, formatCommandFooterLines } from "../lib/terminal.js";
@@ -1040,13 +1040,20 @@ function proxyOptions() {
         stateRoot,
     };
 }
-async function resolveActiveBaseUrl(profileBaseUrl) {
+async function resolveRunRoute(profileBaseUrl) {
     const proxyState = await readProxyState();
     if (!proxyState) {
-        return profileBaseUrl;
+        return { baseURL: profileBaseUrl, proxy: false };
     }
     const runtime = await ensureProxyRunning(proxyOptions());
-    return resolveProxySwitchBaseUrl(runtime?.state ?? proxyState) ?? profileBaseUrl;
+    const baseURL = resolveProxySwitchBaseUrl(runtime?.state ?? proxyState);
+    if (!baseURL) {
+        throw new Error("proxy state has no base URL");
+    }
+    return { baseURL, proxy: true };
+}
+async function resolveActiveBaseUrl(profileBaseUrl) {
+    return (await resolveRunRoute(profileBaseUrl)).baseURL;
 }
 async function runCodexWithProfile(profiles, name, codexArgs) {
     if (!name || name.startsWith("-")) {
@@ -1063,12 +1070,16 @@ async function runCodexWithProfile(profiles, name, codexArgs) {
     const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
     const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
     const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
-    const baseURL = await resolveActiveBaseUrl(normalized.baseURL);
+    const route = await resolveRunRoute(normalized.baseURL);
     const args = [
         "-c",
-        `model_providers.${provider}.base_url=${JSON.stringify(baseURL)}`,
+        `model_providers.${provider}.base_url=${JSON.stringify(route.baseURL)}`,
         "-c",
         `model_providers.${provider}.env_key=${JSON.stringify(apiKeyEnv)}`,
+        ...(route.proxy ? [
+            "-c",
+            `model_providers.${provider}.http_headers.${CCS_PROXY_PROFILE_HEADER}=${JSON.stringify(name)}`,
+        ] : []),
         ...codexArgs,
     ];
     printProfileSummary("run", name, normalized);

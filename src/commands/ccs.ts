@@ -98,7 +98,7 @@ import {
   colorUrl,
   printKeyValue,
 } from "../lib/output.js";
-import { ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   syncTomlTemplate,
   readTomlBaseUrl,
@@ -1519,13 +1519,21 @@ function proxyOptions() {
   };
 }
 
-async function resolveActiveBaseUrl(profileBaseUrl: string): Promise<string> {
+async function resolveRunRoute(profileBaseUrl: string): Promise<{ baseURL: string; proxy: boolean }> {
   const proxyState = await readProxyState();
   if (!proxyState) {
-    return profileBaseUrl;
+    return { baseURL: profileBaseUrl, proxy: false };
   }
   const runtime = await ensureProxyRunning(proxyOptions());
-  return resolveProxySwitchBaseUrl(runtime?.state ?? proxyState) ?? profileBaseUrl;
+  const baseURL = resolveProxySwitchBaseUrl(runtime?.state ?? proxyState);
+  if (!baseURL) {
+    throw new Error("proxy state has no base URL");
+  }
+  return { baseURL, proxy: true };
+}
+
+async function resolveActiveBaseUrl(profileBaseUrl: string): Promise<string> {
+  return (await resolveRunRoute(profileBaseUrl)).baseURL;
 }
 
 async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefined, codexArgs: string[]): Promise<void> {
@@ -1545,12 +1553,16 @@ async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefi
   const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
   const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
   const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
-  const baseURL = await resolveActiveBaseUrl(normalized.baseURL);
+  const route = await resolveRunRoute(normalized.baseURL);
   const args = [
     "-c",
-    `model_providers.${provider}.base_url=${JSON.stringify(baseURL)}`,
+    `model_providers.${provider}.base_url=${JSON.stringify(route.baseURL)}`,
     "-c",
     `model_providers.${provider}.env_key=${JSON.stringify(apiKeyEnv)}`,
+    ...(route.proxy ? [
+      "-c",
+      `model_providers.${provider}.http_headers.${CCS_PROXY_PROFILE_HEADER}=${JSON.stringify(name)}`,
+    ] : []),
     ...codexArgs,
   ];
 

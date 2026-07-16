@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
+import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
 import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -81,6 +82,58 @@ test("remote Codex wrappers add the Unix socket option before resume", async () 
     ]);
   } finally {
     await rm(binDir, { recursive: true, force: true });
+  }
+});
+
+test("ccs run selects its profile through an installed proxy", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "https://input.example.com", apiKey: "input-key" },
+      ciii: { baseURL: "https://ciii.example.com", apiKey: "ciii-key" },
+    },
+    current: "ciii",
+  });
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const proxyPort = await reservePort();
+  const capturePath = join(home, "codex-run.json");
+  const binDir = await createFakeCodex(`
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ args: process.argv.slice(2), apiKey: process.env.CCS_RUN_OPENAI_API_KEY }));
+  `);
+  const codexConfigPath = join(home, ".codex", "config.toml");
+  const options = { codexConfigPath, listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(codexConfigPath, [
+      'model_provider = "codex"',
+      "",
+      "[model_providers.codex]",
+      'base_url = "https://ciii.example.com"',
+      'wire_api = "responses"',
+      "",
+    ].join("\n"), "utf8");
+    await writeProxyStateForRunTest(home, stateRoot, proxyPort);
+
+    await runCcs(["dist/bin/ccs.js", "run", "input", "exec", "hello"], home, {
+      XDG_CACHE_HOME: join(home, ".cache"),
+      CCS_PROXY_STATE_ROOT: stateRoot,
+      CCS_PROXY_LISTEN_PORT: String(proxyPort),
+      PATH: `${binDir}:${process.env.PATH}`,
+      CAPTURE_PATH: capturePath,
+    });
+
+    const captured = JSON.parse(await readFile(capturePath, "utf8"));
+    assert.equal(captured.apiKey, "input-key");
+    assert.deepEqual(captured.args, [
+      "-c", `model_providers.codex.base_url="http://127.0.0.1:${proxyPort}"`,
+      "-c", 'model_providers.codex.env_key="CCS_RUN_OPENAI_API_KEY"',
+      "-c", 'model_providers.codex.http_headers.x-ccs-profile="input"',
+      "exec", "hello",
+    ]);
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    await rm(binDir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 });
 
@@ -1454,6 +1507,37 @@ async function writeProfiles(profiles) {
   await mkdir(configDir, { recursive: true });
   await writeFile(join(configDir, "profiles.json"), JSON.stringify(profiles, null, 2), "utf8");
   return home;
+}
+
+async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
+  await mkdir(stateRoot, { recursive: true });
+  await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
+    installed_at: "2026-01-01T00:00:00.000Z",
+    codex_config_path: join(home, ".codex", "config.toml"),
+    provider_name: "codex",
+    original_base_url: "https://ciii.example.com",
+    proxy_base_url: `http://127.0.0.1:${proxyPort}`,
+    mode: "passthrough",
+    latency_guard: {
+      enabled: false,
+      first_progress_timeout_ms: 0,
+      first_progress_action: "return_502",
+      total_timeout_ms: 0,
+    },
+    listen_host: "127.0.0.1",
+    listen_port: proxyPort,
+    profile_order: ["ciii"],
+    backup_path: "/tmp/backup.toml",
+    metrics: {
+      total_requests: 0,
+      active_requests: [],
+      status_counts: {},
+      reasoning_token_counts: {},
+      upstream_hit_counts: {},
+      latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
+      recent_requests: [],
+    },
+  }, null, 2), "utf8");
 }
 
 async function replaceJson(path, value) {

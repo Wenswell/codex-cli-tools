@@ -983,7 +983,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
   }
 });
 
-test("proxy uses profiles.current only and passes upstream HTTP status bodies", async () => {
+test("proxy uses an explicit run profile or profiles.current and passes upstream HTTP status bodies", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -992,6 +992,7 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
   const otherPort = await reservePort();
   const statuses = [401, 403, 408, 429, 503];
   const currentHeaders = [];
+  const otherHeaders = [];
   let currentHits = 0;
   let otherHits = 0;
 
@@ -1007,8 +1008,12 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
     res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ status, upstream: "current" }));
   });
-  const other = createServer((_req, res) => {
+  const other = createServer((req, res) => {
     otherHits += 1;
+    otherHeaders.push({
+      authorization: req.headers.authorization,
+      profile: req.headers["x-ccs-profile"],
+    });
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ upstream: "other" }));
   });
@@ -1057,13 +1062,36 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
       assert.deepEqual(await response.json(), { status, upstream: "current" });
     }
 
+    const selected = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-ccs-profile": "input",
+      },
+      body: "{}",
+    });
+    assert.equal(selected.status, 200);
+    assert.deepEqual(await selected.json(), { upstream: "other" });
+
+    const unknown = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-ccs-profile": "missing",
+      },
+      body: "{}",
+    });
+    assert.equal(unknown.status, 400);
+    assert.deepEqual(await unknown.json(), { error: { message: "proxy profile missing was not found" } });
+
     const state = await waitForState(
       stateRoot,
       (candidate) => candidate.metrics.active_requests.length === 0
-        && candidate.metrics.total_requests === statuses.length,
+        && candidate.metrics.total_requests === statuses.length + 2,
     );
     assert.equal(currentHits, statuses.length);
-    assert.equal(otherHits, 0);
+    assert.equal(otherHits, 1);
+    assert.deepEqual(otherHeaders, [{ authorization: "Bearer input-key", profile: undefined }]);
     assert.deepEqual(
       currentHeaders,
       statuses.map(() => ({
@@ -1072,13 +1100,14 @@ test("proxy uses profiles.current only and passes upstream HTTP status bodies", 
         xApiKey: undefined,
       })),
     );
-    assert.deepEqual(state.metrics.status_counts, { "401": 1, "403": 1, "408": 1, "429": 1, "503": 1 });
+    assert.deepEqual(state.metrics.status_counts, { "200": 1, "400": 1, "401": 1, "403": 1, "408": 1, "429": 1, "503": 1 });
     assert.equal(state.metrics.upstream_hit_counts.ciii, statuses.length);
-    assert.equal(state.metrics.recent_requests[0].upstream, "ciii");
-    assert.equal(state.metrics.recent_requests[0].attempts, 1);
+    assert.equal(state.metrics.upstream_hit_counts.input, 1);
+    assert.equal(state.metrics.recent_requests.find((record) => record.upstream === "input")?.attempts, 1);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /upstreams=ciii=5/);
+    assert.match(output, /input=1/);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),

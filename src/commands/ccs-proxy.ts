@@ -43,6 +43,8 @@ type ProxyUpstream = {
   apiKey: string;
 };
 
+class ProxyProfileSelectionError extends Error {}
+
 type ProfilesFile = {
   profiles?: Record<string, Profile>;
   current?: string;
@@ -366,6 +368,7 @@ type ProxyResponseBytesObserver = (responseBytes: number) => void | Promise<void
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
+export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const PROXY_HEALTH_PROTOCOL = 5;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
@@ -825,20 +828,32 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
   return profiles.current ? [profiles.current] : [];
 }
 
-function resolveProxyUpstream(profiles: ProfilesFile): ProxyUpstream {
-  const current = profiles.current;
-  if (!current) {
+function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string): ProxyUpstream {
+  const name = requestedProfile || profiles.current;
+  if (!name) {
     throw new Error("profiles.current was not found");
   }
-  const profile = profiles.profiles?.[current];
+  const profile = profiles.profiles?.[name];
+  if (!profile) {
+    if (requestedProfile) {
+      throw new ProxyProfileSelectionError(`proxy profile ${name} was not found`);
+    }
+    throw new Error(`profiles.current ${name} was not found in profiles`);
+  }
   const baseURL = profile?.baseURL;
   if (!baseURL) {
-    throw new Error(`profiles.current ${current} has no baseURL`);
+    if (requestedProfile) {
+      throw new ProxyProfileSelectionError(`proxy profile ${name} has no baseURL`);
+    }
+    throw new Error(`profiles.current ${name} has no baseURL`);
   }
   if (!profile.apiKey) {
-    throw new Error(`profiles.current ${current} has no apiKey`);
+    if (requestedProfile) {
+      throw new ProxyProfileSelectionError(`proxy profile ${name} has no apiKey`);
+    }
+    throw new Error(`profiles.current ${name} has no apiKey`);
   }
-  return { name: current, baseURL, apiKey: profile.apiKey };
+  return { name, baseURL, apiKey: profile.apiKey };
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -2588,6 +2603,7 @@ async function forwardRequest(
       || lower === "authorization"
       || lower === "api-key"
       || lower === "x-api-key"
+      || lower === CCS_PROXY_PROFILE_HEADER
     ) {
       continue;
     }
@@ -5195,7 +5211,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         const endpointClass = route.endpointClass;
         try {
           const profiles = await readProfiles();
-          const upstreamProfile = resolveProxyUpstream(profiles);
+          const upstreamProfile = resolveProxyUpstream(profiles, headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER));
           const body = await readBody(req);
           const requestJson = parseJsonBody(body);
           requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
@@ -5448,10 +5464,12 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             responseBytes = error.responseBytes;
             errorText = error.message;
           } else {
-            status = status ?? 500;
+            status = status ?? (error instanceof ProxyProfileSelectionError ? 400 : 500);
             errorText = error instanceof Error ? error.message : String(error);
           }
-          failureSummary = responseControlLost
+          failureSummary = error instanceof ProxyProfileSelectionError
+            ? proxyFailureSummary("client_error", "invalid_proxy_profile", errorText)
+            : responseControlLost
             ? proxyFailureSummary(
               "gateway_error",
               inspectionLimitAfterForward

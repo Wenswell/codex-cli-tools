@@ -16,6 +16,7 @@ Project design specs:
 - [Codex remote commands plan](./CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs WezTerm current provider plan](./CCS_WEZTERM_CURRENT_PROVIDER_PLAN.md)
 - [ccs proxy spec](./CCS_PROXY_SPEC.md)
+- [ccs run proxy profile plan](./CCS_RUN_PROXY_PROFILE_PLAN.md)
 - [ccs proxy route boundary plan](./CCS_PROXY_ROUTE_BOUNDARY_PLAN.md)
 - [ccs proxy request log plan](./CCS_PROXY_REQUEST_LOG_PLAN.md)
 - [ccs proxy reasoning observability plan](./CCS_PROXY_REASONING_OBSERVABILITY_PLAN.md)
