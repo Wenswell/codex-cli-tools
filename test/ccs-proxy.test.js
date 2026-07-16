@@ -4194,31 +4194,6 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(explicit), 7);
 });
 
-test("proxy status footer lists immediate commands within terminal width", () => {
-  const lines = withStdoutProperties({ isTTY: true, noColor: true, columns: 60 }, () =>
-    buildProxyStatusLines(
-      new Date("2026-01-01T00:00:00.000Z"),
-      proxyStateFixture(),
-      ["input"],
-      { healthy: true, started: false, pid: 1234, state: null, version: packageVersion(), protocol: 3 },
-      {
-        codexConfigPath: "/home/test/.codex/config.toml",
-        listenHost: "127.0.0.1",
-        listenPort: 4610,
-        stateRoot: "/tmp/codex-tools",
-      },
-    ),
-  );
-  const plainLines = lines.map(stripAnsi);
-  const footerLines = plainLines.slice(plainLines.findIndex((line) => line.startsWith("commands:")));
-
-  assert.equal(
-    footerLines.join(" ").replace(/\s+/g, " ").trim(),
-    "commands: watch | mode | config | install | restart | restore | serve | --help",
-  );
-  assert.ok(footerLines.every((line) => line.length <= 60));
-});
-
 test("proxy rejects invalid --history values", async () => {
   const options = {
     codexConfigPath: "/tmp/config.toml",

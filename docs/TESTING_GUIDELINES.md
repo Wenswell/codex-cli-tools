@@ -18,6 +18,9 @@ Tests should fail for product problems and durable contracts. They should stay f
 - Assert exact text when the text is the contract, such as a required confirmation prompt, a documented error code, or a public command line.
 - Assert exact color or spacing when that visual detail carries semantics.
 - Prefer semantic assertions over full-output snapshots for monitor and table output.
+- For compact help footers, assert hierarchy, discoverability, and help routing;
+  avoid full command strings, spacing, and line-count assertions unless the
+  exact layout is an explicit contract.
 
 ## Terminal And Subprocess Helpers
 

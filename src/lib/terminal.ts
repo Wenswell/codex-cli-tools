@@ -38,26 +38,8 @@ export function fitCommandsLine(fullLine: string, compactLine: string, columns: 
 
 export function formatCommandFooterLines(
   rows: CommandFooterRow[],
-  columns = terminalColumns(process.stdout),
 ): string[] {
   const labelWidth = Math.max(...rows.map(({ label }) => visibleLength(label)));
-  return rows.flatMap(({ label, commands }) => {
-    const prefix = `${label}${" ".repeat(labelWidth - visibleLength(label) + 1)}`;
-    const indent = " ".repeat(visibleLength(prefix));
-    const lines: string[] = [];
-    let line = prefix;
-
-    for (const command of commands) {
-      const separator = line === prefix ? "" : " | ";
-      if (line !== prefix && visibleLength(line) + visibleLength(separator) + visibleLength(command) > columns) {
-        lines.push(visibleLength(line) + 2 <= columns ? `${line} |` : line);
-        line = `${indent}${command}`;
-      } else {
-        line += `${separator}${command}`;
-      }
-    }
-
-    lines.push(line);
-    return lines;
-  });
+  return rows.map(({ label, commands }) =>
+    `${label}${" ".repeat(labelWidth - visibleLength(label) + 1)}${commands.join(" | ")}`);
 }
