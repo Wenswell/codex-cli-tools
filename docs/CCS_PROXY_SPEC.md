@@ -185,7 +185,7 @@ Request records include:
 
 Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `pricing_model`, `pricing_model_source`, `pricing_tier`, and `pricing_tier_source`. Every detailed attempt projects exactly once, including attempts without usage. Passthrough entries keep response-derived fields empty because the body is not inspected. Pricing model uses upstream model first and request model second. Pricing tier uses response `service_tier`, request `service_tier`, then the top-level config value captured when the request starts.
 
-`proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, prompt text, and response text stay outside request records.
+`proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, the internal `x-ccs-profile` routing header, prompt text, and response text stay outside request records.
 
 Request schema version `6` and health protocol version `5` are the sole supported contracts.
 
@@ -193,9 +193,9 @@ Request-record readers require every schema `6` field with its documented type. 
 
 ## Upstream forwarding
 
-The proxy resolves one active upstream from `profiles.current` for each client request. `ccs toggle` owns profile switching by changing `profiles.current`; the proxy reads that current value when forwarding a new request.
+The proxy resolves one active upstream for each client request. A non-empty internal `x-ccs-profile` header selects that named profile; requests without the header use `profiles.current`. `ccs run PROFILE` sets the header through a temporary Codex provider `http_headers` override, so its process remains pinned without changing stored state. `ccs toggle` owns the default selection by changing `profiles.current`.
 
-The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, and `x-api-key` headers, then sets `Authorization: Bearer <current profile apiKey>` before the upstream request. This keeps already-running Codex CLI processes on the local proxy URL while new requests use the API key from the latest `profiles.current`. A current profile without `apiKey` is a configuration error and the proxy fails the request before contacting upstream.
+The selected profile must exist and contain non-empty `baseURL` and `apiKey`; invalid explicit selections return local `400` and record failure code `invalid_proxy_profile` before contacting any upstream. The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, `x-api-key`, and `x-ccs-profile` headers, then sets `Authorization: Bearer <selected profile apiKey>` before the upstream request. This keeps ordinary running Codex CLI processes on the latest `profiles.current` while preserving explicit `ccs run` selection.
 
 `ccs proxy install` requires absent proxy state and an explicit `model_provider` with an existing `base_url`. Its preview captures the source config, provider, current URL, proxy URL, and backup path. Apply rejects source changes after preview, backs up the config, starts and health-checks the proxy in `passthrough` mode, changes only the routed provider's `base_url`, and verifies both the exact target content and the parsed local routing value. If apply fails after config writing starts, it restores the source only when the file still contains the planned target, stops the runtime, removes proxy state, and keeps the backup. Intervention begins only after an explicit `ccs proxy mode recovery` or `ccs proxy mode intercept` command.
 
@@ -435,7 +435,7 @@ cost      session time up model input$ output$ cached$ total$ result
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - Compact state history is updated before appending the complete JSONL request record.
-- The proxy selects only `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
+- The proxy selects an explicit `x-ccs-profile` request profile when present and otherwise selects `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body and recorded as `upstream_error` failures.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
 - Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
