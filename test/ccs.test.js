@@ -67,21 +67,23 @@ test("tools print package version", async () => {
   }
 });
 
-test("remote Codex wrappers add the Unix socket option before resume", async () => {
+test("remote Codex wrappers pass the current directory before resume", async () => {
   const binDir = await createFakeCodex("console.log(JSON.stringify(process.argv.slice(2)));\n");
   const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
+  const cwd = await mkdtemp(join(tmpdir(), "codex remote cwd "));
   try {
-    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxr.js", "hello"], { cwd: repoRoot, env })), [
-      "--search", "--remote", "unix://", "hello",
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxr.js"), "hello"], { cwd, env })), [
+      "--search", "--remote", "unix://", "-C", cwd, "hello",
     ]);
-    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxxr.js", "hello"], { cwd: repoRoot, env })), [
-      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "hello",
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxr.js"), "hello"], { cwd, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "hello",
     ]);
-    assert.deepEqual(JSON.parse(await execNodeStdout(["dist/bin/cxxsr.js", "thread"], { cwd: repoRoot, env })), [
-      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "resume", "thread",
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxsr.js"), "thread"], { cwd, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "resume", "thread",
     ]);
   } finally {
     await rm(binDir, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
