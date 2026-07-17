@@ -163,7 +163,7 @@ cxr -v
 Equivalent to:
 
 ```bash
-codex --search --remote unix:// ARGS...
+codex --search --remote unix:// -C "$PWD" ARGS...
 ```
 
 `cxx` also bypasses approvals and sandboxing.
@@ -191,7 +191,7 @@ cxxr -v
 Equivalent to:
 
 ```bash
-codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// ARGS...
+codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" ARGS...
 ```
 
 `cxxs` resumes a Codex session with the same `cxx` flags.
@@ -219,8 +219,10 @@ cxxsr -v
 Equivalent to:
 
 ```bash
-codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// resume ARGS...
+codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" resume ARGS...
 ```
+
+All three remote wrappers pass the caller's absolute current directory through `-C`, so the daemon creates and resumes sessions in the directory where the wrapper was invoked instead of the daemon process's startup directory.
 
 Use `cxx`, `cxxr`, `cxxs`, and `cxxsr` only in directories and tasks you trust.
 
