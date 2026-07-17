@@ -472,6 +472,7 @@ test("proxy records active and history request lifecycle", async () => {
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
+          state_schema_version: 1,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: join(home, ".codex", "config.toml"),
           provider_name: "codex",
@@ -3787,6 +3788,7 @@ test("proxy status table renders configured columns and compact units", () => {
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
     {
+      state_schema_version: 1,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
@@ -3927,6 +3929,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
         error: null,
     });
     const state = {
+      state_schema_version: 1,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
@@ -3994,6 +3997,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
 test("proxy status result column stays single-line and expands with terminal width", () => {
   const stateRoot = "/tmp/codex-tools";
   const state = {
+    state_schema_version: 1,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",
@@ -4058,6 +4062,7 @@ test("proxy status summary renders exact status counts", () => {
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
     {
+      state_schema_version: 1,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
@@ -4492,6 +4497,122 @@ test("proxy runtime restarts a healthy current-protocol server from an older pac
     else process.env.HOME = previousHome;
     if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
     else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy status resets an incompatible state schema and starts the current runtime", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-state-upgrade-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const codexConfigPath = join(home, ".codex", "config.toml");
+  const options = { codexConfigPath, listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+  let oldProxy = null;
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    const configText = [
+      'model_provider = "codex"',
+      "",
+      "[model_providers.codex]",
+      `base_url = "http://127.0.0.1:${proxyPort}"`,
+      "",
+    ].join("\n");
+    await writeFile(codexConfigPath, configText, "utf8");
+    await writeProxyStateFixture(home, stateRoot, proxyPort, {
+      total_requests: 1,
+      active_requests: [{ id: "stale-active-from-old-runtime" }],
+      recent_requests: [proxyHistoryRecord({ id: "legacy-history" })],
+    });
+    const statePath = join(stateRoot, "proxy.json");
+    const legacyState = JSON.parse(await readFile(statePath, "utf8"));
+    delete legacyState.state_schema_version;
+    delete legacyState.latency_guard;
+    legacyState.codex_config_path = codexConfigPath;
+    await writeFile(statePath, JSON.stringify(legacyState, null, 2), "utf8");
+    await writeFile(join(stateRoot, "proxy-requests.jsonl"), '{"schema_version":5}\n', "utf8");
+
+    oldProxy = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { createServer } from "node:http";
+          const server = createServer((req, res) => {
+            if (req.url === "/__codex_proxy/health") {
+              res.writeHead(200, { "content-type": "application/json" });
+              res.end(JSON.stringify({ status: "ok", pid: process.pid, version: "0.2.53", protocol: 5, mode: "recovery" }));
+              return;
+            }
+            res.writeHead(404);
+            res.end();
+          });
+          const close = () => server.close(() => process.exit(0));
+          process.once("SIGTERM", close);
+          server.listen(Number(process.env.CCS_TEST_PROXY_PORT), "127.0.0.1", () => process.stdout.write("legacy-ready\\n"));
+        `,
+      ],
+      {
+        env: { ...process.env, CCS_TEST_PROXY_PORT: String(proxyPort) },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    await waitForChildStdout(oldProxy, /legacy-ready/);
+    const oldPid = oldProxy.pid;
+
+    const output = stripAnsi(await captureStdout(() => runProxyCommand([], options)));
+    await waitForChildExit(oldProxy);
+    oldProxy = null;
+    assert.match(output, /state:\s+reset schema legacy -> 1/);
+    const state = await readProxyState(stateRoot);
+    assert.equal(state.state_schema_version, 1);
+    assert.equal(state.installed_at, "2026-01-01T00:00:00.000Z");
+    assert.equal(state.mode, "passthrough");
+    assert.deepEqual(state.latency_guard, disabledLatencyGuard());
+    assert.equal(state.metrics.total_requests, 0);
+    assert.deepEqual(state.metrics.recent_requests, []);
+    assert.equal(await readFile(codexConfigPath, "utf8"), configText);
+    await assert.rejects(readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"), { code: "ENOENT" });
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
+    assert.notEqual(health.pid, oldPid);
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    assert.equal(health.version, packageJson.version);
+    assert.match(await readFile(join(stateRoot, "proxy.log"), "utf8"), /"event":"ccs_proxy_state_reset"/);
+  } finally {
+    if (oldProxy) {
+      oldProxy.kill();
+      await waitForChildExit(oldProxy).catch(() => null);
+    }
+    await shutdownProxyRuntime(options).catch(() => null);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy status rejects malformed current-schema state without resetting it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-current-state-"));
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const options = {
+    codexConfigPath: join(home, ".codex", "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: await reservePort(),
+    stateRoot,
+  };
+  try {
+    await mkdir(stateRoot, { recursive: true });
+    const malformed = proxyStateFixture();
+    delete malformed.latency_guard;
+    await writeFile(join(stateRoot, "proxy.json"), JSON.stringify(malformed, null, 2), "utf8");
+    await assert.rejects(() => runProxyCommand([], options), /proxy\.json\.latency_guard: expected object/);
+    assert.deepEqual(JSON.parse(await readFile(join(stateRoot, "proxy.json"), "utf8")), malformed);
+  } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -5010,6 +5131,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
+          state_schema_version: 1,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: codexConfigPath,
           provider_name: "codex",
@@ -5419,6 +5541,7 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
     join(stateRoot, "proxy.json"),
     JSON.stringify(
       {
+        state_schema_version: 1,
         installed_at: "2026-01-01T00:00:00.000Z",
         codex_config_path: join(home, ".codex", "config.toml"),
         provider_name: "codex",
@@ -5695,6 +5818,7 @@ function assertCompleteProxyGuardAction(record, expected) {
 
 function proxyStateFixture(metrics = {}) {
   return {
+    state_schema_version: 1,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",

@@ -6,7 +6,7 @@
 
 Proxy state lives under `~/.cache/codex-tools/proxy`:
 
-- `proxy.json`: lightweight runtime state snapshot, counters, active model API requests, and the newest completed model API request snapshot.
+- `proxy.json`: state schema version, lightweight runtime state snapshot, counters, active model API requests, and the newest completed model API request snapshot.
 - `proxy-requests.jsonl`: bounded completed model API request history up to 64M, one normalized request record per line in completion order.
 - `proxy.log`: bounded guard, unsupported-path, upstream-error, and local proxy error events as JSONL up to 16M.
 - `proxy-runtime.log`: bounded background process stdout and stderr up to 16M.
@@ -66,19 +66,13 @@ ccs proxy restart
 
 Running `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while disabling intervention; it does not stop the runtime.
 
+`proxy.json.state_schema_version` is independent from package and health protocol versions. Ordinary package updates keep current state. A missing or different state schema is a destructive upgrade boundary: installed proxy commands gracefully stop the old runtime, preserve stable installation and local routing fields, reset mode to `passthrough`, disable latency policy, clear metrics and `proxy-requests.jsonl`, write the current schema, and append `ccs_proxy_state_reset` to `proxy.log`. Persisted active rows are not authoritative across process versions; a stop timeout leaves state unchanged. The command prints the schema transition once. Config backups plus event and runtime logs remain intact. A malformed current-schema file remains an error and is not reset.
+
 If `restart` reports `proxy state file was not found`, inspect the current provider URL. Use `ccs proxy install` only when the provider has a direct URL and no proxy state exists. If the provider still points to the local proxy, restore its direct URL from a known profile or config archive first.
 
-### Clean reinstall
+### State schema upgrade
 
-An earlier request-record schema requires a clean state. After restoring the direct URL and updating the tool, remove the state directory and install again:
-
-```bash
-ccs proxy restore
-rm -rf "${CCS_PROXY_STATE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tools/proxy}"
-ccs proxy install
-```
-
-Removing the directory deletes `proxy.json`, request history, event/runtime logs, and all config backups. Preserve any required archives before this step. It does not modify `~/.codex/config.toml`; that file is handled by `restore` and `install`.
+An earlier state schema is reset automatically by the next installed proxy command. Manual cache deletion and reinstall are not part of the upgrade flow.
 
 ### Explicit restart
 
@@ -189,7 +183,7 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 Request schema version `6` and health protocol version `5` are the sole supported contracts.
 
-Request-record readers require every schema `6` field with its documented type. Previous field names, missing fields, and retired values produce a schema error. An earlier request schema requires a clean proxy reinstall: restore the configured provider URL from the active profile, remove the proxy state directory, and run `ccs proxy install`. The reinstall creates current state and history records.
+Request-record readers require every schema `6` field with its documented type. Previous field names, missing fields, and retired values produce a schema error while the top-level state schema is current. A top-level state schema change clears incompatible snapshots and history through the automatic state upgrade flow.
 
 ## Upstream forwarding
 

@@ -98,7 +98,7 @@ import {
   colorUrl,
   printKeyValue,
 } from "../lib/output.js";
-import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, proxyStateExists, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   syncTomlTemplate,
   readTomlBaseUrl,
@@ -1247,7 +1247,7 @@ async function buildSyncPreviewPlan(options: SyncOptions): Promise<SyncPreviewPl
     }
   }
   const configPlan = await planCodexConfigSync(new Set(selectedPaths));
-  if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await readProxyState()) {
+  if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await proxyStateExists()) {
     throw new Error("ccs sync cannot replace model_provider while proxy state exists");
   }
   const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
@@ -1520,12 +1520,11 @@ function proxyOptions() {
 }
 
 async function resolveRunRoute(profileBaseUrl: string): Promise<{ baseURL: string; proxy: boolean }> {
-  const proxyState = await readProxyState();
-  if (!proxyState) {
+  const runtime = await ensureProxyRunning(proxyOptions());
+  if (!runtime) {
     return { baseURL: profileBaseUrl, proxy: false };
   }
-  const runtime = await ensureProxyRunning(proxyOptions());
-  const baseURL = resolveProxySwitchBaseUrl(runtime?.state ?? proxyState);
+  const baseURL = resolveProxySwitchBaseUrl(runtime.state);
   if (!baseURL) {
     throw new Error("proxy state has no base URL");
   }

@@ -96,6 +96,7 @@ Use short unit names in dense status tables, such as `K`, `M`, `G`, `K/s`, and `
 
 ## Implementation Notes
 
+- Use an explicit state schema version. At a documented schema boundary, replace incompatible cache snapshots automatically; malformed current-schema state remains an error.
 - Write the live JSON state atomically.
 - Append history records as JSON lines and compact them through the shared bounded helper for long-running or high-volume commands.
 - Use shared runtime-log helpers for JSONL appends, atomic JSON state writes, and content-addressed raw archives.

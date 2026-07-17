@@ -66,6 +66,7 @@ type ProxyUsageAttempt = {
 };
 
 type ProxyState = {
+  state_schema_version: 1;
   installed_at: string;
   codex_config_path: string;
   provider_name: string;
@@ -314,6 +315,11 @@ type ProxyOptions = {
   historyVisible?: boolean;
 };
 
+type ProxyStateReset = {
+  previousSchema: number | null;
+  currentSchema: number;
+};
+
 type ProxyEndpointClass = "chat/completions" | "responses";
 
 type ProxyRoute =
@@ -370,6 +376,7 @@ const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const PROXY_HEALTH_PROTOCOL = 5;
+const PROXY_STATE_SCHEMA_VERSION = 1;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
 const PROXY_MODE_INTERCEPT = "intercept";
@@ -491,13 +498,97 @@ async function readProfiles(): Promise<ProfilesFile> {
 }
 
 export async function readProxyState(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy")): Promise<ProxyState | null> {
+  const raw = await readRawProxyState(stateRoot);
+  return raw ? normalizeProxyState(raw as ProxyState) : null;
+}
+
+export async function proxyStateExists(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy")): Promise<boolean> {
+  return (await readRawProxyState(stateRoot)) !== null;
+}
+
+async function readRawProxyState(stateRoot: string): Promise<Record<string, unknown> | null> {
   const text = await readTextIfExists(statePath(stateRoot));
-  return text ? normalizeProxyState(parseJsonObject(text) as ProxyState) : null;
+  return text ? parseJsonObject(text) : null;
 }
 
 async function writeProxyState(stateRoot: string, state: ProxyState): Promise<void> {
   await mkdir(stateRoot, { recursive: true });
   await writeTextFileAtomic(statePath(stateRoot), stringifyJson(state), 0o600);
+}
+
+async function resetIncompatibleProxyState(options: ProxyOptions): Promise<ProxyStateReset | null> {
+  const raw = await readRawProxyState(options.stateRoot);
+  if (!raw || raw.state_schema_version === PROXY_STATE_SCHEMA_VERSION) {
+    return null;
+  }
+
+  const installedAt = requireProxyField(raw, "installed_at", "proxy.json", isNonEmptyString, "non-empty string") as string;
+  const providerName = requireProxyField(raw, "provider_name", "proxy.json", isNonEmptyString, "non-empty string") as string;
+  const originalBaseUrl = requireProxyField(raw, "original_base_url", "proxy.json", isNonEmptyString, "non-empty string") as string;
+  const storedProxyBaseUrl = requireProxyField(raw, "proxy_base_url", "proxy.json", isNonEmptyString, "non-empty string") as string;
+  const listenHost = requireProxyField(raw, "listen_host", "proxy.json", isNonEmptyString, "non-empty string") as string;
+  const listenPort = requireProxyField(raw, "listen_port", "proxy.json", isProxyPort, "TCP port integer") as number;
+  const backupPath = requireProxyField(raw, "backup_path", "proxy.json", (field) => typeof field === "string", "string") as string;
+  const expectedProxyBaseUrl = proxyBaseUrl(listenHost, listenPort);
+  if (storedProxyBaseUrl !== expectedProxyBaseUrl) {
+    throw new Error(`invalid proxy request data at proxy.json.proxy_base_url: expected ${expectedProxyBaseUrl}`);
+  }
+
+  const codexConfigText = await readFile(options.codexConfigPath, "utf8");
+  const routedBaseUrl = readTomlProviderBaseUrl(codexConfigText, providerName);
+  if (routedBaseUrl !== storedProxyBaseUrl) {
+    throw new Error(`proxy state upgrade requires [model_providers.${providerName}].base_url=${storedProxyBaseUrl}`);
+  }
+
+  const profiles = await readProfiles();
+  const resetState: ProxyState = {
+    state_schema_version: PROXY_STATE_SCHEMA_VERSION,
+    installed_at: installedAt,
+    codex_config_path: options.codexConfigPath,
+    provider_name: providerName,
+    original_base_url: originalBaseUrl,
+    proxy_base_url: storedProxyBaseUrl,
+    mode: PROXY_INSTALL_MODE,
+    latency_guard: { ...PROXY_DEFAULT_LATENCY_GUARD },
+    listen_host: listenHost,
+    listen_port: listenPort,
+    profile_order: buildProfileOrder(profiles),
+    backup_path: backupPath,
+    metrics: createProxyMetrics(),
+  };
+  const health = await readProxyHealth(resetState);
+  if (health.healthy) {
+    if (health.pid === null) {
+      throw new Error("proxy state upgrade cannot stop a healthy runtime without a PID");
+    }
+    process.kill(health.pid);
+    await waitForProxyStop(resetState);
+  }
+
+  await rm(pidPath(options.stateRoot), { force: true });
+  await rm(proxyRequestsPath(options.stateRoot), { force: true });
+  await writeProxyState(options.stateRoot, resetState);
+  await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+    event: "ccs_proxy_state_reset",
+    reason: "state_schema_upgrade",
+    old_schema: Number.isInteger(raw.state_schema_version) ? Number(raw.state_schema_version) : null,
+    new_schema: PROXY_STATE_SCHEMA_VERSION,
+    old_version: health.version,
+    new_version: packageVersion(),
+    pid: health.pid,
+  });
+  return {
+    previousSchema: Number.isInteger(raw.state_schema_version) ? Number(raw.state_schema_version) : null,
+    currentSchema: PROXY_STATE_SCHEMA_VERSION,
+  };
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isProxyPort(value: unknown): boolean {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65_535;
 }
 
 async function removeProxyState(stateRoot: string): Promise<void> {
@@ -719,6 +810,7 @@ async function readProxyPid(stateRoot: string): Promise<{ pid: number | null; ru
 }
 
 export async function ensureProxyRunning(options: ProxyOptions): Promise<ProxyRuntimeState | null> {
+  await resetIncompatibleProxyState(options);
   const initialState = await readProxyState(options.stateRoot);
   if (!initialState) {
     return null;
@@ -1083,6 +1175,13 @@ function normalizeProxyState(state: ProxyState | null): ProxyState | null {
   if (!state) {
     return null;
   }
+  requireProxyField(
+    state as unknown as Record<string, unknown>,
+    "state_schema_version",
+    "proxy.json",
+    (field) => field === PROXY_STATE_SCHEMA_VERSION,
+    `number ${PROXY_STATE_SCHEMA_VERSION}`,
+  );
   return {
     ...state,
     mode: normalizeProxyMode((state as Record<string, unknown>).mode) ?? PROXY_DEFAULT_MODE,
@@ -1752,6 +1851,7 @@ function buildProxyStateFromProfiles(
     throw new Error(`base_url was not found in [model_providers.${providerName}]`);
   }
   return {
+    state_schema_version: PROXY_STATE_SCHEMA_VERSION,
     installed_at: new Date().toISOString(),
     codex_config_path: codexConfigFile,
     provider_name: providerName,
@@ -5762,6 +5862,18 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
 
   const command = args[0] ?? "";
   const rest = args.slice(1);
+  const installedCommands = new Set(["", "--history", "--view", "watch", "mode", "config", "restore", "restart", "serve"]);
+  const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
+  if (reset) {
+    printKeyValue(
+      "state:",
+      textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`),
+      6,
+    );
+    if (command === "config" || (command === "mode" && rest.length === 0)) {
+      await ensureProxyRunning(options);
+    }
+  }
   if (command === "") {
     await runProxyStatusOnce(options);
     return;
