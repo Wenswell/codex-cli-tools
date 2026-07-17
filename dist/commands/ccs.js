@@ -19,7 +19,7 @@ import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.
 import { buildModelPriceSnapshotPlanFromRemoteCatalog, calculateCodexCostBreakdown, litellmPricingUrl, matchingModelNames, missingPricingModels, modelPriceParts, modelPricingStatus, normalizeModelPricePatterns, normalizeModelPriceProviders, pruneModelPriceCache, readModelPriceCache, readModelPriceCacheForModels, readRemoteModelPriceCatalog, readStoredModelPriceCache, resolveCodexCostSpeed, selectRemoteModelPrices, writeModelPriceCache, writeModelPriceSnapshotPlan, } from "../lib/pricing.js";
 import { bgDarkBlue, maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, padVisibleLeft, padVisibleRight, visibleLength, } from "../lib/text.js";
 import { colorCost, colorHost, colorInput, colorName, colorOutput, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
-import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, readProxyState, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, proxyStateExists, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { syncTomlTemplate, readTomlBaseUrl, readTopLevelTomlString, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable, renderTable } from "../lib/table.js";
 import { fitTerminalLine, formatCommandFooterLines } from "../lib/terminal.js";
@@ -798,7 +798,7 @@ async function buildSyncPreviewPlan(options) {
         }
     }
     const configPlan = await planCodexConfigSync(new Set(selectedPaths));
-    if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await readProxyState()) {
+    if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await proxyStateExists()) {
         throw new Error("ccs sync cannot replace model_provider while proxy state exists");
     }
     const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
@@ -1041,12 +1041,11 @@ function proxyOptions() {
     };
 }
 async function resolveRunRoute(profileBaseUrl) {
-    const proxyState = await readProxyState();
-    if (!proxyState) {
+    const runtime = await ensureProxyRunning(proxyOptions());
+    if (!runtime) {
         return { baseURL: profileBaseUrl, proxy: false };
     }
-    const runtime = await ensureProxyRunning(proxyOptions());
-    const baseURL = resolveProxySwitchBaseUrl(runtime?.state ?? proxyState);
+    const baseURL = resolveProxySwitchBaseUrl(runtime.state);
     if (!baseURL) {
         throw new Error("proxy state has no base URL");
     }

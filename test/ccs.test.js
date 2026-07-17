@@ -1366,6 +1366,7 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
     await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
+      state_schema_version: 1,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: join(home, ".codex", "config.toml"),
       provider_name: "codex",
@@ -1514,6 +1515,7 @@ async function writeProfiles(profiles) {
 async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
+    state_schema_version: 1,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: join(home, ".codex", "config.toml"),
     provider_name: "codex",

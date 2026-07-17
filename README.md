@@ -93,6 +93,7 @@ codex-rename
 - [CLI lifecycle plan](docs/CLI_LIFECYCLE_PLAN.md)
 - [CLI command footer plan](docs/CLI_COMMAND_SUMMARY_PLAN.md)
 - [ccs proxy install fix plan](docs/CCS_PROXY_INSTALL_FIX_PLAN.md)
+- [ccs proxy state upgrade plan](docs/CCS_PROXY_STATE_UPGRADE_PLAN.md)
 
 ## CLI conventions
 
@@ -787,17 +788,9 @@ For a normal tool update, leave the installed routing and state in place:
 
 `restart` preserves `config.toml` routing, proxy state, mode, and history. It refuses to restart while requests are active. Running `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI.
 
+`proxy.json` has an explicit state schema version. When an update changes that schema, the next installed proxy command automatically stops the old runtime, preserves local routing and installation metadata, resets policy to safe `passthrough` defaults, clears incompatible request metrics/history, and starts the current runtime when needed. Current-schema corruption remains an explicit error; manual cache-file deletion is not part of the update flow.
+
 Use `ccs proxy restore` when removing the proxy or before a clean reinstall. It restores the active profile URL, stops the runtime, and removes `proxy.json`. `ccs proxy mode passthrough` instead keeps the local proxy URL and runtime while disabling proxy intervention. When the state file is absent, inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
-
-For a request-schema or protocol update that requires a clean state, restore first, update the tool, then remove the proxy state directory before installing:
-
-```bash
-ccs proxy restore
-rm -rf "${CCS_PROXY_STATE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tools/proxy}"
-ccs proxy install
-```
-
-The clean step removes proxy history, logs, and config backups. Copy any files that must be retained before removing the directory. It does not remove `~/.codex/config.toml`; the restore step has already returned the provider to the active profile URL.
 
 Behavior:
 
