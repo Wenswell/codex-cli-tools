@@ -9,8 +9,6 @@ developer_instructions = "开发原则：\n1.尽可能多使用subAgent来辅助
 approvals_reviewer = "user" # 审批交给用户确认
 service_tier = "default" # 服务档位，fast 优先速度
 model = "gpt-5.6-sol" # 默认使用的模型
-model_context_window=286000 # codex默认95%压缩上下文
-model_auto_compact_token_limit=272000 # >272K input token 时双倍计费
 
 suppress_unstable_features_warning = true # 隐藏实验功能警告
 
@@ -48,4 +46,4 @@ max_depth = 2 # 子代理递归派生最大深度
 
 [tui] # 终端 UI 配置
 show_tooltips = false # 是否显示工具提示
-status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "context-window-size", "total-input-tokens", "total-output-tokens", "fast-mode"] # 状态栏展示项
+status_line = ["model-with-reasoning", "current-dir", "run-state", "context-remaining", "context-window-size", "total-input-tokens", "total-output-tokens"] # 状态栏展示项
