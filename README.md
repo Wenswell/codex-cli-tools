@@ -8,7 +8,7 @@ TTY output uses color for status, paths, warnings, and summaries. Set `NO_COLOR=
 
 - Node.js 20+
 - pnpm
-- `codex` CLI for `cx`, `cxr`, `cxx`, `cxxr`, `cxxs`, and `cxxsr`
+- `codex` CLI for `cx`, `cxx`, and `cxxs`
 - `claude` CLI for `ccx` and `ccxs`
 - `sqlite3` CLI for `codex-rename`
 
@@ -68,11 +68,8 @@ ccx
 ccxs
 clvm
 cx
-cxr
 cxx
-cxxr
 cxxs
-cxxsr
 senv
 codex-rename
 ```
@@ -88,7 +85,7 @@ codex-rename
 - [ccs cost spec](docs/CCS_COST_SPEC.md)
 - [ccs cost model breakdown plan](docs/CCS_COST_MODEL_BREAKDOWN_PLAN.md)
 - [ccs pricing selection plan](docs/CCS_PRICING_REMOTE_MODELS_PLAN.md)
-- [Codex remote commands plan](docs/CODEX_REMOTE_COMMANDS_PLAN.md)
+- [Codex command mode plan](docs/CODEX_REMOTE_COMMANDS_PLAN.md)
 - [ccs proxy spec](docs/CCS_PROXY_SPEC.md)
 - [CLI lifecycle plan](docs/CLI_LIFECYCLE_PLAN.md)
 - [CLI command footer plan](docs/CLI_COMMAND_SUMMARY_PLAN.md)
@@ -121,23 +118,9 @@ codex-rename
 - Public tools support `version` and `-v`, and every tool reads the shared `package.json` version.
 - Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. Columns can declare shrink priority so lower-value labels or endpoints compress before dense numeric details. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
 
-## cx / cxr / cxx / cxxr / cxxs / cxxsr
+## cx / cxx / cxxs
 
-`cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
-
-```bash
-cx ARGS...
-cx version
-cx -v
-```
-
-Equivalent to:
-
-```bash
-codex --search ARGS...
-```
-
-`cxr`, `cxxr`, and `cxxsr` use the Codex CLI local app-server daemon through its Unix socket. Codex CLI owns this daemon. Bootstrap it once, then verify it before first use:
+`cx`, `cxx`, and `cxxs` use the Codex CLI local app-server daemon through its Unix socket by default. Codex CLI owns this daemon. Bootstrap it once, then verify it before first use:
 
 ```bash
 codex app-server daemon bootstrap
@@ -155,10 +138,13 @@ codex app-server daemon version
 
 After updating Codex CLI, run `codex app-server daemon restart`, then verify that `version` reports `running` and the expected app-server version. `ccs r` prints the same daemon status and running version in compact form.
 
+`cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
+
 ```bash
-cxr ARGS...
-cxr version
-cxr -v
+cx ARGS...
+cx local ARGS...
+cx version
+cx -v
 ```
 
 Equivalent to:
@@ -167,26 +153,15 @@ Equivalent to:
 codex --search --remote unix:// -C "$PWD" ARGS...
 ```
 
+`cx local ARGS...` runs the original local-session command without `--remote`.
+
 `cxx` also bypasses approvals and sandboxing.
 
 ```bash
 cxx ARGS...
+cxx local ARGS...
 cxx version
 cxx -v
-```
-
-Equivalent to:
-
-```bash
-codex --search --dangerously-bypass-approvals-and-sandbox ARGS...
-```
-
-`cxxr` adds the same Unix-socket remote connection to `cxx`.
-
-```bash
-cxxr ARGS...
-cxxr version
-cxxr -v
 ```
 
 Equivalent to:
@@ -195,26 +170,15 @@ Equivalent to:
 codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" ARGS...
 ```
 
+`cxx local ARGS...` runs the original local-session command without `--remote`.
+
 `cxxs` resumes a Codex session with the same `cxx` flags.
 
 ```bash
 cxxs ARGS...
+cxxs local ARGS...
 cxxs version
 cxxs -v
-```
-
-Equivalent to:
-
-```bash
-codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
-```
-
-`cxxsr` adds the Unix-socket remote connection before the `resume` subcommand.
-
-```bash
-cxxsr ARGS...
-cxxsr version
-cxxsr -v
 ```
 
 Equivalent to:
@@ -223,9 +187,11 @@ Equivalent to:
 codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" resume ARGS...
 ```
 
-All three remote wrappers pass the caller's absolute current directory through `-C`, so the daemon creates and resumes sessions in the directory where the wrapper was invoked instead of the daemon process's startup directory.
+`cxxs local ARGS...` resumes the original local-session command without `--remote`.
 
-Use `cxx`, `cxxr`, `cxxs`, and `cxxsr` only in directories and tasks you trust.
+In default mode, all three commands pass the caller's absolute current directory through `-C`, so the daemon creates and resumes sessions in the directory where the wrapper was invoked instead of the daemon process's startup directory. `local` is only recognized as the first argument and is not forwarded to Codex.
+
+Use `cxx` and `cxxs` only in directories and tasks you trust.
 
 ## ccx / ccxs
 

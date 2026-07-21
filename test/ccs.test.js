@@ -60,26 +60,35 @@ test("ccs namespaces use compact footers and local help", async () => {
 
 test("tools print package version", async () => {
   const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxr", "cxx", "cxxr", "cxxs", "cxxsr", "senv", "codex-rename"];
+  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxx", "cxxs", "senv", "codex-rename"];
   for (const tool of tools) {
     assert.equal(await runTool(tool, ["version"]), `${tool} ${packageJson.version}\n`);
     assert.equal(await runTool(tool, ["-v"]), `${tool} ${packageJson.version}\n`);
   }
 });
 
-test("remote Codex wrappers pass the current directory before resume", async () => {
+test("Codex wrappers default to remote mode and support leading local", async () => {
   const binDir = await createFakeCodex("console.log(JSON.stringify(process.argv.slice(2)));\n");
   const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };
   const cwd = await mkdtemp(join(tmpdir(), "codex remote cwd "));
   try {
-    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxr.js"), "hello"], { cwd, env })), [
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cx.js"), "hello"], { cwd, env })), [
       "--search", "--remote", "unix://", "-C", cwd, "hello",
     ]);
-    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxr.js"), "hello"], { cwd, env })), [
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxx.js"), "hello"], { cwd, env })), [
       "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "hello",
     ]);
-    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxsr.js"), "thread"], { cwd, env })), [
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxs.js"), "thread"], { cwd, env })), [
       "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "resume", "thread",
+    ]);
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cx.js"), "local", "hello"], { cwd, env })), [
+      "--search", "hello",
+    ]);
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxx.js"), "local", "hello"], { cwd, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "hello",
+    ]);
+    assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxs.js"), "local", "thread"], { cwd, env })), [
+      "--search", "--dangerously-bypass-approvals-and-sandbox", "resume", "thread",
     ]);
   } finally {
     await rm(binDir, { recursive: true, force: true });

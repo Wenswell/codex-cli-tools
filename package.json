@@ -1,6 +1,6 @@
 {
   "name": "codex-tools",
-  "version": "0.2.54",
+  "version": "0.2.55",
   "description": "Personal Codex CLI helpers",
   "type": "module",
   "bin": {
@@ -9,11 +9,8 @@
     "ccxs": "dist/bin/ccxs.js",
     "clvm": "dist/bin/clvm.js",
     "cx": "dist/bin/cx.js",
-    "cxr": "dist/bin/cxr.js",
     "cxx": "dist/bin/cxx.js",
-    "cxxr": "dist/bin/cxxr.js",
     "cxxs": "dist/bin/cxxs.js",
-    "cxxsr": "dist/bin/cxxsr.js",
     "senv": "dist/bin/senv.js",
     "codex-rename": "dist/bin/codex-rename.js"
   },

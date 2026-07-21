@@ -4,7 +4,7 @@ import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/ve
 
 export function runCodexSearch(
   args: string[],
-  options: { bypassSandbox?: boolean; remote?: boolean; resume?: boolean } = {},
+  options: { bypassSandbox?: boolean; resume?: boolean } = {},
 ): void {
   const toolName = toolNameFromArgv();
   if (isVersionArgument(args[0])) {
@@ -17,17 +17,19 @@ export function runCodexSearch(
     return;
   }
 
+  const local = args[0] === "local";
+  const forwardedArgs = local ? args.slice(1) : args;
   const codexArgs = ["--search"];
   if (options.bypassSandbox) {
     codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
   }
-  if (options.remote) {
+  if (!local) {
     codexArgs.push("--remote", "unix://", "-C", process.cwd());
   }
   if (options.resume) {
     codexArgs.push("resume");
   }
-  codexArgs.push(...args);
+  codexArgs.push(...forwardedArgs);
 
   const child = spawn("codex", codexArgs, {
     stdio: "inherit",
