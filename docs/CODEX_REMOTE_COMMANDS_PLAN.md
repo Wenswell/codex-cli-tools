@@ -1,21 +1,38 @@
-# Codex remote commands plan
+# Codex Command Mode Plan
+
+Status: implemented in `0.2.55`
 
 ## Scope
 
-- Add `ccs r` to query `codex app-server daemon version` and print the daemon `status` and `appServerVersion` with semantic terminal colors.
-- Add `cxr`, `cxxr`, and `cxxsr` as the remote counterparts of `cx`, `cxx`, and `cxxs`; each adds `--remote unix:// -C CURRENT_DIRECTORY` before any Codex subcommand.
-- Reuse the existing Codex launcher and shared package-version behavior. Do not add aliases, configuration, or fallback process detection.
+- Make `cx`, `cxx`, and `cxxs` connect to the Codex app-server daemon by default.
+- Reserve the first positional argument `local` to run the same command against
+  the local Codex session instead.
+- Remove `cxr`, `cxxr`, and `cxxsr` from source, package bins, documentation,
+  tests, and built output.
+
+## Command Contract
+
+| command | default | `local` mode |
+| --- | --- | --- |
+| `cx [local] ARGS...` | `codex --search --remote unix:// -C "$PWD" ARGS...` | `codex --search ARGS...` |
+| `cxx [local] ARGS...` | `codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" ARGS...` | same command without `--remote unix:// -C "$PWD"` |
+| `cxxs [local] ARGS...` | same as `cxx`, followed by `resume ARGS...` | same command without `--remote unix:// -C "$PWD"` |
+
+`local` is consumed only when it is the first argument. It is not forwarded to
+Codex. `version` and `-v` remain the shared package-version commands.
 
 ## Implementation
 
-1. Parse the daemon command's JSON response and require the two displayed fields.
-2. Reserve `r` in the `ccs` router and document it in status/help output.
-3. Extend the existing launcher options with remote mode, pass the caller's absolute current directory through `-C`, and add three small bin entrypoints.
-4. Register the bins, update README examples, and rebuild `dist`.
+1. Change the launcher to default to remote mode and consume leading `local`.
+2. Make the three retained bins use the default remote launcher behavior.
+3. Delete the remote-only bin files and package registrations.
+4. Update README, lifecycle documentation, and focused tests.
+5. Rebuild `dist`, run type and test checks, then increment the patch version
+   and commit the complete change.
 
 ## Acceptance
 
-- `ccs r` prints colored `status` and `version` values from the daemon JSON response.
-- `cxr`, `cxxr`, and `cxxsr` preserve their base command flags and pass `--remote unix:// -C CURRENT_DIRECTORY` to Codex.
-- All six Codex wrappers print the shared package version through `version` and `-v`.
-- Focused tests, type checking, and the full repository test suite pass.
+- Default invocations use `--remote unix:// -C CURRENT_DIRECTORY`.
+- Each retained command accepts leading `local` and omits those remote flags.
+- `cxr`, `cxxr`, and `cxxsr` are absent from source, package bins, and `dist`.
+- The built command behavior, README, and tests agree.

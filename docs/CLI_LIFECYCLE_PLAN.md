@@ -23,7 +23,7 @@ missing managed-process command needed by `ccs proxy`.
 ### Upstream daemon dependency
 
 - Document `codex app-server daemon bootstrap`, `start`, `restart`, `stop`, and
-  `version` for `cxr`, `cxxr`, and `cxxsr`.
+  `version` for the default `cx`, `cxx`, and `cxxs` mode.
 - Keep daemon ownership in Codex CLI; do not duplicate those commands in this
   package.
 

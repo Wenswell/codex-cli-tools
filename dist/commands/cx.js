@@ -12,17 +12,19 @@ export function runCodexSearch(args, options = {}) {
         printToolVersion(toolName);
         return;
     }
+    const local = args[0] === "local";
+    const forwardedArgs = local ? args.slice(1) : args;
     const codexArgs = ["--search"];
     if (options.bypassSandbox) {
         codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
     }
-    if (options.remote) {
+    if (!local) {
         codexArgs.push("--remote", "unix://", "-C", process.cwd());
     }
     if (options.resume) {
         codexArgs.push("resume");
     }
-    codexArgs.push(...args);
+    codexArgs.push(...forwardedArgs);
     const child = spawn("codex", codexArgs, {
         stdio: "inherit",
     });
