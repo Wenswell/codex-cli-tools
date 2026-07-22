@@ -14,7 +14,7 @@ complete command reference.
 The `ccs` footer separates direct commands from command namespaces:
 
 ```text
-commands:   version | r | PROFILE | run | models | toggle | top | list | init | sync | add | remove
+commands:   version | r | PROFILE | models | toggle | top | list | init | sync | add | remove
 namespaces: pricing | proxy | cost | config | s | usage | --help
 ```
 

@@ -9,13 +9,14 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
+import { codexConfigPath, codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
+import { readProfiles } from "../lib/profiles.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow } from "../lib/table.js";
@@ -140,9 +141,13 @@ function pidPath(stateRoot) {
 function proxyBaseUrl(listenHost, listenPort) {
     return `http://${listenHost}:${listenPort}`;
 }
-async function readProfiles() {
-    const text = await readTextIfExists(profilesPath());
-    return text ? parseJsonObject(text) : {};
+export function resolveProxyOptions() {
+    return {
+        codexConfigPath: codexConfigPath(),
+        listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
+        listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
+        stateRoot: process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy"),
+    };
 }
 export async function readProxyState(stateRoot = process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy")) {
     const raw = await readRawProxyState(stateRoot);

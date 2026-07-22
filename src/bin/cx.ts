@@ -1,4 +1,9 @@
 #!/usr/bin/env node
-import { runCodexSearch } from "../commands/cx.js";
+import { runCodexCommand } from "../commands/cx.js";
+import { textRed } from "../lib/text.js";
 
-runCodexSearch(process.argv.slice(2));
+runCodexCommand(process.argv.slice(2)).catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`${textRed("cx:")} ${message}`);
+  process.exitCode = 1;
+});

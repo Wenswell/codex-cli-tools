@@ -9,13 +9,14 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexConfigPath, codexToolsCacheDir, formatHomePath, profilesPath } from "../lib/paths.js";
+import { codexConfigPath, codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
-import { modelPriceParts, readModelPriceCache, type ModelPriceCache, type ModelPriceOverride } from "../lib/pricing.js";
+import { modelPriceParts, readModelPriceCache, type ModelPriceCache } from "../lib/pricing.js";
+import { readProfiles, type ProfilesFile } from "../lib/profiles.js";
 import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow, type TableColumn, type TableRow } from "../lib/table.js";
@@ -32,11 +33,6 @@ import {
   type ProxyPolicyTrigger,
 } from "../lib/ccs-proxy-policy.js";
 
-type Profile = {
-  baseURL: string;
-  apiKey: string;
-};
-
 type ProxyUpstream = {
   name: string;
   baseURL: string;
@@ -44,13 +40,6 @@ type ProxyUpstream = {
 };
 
 class ProxyProfileSelectionError extends Error {}
-
-type ProfilesFile = {
-  profiles?: Record<string, Profile>;
-  current?: string;
-  toggle?: string[];
-  pricing?: { overrides?: Record<string, ModelPriceOverride> };
-};
 
 type ProxyView = "overview" | "tokens" | "cost";
 
@@ -303,7 +292,7 @@ type ProxyHealth = {
   mode: ProxyMode | null;
 };
 
-type ProxyOptions = {
+export type ProxyOptions = {
   codexConfigPath: string;
   listenHost: string;
   listenPort: number;
@@ -492,9 +481,13 @@ function proxyBaseUrl(listenHost: string, listenPort: number): string {
   return `http://${listenHost}:${listenPort}`;
 }
 
-async function readProfiles(): Promise<ProfilesFile> {
-  const text = await readTextIfExists(profilesPath());
-  return text ? (parseJsonObject(text) as ProfilesFile) : {};
+export function resolveProxyOptions(): ProxyOptions {
+  return {
+    codexConfigPath: codexConfigPath(),
+    listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
+    listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
+    stateRoot: process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy"),
+  };
 }
 
 export async function readProxyState(stateRoot: string = process.env.CCS_PROXY_STATE_ROOT || path.join(codexToolsCacheDir(), "proxy")): Promise<ProxyState | null> {
