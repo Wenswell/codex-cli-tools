@@ -1,4 +1,4 @@
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -47,6 +47,7 @@ import {
   weztermConfigPath,
 } from "../lib/paths.js";
 import { appendBoundedJsonLine, writeJsonStateAtomic } from "../lib/runtime-log.js";
+import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
 import {
   buildModelPriceSnapshotPlanFromRemoteCatalog,
   calculateCodexCostBreakdown,
@@ -98,35 +99,16 @@ import {
   colorUrl,
   printKeyValue,
 } from "../lib/output.js";
-import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, proxyStateExists, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   syncTomlTemplate,
   readTomlBaseUrl,
-  readTopLevelTomlString,
   updateTomlBaseUrl,
   updateTopLevelTomlString,
 } from "../lib/toml.js";
 import { printTable, renderTable, type TableColumn, type TableRow } from "../lib/table.js";
 import { fitTerminalLine, formatCommandFooterLines, type CommandFooterRow } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
-
-type Profile = {
-  baseURL: string;
-  apiKey: string;
-};
-
-type ProfilesFile = {
-  profiles?: Record<string, Profile>;
-  usage?: Record<string, Profile>;
-  current?: string;
-  toggle?: string[];
-  pricing?: {
-    overrides?: Record<string, ModelPriceOverride>;
-  };
-  top?: {
-    stateUrls?: string[];
-  };
-};
 
 type CcsFileBackup = {
   source: string;
@@ -433,37 +415,6 @@ const ccsCostRemoteDir = "/home/ravvss/.cache/codex-tools/ccs-cost";
 const ccsCostRemoteDisplay = `${configSyncUser}@${configSyncHost}:${ccsCostRemoteDir}`;
 const weztermStatusBegin = "-- ccs wezterm status begin";
 const weztermStatusEnd = "-- ccs wezterm status end";
-
-function assertProfile(value: unknown, name: string): Profile {
-  if (!value || typeof value !== "object") {
-    throw new Error(`profile ${name} is invalid`);
-  }
-
-  const profile = value as Partial<Profile>;
-  if (typeof profile.baseURL !== "string" || typeof profile.apiKey !== "string") {
-    throw new Error(`profile ${name} is missing baseURL or apiKey`);
-  }
-
-  return { baseURL: profile.baseURL, apiKey: profile.apiKey };
-}
-
-async function readProfiles(): Promise<ProfilesFile> {
-  const text = await readTextIfExists(profilesPath());
-  if (!text) {
-    return {};
-  }
-
-  try {
-    return parseJsonObject(text) as ProfilesFile;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid profiles.json: ${message}`);
-  }
-}
-
-async function writeProfiles(profiles: ProfilesFile): Promise<void> {
-  await writeTextFileAtomic(profilesPath(), stringifyJson(profiles), 0o600);
-}
 
 async function readDefaultProfiles(): Promise<ProfilesFile> {
   const path = fileURLToPath(new URL("../../config/ccs-profiles.json", import.meta.url));
@@ -1509,16 +1460,6 @@ function printProfileDetails(name: string, profile: Profile): void {
   printProfileSummary("profile", name, profile);
 }
 
-function proxyOptions() {
-  const stateRoot = process.env.CCS_PROXY_STATE_ROOT || join(codexToolsCacheDir(), "proxy");
-  return {
-    codexConfigPath: codexConfigPath(),
-    listenHost: process.env.CCS_PROXY_LISTEN_HOST || "127.0.0.1",
-    listenPort: process.env.CCS_PROXY_LISTEN_PORT ? Number.parseInt(process.env.CCS_PROXY_LISTEN_PORT, 10) : 4610,
-    stateRoot,
-  };
-}
-
 async function resolveRunRoute(profileBaseUrl: string): Promise<{ baseURL: string; proxy: boolean }> {
   const runtime = await ensureProxyRunning(proxyOptions());
   if (!runtime) {
@@ -1533,61 +1474,6 @@ async function resolveRunRoute(profileBaseUrl: string): Promise<{ baseURL: strin
 
 async function resolveActiveBaseUrl(profileBaseUrl: string): Promise<string> {
   return (await resolveRunRoute(profileBaseUrl)).baseURL;
-}
-
-async function runCodexWithProfile(profiles: ProfilesFile, name: string | undefined, codexArgs: string[]): Promise<void> {
-  if (!name || name.startsWith("-")) {
-    throw new Error("usage: ccs run PROFILE [CODEX_ARGS...]");
-  }
-
-  const profile = profiles.profiles?.[name];
-  if (!profile) {
-    throw new Error(`profile not found: ${name}`);
-  }
-  const normalized = assertProfile(profile, name);
-  if (!normalized.apiKey) {
-    throw new Error(`profile ${name} is missing apiKey`);
-  }
-
-  const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
-  const provider = readTopLevelTomlString(currentConfig, "model_provider") ?? "codex";
-  const apiKeyEnv = "CCS_RUN_OPENAI_API_KEY";
-  const route = await resolveRunRoute(normalized.baseURL);
-  const args = [
-    "-c",
-    `model_providers.${provider}.base_url=${JSON.stringify(route.baseURL)}`,
-    "-c",
-    `model_providers.${provider}.env_key=${JSON.stringify(apiKeyEnv)}`,
-    ...(route.proxy ? [
-      "-c",
-      `model_providers.${provider}.http_headers.${CCS_PROXY_PROFILE_HEADER}=${JSON.stringify(name)}`,
-    ] : []),
-    ...codexArgs,
-  ];
-
-  printProfileSummary("run", name, normalized);
-  printKeyValue("mode:", "temporary codex launch; no files changed", 5);
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("codex", args, {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        [apiKeyEnv]: normalized.apiKey,
-      },
-    });
-
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (signal) {
-        process.exitCode = 1;
-        resolve();
-        return;
-      }
-      process.exitCode = code ?? 1;
-      resolve();
-    });
-  });
 }
 
 function formatApiKey(apiKey: string): string {
@@ -4533,7 +4419,6 @@ function usageLines(): string[] {
     "  ccs -v                               # print package version",
     "  ccs r                                # show app-server daemon status and version",
     "  ccs PROFILE                          # show profile details and usage",
-    "  ccs run PROFILE [CODEX_ARGS...]       # launch codex once with a profile",
     "  ccs models [--json]                  # list profile models from /v1/models",
     "  ccs pricing                          # show pricing cache status",
     "  ccs pricing list [--remote]          # show local or watched-provider remote prices",
@@ -6951,7 +6836,7 @@ function printUsageHelp(): void {
   printCommandFooter([
     {
       label: "commands:",
-      commands: ["version", "r", "PROFILE", "run", "models", "toggle", "top", "list", "init", "sync", "add", "remove"],
+      commands: ["version", "r", "PROFILE", "models", "toggle", "top", "list", "init", "sync", "add", "remove"],
     },
     {
       label: "namespaces:",
@@ -7137,16 +7022,6 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (command === "proxy") {
     await runProxyCommand(args, proxyOptions());
-    return;
-  }
-
-  if (command === "run") {
-    if (isHelpArgument(args[0])) {
-      assertExactArgs(args.slice(1), "run help", 0);
-      printHelp();
-      return;
-    }
-    await runCodexWithProfile(profiles, args[0], args.slice(1));
     return;
   }
 

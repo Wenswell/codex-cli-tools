@@ -17,6 +17,7 @@ test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
   assert.match(output, /ccs proxy \[watch\|mode\|config\|install\|restart\|restore\|serve\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
+  assert.doesNotMatch(output, /ccs run/);
 });
 
 test("ccs status footer separates direct commands from namespaces", async () => {
@@ -96,7 +97,17 @@ test("Codex wrappers default to remote mode and support leading local", async ()
   }
 });
 
-test("ccs run selects its profile through an installed proxy", async () => {
+test("Codex wrapper help documents local profile launches", async () => {
+  for (const tool of ["cx", "cxx", "cxxs"]) {
+    for (const help of ["help", "-h", "--help"]) {
+      const output = await runTool(tool, [help]);
+      assert.match(output, new RegExp(`${tool} run PROFILE`));
+      assert.match(output, new RegExp(`${tool} local`));
+    }
+  }
+});
+
+test("Codex wrappers launch with a selected profile through an installed proxy", async () => {
   const home = await writeProfiles({
     profiles: {
       input: { baseURL: "https://input.example.com", apiKey: "input-key" },
@@ -106,10 +117,10 @@ test("ccs run selects its profile through an installed proxy", async () => {
   });
   const stateRoot = join(home, ".cache", "codex-tools", "proxy");
   const proxyPort = await reservePort();
-  const capturePath = join(home, "codex-run.json");
+  const capturePath = join(home, "codex-profile-run.json");
   const binDir = await createFakeCodex(`
     const { writeFileSync } = require("node:fs");
-    writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ args: process.argv.slice(2), apiKey: process.env.CCS_RUN_OPENAI_API_KEY }));
+    writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ args: process.argv.slice(2), apiKey: process.env.CODEX_TOOLS_PROFILE_API_KEY }));
   `);
   const codexConfigPath = join(home, ".codex", "config.toml");
   const options = { codexConfigPath, listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
@@ -125,24 +136,72 @@ test("ccs run selects its profile through an installed proxy", async () => {
     ].join("\n"), "utf8");
     await writeProxyStateForRunTest(home, stateRoot, proxyPort);
 
-    await runCcs(["dist/bin/ccs.js", "run", "input", "exec", "hello"], home, {
+    const cases = [
+      { tool: "cx", args: ["hello"], prefix: ["--search"] },
+      { tool: "cxx", args: ["hello"], prefix: ["--search", "--dangerously-bypass-approvals-and-sandbox"] },
+      { tool: "cxxs", args: ["thread"], prefix: ["--search", "--dangerously-bypass-approvals-and-sandbox"] },
+    ];
+    for (const entry of cases) {
+      await runCcs([`dist/bin/${entry.tool}.js`, "run", "input", ...entry.args], home, {
+        XDG_CACHE_HOME: join(home, ".cache"),
+        CCS_PROXY_STATE_ROOT: stateRoot,
+        CCS_PROXY_LISTEN_PORT: String(proxyPort),
+        PATH: `${binDir}:${process.env.PATH}`,
+        CAPTURE_PATH: capturePath,
+      });
+
+      const captured = JSON.parse(await readFile(capturePath, "utf8"));
+      assert.equal(captured.apiKey, "input-key");
+      assert.deepEqual(captured.args, [
+        ...entry.prefix,
+        "-c", `model_providers.codex.base_url="http://127.0.0.1:${proxyPort}"`,
+        "-c", 'model_providers.codex.env_key="CODEX_TOOLS_PROFILE_API_KEY"',
+        "-c", 'model_providers.codex.http_headers.x-ccs-profile="input"',
+        ...(entry.tool === "cxxs" ? ["resume"] : []),
+        ...entry.args,
+      ]);
+      assert.equal(captured.args.includes("--remote"), false);
+    }
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    await rm(binDir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex profile launch uses the direct URL and rejects unknown profiles", async () => {
+  const home = await writeProfiles({
+    profiles: { input: { baseURL: "https://input.example.com", apiKey: "input-key" } },
+    current: "input",
+  });
+  const capturePath = join(home, "codex-direct-profile-run.json");
+  const binDir = await createFakeCodex(`
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({ args: process.argv.slice(2), apiKey: process.env.CODEX_TOOLS_PROFILE_API_KEY }));
+  `);
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), 'model_provider = "codex"\n', "utf8");
+    const env = {
       XDG_CACHE_HOME: join(home, ".cache"),
-      CCS_PROXY_STATE_ROOT: stateRoot,
-      CCS_PROXY_LISTEN_PORT: String(proxyPort),
       PATH: `${binDir}:${process.env.PATH}`,
       CAPTURE_PATH: capturePath,
-    });
+    };
 
+    await runCcs(["dist/bin/cx.js", "run", "input", "hello"], home, env);
     const captured = JSON.parse(await readFile(capturePath, "utf8"));
     assert.equal(captured.apiKey, "input-key");
     assert.deepEqual(captured.args, [
-      "-c", `model_providers.codex.base_url="http://127.0.0.1:${proxyPort}"`,
-      "-c", 'model_providers.codex.env_key="CCS_RUN_OPENAI_API_KEY"',
-      "-c", 'model_providers.codex.http_headers.x-ccs-profile="input"',
-      "exec", "hello",
+      "--search",
+      "-c", 'model_providers.codex.base_url="https://input.example.com"',
+      "-c", 'model_providers.codex.env_key="CODEX_TOOLS_PROFILE_API_KEY"',
+      "hello",
     ]);
+    await assert.rejects(
+      () => runCcs(["dist/bin/cx.js", "run", "missing"], home, env),
+      /profile not found: missing/,
+    );
   } finally {
-    await shutdownProxyRuntime(options).catch(() => null);
     await rm(binDir, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
   }

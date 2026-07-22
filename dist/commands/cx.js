@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
-import { textRed } from "../lib/text.js";
+import { colorName, colorUrl, printKeyValue } from "../lib/output.js";
+import { maskSecret, textBold, textDim, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
+import { resolveCodexProfileLaunch } from "./codex-profile.js";
 export function runCodexSearch(args, options = {}) {
     const toolName = toolNameFromArgv();
     if (isVersionArgument(args[0])) {
@@ -12,11 +14,14 @@ export function runCodexSearch(args, options = {}) {
         printToolVersion(toolName);
         return;
     }
-    const local = args[0] === "local";
-    const forwardedArgs = local ? args.slice(1) : args;
+    const local = options.forceLocal || args[0] === "local";
+    const forwardedArgs = !options.forceLocal && args[0] === "local" ? args.slice(1) : args;
     const codexArgs = ["--search"];
     if (options.bypassSandbox) {
         codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
+    }
+    for (const override of options.configOverrides ?? []) {
+        codexArgs.push("-c", override);
     }
     if (!local) {
         codexArgs.push("--remote", "unix://", "-C", process.cwd());
@@ -27,6 +32,7 @@ export function runCodexSearch(args, options = {}) {
     codexArgs.push(...forwardedArgs);
     const child = spawn("codex", codexArgs, {
         stdio: "inherit",
+        env: options.env,
     });
     child.on("error", (error) => {
         if (error.code === "ENOENT") {
@@ -42,5 +48,47 @@ export function runCodexSearch(args, options = {}) {
             return;
         }
         process.exit(code ?? 1);
+    });
+}
+function isHelpArgument(value) {
+    return value === "help" || value === "-h" || value === "--help";
+}
+function printHelp(toolName, resume) {
+    const argumentName = resume ? "RESUME_ARGS" : "CODEX_ARGS";
+    const commands = [
+        [`${toolName} [ARGS...]`, "launch through the local app-server daemon"],
+        [`${toolName} local [ARGS...]`, "launch a local Codex process"],
+        [`${toolName} run PROFILE [${argumentName}...]`, "launch locally with one profile"],
+        [`${toolName} version`, "print package version"],
+        [`${toolName} -v`, "print package version"],
+    ];
+    const width = Math.max(...commands.map(([command]) => command.length));
+    console.log([
+        textBold("Usage:"),
+        ...commands.map(([command, comment]) => `  ${command.padEnd(width)} # ${comment}`),
+    ].join("\n"));
+}
+export async function runCodexCommand(args, options = {}) {
+    const toolName = toolNameFromArgv();
+    if (isHelpArgument(args[0]) || (args[0] === "run" && isHelpArgument(args[1]))) {
+        printHelp(toolName, options.resume === true);
+        return;
+    }
+    if (args[0] !== "run") {
+        runCodexSearch(args, options);
+        return;
+    }
+    const name = args[1];
+    if (!name || name.startsWith("-")) {
+        throw new Error(`${toolName} run requires PROFILE`);
+    }
+    const launch = await resolveCodexProfileLaunch(name);
+    printKeyValue("profile:", `${colorName(name)}  ${colorUrl(launch.profile.baseURL)}  ${textDim(maskSecret(launch.profile.apiKey))}`);
+    printKeyValue("mode:", "temporary local codex launch; no files changed");
+    runCodexSearch(args.slice(2), {
+        ...options,
+        forceLocal: true,
+        configOverrides: launch.configOverrides,
+        env: launch.env,
     });
 }

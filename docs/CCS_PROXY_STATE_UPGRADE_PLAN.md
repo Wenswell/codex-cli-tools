@@ -7,7 +7,7 @@
 ## Contract
 
 - Add `state_schema_version` to `proxy.json`. Package and runtime version changes do not change this value unless the state shape changes.
-- Before installed proxy commands or `ccs run` read strict state, inspect the schema version. `ccs sync` uses raw state existence because it only protects the routing field.
+- Before installed proxy commands or a Codex wrapper `run PROFILE` reads strict state, inspect the schema version. `ccs sync` uses raw state existence because it only protects the routing field.
 - A current-schema file remains strict. Corruption is an error and is never silently reset.
 - A missing or different schema is an upgrade boundary: gracefully stop the old runtime, preserve stable installation/routing fields, reset mode to `passthrough`, disable latency policy, clear metrics and incompatible request history, and write current state. Persisted active rows are not authoritative across process versions; a stop timeout leaves state unchanged and reports the error.
 - Record the reset in `proxy.log` and print the schema transition once. Config backups and event/runtime logs remain intact.

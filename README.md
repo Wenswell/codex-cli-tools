@@ -143,6 +143,7 @@ After updating Codex CLI, run `codex app-server daemon restart`, then verify tha
 ```bash
 cx ARGS...
 cx local ARGS...
+cx run PROFILE [CODEX_ARGS...]
 cx version
 cx -v
 ```
@@ -160,6 +161,7 @@ codex --search --remote unix:// -C "$PWD" ARGS...
 ```bash
 cxx ARGS...
 cxx local ARGS...
+cxx run PROFILE [CODEX_ARGS...]
 cxx version
 cxx -v
 ```
@@ -177,6 +179,7 @@ codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$
 ```bash
 cxxs ARGS...
 cxxs local ARGS...
+cxxs run PROFILE [RESUME_ARGS...]
 cxxs version
 cxxs -v
 ```
@@ -190,6 +193,16 @@ codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$
 `cxxs local ARGS...` resumes the original local-session command without `--remote`.
 
 In default mode, all three commands pass the caller's absolute current directory through `-C`, so the daemon creates and resumes sessions in the directory where the wrapper was invoked instead of the daemon process's startup directory. `local` is only recognized as the first argument and is not forwarded to Codex.
+
+All three wrappers can launch one local Codex process with a profile without changing the stored current profile:
+
+```bash
+cx run input
+cxx run ciii "check this repo"
+cxxs run input --last
+```
+
+`run PROFILE` is local because the selected provider API key is scoped to that Codex process. It passes temporary provider `base_url` and `env_key` overrides. When proxy mode is installed, it keeps using the local proxy and sends a temporary `x-ccs-profile` provider header; the proxy uses that profile for the process without changing `profiles.current` and removes the internal header before contacting the provider. No profile, Codex config, auth, or proxy state file is modified.
 
 Use `cxx` and `cxxs` only in directories and tasks you trust.
 
@@ -248,7 +261,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, usage, and a compact two-level command footer:
 
 ```text
-commands:   version | r | PROFILE | run | models | toggle | top | list | init | sync | add | remove
+commands:   version | r | PROFILE | models | toggle | top | list | init | sync | add | remove
 namespaces: pricing | proxy | cost | config | s | usage | --help
 ```
 
@@ -260,7 +273,6 @@ ccs version
 ccs -v
 ccs r
 ccs PROFILE
-ccs run PROFILE [CODEX_ARGS...]
 ccs models [--json]
 ccs pricing
 ccs pricing list [--remote]
@@ -697,15 +709,6 @@ Show a profile without switching:
 ccs PROFILE
 ```
 
-Launch a new Codex CLI once with a profile without switching the stored current profile:
-
-```bash
-ccs run input
-ccs run ciii exec "check this repo"
-```
-
-When proxy mode is installed, `ccs run PROFILE` keeps using the local proxy and sends a temporary `x-ccs-profile` provider header for that Codex process. The proxy uses the requested profile for those requests without changing `profiles.current`, and removes the internal header before contacting the provider. Other Codex processes continue to follow `profiles.current`.
-
 Proxy commands live under `ccs proxy`:
 
 ```bash
@@ -762,12 +765,12 @@ Behavior:
 
 - `ccs proxy install` and `ccs proxy restore` semantically modify only `model_providers.<provider>.base_url` in `~/.codex/config.toml`. Install points it to `http://127.0.0.1:4610`; restore resolves `profiles.current` and points it to that profile's `baseURL`. Other TOML fields, profiles, authentication, and unrelated config text remain unchanged.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
-- `ccs run PROFILE [CODEX_ARGS...]` sets `CCS_RUN_OPENAI_API_KEY` only for the launched `codex` process and passes temporary provider `base_url` and `env_key` overrides. When proxy state exists, it also passes `http_headers.x-ccs-profile=PROFILE`; the proxy validates and uses that profile for the request, then strips the header before forwarding. The command does not write `config.toml`, `auth.json`, or `profiles.json`.
+- `cx run`, `cxx run`, and `cxxs run` set `CODEX_TOOLS_PROFILE_API_KEY` only for the launched `codex` process and pass temporary provider `base_url` and `env_key` overrides. When proxy state exists, they also pass `http_headers.x-ccs-profile=PROFILE`; the proxy validates and uses that profile for the request, then strips the header before forwarding. The commands do not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` requires explicit `model_provider`, its existing `base_url`, a current profile, and absent proxy state. It previews the current and proxy URLs plus backup path, backs up the current config, starts and health-checks the proxy, then changes and verifies that provider's `base_url` is the local proxy URL. If apply fails after routing is written, it restores the preview source, removes proxy state, and keeps the backup. Mode starts as `passthrough`; use `ccs proxy mode recovery` or `ccs proxy mode intercept` to enable intervention.
 - `ccs proxy mode` prints the active mode. All three mode writes preview the current and target values and require exact `yes`. `passthrough` performs one upstream fetch and never applies policy, retries, waits, deadlines, response inspection, or rewriting. `recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `intercept` disables continuation recovery and uses ordinary guard retry.
 - `ccs proxy config` prints the active latency policy. Latency deadlines are disabled by default. `ccs proxy config latency FIRST TOTAL [ACTION]` enables them after exact `yes` confirmation; `FIRST` and `TOTAL` are milliseconds, either may be `0`, at least one must be positive, and `ACTION` defaults to `return_502`. `ccs proxy config latency off` disables both deadlines after confirmation.
 - `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
-- `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from `ccs run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while `ccs run` remains pinned to its requested profile.
+- `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while explicit profile launches remain pinned to their requested profile.
 - Upstream HTTP responses are forwarded as received when intervention policy accepts them. This includes `401`, `403`, `408`, `429`, and `5xx`. Upstream `4xx` and `5xx` responses record `failure_summary.type=upstream_error` and render the upstream failure summary in the history `result` column.
 - In `recovery` and `intercept`, upstream capacity errors retry the same upstream when an error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively. Plain `429` and `5xx` responses without that text are forwarded as received. Capacity defaults to `retry_then_pass_through`; HTTP 429 defaults to `pass_through`. Capacity, 429, reasoning, and first-progress retries share the three-retry policy budget; transport retry remains independent.
 - A retryable Capacity response uses `Retry-After` seconds or HTTP date when present. Values over 60 seconds are not waited; missing or invalid values use bounded jitter. Retry waits stop on client abort or the absolute total deadline.
