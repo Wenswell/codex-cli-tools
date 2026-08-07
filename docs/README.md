@@ -25,6 +25,7 @@ Project design specs:
 - [ccs proxy upstream sync plan](./CCS_PROXY_UPSTREAM_SYNC_PLAN.md)
 - [ccs proxy core policy refactor plan](./CCS_PROXY_CORE_POLICY_REFACTOR_PLAN.md)
 - [ccs proxy passthrough and CLI display plan](./CCS_PROXY_PASSTHROUGH_CLI_DISPLAY_PLAN.md)
+- [ccs proxy status retry plan](./CCS_PROXY_STATUS_RETRY_PLAN.md)
 - [ccs proxy mode plan](./CCS_PROXY_MODE_PLAN.md)
 - [ccs proxy install fix plan](./CCS_PROXY_INSTALL_FIX_PLAN.md)
 - [ccs proxy state upgrade plan](./CCS_PROXY_STATE_UPGRADE_PLAN.md)
