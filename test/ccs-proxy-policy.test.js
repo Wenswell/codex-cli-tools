@@ -48,8 +48,10 @@ test("Retry-After parsing, jitter, abort, and deadline are bounded", async () =>
   assert.deepEqual(parseRetryAfter("Wed, 15 Jul 2026 00:00:02 GMT", now), { kind: "valid", delayMs: 2000 });
   assert.deepEqual(parseRetryAfter("61", now), { kind: "exceeds_limit", delayMs: 61000 });
   assert.deepEqual(parseRetryAfter("invalid", now), { kind: "missing_or_invalid" });
-  assert.equal(retryDelayMs(2, () => 0), 0);
-  assert.equal(retryDelayMs(2, () => 1), 4000);
+  assert.equal(retryDelayMs(2, 1000, 30_000, () => 0), 0);
+  assert.equal(retryDelayMs(2, 1000, 30_000, () => 1), 4000);
+  assert.equal(retryDelayMs(20, 250, 5000, () => 1), 5000);
+  assert.deepEqual(parseRetryAfter("120", now, 180_000), { kind: "valid", delayMs: 120_000 });
 
   const aborted = new AbortController();
   aborted.abort();

@@ -46,7 +46,10 @@ export function decideProxyPolicy(facts, actions, retryBudgetRemaining) {
             : "pass_through",
     };
 }
-export function parseRetryAfter(value, nowMs = Date.now()) {
+export function parseRetryAfter(value, nowMs = Date.now(), maxDelayMs = RETRY_AFTER_MAX_MS) {
+    if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0 || maxDelayMs > NODE_TIMER_MAX_MS) {
+        throw new Error("Retry-After maximum must be within the Node timer range");
+    }
     if (!value) {
         return { kind: "missing_or_invalid" };
     }
@@ -65,16 +68,19 @@ export function parseRetryAfter(value, nowMs = Date.now()) {
         }
         delayMs = Math.max(0, dateMs - nowMs);
     }
-    if (delayMs > RETRY_AFTER_MAX_MS) {
+    if (delayMs > maxDelayMs) {
         return { kind: "exceeds_limit", delayMs };
     }
     return { kind: "valid", delayMs };
 }
-export function retryDelayMs(retryIndex, random = Math.random) {
+export function retryDelayMs(retryIndex, baseMs = 1000, maxMs = RETRY_BACKOFF_MAX_MS, random = Math.random) {
     if (!Number.isInteger(retryIndex) || retryIndex < 0) {
         throw new Error("retry index must be a non-negative integer");
     }
-    const maximum = Math.min(RETRY_BACKOFF_MAX_MS, 1000 * (2 ** retryIndex));
+    if (!Number.isInteger(baseMs) || baseMs <= 0 || !Number.isInteger(maxMs) || maxMs < baseMs || maxMs > NODE_TIMER_MAX_MS) {
+        throw new Error("retry backoff requires positive integer bounds within the Node timer range");
+    }
+    const maximum = Math.min(maxMs, baseMs * (2 ** retryIndex));
     return Math.floor(Math.max(0, Math.min(1, random())) * maximum);
 }
 export async function waitForProxyRetry(delayMs, signal, deadlineAtMs) {

@@ -1,5 +1,5 @@
 export type ProxyPolicyAction = "pass_through" | "return_502" | "retry_then_pass_through" | "retry_then_502";
-export type ProxyPolicyTrigger = "timeout" | "capacity" | "http_429" | "reasoning" | "pass_through";
+export type ProxyPolicyTrigger = "timeout" | "capacity" | "http_429" | "http_503" | "reasoning" | "pass_through";
 
 export type ProxyPolicyDecision = {
   trigger: ProxyPolicyTrigger;
@@ -84,7 +84,10 @@ export function decideProxyPolicy(
   };
 }
 
-export function parseRetryAfter(value: string | null, nowMs = Date.now()): RetryAfterResult {
+export function parseRetryAfter(value: string | null, nowMs = Date.now(), maxDelayMs = RETRY_AFTER_MAX_MS): RetryAfterResult {
+  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0 || maxDelayMs > NODE_TIMER_MAX_MS) {
+    throw new Error("Retry-After maximum must be within the Node timer range");
+  }
   if (!value) {
     return { kind: "missing_or_invalid" };
   }
@@ -101,17 +104,25 @@ export function parseRetryAfter(value: string | null, nowMs = Date.now()): Retry
     }
     delayMs = Math.max(0, dateMs - nowMs);
   }
-  if (delayMs > RETRY_AFTER_MAX_MS) {
+  if (delayMs > maxDelayMs) {
     return { kind: "exceeds_limit", delayMs };
   }
   return { kind: "valid", delayMs };
 }
 
-export function retryDelayMs(retryIndex: number, random = Math.random): number {
+export function retryDelayMs(
+  retryIndex: number,
+  baseMs = 1000,
+  maxMs = RETRY_BACKOFF_MAX_MS,
+  random = Math.random,
+): number {
   if (!Number.isInteger(retryIndex) || retryIndex < 0) {
     throw new Error("retry index must be a non-negative integer");
   }
-  const maximum = Math.min(RETRY_BACKOFF_MAX_MS, 1000 * (2 ** retryIndex));
+  if (!Number.isInteger(baseMs) || baseMs <= 0 || !Number.isInteger(maxMs) || maxMs < baseMs || maxMs > NODE_TIMER_MAX_MS) {
+    throw new Error("retry backoff requires positive integer bounds within the Node timer range");
+  }
+  const maximum = Math.min(maxMs, baseMs * (2 ** retryIndex));
   return Math.floor(Math.max(0, Math.min(1, random())) * maximum);
 }
 

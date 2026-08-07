@@ -17,8 +17,8 @@ name = "OpenAI" # 提供商名称
 base_url = "https://codex.ciii.club" # API 基础地址
 wire_api = "responses" # 使用 Responses API 协议
 requires_openai_auth = true # 需要 OpenAI 风格认证
-request_max_retries = 20 # 普通 HTTP 请求最大重试次数
-stream_max_retries = 20 # 流式响应最大重试次数
+request_max_retries = 14 # 普通 HTTP 请求最大重试次数
+stream_max_retries = 15 # 流式响应最大重试次数
 stream_idle_timeout_ms = 600000 # 流式响应空闲超时，单位毫秒
 
 [features] # 功能开关，--enable xxx 等价于 features.xxx = true

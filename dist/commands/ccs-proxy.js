@@ -29,14 +29,20 @@ const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
-const PROXY_HEALTH_PROTOCOL = 5;
-const PROXY_STATE_SCHEMA_VERSION = 1;
+const PROXY_HEALTH_PROTOCOL = 6;
+const PROXY_STATE_SCHEMA_VERSION = 2;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
+const PROXY_MODE_RETRY = "retry";
 const PROXY_MODE_INTERCEPT = "intercept";
 const PROXY_MODE_RECOVERY = "recovery";
 const PROXY_DEFAULT_MODE = PROXY_MODE_RECOVERY;
 const PROXY_INSTALL_MODE = PROXY_MODE_PASSTHROUGH;
+const PROXY_DEFAULT_STATUS_RETRY = {
+    total_window_ms: 60 * 60 * 1000,
+    backoff_base_ms: 1000,
+    backoff_max_ms: 30_000,
+};
 const PROXY_DEFAULT_LATENCY_GUARD = {
     enabled: false,
     first_progress_timeout_ms: 0,
@@ -62,7 +68,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-const PROXY_REQUEST_SCHEMA_VERSION = 6;
+const PROXY_REQUEST_SCHEMA_VERSION = 7;
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
@@ -194,6 +200,7 @@ async function resetIncompatibleProxyState(options) {
         original_base_url: originalBaseUrl,
         proxy_base_url: storedProxyBaseUrl,
         mode: PROXY_INSTALL_MODE,
+        status_retry: { ...PROXY_DEFAULT_STATUS_RETRY },
         latency_guard: { ...PROXY_DEFAULT_LATENCY_GUARD },
         listen_host: listenHost,
         listen_port: listenPort,
@@ -308,8 +315,9 @@ async function isProxyHealthy(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
 async function waitForProxyHealth(state, stateRoot) {
     const deadline = Date.now() + PROXY_START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-        if (await isProxyHealthy(state)) {
-            return;
+        const health = await readProxyHealth(state);
+        if (proxyHealthRuntimeMatches(health)) {
+            return health;
         }
         await sleep(PROXY_HEALTH_POLL_MS);
     }
@@ -507,8 +515,7 @@ export async function ensureProxyRunning(options) {
         }
         await rm(pidPath(options.stateRoot), { force: true });
         const pid = startProxyBackgroundProcess(options, state);
-        await waitForProxyHealth(state, options.stateRoot);
-        const startedHealth = await readProxyHealth(state);
+        const startedHealth = await waitForProxyHealth(state, options.stateRoot);
         assertProxyHealthRuntime(startedHealth);
         return {
             state,
@@ -695,7 +702,7 @@ function parseProxyFailureSummary(value, source) {
 }
 function parseProxyRetrySummary(value, source) {
     const summary = requireProxyObject(value, source);
-    for (const field of ["total", "reasoning_guard", "upstream_capacity", "http_429", "timeout", "transport"]) {
+    for (const field of ["total", "reasoning_guard", "upstream_capacity", "http_429", "http_503", "timeout", "transport"]) {
         requireProxyField(summary, field, source, isNonNegativeInteger, "non-negative integer");
     }
 }
@@ -766,9 +773,27 @@ function normalizeProxyState(state) {
     return {
         ...state,
         mode: normalizeProxyMode(state.mode) ?? PROXY_DEFAULT_MODE,
+        status_retry: parseProxyStatusRetry(state.status_retry, "proxy.json.status_retry"),
         latency_guard: parseProxyLatencyGuard(state.latency_guard, "proxy.json.latency_guard"),
         profile_order: Array.isArray(state.profile_order) ? state.profile_order.filter((value) => typeof value === "string" && value.length > 0) : [],
         metrics: parseProxyMetrics(state.metrics),
+    };
+}
+function parseProxyStatusRetry(value, source) {
+    const raw = requireProxyObject(value, source);
+    const totalWindowMs = requireProxyField(raw, "total_window_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
+    const backoffBaseMs = requireProxyField(raw, "backoff_base_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
+    const backoffMaxMs = requireProxyField(raw, "backoff_max_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
+    if (backoffBaseMs > backoffMaxMs) {
+        throw new Error(`invalid proxy request data at ${source}: backoff_base_ms must not exceed backoff_max_ms`);
+    }
+    if (backoffMaxMs > totalWindowMs) {
+        throw new Error(`invalid proxy request data at ${source}: backoff_max_ms must not exceed total_window_ms`);
+    }
+    return {
+        total_window_ms: totalWindowMs,
+        backoff_base_ms: backoffBaseMs,
+        backoff_max_ms: backoffMaxMs,
     };
 }
 function parseProxyLatencyGuard(value, source) {
@@ -790,9 +815,15 @@ function parseProxyLatencyGuard(value, source) {
 function isProxyTimeoutMs(value) {
     return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= PROXY_TIMER_MAX_MS;
 }
+function isPositiveProxyTimerMs(value) {
+    return Number.isInteger(value) && Number(value) > 0 && Number(value) <= PROXY_TIMER_MAX_MS;
+}
 function normalizeProxyMode(value) {
     if (value === PROXY_MODE_PASSTHROUGH) {
         return PROXY_MODE_PASSTHROUGH;
+    }
+    if (value === PROXY_MODE_RETRY) {
+        return PROXY_MODE_RETRY;
     }
     if (value === PROXY_MODE_INTERCEPT) {
         return PROXY_MODE_INTERCEPT;
@@ -801,6 +832,9 @@ function normalizeProxyMode(value) {
         return PROXY_MODE_RECOVERY;
     }
     return null;
+}
+function isProxyInspectionMode(mode) {
+    return mode === PROXY_MODE_INTERCEPT || mode === PROXY_MODE_RECOVERY;
 }
 function ensureProxyMetrics(state) {
     return state.metrics ?? createProxyMetrics();
@@ -1042,11 +1076,15 @@ function formatProxyStatusLine(now, state, runtime) {
     const deadline = state?.latency_guard.enabled
         ? `${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
         : textDim("off");
+    const statusRetry = state
+        ? `${formatDurationMs(state.status_retry.total_window_ms, { maxUnit: "h" })}/${formatDurationMs(state.status_retry.backoff_base_ms)}-${formatDurationMs(state.status_retry.backoff_max_ms)}`
+        : "unset";
     return [
         bgDarkBlue(" ccs proxy "),
         textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
         `runtime: ${state ? runtimeLabel : textRed("missing")}`,
         `mode: ${mode}`,
+        `retry: ${state?.mode === PROXY_MODE_RETRY ? colorCount(statusRetry) : textDim("off")}`,
         `deadline: ${deadline}`,
         `pid: ${pid}`,
         `server: ${version}`,
@@ -1359,6 +1397,7 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, codexConfigFile,
         original_base_url: originalBaseUrl,
         proxy_base_url: proxyBaseUrl(listenHost, listenPort),
         mode: PROXY_INSTALL_MODE,
+        status_retry: { ...PROXY_DEFAULT_STATUS_RETRY },
         latency_guard: { ...PROXY_DEFAULT_LATENCY_GUARD },
         listen_host: listenHost,
         listen_port: listenPort,
@@ -1409,6 +1448,7 @@ function createEmptyProxyRetrySummary() {
         reasoning_guard: 0,
         upstream_capacity: 0,
         http_429: 0,
+        http_503: 0,
         timeout: 0,
         transport: 0,
     };
@@ -3154,6 +3194,116 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, ga
         });
     }
 }
+function isRetryableUpstreamStatus(status) {
+    return status === 429 || status === 503;
+}
+async function proxyThroughActiveUpstreamStatusRetry(request, upstream, body, gatewayRequestId, attemptRecords, config, callbacks) {
+    const attemptState = {
+        gatewayRequestId,
+        attempts: 0,
+        attemptRecords,
+        attemptStartedAtMs: [],
+    };
+    const deadlineAtMs = Date.now() + config.total_window_ms;
+    let retries = 0;
+    while (true) {
+        if (callbacks.signal?.aborted) {
+            throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+        }
+        attemptState.attempts += 1;
+        attemptState.attemptRecords.push(createProxyAttemptRecord(gatewayRequestId, attemptState.attempts, upstream.name));
+        attemptState.attemptStartedAtMs.push(performance.now());
+        await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
+        try {
+            const response = await forwardRequest(request, upstream, body, callbacks.signal);
+            markProxyAttemptHeaders(attemptState, response.status);
+            await callbacks.onResponseStart?.(response.status, upstream.name);
+            const attempt = currentProxyAttemptRecord(attemptState);
+            const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
+            if (!isRetryableUpstreamStatus(response.status)) {
+                attempt.client_http_status = response.status;
+                completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
+                return createProxyOutcome({
+                    response,
+                    upstream: upstream.name,
+                    upstreamStatus: response.status,
+                    attempts: attemptState.attempts,
+                    attemptRecords,
+                    failureSummary,
+                });
+            }
+            const trigger = response.status === 429 ? "http_429" : "http_503";
+            const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), config.total_window_ms);
+            const retryAfterMs = retryAfter.kind === "missing_or_invalid" ? null : retryAfter.delayMs;
+            const delayMs = retryAfter.kind === "missing_or_invalid"
+                ? retryDelayMs(retries, config.backoff_base_ms, config.backoff_max_ms)
+                : retryAfter.delayMs;
+            attempt.policy_trigger = trigger;
+            attempt.policy_action = "retry_then_pass_through";
+            attempt.retry_after_ms = retryAfterMs;
+            attempt.retry_delay_ms = delayMs;
+            attempt.retry_budget_used = retries;
+            attempt.retry_budget_remaining = 0;
+            const remainingMs = deadlineAtMs - Date.now();
+            if (retryAfter.kind === "exceeds_limit" || remainingMs <= 0 || delayMs > remainingMs) {
+                attempt.client_http_status = response.status;
+                completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
+                return createProxyOutcome({
+                    response,
+                    upstream: upstream.name,
+                    upstreamStatus: response.status,
+                    attempts: attemptState.attempts,
+                    attemptRecords,
+                    failureSummary,
+                });
+            }
+            const waitResult = await waitForProxyRetry(delayMs, callbacks.signal ?? new AbortController().signal, deadlineAtMs);
+            if (waitResult === "aborted") {
+                await response.body?.cancel().catch(() => undefined);
+                throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+            }
+            if (waitResult === "deadline") {
+                attempt.client_http_status = response.status;
+                completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
+                return createProxyOutcome({
+                    response,
+                    upstream: upstream.name,
+                    upstreamStatus: response.status,
+                    attempts: attemptState.attempts,
+                    attemptRecords,
+                    failureSummary,
+                });
+            }
+            await response.body?.cancel().catch(() => undefined);
+            retries += 1;
+            attempt.retry_trigger = trigger;
+            attempt.retry_budget_used = retries;
+            completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: null });
+        }
+        catch (error) {
+            if (error instanceof ProxyResponseWriteError)
+                throw error;
+            if (isClientAbortError(error, callbacks.signal)) {
+                throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            const code = isFetchFailedError(error) ? "upstream_fetch_failed" : "upstream_error";
+            const failureSummary = proxyFailureSummaryFromError(code, error);
+            const attempt = currentProxyAttemptRecord(attemptState);
+            attempt.client_http_status = NON_STREAM_STATUS_CODE;
+            completeProxyAttempt(attempt, code, { failureSummary, remainingRetries: 0 });
+            return createProxyOutcome({
+                response: createUpstreamErrorResponse(message, code),
+                upstream: upstream.name,
+                upstreamStatus: null,
+                attempts: attemptState.attempts,
+                attemptRecords,
+                failureSummary,
+                error: `${code}: ${message}`,
+            });
+        }
+    }
+}
 function isFetchFailedError(error) {
     return error instanceof TypeError && error.message === "fetch failed";
 }
@@ -3418,6 +3568,9 @@ function createRetrySummary(attemptRecords) {
         else if (attempt.retry_trigger === "http_429") {
             summary.http_429 += 1;
         }
+        else if (attempt.retry_trigger === "http_503") {
+            summary.http_503 += 1;
+        }
         else if (attempt.final_action === "timeout_internal_retry") {
             summary.timeout += 1;
         }
@@ -3425,7 +3578,7 @@ function createRetrySummary(attemptRecords) {
             summary.transport += 1;
         }
     }
-    summary.total = summary.reasoning_guard + summary.upstream_capacity + summary.http_429 + summary.timeout + summary.transport;
+    summary.total = summary.reasoning_guard + summary.upstream_capacity + summary.http_429 + summary.http_503 + summary.timeout + summary.transport;
     return summary;
 }
 function lastProxyAttemptRecord(attemptRecords) {
@@ -3836,12 +3989,20 @@ function formatProxyPolicySummary(records) {
     const totals = records.reduce((summary, record) => ({
         upstream_capacity: summary.upstream_capacity + record.retry_summary.upstream_capacity,
         http_429: summary.http_429 + record.retry_summary.http_429,
+        http_503: summary.http_503 + record.retry_summary.http_503,
         reasoning_guard: summary.reasoning_guard + record.retry_summary.reasoning_guard,
         timeout: summary.timeout + record.retry_summary.timeout,
         transport: summary.transport + record.retry_summary.transport,
-    }), { upstream_capacity: 0, http_429: 0, reasoning_guard: 0, timeout: 0, transport: 0 });
-    const retries = totals.upstream_capacity + totals.http_429 + totals.reasoning_guard + totals.timeout + totals.transport;
-    return `policy retries=${retries} capacity=${totals.upstream_capacity} 429=${totals.http_429} reasoning=${totals.reasoning_guard} timeout=${totals.timeout} transport=${totals.transport}`;
+    }), { upstream_capacity: 0, http_429: 0, http_503: 0, reasoning_guard: 0, timeout: 0, transport: 0 });
+    const retries = totals.upstream_capacity + totals.http_429 + totals.http_503 + totals.reasoning_guard + totals.timeout + totals.transport;
+    return `policy retries=${retries} capacity=${totals.upstream_capacity} 429=${totals.http_429} 503=${totals.http_503} reasoning=${totals.reasoning_guard} timeout=${totals.timeout} transport=${totals.transport}`;
+}
+function formatProxyStatusRetrySummary(records) {
+    const totals = records.reduce((summary, record) => ({
+        http_429: summary.http_429 + record.retry_summary.http_429,
+        http_503: summary.http_503 + record.retry_summary.http_503,
+    }), { http_429: 0, http_503: 0 });
+    return `retry total=${totals.http_429 + totals.http_503} 429=${totals.http_429} 503=${totals.http_503}`;
 }
 function formatProxyReasoningSummary(metrics) {
     const reasoningCounts = formatGroupedProxyReasoningTokenCounts(metrics.reasoning_token_counts);
@@ -3986,7 +4147,12 @@ function proxyActiveSectionLineCount(metrics) {
 function proxyPathLineCount(options) {
     return options.watch ? 0 : 5;
 }
-function resolveProxyHistoryRenderCount(metrics, options) {
+function proxyPolicySummaryLineCount(state, options) {
+    if (!options.watch || !state || isProxyInspectionMode(state.mode))
+        return 2;
+    return state.mode === PROXY_MODE_RETRY ? 1 : 0;
+}
+function resolveProxyHistoryRenderCount(metrics, options, state) {
     if (options.historyVisible === false) {
         return 0;
     }
@@ -4002,7 +4168,8 @@ function resolveProxyHistoryRenderCount(metrics, options) {
     }
     const fixedLines = 1
         + proxyPathLineCount(options)
-        + 4
+        + 2
+        + proxyPolicySummaryLineCount(state, options)
         + proxyActiveSectionLineCount(metrics)
         + 1
         + 1
@@ -4091,7 +4258,7 @@ async function renderProxyStatusLines(options) {
     const currentProfileOrder = buildProfileOrder(profiles);
     const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
     const metrics = state?.metrics ?? createProxyMetrics();
-    const historyCount = resolveProxyHistoryRenderCount(metrics, options);
+    const historyCount = resolveProxyHistoryRenderCount(metrics, options, state);
     const historyRecords = options.historyVisible === false
         ? []
         : await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
@@ -4101,16 +4268,22 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
     const metrics = state?.metrics
         ? { ...state.metrics, ...proxyMetricsFromRecentRequests(state.metrics.recent_requests) }
         : createProxyMetrics();
-    const historyCount = resolveProxyHistoryRenderCount(metrics, options);
+    const historyCount = resolveProxyHistoryRenderCount(metrics, options, state);
     const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
     const view = options.view ?? "overview";
     const historyVisible = options.historyVisible ?? true;
+    const watchPolicyLines = !options.watch || !state
+        ? [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)]
+        : state.mode === PROXY_MODE_PASSTHROUGH
+            ? []
+            : state.mode === PROXY_MODE_RETRY
+                ? [formatProxyStatusRetrySummary(metrics.recent_requests)]
+                : [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)];
     return [
         fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
         ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
         fitTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
-        fitTerminalLine(formatProxyPolicySummary(metrics.recent_requests)),
-        fitTerminalLine(formatProxyReasoningSummary(metrics)),
+        ...watchPolicyLines.map((line) => fitTerminalLine(line)),
         fitTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
         ...formatProxyActiveRows(metrics, now, view, priceCache),
@@ -4519,8 +4692,10 @@ export async function serveProxy(options) {
                     };
                     const outcome = mode === PROXY_MODE_PASSTHROUGH
                         ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, activeRecord.id, attemptRecords, passthroughCallbacks)
-                        : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, guardedCallbacks);
-                    if (mode !== PROXY_MODE_PASSTHROUGH) {
+                        : mode === PROXY_MODE_RETRY
+                            ? await proxyThroughActiveUpstreamStatusRetry(req, upstreamProfile, body, activeRecord.id, attemptRecords, requestState.status_retry, passthroughCallbacks)
+                            : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, guardedCallbacks);
+                    if (isProxyInspectionMode(mode)) {
                         enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
                     }
                     status = outcome.response.status;
@@ -4587,7 +4762,7 @@ export async function serveProxy(options) {
                     responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, async (receivedBytes) => {
                         activeRecord.response_bytes = receivedBytes;
                         await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                    }, outcome.streamScanner, mode !== PROXY_MODE_PASSTHROUGH);
+                    }, outcome.streamScanner, isProxyInspectionMode(mode));
                     if (outcome.streamScanner) {
                         const inspection = outcome.streamScanner.currentInspection();
                         const streamAttemptState = { gatewayRequestId: activeRecord.id, attempts, attemptRecords, attemptStartedAtMs: [] };
@@ -4779,14 +4954,19 @@ export async function serveProxy(options) {
     });
     await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
     process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
+    let exitAfterClose = false;
     await new Promise((resolve) => {
         const close = () => {
+            exitAfterClose = true;
             server.close(() => resolve());
         };
         process.once("SIGINT", close);
         process.once("SIGTERM", close);
     });
     await rm(pidPath(options.stateRoot), { force: true });
+    if (exitAfterClose) {
+        process.exit(0);
+    }
 }
 function usageHelpLines() {
     return [
@@ -4799,9 +4979,11 @@ function usageHelpLines() {
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy mode                           # print active proxy intervention mode",
         "  ccs proxy mode passthrough               # disable proxy policy after confirmation",
+        "  ccs proxy mode retry                     # retry upstream HTTP 429 and 503 only",
         "  ccs proxy mode recovery                  # enable continuation recovery mode",
         "  ccs proxy mode intercept                 # enable guard intercept mode",
         "  ccs proxy config                         # print active proxy policy configuration",
+        "  ccs proxy config retry WINDOW BASE MAX   # set status retry window and backoff milliseconds",
         "  ccs proxy config latency off             # disable latency deadlines after confirmation",
         "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
@@ -4856,7 +5038,10 @@ function parseProxyUserMode(value) {
     if (value === PROXY_MODE_RECOVERY) {
         return PROXY_MODE_RECOVERY;
     }
-    throw new Error("ccs proxy mode requires passthrough, recovery, or intercept");
+    if (value === PROXY_MODE_RETRY) {
+        return PROXY_MODE_RETRY;
+    }
+    throw new Error("ccs proxy mode requires passthrough, retry, recovery, or intercept");
 }
 function formatProxyModeChange(result) {
     return result.previousMode === result.mode
@@ -4902,6 +5087,28 @@ function printProxyLatencyGuard(value) {
     printKeyValue("first_progress:", `${value.first_progress_timeout_ms}ms`, 15);
     printKeyValue("first_action:", value.first_progress_action, 15);
     printKeyValue("total:", `${value.total_timeout_ms}ms`, 15);
+}
+function parseProxyStatusRetryConfig(args) {
+    if (args.length !== 3) {
+        throw new Error("ccs proxy config retry requires WINDOW BASE MAX milliseconds");
+    }
+    const [totalWindowMs, backoffBaseMs, backoffMaxMs] = args.map((value) => {
+        if (!value || !/^\d+$/.test(value) || !isPositiveProxyTimerMs(Number(value))) {
+            throw new Error("ccs proxy config retry requires positive timer-range integers");
+        }
+        return Number(value);
+    });
+    return parseProxyStatusRetry({
+        total_window_ms: totalWindowMs,
+        backoff_base_ms: backoffBaseMs,
+        backoff_max_ms: backoffMaxMs,
+    }, "retry config");
+}
+function printProxyStatusRetry(value) {
+    printKeyValue("retry_statuses:", "429,503", 15);
+    printKeyValue("retry_window:", `${value.total_window_ms}ms`, 15);
+    printKeyValue("backoff_base:", `${value.backoff_base_ms}ms`, 15);
+    printKeyValue("backoff_max:", `${value.backoff_max_ms}ms`, 15);
 }
 export async function runProxyCommand(args, options) {
     if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
@@ -4961,20 +5168,28 @@ export async function runProxyCommand(args, options) {
             throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
         }
         if (rest.length === 0) {
+            printProxyStatusRetry(state.status_retry);
             printProxyLatencyGuard(state.latency_guard);
             return;
         }
         rejectRemovedYesFlags(rest, "ccs proxy config");
-        if (rest[0] !== "latency") {
+        if (rest[0] !== "latency" && rest[0] !== "retry") {
             throw new Error(`unknown argument for ccs proxy config: ${rest[0]}`);
         }
-        const latencyGuard = parseProxyLatencyConfig(rest.slice(1));
-        printProxyLatencyGuard(latencyGuard);
+        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1)) : state.status_retry;
+        const latencyGuard = rest[0] === "latency" ? parseProxyLatencyConfig(rest.slice(1)) : state.latency_guard;
+        if (rest[0] === "retry")
+            printProxyStatusRetry(statusRetry);
+        else
+            printProxyLatencyGuard(latencyGuard);
         printKeyValue("note:", "no changes are written unless you type yes", 5);
         if (!(await confirmApply()))
             return;
-        await writeProxyState(options.stateRoot, { ...state, latency_guard: latencyGuard });
-        printProxyLatencyGuard(latencyGuard);
+        await writeProxyState(options.stateRoot, { ...state, status_retry: statusRetry, latency_guard: latencyGuard });
+        if (rest[0] === "retry")
+            printProxyStatusRetry(statusRetry);
+        else
+            printProxyLatencyGuard(latencyGuard);
         return;
     }
     if (command === "install") {
