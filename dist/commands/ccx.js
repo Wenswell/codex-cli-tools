@@ -1,8 +1,17 @@
 import { spawn } from "node:child_process";
-import { textRed } from "../lib/text.js";
+import { textBold, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
 export function runClaude(args, options = {}) {
     const toolName = toolNameFromArgv();
+    if (isHelpArgument(args[0])) {
+        if (args.length !== 1) {
+            console.error(`${textRed("error:")} usage: ${toolName} ${args[0]}`);
+            process.exitCode = 1;
+            return;
+        }
+        printHelp(toolName, options.resume === true);
+        return;
+    }
     if (isVersionArgument(args[0])) {
         if (args.length !== 1) {
             console.error(`${textRed("error:")} usage: ${toolName} ${args[0]}`);
@@ -35,4 +44,20 @@ export function runClaude(args, options = {}) {
         }
         process.exit(code ?? 1);
     });
+}
+function isHelpArgument(value) {
+    return value === "help" || value === "-h" || value === "--help";
+}
+function printHelp(toolName, resume) {
+    const commands = [
+        [`${toolName} [CLAUDE_ARGS...]`, resume ? "resume Claude Code with permission checks skipped" : "launch Claude Code with permission checks skipped"],
+        [`${toolName} version`, "print package version"],
+        [`${toolName} -v`, "print package version"],
+        [`${toolName} help | -h | --help`, "show this help"],
+    ];
+    const width = Math.max(...commands.map(([command]) => command.length));
+    console.log([
+        textBold("Usage:"),
+        ...commands.map(([command, comment]) => `  ${command.padEnd(width)} # ${comment}`),
+    ].join("\n"));
 }

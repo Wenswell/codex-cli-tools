@@ -12,6 +12,7 @@ import {
   parseArgs,
   runCimg,
 } from "../dist/commands/cimg.js";
+import { captureStdout } from "./helpers/terminal.js";
 
 const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl9sAAAAASUVORK5CYII=", "base64");
 const profiles = async () => ({
@@ -19,6 +20,15 @@ const profiles = async () => ({
   profiles: {
     test: { baseURL: "https://images.example.test", apiKey: "secret-key" },
   },
+});
+
+test("cimg no-argument output shows active state and compact commands", async () => {
+  const output = await captureStdout(() => runCimg([], { profiles }));
+  assert.match(output, /^profile:\s+test$/m);
+  assert.match(output, /^api:\s+https:\/\/images\.example\.test$/m);
+  assert.match(output, /^model:\s+gpt-image-2$/m);
+  assert.match(output, /^defaults:\s+1:1 1024x1024 auto$/m);
+  assert.match(output, /^commands: cimg -p TEXT \| version\|-v \| --help$/m);
 });
 
 test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {

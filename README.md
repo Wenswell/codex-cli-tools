@@ -78,6 +78,7 @@ codex-rename
 ## Design Specs
 
 - [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
+- [public CLI surface regression plan](docs/CLI_SURFACE_REGRESSION_PLAN.md)
 - [cimg CLI plan](docs/CIMG_PLAN.md)
 - [engineering preferences](docs/ENGINEERING_PREFERENCES.md)
 - [testing guidelines](docs/TESTING_GUIDELINES.md)
@@ -104,6 +105,7 @@ codex-rename
 - Explicit help contains parameters, aliases, nested commands, and command comments.
 - Each labeled command footer row is emitted as one line without width-dependent formatting.
 - At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
+- Every `package.json.bin` entry is automatically covered by the shared version and help regression test; adding a public tool requires no hand-maintained test list.
 - Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
 - Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
 - Write/apply commands first print the same plan as preview, then ask for confirmation and print the actual result.
@@ -216,6 +218,9 @@ Use `cxx` and `cxxs` only in directories and tasks you trust.
 ccx ARGS...
 ccx version
 ccx -v
+ccx help
+ccx -h
+ccx --help
 ```
 
 Equivalent to:
@@ -230,6 +235,9 @@ claude --dangerously-skip-permissions ARGS...
 ccxs ARGS...
 ccxs version
 ccxs -v
+ccxs help
+ccxs -h
+ccxs --help
 ```
 
 Equivalent to:
@@ -1035,6 +1043,7 @@ codex-rename -v                                       # print package version
 codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update
 codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates
 codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed
+codex-rename help | -h | --help                         # show help
 ```
 
 Default mode is preview. Nothing is modified unless you type exact `yes` at the prompt.
@@ -1138,6 +1147,7 @@ Before committing command-surface or documentation changes, verify:
 pnpm check
 pnpm test
 pnpm build
+node --test test/cli-surface.test.js
 git diff --check
 node dist/bin/ccs.js --help
 node dist/bin/ccs.js -v

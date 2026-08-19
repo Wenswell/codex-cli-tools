@@ -9,10 +9,6 @@ import { sqliteJson, sqliteRun, sqlString } from "../lib/sqlite.js";
 import { textBlue, textBold, textDim, textGreen, textRed } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 function parseArgs(argv) {
-    if (argv.includes("--help") || argv.includes("-h")) {
-        printHelp();
-        process.exit(0);
-    }
     const positional = [];
     let prefix = false;
     let sessionsOnly = false;
@@ -54,7 +50,11 @@ function printHelp() {
         "  codex-rename OLD_PATH NEW_PATH                         # preview directory rename and exact session cwd update",
         "  codex-rename OLD_PATH NEW_PATH --prefix                # preview directory rename and child session cwd updates",
         "  codex-rename OLD_PATH NEW_PATH --sessions-only --prefix # update sessions only after directory was already renamed",
+        "  codex-rename help | -h | --help                         # show this help",
     ].join("\n"));
+}
+function isHelpArgument(value) {
+    return value === "help" || value === "-h" || value === "--help";
 }
 async function pathExists(path) {
     try {
@@ -383,6 +383,13 @@ function printPlan(args, directoryPlan, dbPath, rows, dryRun) {
 }
 export async function runCodexRename(argv) {
     if (printToolVersionIfRequested("codex-rename", argv)) {
+        return;
+    }
+    if (isHelpArgument(argv[0])) {
+        if (argv.length !== 1) {
+            throw new Error(`usage: codex-rename ${argv[0]}`);
+        }
+        printHelp();
         return;
     }
     const args = parseArgs(argv);
