@@ -832,7 +832,7 @@ cimg --help
 
 The default is `1:1`, `1024x1024`, and `auto` quality. Ratios are fixed to `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16`, `21:9`, and `9:21`; each ratio accepts only the sizes printed by `cimg --help`. Quality accepts `auto`, `low`, `medium`, or `high`.
 
-With no arguments, `cimg` prints the active profile, base URL, API key state, fixed model, defaults, output directory, and request log path. Generation prints the same request plan and writes nothing until you type exact `yes`. The default output is `~/Pictures/cimg/image-<timestamp>.png`; the directory is created after confirmation when needed, and existing files are not overwritten. `-o` or `--out` selects another PNG path. Completion output and logs use the PNG's actual IHDR dimensions and warn when the provider returns a different size from the request; `cimg` does not resize the image.
+With no arguments, `cimg` prints the active profile, base URL, API key state, fixed model, defaults, output directory, and request log path. Generation prints the same request plan and writes nothing until you type exact `yes`. After confirmation, an interactive terminal immediately prints the active size, quality, and elapsed time, then refreshes that line every 10 seconds. Non-interactive output prints one start line. The endpoint does not expose real progress, so `cimg` does not display a percentage. Press `Ctrl-C` to abort an active request; the CLI exits with status `130` after recording the cancellation. The default output is `~/Pictures/cimg/image-<timestamp>.png`; the directory is created after confirmation when needed, and existing files are not overwritten. `-o` or `--out` selects another PNG path. Completion output and logs use the PNG's actual IHDR dimensions and warn when the provider returns a different size from the request; `cimg` does not resize the image.
 
 Every API request writes two schema v1 lifecycle events with the same `request_id`:
 
@@ -840,7 +840,7 @@ Every API request writes two schema v1 lifecycle events with the same `request_i
 ~/.cache/codex-tools/cimg/requests.jsonl
 ```
 
-`started` is appended before the HTTP request. `succeeded` or `failed` is appended after completion with duration, HTTP status, output bytes, actual PNG width and height, or normalized error facts. The bounded `0600` log stores the prompt SHA-256 and character count, not the API key, prompt text, provider error message, response body, or image base64.
+`started` is appended before the HTTP request. `succeeded` or `failed` is appended after completion with duration, HTTP status, output bytes, actual PNG width and height, or normalized error facts. User cancellation is recorded as `failed` with error code `canceled`. The bounded `0600` log stores the prompt SHA-256 and character count, not the API key, prompt text, provider error message, response body, or image base64.
 
 ## clvm
 
