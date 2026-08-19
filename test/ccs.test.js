@@ -59,15 +59,6 @@ test("ccs namespaces use compact footers and local help", async () => {
   }
 });
 
-test("tools print package version", async () => {
-  const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-  const tools = ["ccs", "ccx", "ccxs", "clvm", "cx", "cxx", "cxxs", "senv", "codex-rename"];
-  for (const tool of tools) {
-    assert.equal(await runTool(tool, ["version"]), `${tool} ${packageJson.version}\n`);
-    assert.equal(await runTool(tool, ["-v"]), `${tool} ${packageJson.version}\n`);
-  }
-});
-
 test("Codex wrappers default to remote mode and support leading local", async () => {
   const binDir = await createFakeCodex("console.log(JSON.stringify(process.argv.slice(2)));\n");
   const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` };

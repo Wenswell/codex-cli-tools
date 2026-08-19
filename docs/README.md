@@ -3,6 +3,7 @@
 Project design specs:
 
 - [CLI runtime records](./CLI_RUNTIME_RECORDS.md)
+- [public CLI surface regression plan](./CLI_SURFACE_REGRESSION_PLAN.md)
 - [cimg CLI plan](./CIMG_PLAN.md)
 - [engineering preferences](./ENGINEERING_PREFERENCES.md)
 - [testing guidelines](./TESTING_GUIDELINES.md)
