@@ -1,4 +1,4 @@
-import { copyFile } from "node:fs/promises";
+import { copyFile, readdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename } from "node:path";
 import { createTwoFilesPatch } from "diff";
@@ -10,8 +10,6 @@ import { printToolVersionIfRequested } from "../lib/version.js";
 const envLinePattern = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 function parseArgs(argv) {
     const args = {
-        source: ".env.example",
-        target: ".env",
         backup: false,
     };
     rejectRemovedYesFlags(argv, "senv");
@@ -39,6 +37,31 @@ function parseArgs(argv) {
     }
     return args;
 }
+async function resolveArgs(args) {
+    if (args.source !== undefined || args.target !== undefined) {
+        return {
+            source: args.source ?? ".env.example",
+            target: args.target ?? ".env",
+            backup: args.backup,
+        };
+    }
+    const sources = (await readdir(".", { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".env.example"))
+        .map((entry) => entry.name)
+        .sort();
+    if (sources.length === 0) {
+        throw new Error("no source file found: expected one *.env.example in the current directory; use --source and --target");
+    }
+    if (sources.length > 1) {
+        throw new Error(`multiple source files found: ${sources.join(", ")}; use --source and --target`);
+    }
+    const source = sources[0];
+    return {
+        source,
+        target: source.slice(0, -".example".length),
+        backup: args.backup,
+    };
+}
 function requireValue(argv, index) {
     const value = argv[index + 1];
     if (!value || value.startsWith("-")) {
@@ -49,7 +72,7 @@ function requireValue(argv, index) {
 function printHelp() {
     console.log([
         "Usage:",
-        "  senv                                      # preview, confirm, and update .env from .env.example",
+        "  senv                                      # discover one *.env.example and update its target",
         "  senv version                              # print package version",
         "  senv -v                                   # print package version",
         "  senv --source FILE --target FILE         # preview, confirm, and update a target env file",
@@ -255,7 +278,7 @@ export async function runEnvsync(argv) {
     if (printToolVersionIfRequested("senv", argv)) {
         return;
     }
-    const args = parseArgs(argv);
+    const args = await resolveArgs(parseArgs(argv));
     const exampleText = await readTextIfExists(args.source);
     if (exampleText === null) {
         throw new Error(`source file not found: ${args.source}`);
