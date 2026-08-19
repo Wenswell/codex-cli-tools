@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { access, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { rejectRemovedYesFlags } from "../lib/confirm.js";
 import { ensureDir } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorPath, colorUrl, printKeyValue } from "../lib/output.js";
-import { codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
+import { codexToolsCacheDir, formatHomePath, homeDir } from "../lib/paths.js";
 import { assertProfile, readProfiles } from "../lib/profiles.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { textDim, textGreen, textRed, textYellow } from "../lib/text.js";
@@ -182,7 +182,9 @@ export function parseArgs(argv, now = new Date()) {
     if (!CIMG_SIZES[ratio].includes(resolvedSize)) {
         throw new Error(`invalid size for ${ratio}: ${resolvedSize}; expected ${CIMG_SIZES[ratio].join(" | ")}`);
     }
-    const resolvedOutput = resolve(outputPath ?? defaultOutputName(now));
+    const resolvedOutput = outputPath
+        ? resolve(outputPath)
+        : join(cimgDefaultOutputDir(), defaultOutputName(now));
     if (!resolvedOutput.toLowerCase().endsWith(".png")) {
         throw new Error("output path must end with .png");
     }
@@ -220,6 +222,9 @@ export function buildEndpoint(baseURL) {
 }
 export function cimgRequestsPath() {
     return resolve(codexToolsCacheDir(), "cimg", "requests.jsonl");
+}
+export function cimgDefaultOutputDir() {
+    return join(homeDir(), "Pictures", "cimg");
 }
 async function requestImage(fetchImpl, endpoint, apiKey, args) {
     let response;
@@ -300,7 +305,7 @@ function printStatus(profiles) {
     printCimgValue("key:", apiKey);
     printCimgValue("model:", CIMG_MODEL);
     printCimgValue("defaults:", `${CIMG_DEFAULT_RATIO} ${CIMG_DEFAULT_SIZES[CIMG_DEFAULT_RATIO]} ${CIMG_DEFAULT_QUALITY}`);
-    printCimgValue("output:", colorPath(process.cwd()));
+    printCimgValue("output:", colorPath(formatHomePath(cimgDefaultOutputDir())));
     printCimgValue("log:", colorPath(formatHomePath(cimgRequestsPath())));
     console.log("commands: cimg -p TEXT | version|-v | --help");
 }
@@ -328,7 +333,7 @@ function printHelp() {
         `  --ratio RATIO    ${Object.keys(CIMG_SIZES).join(" | ")} (default: ${CIMG_DEFAULT_RATIO})`,
         "  --size SIZE      one fixed size listed for the selected ratio",
         "  --quality VALUE  auto | low | medium | high (default: auto)",
-        "  -o, --out FILE   output PNG path (default: ./image-<timestamp>.png)",
+        "  -o, --out FILE   output PNG path (default: ~/Pictures/cimg/image-<timestamp>.png)",
         "  -p, --prompt     text prompt",
         "",
         "Sizes:",

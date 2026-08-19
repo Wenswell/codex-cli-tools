@@ -832,7 +832,7 @@ cimg --help
 
 The default is `1:1`, `1024x1024`, and `auto` quality. Ratios are fixed to `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16`, `21:9`, and `9:21`; each ratio accepts only the sizes printed by `cimg --help`. Quality accepts `auto`, `low`, `medium`, or `high`.
 
-With no arguments, `cimg` prints the active profile, base URL, API key state, fixed model, defaults, output directory, and request log path. Generation prints the same request plan and writes nothing until you type exact `yes`. The default output name is `image-<timestamp>.png` in the current directory; existing files are not overwritten. Completion output and logs use the PNG's actual IHDR dimensions and warn when the provider returns a different size from the request; `cimg` does not resize the image.
+With no arguments, `cimg` prints the active profile, base URL, API key state, fixed model, defaults, output directory, and request log path. Generation prints the same request plan and writes nothing until you type exact `yes`. The default output is `~/Pictures/cimg/image-<timestamp>.png`; the directory is created after confirmation when needed, and existing files are not overwritten. `-o` or `--out` selects another PNG path. Completion output and logs use the PNG's actual IHDR dimensions and warn when the provider returns a different size from the request; `cimg` does not resize the image.
 
 Every API request writes two schema v1 lifecycle events with the same `request_id`:
 
