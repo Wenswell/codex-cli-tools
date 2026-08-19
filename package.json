@@ -1,9 +1,10 @@
 {
   "name": "codex-tools",
-  "version": "0.2.58",
+  "version": "0.2.59",
   "description": "Personal Codex CLI helpers",
   "type": "module",
   "bin": {
+    "cimg": "dist/bin/cimg.js",
     "ccs": "dist/bin/ccs.js",
     "ccx": "dist/bin/ccx.js",
     "ccxs": "dist/bin/ccxs.js",
