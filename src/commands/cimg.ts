@@ -17,6 +17,7 @@ export const CIMG_DEFAULT_RATIO = "1:1";
 export const CIMG_DEFAULT_QUALITY = "auto";
 
 const requestTimeoutMs = 300_000;
+export const CIMG_PROGRESS_INTERVAL_MS = 10_000;
 const requestLogMaxBytes = 16 * 1024 * 1024;
 const requestLogTrimBytes = 12 * 1024 * 1024;
 const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -150,11 +151,16 @@ export async function runCimg(argv: string[], overrides: Partial<CimgDependencie
   const baseEvent = buildBaseEvent(requestId, startedAt, active.name, active.profile.baseURL, endpoint, args);
   await dependencies.appendEvent({ ...baseEvent, event: "started" });
 
+  const abortController = new AbortController();
+  const cancelRequest = (): void => abortController.abort();
+  const progress = startGenerationProgress(args.size, args.quality);
+  process.once("SIGINT", cancelRequest);
   let response: RequestResult;
   try {
-    response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args);
+    response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args, abortController.signal);
     await writeFile(args.outputPath, response.bytes, { flag: "wx", mode: 0o600 });
   } catch (error) {
+    progress.stop();
     const completedAt = dependencies.now();
     const normalized = normalizeError(error);
     await dependencies.appendEvent({
@@ -172,6 +178,9 @@ export async function runCimg(argv: string[], overrides: Partial<CimgDependencie
       },
     });
     throw error;
+  } finally {
+    process.off("SIGINT", cancelRequest);
+    progress.stop();
   }
 
   const completedAt = dependencies.now();
@@ -306,7 +315,14 @@ export function cimgDefaultOutputDir(): string {
   return join(homeDir(), "Pictures", "cimg");
 }
 
-async function requestImage(fetchImpl: typeof fetch, endpoint: string, apiKey: string, args: CimgArgs): Promise<RequestResult> {
+async function requestImage(
+  fetchImpl: typeof fetch,
+  endpoint: string,
+  apiKey: string,
+  args: CimgArgs,
+  cancelSignal: AbortSignal,
+): Promise<RequestResult> {
+  const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
   let response: Response;
   try {
     response = await fetchImpl(endpoint, {
@@ -316,9 +332,12 @@ async function requestImage(fetchImpl: typeof fetch, endpoint: string, apiKey: s
         "Content-Type": "application/json",
       },
       body: JSON.stringify(buildRequestBody(args)),
-      signal: AbortSignal.timeout(requestTimeoutMs),
+      signal: AbortSignal.any([cancelSignal, timeoutSignal]),
     });
   } catch (error) {
+    if (cancelSignal.aborted) {
+      throw new CimgCanceledError();
+    }
     if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
       throw new Error("image request timed out after 300 seconds");
     }
@@ -424,6 +443,9 @@ function printHelp(): void {
     "  -o, --out FILE   output PNG path (default: ~/Pictures/cimg/image-<timestamp>.png)",
     "  -p, --prompt     text prompt",
     "",
+    "Generation:",
+    "  elapsed time refreshes every 10 seconds in a terminal; Ctrl-C cancels the request",
+    "",
     "Sizes:",
     ...Object.entries(CIMG_SIZES).map(([ratio, sizes]) => `  ${ratio.padEnd(5)} ${sizes.join(" | ")}`),
   ].join("\n"));
@@ -478,6 +500,9 @@ function buildBaseEvent(
 }
 
 function normalizeError(error: unknown): { code: string; message: string } {
+  if (error instanceof CimgCanceledError) {
+    return { code: "canceled", message: "image request canceled by user" };
+  }
   if (error instanceof CimgHttpError) {
     return { code: error.code, message: `image request failed with HTTP ${error.status}` };
   }
@@ -520,6 +545,39 @@ function printCimgValue(label: string, value: string): void {
   printKeyValue(label, value, 10);
 }
 
+function startGenerationProgress(size: string, quality: CimgQuality): { stop: () => void } {
+  const startedAt = Date.now();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+  const render = (): void => {
+    const status = `generating: ${formatDurationMs(Date.now() - startedAt)} ${size} ${quality} Ctrl-C to cancel`;
+    process.stdout.write(`\r\u001b[2K${status}`);
+  };
+
+  if (process.stdout.isTTY) {
+    render();
+    timer = setInterval(render, CIMG_PROGRESS_INTERVAL_MS);
+    timer.unref();
+  } else {
+    console.log(`generating: ${size} ${quality}`);
+  }
+
+  return {
+    stop() {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      if (timer) {
+        clearInterval(timer);
+      }
+      if (process.stdout.isTTY) {
+        process.stdout.write("\r\u001b[2K");
+      }
+    },
+  };
+}
+
 async function assertOutputAvailable(path: string): Promise<void> {
   try {
     await access(path);
@@ -540,5 +598,12 @@ class CimgHttpError extends Error {
   ) {
     super(message);
     this.name = "CimgHttpError";
+  }
+}
+
+export class CimgCanceledError extends Error {
+  constructor() {
+    super("image request canceled by user");
+    this.name = "CimgCanceledError";
   }
 }

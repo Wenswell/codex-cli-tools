@@ -6,7 +6,9 @@ import test from "node:test";
 import {
   CIMG_DEFAULT_SIZES,
   CIMG_MODEL,
+  CIMG_PROGRESS_INTERVAL_MS,
   CIMG_SIZES,
+  CimgCanceledError,
   buildEndpoint,
   buildRequestBody,
   cimgDefaultOutputDir,
@@ -45,6 +47,7 @@ test("cimg defaults images to the user Pictures directory and keeps explicit out
 test("cimg help documents the default image directory", async () => {
   const output = await captureStdout(() => runCimg(["--help"]));
   assert.match(output, /default: ~\/Pictures\/cimg\/image-<timestamp>\.png/);
+  assert.match(output, /elapsed time refreshes every 10 seconds in a terminal; Ctrl-C cancels the request/);
 });
 
 test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {
@@ -60,6 +63,7 @@ test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {
 });
 
 test("cimg builds one fixed-model PNG generation request", () => {
+  assert.equal(CIMG_PROGRESS_INTERVAL_MS, 10_000);
   assert.equal(buildEndpoint("https://images.example.test///"), "https://images.example.test/v1/images/generations");
   assert.throws(() => buildEndpoint("https://token@images.example.test"), /must not contain credentials/);
   assert.throws(() => buildEndpoint("https://images.example.test?key=secret"), /must not contain credentials/);
@@ -106,30 +110,35 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
     new Date("2026-08-19T09:00:03.500Z"),
   ];
   try {
-    await runCimg(["-p", "private scene", "--quality", "low", "-o", output], {
-      profiles,
-      confirm: async () => true,
-      now: () => times.shift() ?? new Date("2026-08-19T09:00:03.500Z"),
-      requestId: () => "request-1",
-      appendEvent: async (event) => events.push(event),
-      fetch: async (url, init) => {
-        assert.equal(events.length, 1);
-        assert.equal(events[0].event, "started");
-        assert.equal(url, "https://images.example.test/v1/images/generations");
-        assert.equal(new Headers(init.headers).get("authorization"), "Bearer secret-key");
-        assert.deepEqual(JSON.parse(init.body), {
-          prompt: "private scene",
-          model: "gpt-image-2",
-          size: "1024x1024",
-          quality: "low",
-          n: 1,
-          output_format: "png",
-        });
-        return new Response(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }), { status: 200 });
-      },
-    });
+    const terminalOutput = await captureStdout(
+      () => runCimg(["-p", "private scene", "--quality", "low", "-o", output], {
+        profiles,
+        confirm: async () => true,
+        now: () => times.shift() ?? new Date("2026-08-19T09:00:03.500Z"),
+        requestId: () => "request-1",
+        appendEvent: async (event) => events.push(event),
+        fetch: async (url, init) => {
+          assert.equal(events.length, 1);
+          assert.equal(events[0].event, "started");
+          assert.equal(url, "https://images.example.test/v1/images/generations");
+          assert.equal(new Headers(init.headers).get("authorization"), "Bearer secret-key");
+          assert.deepEqual(JSON.parse(init.body), {
+            prompt: "private scene",
+            model: "gpt-image-2",
+            size: "1024x1024",
+            quality: "low",
+            n: 1,
+            output_format: "png",
+          });
+          return new Response(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }), { status: 200 });
+        },
+      }),
+      { isTTY: true },
+    );
 
     assert.deepEqual(await readFile(output), pngBytes);
+    assert.match(terminalOutput, /\r\u001b\[2Kgenerating: \d+ms 1024x1024 low Ctrl-C to cancel/);
+    assert.match(terminalOutput, /\r\u001b\[2Kresult:/);
     assert.deepEqual(events.map((event) => event.event), ["started", "succeeded"]);
     assert.equal(events[0].request_id, "request-1");
     assert.equal(events[1].request_id, "request-1");
@@ -164,6 +173,44 @@ test("cimg logs a failed terminal event for an API error", async () => {
     assert.equal(events[1].request_id, "request-2");
     assert.equal(events[1].result.http_status, 400);
     assert.deepEqual(events[1].result.error, { code: "invalid_request", message: "image request failed with HTTP 400" });
+    await assert.rejects(() => readFile(output), /ENOENT/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("cimg Ctrl-C aborts the request and logs a canceled terminal event", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cimg-cancel-"));
+  const output = join(directory, "canceled.png");
+  const events = [];
+  const existingSigintListeners = new Set(process.listeners("SIGINT"));
+  try {
+    await assert.rejects(
+      () => captureStdout(
+        () => runCimg(["-p", "scene", "-o", output], {
+          profiles,
+          confirm: async () => true,
+          requestId: () => "request-canceled",
+          appendEvent: async (event) => events.push(event),
+          fetch: async (_url, init) => await new Promise((resolve, reject) => {
+            const signal = init.signal;
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            const cancelRequest = process.listeners("SIGINT").find((listener) => !existingSigintListeners.has(listener));
+            assert.ok(cancelRequest);
+            setImmediate(() => cancelRequest());
+          }),
+        }),
+        { isTTY: true },
+      ),
+      CimgCanceledError,
+    );
+    assert.deepEqual(events.map((event) => event.event), ["started", "failed"]);
+    assert.equal(events[1].request_id, "request-canceled");
+    assert.equal(events[1].result.http_status, null);
+    assert.deepEqual(events[1].result.error, {
+      code: "canceled",
+      message: "image request canceled by user",
+    });
     await assert.rejects(() => readFile(output), /ENOENT/);
   } finally {
     await rm(directory, { recursive: true, force: true });
