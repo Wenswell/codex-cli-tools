@@ -3,6 +3,7 @@
 Project design specs:
 
 - [CLI runtime records](./CLI_RUNTIME_RECORDS.md)
+- [cimg CLI plan](./CIMG_PLAN.md)
 - [engineering preferences](./ENGINEERING_PREFERENCES.md)
 - [testing guidelines](./TESTING_GUIDELINES.md)
 - [senv automatic source discovery](./SENV_AUTO_DISCOVERY_PLAN.md)

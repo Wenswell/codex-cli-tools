@@ -63,6 +63,7 @@ An installed `ccs proxy` runs in the background. Update the package first, then 
 ## Commands
 
 ```bash
+cimg
 ccs
 ccx
 ccxs
@@ -77,6 +78,7 @@ codex-rename
 ## Design Specs
 
 - [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
+- [cimg CLI plan](docs/CIMG_PLAN.md)
 - [engineering preferences](docs/ENGINEERING_PREFERENCES.md)
 - [testing guidelines](docs/TESTING_GUIDELINES.md)
 - [test suite audit](docs/TEST_SUITE_AUDIT.md)
@@ -806,6 +808,32 @@ Behavior:
 - `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
+## cimg
+
+`cimg` generates one PNG from one text prompt through the active `ccs` profile. It always calls `{baseURL}/v1/images/generations` with `model=gpt-image-2`, `n=1`, and `output_format=png`.
+
+```bash
+cimg
+cimg -p "A red ceramic cup on a white background"
+cimg -p "A wide mountain landscape" --ratio 16:9 --size 2048x1152 --quality high
+cimg -p "A vertical poster without text" --ratio 9:16 -o poster.png
+cimg version
+cimg -v
+cimg --help
+```
+
+The default is `1:1`, `1024x1024`, and `auto` quality. Ratios are fixed to `1:1`, `3:2`, `2:3`, `4:3`, `3:4`, `16:9`, `9:16`, `21:9`, and `9:21`; each ratio accepts only the sizes printed by `cimg --help`. Quality accepts `auto`, `low`, `medium`, or `high`.
+
+With no arguments, `cimg` prints the active profile, base URL, API key state, fixed model, defaults, output directory, and request log path. Generation prints the same request plan and writes nothing until you type exact `yes`. The default output name is `image-<timestamp>.png` in the current directory; existing files are not overwritten. Completion output and logs use the PNG's actual IHDR dimensions and warn when the provider returns a different size from the request; `cimg` does not resize the image.
+
+Every API request writes two schema v1 lifecycle events with the same `request_id`:
+
+```text
+~/.cache/codex-tools/cimg/requests.jsonl
+```
+
+`started` is appended before the HTTP request. `succeeded` or `failed` is appended after completion with duration, HTTP status, output bytes, actual PNG width and height, or normalized error facts. The bounded `0600` log stores the prompt SHA-256 and character count, not the API key, prompt text, provider error message, response body, or image base64.
+
 ## clvm
 
 `clvm` monitors Clash Verge Rev / mihomo `/connections` data for configured domains.
@@ -1082,6 +1110,8 @@ Run commands locally from `dist` after building:
 ```bash
 node dist/bin/ccs.js --help
 node dist/bin/ccs.js -v
+node dist/bin/cimg.js -v
+node dist/bin/cimg.js --help
 node dist/bin/ccx.js -v
 node dist/bin/ccxs.js -v
 node dist/bin/clvm.js -v
@@ -1111,6 +1141,8 @@ pnpm build
 git diff --check
 node dist/bin/ccs.js --help
 node dist/bin/ccs.js -v
+node dist/bin/cimg.js -v
+node dist/bin/cimg.js --help
 node dist/bin/ccx.js -v
 node dist/bin/ccxs.js -v
 node dist/bin/clvm.js -v
