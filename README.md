@@ -925,13 +925,19 @@ clvm monitor
 
 `senv version` and `senv -v` print the shared package version.
 
-Default:
+Default discovery:
 
 ```bash
 senv
 ```
 
-Preview mode is equivalent to:
+With no path options, `senv` finds the single file in the current directory whose
+name ends with `.env.example` and removes the final `.example` suffix for the
+target. For example, `.env.example` targets `.env`, while
+`runtime.env.example` targets `runtime.env`. If the directory has no matching
+file or more than one, specify both paths explicitly.
+
+Explicit paths:
 
 ```bash
 senv --source .env.example --target .env
