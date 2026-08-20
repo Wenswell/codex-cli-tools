@@ -531,6 +531,25 @@ export async function ensureProxyRunning(options) {
         await releaseProxyStartLock(options.stateRoot, lockFd);
     }
 }
+async function readProxyRuntime(options) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state) {
+        return null;
+    }
+    const [health, pid] = await Promise.all([
+        readProxyHealth(state),
+        readProxyPid(options.stateRoot),
+    ]);
+    return {
+        state,
+        pid: health.pid ?? pid.pid,
+        healthy: health.healthy,
+        started: false,
+        logPath: proxyRuntimeLogPath(options.stateRoot),
+        version: health.version,
+        protocol: health.protocol,
+    };
+}
 function currentProviderName(content) {
     const provider = readTopLevelTomlString(content, "model_provider");
     if (!provider) {
@@ -1943,18 +1962,10 @@ async function readBody(request) {
     }
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
-function extractSessionShortId(body) {
-    if (body.length === 0) {
-        return null;
-    }
-    try {
-        const parsed = JSON.parse(body.toString("utf8"));
-        const sessionId = findJsonStringField(parsed, "session_id");
-        return sessionId ? shortSessionId(sessionId) : null;
-    }
-    catch {
-        return null;
-    }
+function extractSessionShortId(requestJson, turnMetadata) {
+    const sessionId = jsonStringAt(turnMetadata, ["session_id"])
+        ?? findJsonStringField(requestJson, "session_id");
+    return sessionId ? shortSessionId(sessionId) : null;
 }
 function proxyEndpointClass(pathname) {
     if (pathname === "/v1/chat/completions" || pathname === "/chat/completions") {
@@ -2004,16 +2015,14 @@ function extractRequestReasoningEffortFromJson(parsed) {
     }
     return jsonStringAt(parsed, ["reasoning", "effort"]) ?? jsonStringAt(parsed, ["reasoning_effort"]);
 }
-function extractCodexTurnId(headers) {
+function parseCodexTurnMetadata(headers) {
     const metadata = headerSignal(headers, "x-codex-turn-metadata");
     if (!metadata) {
         return null;
     }
     try {
         const parsed = JSON.parse(metadata);
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? nullableStringField(parsed.turn_id)
-            : null;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
     }
     catch {
         return null;
@@ -4254,7 +4263,9 @@ async function resolveProxyHistoryRecords(stateRoot, metrics, count, explicitHis
     return metrics.recent_requests.slice(0, count);
 }
 async function renderProxyStatusLines(options) {
-    const runtime = await ensureProxyRunning(options);
+    const runtime = options.watch
+        ? await readProxyRuntime(options)
+        : await ensureProxyRunning(options);
     const state = runtime?.state ?? await readProxyState(options.stateRoot);
     const profiles = await readProfiles();
     const priceCache = options.view === "cost" ? await readModelPriceCache({ overrides: profiles.pricing?.overrides }) : undefined;
@@ -4462,7 +4473,12 @@ export async function serveProxy(options) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
     await resetProxyActiveRequestsOnStart(state, options.stateRoot);
+    let closing = false;
     const server = createServer((req, res) => {
+        res.once("finish", () => {
+            if (closing)
+                server.closeIdleConnections();
+        });
         void (async () => {
             let method = req.method || "GET";
             let requestPath = "/";
@@ -4609,12 +4625,13 @@ export async function serveProxy(options) {
                     const upstreamProfile = resolveProxyUpstream(profiles, headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER));
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
+                    const turnMetadata = parseCodexTurnMetadata(req.headers);
                     requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
-                    activeRecord.session = extractSessionShortId(body);
-                    activeRecord.client_turn_id = extractCodexTurnId(req.headers);
+                    activeRecord.session = extractSessionShortId(requestJson, turnMetadata);
+                    activeRecord.client_turn_id = nullableStringField(turnMetadata?.turn_id);
                     activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
                     activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
                     activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
@@ -4960,17 +4977,22 @@ export async function serveProxy(options) {
         server.once("error", reject);
         server.listen(state.listen_port, state.listen_host, () => resolve());
     });
-    await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
-    process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
     let exitAfterClose = false;
-    await new Promise((resolve) => {
+    const closed = new Promise((resolve) => {
         const close = () => {
+            if (closing)
+                return;
+            closing = true;
             exitAfterClose = true;
             server.close(() => resolve());
+            server.closeIdleConnections();
         };
         process.once("SIGINT", close);
         process.once("SIGTERM", close);
     });
+    await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
+    process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
+    await closed;
     await rm(pidPath(options.stateRoot), { force: true });
     if (exitAfterClose) {
         process.exit(0);
@@ -5125,7 +5147,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "watch", "mode", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "mode", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);

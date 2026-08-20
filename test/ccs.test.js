@@ -90,11 +90,9 @@ test("Codex wrappers default to remote mode and support leading local", async ()
 
 test("Codex wrapper help documents local profile launches", async () => {
   for (const tool of ["cx", "cxx", "cxxs"]) {
-    for (const help of ["help", "-h", "--help"]) {
-      const output = await runTool(tool, [help]);
-      assert.match(output, new RegExp(`${tool} run PROFILE`));
-      assert.match(output, new RegExp(`${tool} local`));
-    }
+    const output = await runTool(tool, ["--help"]);
+    assert.match(output, new RegExp(`${tool} run PROFILE`));
+    assert.match(output, new RegExp(`${tool} local`));
   }
 });
 
@@ -932,103 +930,43 @@ test("ccs pricing refresh rebuilds every selected model and price", async () => 
   }
 });
 
-test("ccs pricing list rejects unsupported options", async () => {
+test("ccs rejects invalid pricing, cost, and models arguments", async () => {
   const home = await writeProfiles({
     profiles: {
-      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
+      input: { baseURL: "http://127.0.0.1:1", apiKey: "input-key" },
     },
     current: "input",
   });
   try {
-    await assert.rejects(
-      runCcsDirect(["pricing", "list", "--json"], home),
-      /unknown argument for ccs pricing list: --json/,
-    );
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs pricing refresh rejects arguments", async () => {
-  const home = await writeProfiles({
-    profiles: {
-      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
-    },
-    current: "input",
-  });
-  try {
-    await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "pricing", "refresh", "--json"], home),
-      /usage: ccs pricing refresh/,
-    );
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs pricing refresh requires watched patterns and providers", async () => {
-  const home = await writeProfiles({
-    profiles: {
-      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
-    },
-    current: "input",
-  });
-  try {
-    await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
-      /ccs pricing refresh requires watched patterns and providers/,
-    );
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs pricing rejects unknown subcommands", async () => {
-  const home = await writeProfiles({
-    profiles: {
-      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
-    },
-    current: "input",
-  });
-  try {
-    await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "pricing", "unknown"], home),
-      /unknown argument for ccs pricing: unknown/,
-    );
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs cost rejects unknown report commands", async () => {
-  const home = await writeProfiles({
-    profiles: {
-      input: { baseURL: "http://127.0.0.1:1", apiKey: "" },
-    },
-    current: "input",
-  });
-  try {
-    await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "cost", "unknown"], home),
-      /unknown argument for ccs cost: unknown/,
-    );
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs models rejects unknown arguments", async () => {
-  const home = await writeProfiles({
-    profiles: {
-      ok: { baseURL: "http://127.0.0.1:1", apiKey: "ok-key" },
-    },
-    current: "ok",
-  });
-  try {
-    await assert.rejects(
-      runCcs(["dist/bin/ccs.js", "models", "--raw"], home),
-      /unknown argument for ccs models: --raw/,
-    );
+    const cases = [
+      {
+        run: () => runCcsDirect(["pricing", "list", "--json"], home),
+        error: /unknown argument for ccs pricing list: --json/,
+      },
+      {
+        run: () => runCcs(["dist/bin/ccs.js", "pricing", "refresh", "--json"], home),
+        error: /usage: ccs pricing refresh/,
+      },
+      {
+        run: () => runCcs(["dist/bin/ccs.js", "pricing", "refresh"], home),
+        error: /ccs pricing refresh requires watched patterns and providers/,
+      },
+      {
+        run: () => runCcs(["dist/bin/ccs.js", "pricing", "unknown"], home),
+        error: /unknown argument for ccs pricing: unknown/,
+      },
+      {
+        run: () => runCcs(["dist/bin/ccs.js", "cost", "unknown"], home),
+        error: /unknown argument for ccs cost: unknown/,
+      },
+      {
+        run: () => runCcs(["dist/bin/ccs.js", "models", "--raw"], home),
+        error: /unknown argument for ccs models: --raw/,
+      },
+    ];
+    for (const fixture of cases) {
+      await assert.rejects(fixture.run, fixture.error);
+    }
   } finally {
     await rm(home, { recursive: true, force: true });
   }

@@ -912,6 +912,26 @@ export async function ensureProxyRunning(options: ProxyOptions): Promise<ProxyRu
   }
 }
 
+async function readProxyRuntime(options: ProxyOptions): Promise<ProxyRuntimeState | null> {
+  const state = await readProxyState(options.stateRoot);
+  if (!state) {
+    return null;
+  }
+  const [health, pid] = await Promise.all([
+    readProxyHealth(state),
+    readProxyPid(options.stateRoot),
+  ]);
+  return {
+    state,
+    pid: health.pid ?? pid.pid,
+    healthy: health.healthy,
+    started: false,
+    logPath: proxyRuntimeLogPath(options.stateRoot),
+    version: health.version,
+    protocol: health.protocol,
+  };
+}
+
 function currentProviderName(content: string): string {
   const provider = readTopLevelTomlString(content, "model_provider");
   if (!provider) {
@@ -2523,17 +2543,10 @@ async function readBody(request: IncomingMessage): Promise<Buffer> {
   return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
 
-function extractSessionShortId(body: Buffer): string | null {
-  if (body.length === 0) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(body.toString("utf8")) as unknown;
-    const sessionId = findJsonStringField(parsed, "session_id");
-    return sessionId ? shortSessionId(sessionId) : null;
-  } catch {
-    return null;
-  }
+function extractSessionShortId(requestJson: unknown, turnMetadata: Record<string, unknown> | null): string | null {
+  const sessionId = jsonStringAt(turnMetadata, ["session_id"])
+    ?? findJsonStringField(requestJson, "session_id");
+  return sessionId ? shortSessionId(sessionId) : null;
 }
 
 function proxyEndpointClass(pathname: string): ProxyEndpointClass | null {
@@ -2589,16 +2602,14 @@ function extractRequestReasoningEffortFromJson(parsed: unknown): string | null {
   return jsonStringAt(parsed, ["reasoning", "effort"]) ?? jsonStringAt(parsed, ["reasoning_effort"]);
 }
 
-function extractCodexTurnId(headers: IncomingMessage["headers"]): string | null {
+function parseCodexTurnMetadata(headers: IncomingMessage["headers"]): Record<string, unknown> | null {
   const metadata = headerSignal(headers, "x-codex-turn-metadata");
   if (!metadata) {
     return null;
   }
   try {
     const parsed = JSON.parse(metadata) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? nullableStringField((parsed as Record<string, unknown>).turn_id)
-      : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
   } catch {
     return null;
   }
@@ -5137,7 +5148,9 @@ async function resolveProxyHistoryRecords(stateRoot: string, metrics: ProxyMetri
 }
 
 async function renderProxyStatusLines(options: ProxyOptions): Promise<string[]> {
-  const runtime = await ensureProxyRunning(options);
+  const runtime = options.watch
+    ? await readProxyRuntime(options)
+    : await ensureProxyRunning(options);
   const state = runtime?.state ?? await readProxyState(options.stateRoot);
   const profiles = await readProfiles();
   const priceCache = options.view === "cost" ? await readModelPriceCache({ overrides: profiles.pricing?.overrides }) : undefined;
@@ -5366,7 +5379,11 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
   }
   await resetProxyActiveRequestsOnStart(state, options.stateRoot);
 
+  let closing = false;
   const server = createServer((req, res) => {
+    res.once("finish", () => {
+      if (closing) server.closeIdleConnections();
+    });
     void (async () => {
       let method = req.method || "GET";
       let requestPath = "/";
@@ -5514,12 +5531,13 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           const upstreamProfile = resolveProxyUpstream(profiles, headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER));
           const body = await readBody(req);
           const requestJson = parseJsonBody(body);
+          const turnMetadata = parseCodexTurnMetadata(req.headers);
           requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
           requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
           activeRecord.request_bytes = body.length;
           activeRecord.request_body_sha256 = hashRequestBody(body);
-          activeRecord.session = extractSessionShortId(body);
-          activeRecord.client_turn_id = extractCodexTurnId(req.headers);
+          activeRecord.session = extractSessionShortId(requestJson, turnMetadata);
+          activeRecord.client_turn_id = nullableStringField(turnMetadata?.turn_id);
           activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
           activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
           activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
@@ -5928,18 +5946,23 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
     server.listen(state.listen_port, state.listen_host, () => resolve());
   });
 
-  await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
-  process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
-
   let exitAfterClose = false;
-  await new Promise<void>((resolve) => {
+  const closed = new Promise<void>((resolve) => {
     const close = (): void => {
+      if (closing) return;
+      closing = true;
       exitAfterClose = true;
       server.close(() => resolve());
+      server.closeIdleConnections();
     };
     process.once("SIGINT", close);
     process.once("SIGTERM", close);
   });
+
+  await writeTextFile(pidPath(options.stateRoot), `${process.pid}\n`, 0o600);
+  process.stdout.write(`proxy listening: ${state.proxy_base_url}\n`);
+
+  await closed;
   await rm(pidPath(options.stateRoot), { force: true });
   if (exitAfterClose) {
     process.exit(0);
@@ -6106,7 +6129,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
 
   const command = args[0] ?? "";
   const rest = args.slice(1);
-  const installedCommands = new Set(["", "--history", "--view", "watch", "mode", "config", "restore", "restart", "serve"]);
+  const installedCommands = new Set(["", "--history", "--view", "mode", "config", "restore", "restart", "serve"]);
   const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
   if (reset) {
     printKeyValue(

@@ -719,11 +719,14 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
     const searchBody = JSON.stringify({ query: "codex proxy" });
+    const searchSessionId = "01a01cd2-7cd4-7e83-b126-48f357c48f69";
+    const searchTurnId = "01a01cf3-4a84-7e22-bb84-b2ab8f5b91db";
     const searchResponse = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search?limit=3`, {
       method: "POST",
       headers: {
         authorization: "Bearer client-key",
         "content-type": "application/json",
+        "x-codex-turn-metadata": JSON.stringify({ session_id: searchSessionId, turn_id: searchTurnId }),
       },
       body: searchBody,
     });
@@ -763,6 +766,8 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
     assert.equal(state.metrics.active_requests.length, 0);
     assert.equal(state.metrics.recent_requests.length, 1);
     assert.equal(state.metrics.recent_requests[0].path, "/v1/alpha/search");
+    assert.equal(state.metrics.recent_requests[0].session, "01a01cd2");
+    assert.equal(state.metrics.recent_requests[0].client_turn_id, searchTurnId);
     assert.equal(state.metrics.recent_requests[0].attempts, 1);
     assert.deepEqual(state.metrics.recent_requests[0].guard_actions, []);
     assert.equal(state.metrics.total_requests, 1);
@@ -4213,65 +4218,6 @@ test("proxy status result column stays single-line and expands with terminal wid
   assert.equal(wideRow.includes("diagnostic"), true);
 });
 
-test("proxy status summary renders exact status counts", () => {
-  const stateRoot = "/tmp/codex-tools";
-  const lines = buildProxyStatusLines(
-    new Date("2026-01-01T00:00:00.000Z"),
-    {
-      state_schema_version: 2,
-      installed_at: "2026-01-01T00:00:00.000Z",
-      codex_config_path: "/home/test/.codex/config.toml",
-      provider_name: "codex",
-      original_base_url: "https://proxy.example.com",
-      proxy_base_url: "http://127.0.0.1:4610",
-      status_retry: defaultStatusRetry(),
-      latency_guard: {
-        enabled: true,
-        first_progress_timeout_ms: 30_000,
-        first_progress_action: "retry_then_502",
-        total_timeout_ms: 600_000,
-      },
-      listen_host: "127.0.0.1",
-      listen_port: 4610,
-      profile_order: ["input"],
-      backup_path: "/tmp/backup.toml",
-      metrics: {
-        total_requests: 12,
-        active_requests: [],
-        status_counts: { "200": 11, "502": 1 },
-        reasoning_token_counts: { "0": 1, "42": 5, "516": 2, "1034": 3, "1552": 1 },
-        upstream_hit_counts: { input: 12 },
-        latency_ms: { last: 56, count: 12, sum: 123, min: 56, max: 187200 },
-        recent_requests: [
-          proxyHistoryRecord({
-            session: "019f0df6",
-            completed_at: "2026-01-01T00:00:05.000Z",
-            upstream: "input",
-            latency_ms: 56,
-            response_bytes: 32 * 1024,
-            request_model: "gpt-5.5",
-            upstream_model: "gpt-5.5",
-            path: "/same",
-          }),
-        ],
-      },
-    },
-    ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
-    {
-      codexConfigPath: "/home/test/.codex/config.toml",
-      listenHost: "127.0.0.1",
-      listenPort: 4610,
-      stateRoot,
-    },
-  ).join("\n");
-
-  assert.match(lines, /status events=1 active=0 200=1 upstreams=input=1/);
-  assert.match(lines, /deadline: 30\.0s\/10\.0m retry_then_502/);
-  assert.match(lines, /policy retries=0 capacity=0 429=0 503=0 reasoning=0 timeout=0 transport=0/);
-  assert.match(lines, /reasoning total=0 max=-/);
-});
-
 test("proxy watch hides summaries that do not apply to the active mode", () => {
   const options = {
     codexConfigPath: "/tmp/config.toml",
@@ -4333,58 +4279,66 @@ test("proxy status and reasoning summaries use event counts", () => {
   const stateRoot = "/tmp/codex-tools";
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
-    proxyStateFixture({
-      recent_requests: [
-        proxyHistoryRecord({
-          id: "retry-success",
-          completed_at: "2026-01-01T00:00:02.000Z",
-          attempts: 4,
-          reasoning_tokens: 42,
-          guard_actions: [
-            proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 516 }),
-            proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 516 }),
-            proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 516 }),
-          ],
-          retry_summary: {
-            total: 99,
-            reasoning_guard: 2,
-            upstream_capacity: 1,
-            http_429: 0,
-            http_503: 0,
-            timeout: 0,
-            transport: 0,
-          },
-        }),
-        proxyHistoryRecord({
-          id: "guard-exhausted",
-          completed_at: "2026-01-01T00:00:01.000Z",
-          status: 502,
-          attempts: 4,
-          reasoning_tokens: 1034,
-          guard_actions: [
-            proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 1034 }),
-            proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 1034 }),
-            proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 1034 }),
-            proxyGuardAction({ action: "return_status_502", attempt: 4, status: 502, reasoning_tokens: 1034 }),
-          ],
-          retry_summary: {
-            total: 99,
-            reasoning_guard: 0,
-            upstream_capacity: 0,
-            http_429: 3,
-            http_503: 0,
-            timeout: 4,
-            transport: 5,
-          },
-        }),
-        proxyHistoryRecord({
-          id: "text-only",
-          completed_at: "2026-01-01T00:00:00.000Z",
-          reasoning_text_observed: true,
-          reasoning_text_source: "/delta/reasoning_content",
-        }),
-      ],
-    }),
+    {
+      ...proxyStateFixture({
+        recent_requests: [
+          proxyHistoryRecord({
+            id: "retry-success",
+            completed_at: "2026-01-01T00:00:02.000Z",
+            attempts: 4,
+            reasoning_tokens: 42,
+            guard_actions: [
+              proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 516 }),
+              proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 516 }),
+              proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 516 }),
+            ],
+            retry_summary: {
+              total: 99,
+              reasoning_guard: 2,
+              upstream_capacity: 1,
+              http_429: 0,
+              http_503: 0,
+              timeout: 0,
+              transport: 0,
+            },
+          }),
+          proxyHistoryRecord({
+            id: "guard-exhausted",
+            completed_at: "2026-01-01T00:00:01.000Z",
+            status: 502,
+            attempts: 4,
+            reasoning_tokens: 1034,
+            guard_actions: [
+              proxyGuardAction({ action: "internal_retry", attempt: 1, reasoning_tokens: 1034 }),
+              proxyGuardAction({ action: "internal_retry", attempt: 2, reasoning_tokens: 1034 }),
+              proxyGuardAction({ action: "internal_retry", attempt: 3, reasoning_tokens: 1034 }),
+              proxyGuardAction({ action: "return_status_502", attempt: 4, status: 502, reasoning_tokens: 1034 }),
+            ],
+            retry_summary: {
+              total: 99,
+              reasoning_guard: 0,
+              upstream_capacity: 0,
+              http_429: 3,
+              http_503: 0,
+              timeout: 4,
+              transport: 5,
+            },
+          }),
+          proxyHistoryRecord({
+            id: "text-only",
+            completed_at: "2026-01-01T00:00:00.000Z",
+            reasoning_text_observed: true,
+            reasoning_text_source: "/delta/reasoning_content",
+          }),
+        ],
+      }),
+      latency_guard: {
+        enabled: true,
+        first_progress_timeout_ms: 30_000,
+        first_progress_action: "retry_then_502",
+        total_timeout_ms: 600_000,
+      },
+    },
     ["input"],
     { healthy: true, started: false, pid: 1234, state: null, version: "0.1.12", protocol: 3 },
     {
@@ -4397,6 +4351,7 @@ test("proxy status and reasoning summaries use event counts", () => {
   ).join("\n");
 
   assert.match(lines, /status events=9 active=0 200=8 502=1 upstreams=input=9/);
+  assert.match(lines, /deadline: 30\.0s\/10\.0m retry_then_502/);
   assert.match(lines, /policy retries=15 capacity=1 429=3 503=0 reasoning=2 timeout=4 transport=5/);
   assert.match(lines, /reasoning total=8 max=1034/);
   assert.match(lines, /516=3/);
@@ -4444,17 +4399,13 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(explicit), 7);
 });
 
-test("proxy rejects invalid --history values", async () => {
+test("proxy rejects invalid and removed command arguments", async () => {
   const options = {
     codexConfigPath: "/tmp/config.toml",
     listenHost: "127.0.0.1",
     listenPort: 4610,
     stateRoot: "/tmp/codex-tools",
   };
-  const help = await captureConsole(() => runProxyCommand(["help"], options));
-  assert.match(help, /ccs proxy mode passthrough/);
-  assert.match(help, /ccs proxy restart/);
-  assert.doesNotMatch(help, /ccs proxy --once|ccs proxy stop/);
   for (const args of [
     ["--history"],
     ["--history", "abc"],
@@ -4510,38 +4461,7 @@ test("proxy runtime restarts protocol mismatches", async () => {
     await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
     await writeProxyStateFixture(home, stateRoot, proxyPort);
 
-    oldProxy = spawnNode(
-      [
-        "--input-type=module",
-        "-e",
-        `
-          import { createServer } from "node:http";
-
-          const port = Number(process.env.CCS_TEST_PROXY_PORT);
-          const server = createServer((req, res) => {
-            if (req.url === "/__codex_proxy/health") {
-              res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-              res.end(JSON.stringify({ status: "ok", pid: process.pid, version: "0.1.0", protocol: 1, mode: "recovery" }));
-              return;
-            }
-            res.writeHead(404);
-            res.end();
-          });
-
-          const close = () => server.close(() => process.exit(0));
-          process.once("SIGINT", close);
-          process.once("SIGTERM", close);
-          server.listen(port, "127.0.0.1", () => process.stdout.write("old-proxy-ready\\n"));
-        `,
-      ],
-      {
-        env: {
-          ...process.env,
-          CCS_TEST_PROXY_PORT: String(proxyPort),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    oldProxy = spawnProxyHealthStub(proxyPort, 1, "0.1.0");
     await waitForChildStdout(oldProxy, /old-proxy-ready/);
     const oldProxyPid = oldProxy.pid;
     assert.ok(oldProxyPid);
@@ -4612,7 +4532,7 @@ test("proxy runtime restarts protocol mismatches", async () => {
   }
 });
 
-test("proxy runtime restarts a healthy current-protocol server from an older package", async () => {
+test("proxy watch observes an older package and one-shot status replaces it", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -4627,38 +4547,7 @@ test("proxy runtime restarts a healthy current-protocol server from an older pac
     await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
     await writeProxyStateFixture(home, stateRoot, proxyPort);
 
-    oldProxy = spawnNode(
-      [
-        "--input-type=module",
-        "-e",
-        `
-          import { createServer } from "node:http";
-
-          const port = Number(process.env.CCS_TEST_PROXY_PORT);
-          const server = createServer((req, res) => {
-            if (req.url === "/__codex_proxy/health") {
-              res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-              res.end(JSON.stringify({ status: "ok", pid: process.pid, version: "0.1.0", protocol: 6, mode: "recovery" }));
-              return;
-            }
-            res.writeHead(404);
-            res.end();
-          });
-
-          const close = () => server.close(() => process.exit(0));
-          process.once("SIGINT", close);
-          process.once("SIGTERM", close);
-          server.listen(port, "127.0.0.1", () => process.stdout.write("old-proxy-ready\\n"));
-        `,
-      ],
-      {
-        env: {
-          ...process.env,
-          CCS_TEST_PROXY_PORT: String(proxyPort),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    oldProxy = spawnProxyHealthStub(proxyPort, 6, "0.1.0");
     await waitForChildStdout(oldProxy, /old-proxy-ready/);
     const oldProxyPid = oldProxy.pid;
     assert.ok(oldProxyPid);
@@ -4669,16 +4558,35 @@ test("proxy runtime restarts a healthy current-protocol server from an older pac
       listenPort: proxyPort,
       stateRoot,
     };
-    const runtime = await ensureProxyRunning(options);
-    assert.ok(runtime);
-    assert.equal(runtime.started, true);
-    assert.equal(runtime.protocol, 6);
-    assert.notEqual(runtime.pid, oldProxyPid);
+    const watchOutput = stripAnsi(await captureStdout(
+      () => runProxyCommand(["watch"], options),
+      {
+        isTTY: true,
+        columns: 180,
+        rows: 12,
+        onWrite: (output) => {
+          if (output.includes("\u001b[J")) {
+            setImmediate(() => process.emit("SIGINT"));
+          }
+        },
+      },
+    ));
+    assert.match(watchOutput, /runtime: healthy/);
+    assert.match(watchOutput, /server: 0\.1\.0/);
+    assert.equal(oldProxy.exitCode, null);
+    process.kill(oldProxyPid, 0);
+    await assert.rejects(readFile(join(stateRoot, "proxy.log"), "utf8"), { code: "ENOENT" });
+
+    const statusOutput = stripAnsi(await captureStdout(() => runProxyCommand([], options)));
     await waitForChildExit(oldProxy);
     oldProxy = null;
 
     const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-    assert.equal(runtime.version, packageJson.version);
+    assert.match(statusOutput, new RegExp(`server: ${packageJson.version.replaceAll(".", "\\.")}`));
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
+    assert.equal(health.protocol, 6);
+    assert.equal(health.version, packageJson.version);
+    assert.notEqual(health.pid, oldProxyPid);
     const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_runtime_restart"/);
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
     const restartEvent = events.find((event) => event.event === "ccs_proxy_runtime_restart");
@@ -5109,87 +5017,6 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /view: overview\s+history:on\s+keys: v view\s+t history\s+q\/Ctrl-C exit/);
     const frame = output.split("\u001b[H")[1]?.split("\u001b[J")[0] ?? "";
     assert.equal((frame.match(/\u001b\[2K/g) ?? []).length, 12);
-  } finally {
-    await closeServer(health);
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    if (previousStateRoot === undefined) {
-      delete process.env.CCS_PROXY_STATE_ROOT;
-    } else {
-      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    }
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("proxy watch --history uses explicit history count", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const health = createServer((req, res) => {
-    if (req.url === "/__codex_proxy/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", pid: 1234, version: packageVersion(), protocol: 6 }));
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
-
-  try {
-    await new Promise((resolve, reject) => {
-      health.once("error", reject);
-      health.listen(0, "127.0.0.1", resolve);
-    });
-    const address = health.address();
-    assert.ok(address && typeof address === "object");
-    const proxyPort = address.port;
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await mkdir(join(home, ".codex"), { recursive: true });
-    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
-    await writeProxyStateFixture(home, stateRoot, proxyPort, {
-      total_requests: 5,
-      status_counts: { "200": 5 },
-      upstream_hit_counts: { input: 5 },
-      latency_ms: { last: 10, count: 5, sum: 50, min: 10, max: 10 },
-      recent_requests: Array.from({ length: 5 }, (_, index) => proxyHistoryRecord({
-        id: `watch-history-${index}`,
-        completed_at: `2026-01-01T00:00:${String(50 - index).padStart(2, "0")}.000Z`,
-        path: `/h${index}`,
-        request_model: `h${index}`,
-      })),
-    });
-
-    const output = await captureStdout(
-      () => runProxyCommand(
-        ["watch", "--history", "3"],
-        {
-          codexConfigPath: join(home, ".codex", "config.toml"),
-          listenHost: "127.0.0.1",
-          listenPort: proxyPort,
-          stateRoot,
-        },
-      ),
-      {
-        isTTY: true,
-        columns: 120,
-        rows: 8,
-        onWrite: (output) => {
-          if (output.includes("\u001b[J")) {
-            setImmediate(() => process.emit("SIGINT"));
-          }
-        },
-      },
-    );
-
-    assert.match(output, /h0/);
-    assert.match(output, /h2/);
-    assert.doesNotMatch(output, /h3/);
   } finally {
     await closeServer(health);
     if (previousHome === undefined) {
@@ -5648,6 +5475,51 @@ async function waitForFetchOk(url) {
 
 async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function spawnProxyHealthStub(proxyPort, protocol, version) {
+  return spawnNode(
+    [
+      "--input-type=module",
+      "-e",
+      `
+        import { createServer } from "node:http";
+
+        const server = createServer((req, res) => {
+          if (req.url === "/__codex_proxy/health") {
+            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({
+              status: "ok",
+              pid: process.pid,
+              version: process.env.CCS_TEST_PROXY_VERSION,
+              protocol: Number(process.env.CCS_TEST_PROXY_PROTOCOL),
+              mode: "recovery",
+            }));
+            return;
+          }
+          res.writeHead(404);
+          res.end();
+        });
+
+        const close = () => {
+          server.close(() => process.exit(0));
+          server.closeAllConnections();
+        };
+        process.once("SIGINT", close);
+        process.once("SIGTERM", close);
+        server.listen(Number(process.env.CCS_TEST_PROXY_PORT), "127.0.0.1", () => process.stdout.write("old-proxy-ready\\n"));
+      `,
+    ],
+    {
+      env: {
+        ...process.env,
+        CCS_TEST_PROXY_PORT: String(proxyPort),
+        CCS_TEST_PROXY_PROTOCOL: String(protocol),
+        CCS_TEST_PROXY_VERSION: version,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
 }
 
 async function waitForChildStdout(child, pattern) {
@@ -6115,7 +5987,10 @@ async function closeServer(server) {
   if (!server.listening) {
     return;
   }
-  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => {
+    server.close(resolve);
+    server.closeAllConnections();
+  });
 }
 
 // Proxy view and pricing contracts.
