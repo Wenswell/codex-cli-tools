@@ -21,8 +21,10 @@ The proxy HTTP server separates local control traffic, policy-managed model API 
 Local control endpoints:
 
 - `GET /__codex_proxy/health`
+- `GET /__codex_proxy/reroute`
+- `POST /__codex_proxy/reroute`
 
-Health responses include `status`, `pid`, `version`, `protocol`, and `mode`. Health checks are handled before metrics and never enter request history.
+Health responses include `status`, `pid`, `version`, `protocol`, and `mode`. The reroute endpoints inspect and wake eligible status-retry waits. Control requests are handled before metrics and never enter request history.
 
 These model API paths enter upstream forwarding and request metrics with the active proxy mode policy:
 
@@ -188,7 +190,7 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, the internal `x-ccs-profile` routing header, prompt text, and response text stay outside request records.
 
-Request schema version `6` and health protocol version `5` are the sole supported contracts.
+Request schema version `7` and health protocol version `7` are the sole supported contracts.
 
 Request-record readers require every schema `7` field with its documented type. Previous field names, missing fields, and retired values produce a schema error while the top-level state schema is current. A top-level state schema change clears incompatible snapshots and history through the automatic state upgrade flow.
 
@@ -202,7 +204,9 @@ The selected profile must exist and contain non-empty `baseURL` and `apiKey`; in
 
 `ccs proxy mode passthrough|retry|recovery|intercept` previews the current and target values and requires exact `yes`. `passthrough` performs one upstream fetch and skips proxy policy. `retry` checks only upstream response status and retries 429/503; it does not buffer or inspect response bodies, run latency policy, retry transport errors, or perform reasoning recovery. `recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `intercept` disables continuation recovery and uses ordinary guard retry.
 
-In `retry` mode, the total window starts immediately before the first upstream fetch. A 429/503 response uses `Retry-After` seconds or HTTP date when the delay fits the configured window; a missing or invalid header uses full-jitter exponential backoff from `backoff_base_ms` through `backoff_max_ms`. A wait is abortable by the client. No attempt is dispatched after the window, and exhaustion returns the last original upstream status, headers, and body. Other statuses use one attempt and are forwarded immediately.
+In `retry` mode, the total window starts immediately before the first upstream fetch. A 429/503 response uses `Retry-After` seconds or HTTP date when the delay fits the configured window; a missing or invalid header uses full-jitter exponential backoff from `backoff_base_ms` through `backoff_max_ms`. A wait is abortable by the client. Before every retry dispatch, requests without `x-ccs-profile` reload `profiles.current`; explicit profile requests stay pinned. No attempt is dispatched after the window, and exhaustion returns the last original upstream status, headers, and body. Other statuses use one attempt and are forwarded immediately.
+
+`ccs proxy reroute` requires a healthy matching runtime in `retry` mode. `GET /__codex_proxy/reroute` returns the current profile and in-memory requests that are waiting after 429/503 and are not explicitly pinned. The CLI prints that plan and performs no action when the set is empty. After exact `yes`, `POST /__codex_proxy/reroute` verifies that the current profile still matches the preview, wakes the previewed requests that are still eligible, and reports rerouted and skipped IDs. Each awakened request cancels only its backoff wait, retains its original client connection, body, deadline, and counters, then resolves the current profile before its next dispatch. Fetching, forwarding, completed, and pinned requests are never registered for reroute.
 
 `ccs proxy restore` resolves `profiles.current` while building its preview and targets that profile's `baseURL`. Apply rejects config or proxy-state changes after preview, backs up the current config, changes and verifies only `state.provider_name`'s `base_url`, then stops the proxy and removes state. Install and restore backups remain available. Every other TOML field, `profiles.json`, and authentication data remain unchanged. Restore is for returning to direct routing or preparing a clean reinstall; an ordinary package update uses `ccs proxy restart`.
 
@@ -439,6 +443,7 @@ cost      session time up model input$ output$ cached$ total$ result
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - Compact state history is updated before appending the complete JSONL request record.
 - The proxy selects an explicit `x-ccs-profile` request profile when present and otherwise selects `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
+- Status retries reload `profiles.current` before each later attempt, and `ccs proxy reroute` wakes eligible unpinned 429/503 waits without creating another client request.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body and recorded as `upstream_error` failures.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
 - Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
