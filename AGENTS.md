@@ -1,25 +1,15 @@
-- Keep command surfaces small. Prefer one obvious command over aliases or compatibility shims.
-- New user-facing tools must include a basic CLI surface, not only an internal hook/script entry. At minimum consider no-argument/status output and `--help`; add focused `config`, `test`, or `logs` commands when the tool has configuration, delivery, or debug state.
-- Remove legacy behavior instead of preserving fallback modes when the command contract changes.
-- For status/no-argument commands, print the actual active configuration values, not just where to find them. Example: `codex-notice` prints the active webhook URL plus config/log paths.
-- No-argument output should combine compact status with a compact command/help line when the tool has user-facing commands.
-- At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. Print one command per line and include a short comment for every command.
-- Public tool entrypoints support `version` and `-v`, and read the shared `package.json` version.
-- Usage/help/commands text is lower-value than state and results. When it appears alongside status or command output, place it at the bottom.
-- Apply/write modes must first print the same plan/details as preview, ask for explicit typed confirmation, then print the actual write/backup/verification result.
-- Any command that modifies files must default to preview and require typing exact `yes` at the prompt to write. Do not add `-y`, `--yes`, or separate dry-run flags.
-- Preview output should directly say that no changes are written unless the user types `yes` at the prompt.
-- Keep output compact and aligned with key/value labels where practical.
-- Runtime logs preserve normalized facts by default. Raw input, events, and responses are explicit debug data with documented boundaries, private permissions, redaction, and size limits.
-- Status and monitor commands that sample external runtime state should write a latest JSON state file and append normalized JSONL history under `~/.cache/codex-tools`.
-- Long-running monitors should append history only when observed runtime facts change. Terminal refresh cadence and history growth are separate concerns.
-- When a logging issue names one file or command as an example, audit the surrounding command family and similar runtime files before choosing the change scope.
-- Runtime logging changes follow `docs/CLI_RUNTIME_RECORDS.md` and reusable engineering preferences follow `docs/ENGINEERING_PREFERENCES.md`.
-- Monitor/status headers should use compact labels, bare `HH:mm:ss` clocks, single spaces between fields, and a small semantic color set.
-- Tests should cover behavior, data contracts, safety boundaries, parsing, formatting width, and regression-prone calculations. Exact spacing, wording, and color assertions are reserved for explicit user-facing contracts.
-- Test selection follows `docs/TESTING_GUIDELINES.md`.
-- Dense terminal byte, speed, duration, and compact counter values should use three significant digits after the base unit, such as `160K`, `43.2M`, `160K/s`, `56ms`, and `2.34s`.
-- Each commit updates `package.json` version. Use a patch version increment by default.
-- When changing CLI behavior, update both `README.md` and built `dist` files in the same change.
-- For config under this toolset, use `~/.config/codex-tools` unless there is a strong reason not to.
-- Do not add package-directory secret fallbacks. Secrets belong in environment variables or `~/.config/codex-tools/*`.
+# Contributor guide
+
+- Follow [engineering preferences](docs/ENGINEERING_PREFERENCES.md) for CLI,
+  configuration, terminal output, documentation, and release conventions.
+- Follow [testing guidelines](docs/TESTING_GUIDELINES.md) when selecting tests and
+  assertions.
+- Follow [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md) for state, history,
+  logs, retention, and raw debug data.
+- Treat [the proxy specification](docs/CCS_PROXY_SPEC.md) and
+  [the cost specification](docs/CCS_COST_SPEC.md) as the current command-specific
+  contracts.
+- Update `README.md`, the owning specification, tests, and built `dist` output in
+  the same change when CLI behavior changes.
+- Increment the `package.json` patch version in every commit unless the release
+  explicitly requires a different semantic-version increment.

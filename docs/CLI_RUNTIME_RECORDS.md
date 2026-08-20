@@ -102,5 +102,4 @@ Use short unit names in dense status tables, such as `K`, `M`, `G`, `K/s`, and `
 - Use shared runtime-log helpers for JSONL appends, atomic JSON state writes, and content-addressed raw archives.
 - Write referenced raw payloads before writing state and history records when raw debug mode is enabled.
 - Preserve completion or sample order in JSONL.
-- Keep table columns stable and let the final detail column absorb remaining terminal width.
 - Reuse shared formatters and table rendering helpers when available.

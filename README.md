@@ -77,39 +77,9 @@ codex-rename
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
-- [Engineering preferences](docs/ENGINEERING_PREFERENCES.md)
-- [Testing guidelines](docs/TESTING_GUIDELINES.md)
-- [CLI runtime records](docs/CLI_RUNTIME_RECORDS.md)
-- [CCS proxy specification](docs/CCS_PROXY_SPEC.md)
-- [CCS cost specification](docs/CCS_COST_SPEC.md)
-
-## CLI conventions
-
-- No-argument/status commands print active configuration values, not just file paths.
-- New user-facing tools include a basic CLI surface, not only an internal hook/script entry.
-- No-argument output combines compact status with a compact command footer when the tool has user-facing commands.
-- The root `ccs` footer separates direct commands from command namespaces. Both lists use primary names only.
-- A namespace footer lists its immediate primary subcommands and ends with `--help`.
-- Explicit help contains parameters, aliases, nested commands, and command comments.
-- Each labeled command footer row is emitted as one line without width-dependent formatting.
-- At tool entrypoints, `-h`, `--help`, and `help` are dedicated help output. They print one command per line and include a short comment for every command.
-- Every `package.json.bin` entry is automatically covered by the shared version and help regression test; adding a public tool requires no hand-maintained test list.
-- Usage/help/commands text is lower-value than state and results, so it appears at the bottom when combined with other output.
-- Commands that modify files default to preview and require typing exact `yes` at the prompt to write.
-- Write/apply commands first print the same plan as preview, then ask for confirmation and print the actual result.
-- Invalid arguments fail with a short explicit error instead of stack traces or silent fallback.
-- Logs preserve normalized runtime facts by default. Raw payload archives are explicit debug surfaces with documented boundaries, private permissions, and size limits.
-- Status and monitor commands that sample external runtime state write a latest JSON state file and append normalized JSONL history under `~/.cache/codex-tools`.
-- Long-running monitors append history only when observed runtime facts change; watch refreshes do not imply history growth.
-- Monitor headers use compact labels, bare `HH:mm:ss` clocks, single spaces between fields, and small semantic color sets.
-- Tests protect behavior, data contracts, safety boundaries, parsing, formatting width, and calculations. Exact output assertions are reserved for explicit display contracts.
-- Dense terminal byte, speed, duration, and compact counter values use three significant digits after the base unit, such as `160K`, `43.2M`, `160K/s`, `56ms`, and `2.34s`.
-- Each commit updates `package.json` version. Use a patch version increment by default.
-- Secrets live in environment variables or `~/.config/codex-tools`, not package files.
-- Command surfaces stay small; legacy modes are removed when contracts change.
-- Public tools support `version` and `-v`, and every tool reads the shared `package.json` version.
-- Terminal tables use the shared renderer in `src/lib/table.ts`. Text columns are left-aligned, numeric columns are right-aligned, row numbers use explicit columns when present, and long path/rule/detail text lives in the final column. Columns can declare shrink priority so lower-value labels or endpoints compress before dense numeric details. ANSI color and wide characters are measured by terminal display width before padding or truncation. Truncated cell text uses the single-character ellipsis `…`.
+User setup and command behavior are documented in this README. Contributor
+standards and detailed data contracts are listed in the
+[documentation index](docs/README.md).
 
 ## cx / cxx / cxxs
 
