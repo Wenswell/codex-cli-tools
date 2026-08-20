@@ -28,8 +28,9 @@ class ProxyProfileSelectionError extends Error {
 const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
+const REROUTE_PATH = "/__codex_proxy/reroute";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
-const PROXY_HEALTH_PROTOCOL = 6;
+const PROXY_HEALTH_PROTOCOL = 7;
 const PROXY_STATE_SCHEMA_VERSION = 2;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
@@ -266,6 +267,9 @@ function ccsBinPath() {
 }
 function healthUrl(state) {
     return new URL(HEALTH_PATH, state.proxy_base_url).toString();
+}
+function rerouteUrl(state) {
+    return new URL(REROUTE_PATH, state.proxy_base_url).toString();
 }
 async function sleep(ms) {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -2034,6 +2038,9 @@ function classifyProxyRoute(method, pathname) {
     if (method === "GET" && pathname === HEALTH_PATH) {
         return { kind: "control", endpoint: "health" };
     }
+    if ((method === "GET" || method === "POST") && pathname === REROUTE_PATH) {
+        return { kind: "control", endpoint: "reroute" };
+    }
     if (pathname === "/__codex_proxy" || pathname.startsWith("/__codex_proxy/")) {
         return { kind: "invalid" };
     }
@@ -3263,7 +3270,7 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, ga
 function isRetryableUpstreamStatus(status) {
     return status === 429 || status === 503;
 }
-async function proxyThroughActiveUpstreamStatusRetry(request, upstream, body, gatewayRequestId, attemptRecords, config, callbacks) {
+async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, body, gatewayRequestId, attemptRecords, config, callbacks) {
     const attemptState = {
         gatewayRequestId,
         attempts: 0,
@@ -3272,9 +3279,13 @@ async function proxyThroughActiveUpstreamStatusRetry(request, upstream, body, ga
     };
     const deadlineAtMs = Date.now() + config.total_window_ms;
     let retries = 0;
+    let upstream = initialUpstream;
     while (true) {
         if (callbacks.signal?.aborted) {
             throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+        }
+        if (attemptState.attempts > 0 && callbacks.resolveRetryUpstream) {
+            upstream = await callbacks.resolveRetryUpstream();
         }
         attemptState.attempts += 1;
         attemptState.attemptRecords.push(createProxyAttemptRecord(gatewayRequestId, attemptState.attempts, upstream.name));
@@ -3323,10 +3334,33 @@ async function proxyThroughActiveUpstreamStatusRetry(request, upstream, body, ga
                     failureSummary,
                 });
             }
-            const waitResult = await waitForProxyRetry(delayMs, callbacks.signal ?? new AbortController().signal, deadlineAtMs);
+            const waitAbort = new AbortController();
+            const abortFromClient = () => waitAbort.abort("client");
+            if (callbacks.signal?.aborted)
+                abortFromClient();
+            else
+                callbacks.signal?.addEventListener("abort", abortFromClient, { once: true });
+            const unregisterWait = callbacks.onStatusRetryWait?.({
+                requestId: gatewayRequestId,
+                upstream: upstream.name,
+                status: response.status,
+                attempt: attemptState.attempts,
+                waitingSince: new Date().toISOString(),
+                wake: () => waitAbort.abort("reroute"),
+            });
+            let waitResult;
+            try {
+                waitResult = await waitForProxyRetry(delayMs, waitAbort.signal, deadlineAtMs);
+            }
+            finally {
+                unregisterWait?.();
+                callbacks.signal?.removeEventListener("abort", abortFromClient);
+            }
             if (waitResult === "aborted") {
-                await response.body?.cancel().catch(() => undefined);
-                throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+                if (waitAbort.signal.reason !== "reroute") {
+                    await response.body?.cancel().catch(() => undefined);
+                    throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+                }
             }
             if (waitResult === "deadline") {
                 attempt.client_http_status = response.status;
@@ -4363,7 +4397,7 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
             ? [fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))]
             : formatCommandFooterLines([{
                     label: "commands:",
-                    commands: ["watch", "mode", "config", "install", "restart", "restore", "serve", "--help"],
+                    commands: ["watch", "reroute", "mode", "config", "install", "restart", "restore", "serve", "--help"],
                 }]).map(textDim)),
     ];
 }
@@ -4507,6 +4541,34 @@ export async function restartProxyRuntime(options, plan) {
     }
     return { stopped, runtime };
 }
+async function proxyRerouteRequest(state, init) {
+    const response = await fetch(rerouteUrl(state), {
+        headers: { accept: "application/json", "content-type": "application/json" },
+        signal: AbortSignal.timeout(PROXY_HEALTH_TIMEOUT_MS),
+        ...init,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(typeof payload?.error === "string" ? payload.error : `proxy reroute failed with HTTP ${response.status}`);
+    }
+    return payload;
+}
+async function buildProxyReroutePlan(options) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state)
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    assertProxyHealthRuntime(await readProxyHealth(state));
+    return { state, status: await proxyRerouteRequest(state) };
+}
+async function applyProxyReroutePlan(plan) {
+    return proxyRerouteRequest(plan.state, {
+        method: "POST",
+        body: JSON.stringify({
+            profile: plan.status.profile,
+            request_ids: plan.status.requests.map((request) => request.request_id),
+        }),
+    });
+}
 export async function setProxyMode(options, mode) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
@@ -4528,6 +4590,7 @@ export async function serveProxy(options) {
     }
     await resetProxyActiveRequestsOnStart(state, options.stateRoot);
     let closing = false;
+    const rerouteWaits = new Map();
     const server = createServer((req, res) => {
         res.once("finish", () => {
             if (closing)
@@ -4543,6 +4606,55 @@ export async function serveProxy(options) {
                 const route = classifyProxyRoute(method, url.pathname);
                 if (route.kind === "control") {
                     const currentState = await readProxyState(options.stateRoot) ?? state;
+                    if (route.endpoint === "reroute") {
+                        const profiles = await readProfiles();
+                        const profile = resolveProxyUpstream(profiles).name;
+                        if (currentState.mode !== PROXY_MODE_RETRY) {
+                            res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ error: `proxy reroute requires retry mode; mode=${currentState.mode}` }));
+                            return;
+                        }
+                        if (method === "GET") {
+                            const payload = {
+                                mode: currentState.mode,
+                                profile,
+                                requests: [...rerouteWaits.values()]
+                                    .map(({ wake: _wake, ...request }) => request)
+                                    .sort((left, right) => left.waiting_since.localeCompare(right.waiting_since)),
+                            };
+                            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify(payload));
+                            return;
+                        }
+                        const payload = parseJsonBody(await readBody(req));
+                        const targetProfile = payload && typeof payload === "object" && !Array.isArray(payload)
+                            ? payload.profile
+                            : null;
+                        const requestIds = payload && typeof payload === "object" && !Array.isArray(payload)
+                            ? payload.request_ids
+                            : null;
+                        if (targetProfile !== profile || !Array.isArray(requestIds) || !requestIds.every((id) => typeof id === "string")) {
+                            res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ error: "proxy reroute preview is stale; run ccs proxy reroute again" }));
+                            return;
+                        }
+                        const rerouted = [];
+                        const skipped = [];
+                        for (const requestId of [...new Set(requestIds)]) {
+                            const wait = rerouteWaits.get(requestId);
+                            if (!wait) {
+                                skipped.push(requestId);
+                                continue;
+                            }
+                            rerouteWaits.delete(requestId);
+                            wait.wake();
+                            rerouted.push(requestId);
+                        }
+                        const result = { profile, rerouted, skipped };
+                        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                        res.end(JSON.stringify(result));
+                        return;
+                    }
                     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
                     res.end(JSON.stringify({
                         status: "ok",
@@ -4680,7 +4792,8 @@ export async function serveProxy(options) {
                 const endpointClass = route.endpointClass;
                 try {
                     const profiles = await readProfiles();
-                    const upstreamProfile = resolveProxyUpstream(profiles, headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER));
+                    const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
+                    const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile);
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
                     const turnMetadata = parseCodexTurnMetadata(req.headers);
@@ -4696,6 +4809,27 @@ export async function serveProxy(options) {
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                     const passthroughCallbacks = {
                         signal: downstreamAbort.signal,
+                        resolveRetryUpstream: requestedProfile
+                            ? undefined
+                            : async () => resolveProxyUpstream(await readProfiles()),
+                        onStatusRetryWait: requestedProfile
+                            ? undefined
+                            : (wait) => {
+                                const entry = {
+                                    request_id: wait.requestId,
+                                    session: activeRecord.session,
+                                    upstream: wait.upstream,
+                                    status: wait.status,
+                                    attempt: wait.attempt,
+                                    waiting_since: wait.waitingSince,
+                                    wake: wait.wake,
+                                };
+                                rerouteWaits.set(wait.requestId, entry);
+                                return () => {
+                                    if (rerouteWaits.get(wait.requestId) === entry)
+                                        rerouteWaits.delete(wait.requestId);
+                                };
+                            },
                         onAttempt: async (attemptCount, upstreamName) => {
                             activeRecord.upstream = upstreamName;
                             activeRecord.attempts = attemptCount;
@@ -5063,6 +5197,7 @@ function usageHelpLines() {
         "  ccs proxy watch                          # watch proxy status and active upstream",
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
+        "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
         "  ccs proxy mode                           # print active proxy intervention mode",
         "  ccs proxy mode passthrough               # disable proxy policy after confirmation",
         "  ccs proxy mode retry                     # retry upstream HTTP 429 and 503 only",
@@ -5203,7 +5338,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "mode", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "reroute", "mode", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
@@ -5223,6 +5358,29 @@ export async function runProxyCommand(args, options) {
     if (command === "watch") {
         const parsed = parseProxyStatusArgs(rest, "ccs proxy watch");
         await runProxyStatusWatch({ ...options, ...parsed });
+        return;
+    }
+    if (command === "reroute") {
+        rejectRemovedYesFlags(rest, "ccs proxy reroute");
+        rejectProxyCommandArgs(rest, "ccs proxy reroute");
+        const plan = await buildProxyReroutePlan(options);
+        printKeyValue("profile:", colorName(plan.status.profile), 9);
+        printKeyValue("eligible:", String(plan.status.requests.length), 9);
+        for (const request of plan.status.requests) {
+            const waitedMs = Math.max(0, Date.now() - Date.parse(request.waiting_since));
+            printKeyValue("request:", `${request.request_id} session=${request.session ?? "-"} upstream=${request.upstream} status=${request.status} attempt=${request.attempt} wait=${formatDurationMs(waitedMs)}`, 9);
+        }
+        if (plan.status.requests.length === 0) {
+            printKeyValue("result:", "no waiting 429/503 requests", 9);
+            return;
+        }
+        printKeyValue("confirm:", "no requests are rerouted unless you type yes", 9);
+        if (!(await confirmApply()))
+            return;
+        const result = await applyProxyReroutePlan(plan);
+        printKeyValue("profile:", colorName(result.profile), 9);
+        printKeyValue("rerouted:", textGreen(String(result.rerouted.length)), 9);
+        printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
         return;
     }
     if (command === "mode") {
