@@ -15,6 +15,7 @@ This document records reusable project preferences that come from implementation
 - Managed background processes with a health protocol treat protocol mismatch as a runtime replacement event: record a normalized event, stop the mismatched runtime, start the current entrypoint, and report a startup error when the current protocol remains unavailable.
 - Shared helpers own JSONL append, bounded retention, atomic state writes, and raw archive behavior. New runtime logs should reuse those helpers.
 - Status and watch renderers read compact state first. Larger history reads should be explicit and should use tail-oriented readers.
+- High-frequency runtime progress stays in memory between bounded state refreshes. Persist the first useful observation and exact terminal value without rewriting the full state file for every transport chunk.
 
 ## CLI Output
 
