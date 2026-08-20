@@ -428,6 +428,7 @@ test("proxy records active and history request lifecycle", async () => {
     streamStartedResolve = resolve;
   });
   let finishStream;
+  let writeStreamBurst;
   const streamRelease = new Promise((resolve) => {
     finishStream = resolve;
   });
@@ -443,6 +444,7 @@ test("proxy records active and history request lifecycle", async () => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write("data: one\n\n");
       streamStartedResolve();
+      writeStreamBurst = () => res.write("data: burst\n\n");
       void streamRelease.then(() => {
         res.end("data: two\n\n");
       });
@@ -579,10 +581,20 @@ test("proxy records active and history request lifecycle", async () => {
     const activeOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(activeOutput, /\b11B\b/);
 
+    writeStreamBurst();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.active_requests[0].response_bytes, Buffer.byteLength("data: one\n\n"));
+
     finishStream();
     const streamResponse = await streamFetch;
-    assert.equal(await streamResponse.text(), "data: one\n\ndata: two\n\n");
+    const streamBody = "data: one\n\ndata: burst\n\ndata: two\n\n";
+    assert.equal(await streamResponse.text(), streamBody);
     await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0].path === "/responses");
+    state = await readProxyState(stateRoot);
+    assert.ok(state);
+    assert.equal(state.metrics.recent_requests[0].response_bytes, Buffer.byteLength(streamBody));
 
     const clientError = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=client-error`, { method: "POST", body: "{}" });
     assert.equal(clientError.status, 404);
