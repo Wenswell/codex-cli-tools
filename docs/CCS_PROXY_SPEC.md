@@ -16,7 +16,7 @@ Proxy state lives under `~/.cache/codex-tools/proxy`:
 
 ## Route boundary
 
-The proxy HTTP server separates local control traffic from model API forwarding.
+The proxy HTTP server separates local control traffic, policy-managed model API forwarding, and transparent upstream API forwarding.
 
 Local control endpoints:
 
@@ -24,14 +24,16 @@ Local control endpoints:
 
 Health responses include `status`, `pid`, `version`, `protocol`, and `mode`. Health checks are handled before metrics and never enter request history.
 
-Only these model API paths enter upstream forwarding and request metrics:
+These model API paths enter upstream forwarding and request metrics with the active proxy mode policy:
 
 - `/responses`
 - `/v1/responses`
 - `/chat/completions`
 - `/v1/chat/completions`
 
-Unsupported paths return local `404` JSON with `code: "unsupported_proxy_path"`, write one `ccs_proxy_unsupported_path` event to `proxy.log`, and do not update `active_requests`, `recent_requests`, `proxy-requests.jsonl`, status counters, latency counters, reasoning counters, or upstream hit counters.
+Every other upstream API path, including `/v1/alpha/search`, is transparently forwarded once with the selected upstream and proxy authentication. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
+
+The `/__codex_proxy/*` namespace is reserved for local control. Unknown local control paths return local `404` JSON with `code: "unsupported_proxy_path"` and a message that identifies `ccs proxy` as the rejecting component. They write one `ccs_proxy_unsupported_path` event to `proxy.log` and do not enter request metrics or history.
 
 Proxy startup reuses a healthy runtime only when its health `protocol` and `version` match the current CLI protocol and package version. A mismatch records one `ccs_proxy_runtime_restart` event with `reason=runtime_mismatch`, `old_protocol`, `new_protocol`, `old_version`, `new_version`, and the replaced process `pid`, then stops that process and starts the current proxy. Explicit replacement records the same event with `reason=explicit`. A remaining protocol or version mismatch after restart is a startup error.
 

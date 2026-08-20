@@ -674,17 +674,30 @@ test("proxy records active and history request lifecycle", async () => {
   }
 });
 
-test("proxy rejects unsupported paths without request history", async () => {
+test("proxy transparently forwards non-policy paths and rejects unknown local control paths", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
   const proxyPort = await reservePort();
   const upstreamPort = await reservePort();
   let upstreamHits = 0;
-  const upstream = createServer((_req, res) => {
+  let upstreamRequestResolve;
+  const upstreamRequest = new Promise((resolve) => {
+    upstreamRequestResolve = resolve;
+  });
+  const upstream = createServer(async (req, res) => {
     upstreamHits += 1;
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true }));
+    upstreamRequestResolve({
+      authorization: req.headers.authorization,
+      body: await readServerRequestBody(req),
+      method: req.method,
+      url: req.url,
+    });
+    res.writeHead(201, {
+      "content-type": "application/json; charset=utf-8",
+      "x-upstream-route": "search",
+    });
+    res.end(JSON.stringify({ usage: { output_tokens_details: { reasoning_tokens: 516 } } }));
   });
 
   try {
@@ -705,39 +718,55 @@ test("proxy rejects unsupported paths without request history", async () => {
     assert.equal(runtime.healthy, true);
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
-    const rootResponse = await fetch(`http://127.0.0.1:${proxyPort}/?api_key=query-secret`);
-    assert.equal(rootResponse.status, 404);
-    assert.deepEqual(await rootResponse.json(), {
-      error: {
-        code: "unsupported_proxy_path",
-        message: "unsupported proxy path",
+    const searchBody = JSON.stringify({ query: "codex proxy" });
+    const searchResponse = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search?limit=3`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer client-key",
+        "content-type": "application/json",
       },
+      body: searchBody,
     });
+    assert.equal(searchResponse.status, 201);
+    assert.equal(searchResponse.headers.get("x-upstream-route"), "search");
+    assert.deepEqual(await searchResponse.json(), { usage: { output_tokens_details: { reasoning_tokens: 516 } } });
+    assert.deepEqual(await upstreamRequest, {
+      authorization: "Bearer input-key",
+      body: searchBody,
+      method: "POST",
+      url: "/v1/alpha/search?limit=3",
+    });
+    assert.equal(upstreamHits, 1);
 
-    const otherResponse = await fetch(`http://127.0.0.1:${proxyPort}/anything`, { method: "POST", body: "{}" });
-    assert.equal(otherResponse.status, 404);
-    assert.deepEqual(await otherResponse.json(), {
+    const controlResponse = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/unknown?api_key=query-secret`);
+    assert.equal(controlResponse.status, 404);
+    assert.deepEqual(await controlResponse.json(), {
       error: {
         code: "unsupported_proxy_path",
-        message: "unsupported proxy path",
+        message: "request blocked by ccs proxy: unsupported local control path; request was not forwarded upstream",
       },
     });
 
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_unsupported_path"/);
     const events = (await readFile(join(stateRoot, "proxy.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_unsupported_path", "ccs_proxy_unsupported_path"]);
-    assert.deepEqual(events.map((event) => event.path), ["/", "/anything"]);
+    assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_unsupported_path"]);
+    assert.deepEqual(events.map((event) => event.path), ["/__codex_proxy/unknown"]);
     assert.doesNotMatch(await readFile(join(stateRoot, "proxy.log"), "utf8"), /query-secret|api_key/);
-    assert.deepEqual(events.map((event) => event.status), [404, 404]);
-    assert.equal(upstreamHits, 0);
+    assert.deepEqual(events.map((event) => event.status), [404]);
+    assert.equal(upstreamHits, 1);
 
-    const state = await readProxyState(stateRoot);
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.total_requests === 1,
+    );
     assert.ok(state);
     assert.equal(state.metrics.active_requests.length, 0);
-    assert.equal(state.metrics.recent_requests.length, 0);
-    assert.equal(state.metrics.total_requests, 0);
-    assert.deepEqual(state.metrics.status_counts, {});
-    assert.equal(await readTextOrEmpty(join(stateRoot, "proxy-requests.jsonl")), "");
+    assert.equal(state.metrics.recent_requests.length, 1);
+    assert.equal(state.metrics.recent_requests[0].path, "/v1/alpha/search");
+    assert.equal(state.metrics.recent_requests[0].attempts, 1);
+    assert.deepEqual(state.metrics.recent_requests[0].guard_actions, []);
+    assert.equal(state.metrics.total_requests, 1);
+    assert.deepEqual(state.metrics.status_counts, { "201": 1 });
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
