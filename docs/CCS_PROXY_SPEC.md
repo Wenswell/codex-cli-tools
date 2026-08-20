@@ -37,6 +37,8 @@ The `/__codex_proxy/*` namespace is reserved for local control. Unknown local co
 
 Proxy startup reuses a healthy runtime only when its health `protocol` and `version` match the current CLI protocol and package version. A mismatch records one `ccs_proxy_runtime_restart` event with `reason=runtime_mismatch`, `old_protocol`, `new_protocol`, `old_version`, `new_version`, and the replaced process `pid`, then stops that process and starts the current proxy. Explicit replacement records the same event with `reason=explicit`. A remaining protocol or version mismatch after restart is a startup error.
 
+Graceful shutdown stops accepting new requests, drains active responses, and closes idle keep-alive connections immediately so health checks do not delay restart or restore.
+
 ## Configuration lifecycle
 
 `ccs proxy install` and `ccs proxy restore` semantically change only one TOML value: `model_providers.<provider>.base_url` in `~/.codex/config.toml`. Install targets `http://127.0.0.1:4610`; restore resolves `profiles.current` and targets that profile's `baseURL`. The operations preserve other TOML fields, profile data, authentication, and unrelated config text.
@@ -68,7 +70,7 @@ ccs proxy restart
 
 `restart` prints the current and target runtime details and states that nothing changes unless exact `yes` is entered. Apply refuses while `metrics.active_requests` is non-empty, gracefully stops the current runtime, starts the current package version, and verifies the health protocol and version. It preserves proxy routing, mode, latency configuration, counters, and completed history. When a runtime was running, the replacement has a different PID.
 
-Running `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while disabling intervention; it does not stop the runtime.
+Running one-shot `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. `ccs proxy watch` only reads state and health; it does not start, upgrade, or replace a runtime. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while disabling intervention; it does not stop the runtime.
 
 `proxy.json.state_schema_version` is independent from package and health protocol versions. Ordinary package updates keep current state. A missing or different state schema is a destructive upgrade boundary: installed proxy commands gracefully stop the old runtime, preserve stable installation and local routing fields, reset mode to `passthrough`, disable latency policy, clear metrics and `proxy-requests.jsonl`, write the current schema, and append `ccs_proxy_state_reset` to `proxy.log`. Persisted active rows are not authoritative across process versions; a stop timeout leaves state unchanged. The command prints the schema transition once. Config backups plus event and runtime logs remain intact. A malformed current-schema file remains an error and is not reset.
 
@@ -80,7 +82,7 @@ An earlier state schema is reset automatically by the next installed proxy comma
 
 ### Explicit restart
 
-`ccs proxy restart` is the only public runtime replacement command. There are no separate `start` or `stop` commands: installed proxy status commands start a missing compatible runtime automatically, and stopping while the configured provider still points to the local URL would break routing.
+`ccs proxy restart` is the only explicit public runtime replacement command. There are no separate `start` or `stop` commands: one-shot installed proxy commands start a missing compatible runtime when needed, while `watch` remains read-only. Stopping while the configured provider still points to the local URL would break routing.
 
 Restart requires installed proxy state. Preview prints the active PID, protocol, and package version plus the target protocol and package version, then requires exact `yes`. Apply rechecks that `metrics.active_requests` is empty before stopping the runtime. It preserves `proxy.json`, `proxy-requests.jsonl`, routing, mode, policy configuration, counters, and completed history, then verifies the new PID and matching health contract. An explicit restart with active requests fails without stopping the runtime or changing state.
 
@@ -132,7 +134,7 @@ Request records include:
 - `stream_duration_ms`: streaming time from first upstream chunk to final upstream chunk for the final attempt.
 - `request_bytes`: request body byte count.
 - `response_bytes`: completed response body byte count.
-- `session`: short Codex session id when present.
+- `session`: short Codex session id from `x-codex-turn-metadata.session_id` when present, otherwise from the JSON request body's `session_id`.
 - `client_turn_id`: Codex turn id parsed from `x-codex-turn-metadata`.
 - `client_request_attempt`: repeated local client request count for the same `client_turn_id` and `request_body_sha256` inside the compact state window. The first request is `1`.
 - `request_kind`: `normal` or `context_compaction`.
@@ -269,7 +271,7 @@ History row count follows these rules:
 - Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
 - Explicit `--history N` reads the tail of `proxy-requests.jsonl` when `N` exceeds the snapshot length.
 
-`ccs proxy watch` renders live status in the terminal alternate screen, repaints immediately on terminal resize, and omits path lines. `passthrough` hides policy and reasoning summaries. `retry` renders only `retry total=... 429=... 503=...`. `intercept` and `recovery` retain the complete policy and reasoning summaries. Latency remains visible in every mode. The footer shows the current view, history visibility, and keys; `v` cycles views, `t` toggles history, and `q` or `Ctrl-C` exits.
+`ccs proxy watch` renders live status in the terminal alternate screen, repaints immediately on terminal resize, and omits path lines. Each refresh reads stored state and current health without changing the runtime. `passthrough` hides policy and reasoning summaries. `retry` renders only `retry total=... 429=... 503=...`. `intercept` and `recovery` retain the complete policy and reasoning summaries. Latency remains visible in every mode. The footer shows the current view, history visibility, and keys; `v` cycles views, `t` toggles history, and `q` or `Ctrl-C` exits.
 
 `status events` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. The policy line sums all retry categories, including separate 429 and 503 counts, from every `retry_summary` in the complete recent-request window. Status counters render in ascending numeric order and omit zero counts.
 
