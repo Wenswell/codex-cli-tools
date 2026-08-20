@@ -1,6 +1,24 @@
 # engineering preferences
 
-This document records reusable project preferences that come from implementation reviews. Detailed command contracts stay in the command-specific specs.
+This document owns reusable project conventions. Detailed command contracts stay
+in the command-specific specifications.
+
+## CLI Design
+
+- Keep command surfaces small. Prefer one obvious command and remove replaced
+  behavior instead of retaining aliases or compatibility modes.
+- New public tools expose useful no-argument behavior, dedicated `help`, `-h`,
+  and `--help` output, plus `version` and `-v` backed by `package.json`.
+- Status output prints active configuration values and results before a compact
+  command footer. Root footers distinguish direct commands from namespaces;
+  namespace footers list only immediate primary commands and end with `--help`.
+- Help prints one command per line with a short comment. Invalid arguments fail
+  with a short explicit error.
+- File-changing commands print the complete preview, state that no changes are
+  written without confirmation, and require typing exact `yes`. Do not add
+  automatic-confirmation or separate dry-run flags.
+- Apply rechecks the preview source, writes only the previewed target, verifies
+  the result, and reports backups and verification.
 
 ## Runtime Logging
 
@@ -20,6 +38,8 @@ This document records reusable project preferences that come from implementation
 ## CLI Output
 
 - Nested command status pages limit their compact `commands:` summary to the current command family.
+- Keep labeled output compact and aligned where practical. Command footer rows
+  stay on one line and are not width-dependent.
 
 ## Terminal Monitor Output
 
@@ -49,13 +69,25 @@ This document records reusable project preferences that come from implementation
 
 ## Documentation
 
-- Update root-level summaries and detailed docs together when CLI behavior or runtime records change.
-- Keep README content compact. Put durable contracts, plans, and review notes under `docs/`.
-- Convert repeated review feedback into reusable rules rather than single-incident notes.
-- Document the current contract separately from future schema and behavior plans.
+- Keep `README.md` focused on user setup and command behavior. Put reusable
+  contributor rules and detailed data contracts under `docs/`.
+- Update the README, owning specification, tests, and built `dist` output together
+  when CLI behavior changes.
+- Keep current contracts, not completed implementation plans, audits, or review
+  logs. Git history owns historical implementation detail.
+- Convert repeated review feedback into a reusable rule in the owning document.
 
 ## Configuration And Runtime Views
 
+- Store configuration under `~/.config/codex-tools` unless the data is runtime
+  state. Secrets belong in environment variables or that config directory, not
+  in package files.
 - File-changing previews should retain the exact source and target content. Apply verifies that the source remains current, writes the previewed target, and reads it back before reporting success.
 - Multi-attempt runtime records should project one compact attribution entry per owned attempt at request completion. Aggregate views require complete facts for each displayed component and preserve missing or invalid states explicitly.
 - Multi-view terminal tables should keep shared identity columns stable, derive every view from the same normalized records, and load local pricing or other frame dependencies once per rendered frame.
+
+## Release
+
+- Increment the shared `package.json` version in every commit. Use a patch
+  increment unless the release explicitly requires another semantic-version level.
+- Rebuild `dist` whenever source behavior or public help changes.
