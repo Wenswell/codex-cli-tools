@@ -1969,8 +1969,11 @@ function classifyProxyRoute(method, pathname) {
     if (method === "GET" && pathname === HEALTH_PATH) {
         return { kind: "control", endpoint: "health" };
     }
+    if (pathname === "/__codex_proxy" || pathname.startsWith("/__codex_proxy/")) {
+        return { kind: "invalid" };
+    }
     const endpointClass = proxyEndpointClass(pathname);
-    return endpointClass ? { kind: "model_api", endpointClass } : { kind: "invalid" };
+    return { kind: "upstream_api", endpointClass, policyManaged: endpointClass !== null };
 }
 function parseJsonBody(body) {
     if (body.length === 0) {
@@ -4482,7 +4485,12 @@ export async function serveProxy(options) {
                 }
                 if (route.kind === "invalid") {
                     await logProxyUnsupportedPath(options.stateRoot, method, url.pathname);
-                    const payload = JSON.stringify({ error: { code: "unsupported_proxy_path", message: "unsupported proxy path" } });
+                    const payload = JSON.stringify({
+                        error: {
+                            code: "unsupported_proxy_path",
+                            message: "request blocked by ccs proxy: unsupported local control path; request was not forwarded upstream",
+                        },
+                    });
                     res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
                     res.end(payload);
                     return;
@@ -4690,12 +4698,12 @@ export async function serveProxy(options) {
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                     };
-                    const outcome = mode === PROXY_MODE_PASSTHROUGH
+                    const outcome = mode === PROXY_MODE_PASSTHROUGH || !route.policyManaged
                         ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, activeRecord.id, attemptRecords, passthroughCallbacks)
                         : mode === PROXY_MODE_RETRY
                             ? await proxyThroughActiveUpstreamStatusRetry(req, upstreamProfile, body, activeRecord.id, attemptRecords, requestState.status_retry, passthroughCallbacks)
                             : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, endpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, guardedCallbacks);
-                    if (isProxyInspectionMode(mode)) {
+                    if (route.policyManaged && isProxyInspectionMode(mode)) {
                         enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
                     }
                     status = outcome.response.status;
@@ -4762,7 +4770,7 @@ export async function serveProxy(options) {
                     responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, async (receivedBytes) => {
                         activeRecord.response_bytes = receivedBytes;
                         await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                    }, outcome.streamScanner, isProxyInspectionMode(mode));
+                    }, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode));
                     if (outcome.streamScanner) {
                         const inspection = outcome.streamScanner.currentInspection();
                         const streamAttemptState = { gatewayRequestId: activeRecord.id, attempts, attemptRecords, attemptStartedAtMs: [] };
