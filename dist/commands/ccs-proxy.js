@@ -17,7 +17,7 @@ import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { readProfiles } from "../lib/profiles.js";
-import { bgDarkBlue, textBlue, textBold, textCyan, textDim, textGreen, textMagenta, textOrange, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
+import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow } from "../lib/table.js";
 import { fitTerminalLine, formatCommandFooterLines } from "../lib/terminal.js";
@@ -139,7 +139,7 @@ const PROXY_COST_TABLE_COLUMNS = [
     { key: "total_cost", title: "total$", width: 9, align: "right" },
     PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
-const PROXY_SESSION_COLORS = [textBlue, textCyan, textGreen, textMagenta, textOrange, textYellow];
+const PROXY_SESSION_COLOR_CODES = [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214];
 function statePath(stateRoot) {
     return path.join(stateRoot, PROXY_STATE_FILE);
 }
@@ -1442,16 +1442,16 @@ function formatProxySession(value, colorIndexes) {
     if (colorIndex === undefined) {
         throw new Error(`visible proxy session color was not allocated: ${value}`);
     }
-    return PROXY_SESSION_COLORS[colorIndex](text);
+    return textAnsi256(PROXY_SESSION_COLOR_CODES[colorIndex], text);
 }
 function allocateProxySessionColorIndexes(records) {
     const sessions = [...new Set(records.flatMap((record) => record.session ? [record.session] : []))].sort();
-    const available = new Set(PROXY_SESSION_COLORS.map((_, index) => index));
+    const available = new Set(PROXY_SESSION_COLOR_CODES.map((_, index) => index));
     const indexes = new Map();
     for (const session of sessions) {
         let colorIndex = stableProxySessionColorIndex(session);
         while (available.size > 0 && !available.has(colorIndex)) {
-            colorIndex = (colorIndex + 1) % PROXY_SESSION_COLORS.length;
+            colorIndex = (colorIndex + 1) % PROXY_SESSION_COLOR_CODES.length;
         }
         indexes.set(session, colorIndex);
         available.delete(colorIndex);
@@ -1463,7 +1463,7 @@ function stableProxySessionColorIndex(value) {
     for (let index = 0; index < value.length; index += 1) {
         hash = ((hash * 31) + value.charCodeAt(index)) >>> 0;
     }
-    return hash % PROXY_SESSION_COLORS.length;
+    return hash % PROXY_SESSION_COLOR_CODES.length;
 }
 function formatProxyUpstream(upstream, attempts) {
     if (!upstream) {

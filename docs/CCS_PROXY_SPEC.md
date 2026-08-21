@@ -412,7 +412,7 @@ cost      session time up model input$ output$ cached$ total$ result
 ```
 
 - `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.
-- `session`: equal visible session ids use the same color across active and history rows. The first six distinct visible ids use different colors from the shared bright palette; allocation is deterministic for the visible id set.
+- `session`: equal visible session ids use the same color across active and history rows. The first 11 distinct visible ids use different ANSI 256 colors from `39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214`; allocation is deterministic for the visible id set.
 - `reas./code`: explicit `reasoning_tokens`, `text` for observed reasoning text with absent token count, and HTTP status code. Missing reasoning metadata renders dim `-`; HTTP status keeps the existing status color.
 - `dur.`: elapsed time for active rows and completed duration for history rows.
 - Token columns require the field from every attempt and sum all attempt values.
@@ -453,7 +453,7 @@ cost      session time up model input$ output$ cached$ total$ result
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
 - Status tables display `reas./code` as one combined column.
-- Status tables keep equal visible session ids the same color and avoid color reuse among the first six distinct visible ids, including ids whose direct hash colors collide.
+- Status tables keep equal visible session ids the same color and avoid color reuse among the first 11 distinct visible ids, including ids whose direct hash colors collide. Tests assert the complete selected ANSI color set.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Completed model API requests are appended to bounded `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
