@@ -4263,14 +4263,14 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
       backup_path: "/tmp/backup.toml",
       metrics: {
         total_requests: 3,
-        active_requests: [record("active-same", "019f0df6", null)],
+        active_requests: [record("active-same", "01a01e23", null)],
         status_counts: { "200": 2 },
         reasoning_token_counts: {},
         upstream_hit_counts: { input: 2 },
         latency_ms: { last: 50, count: 2, sum: 100, min: 50, max: 50 },
         recent_requests: [
-          record("history-same", "019f0df6", "2026-01-01T00:00:02.000Z"),
-          record("history-other", "019f0df7", "2026-01-01T00:00:01.000Z"),
+          record("history-same", "01a01e23", "2026-01-01T00:00:02.000Z"),
+          record("history-other", "01a0219e", "2026-01-01T00:00:01.000Z"),
           record("history-none", null, "2026-01-01T00:00:00.000Z"),
         ],
       },
@@ -4294,10 +4294,10 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   const output = renderedLines.join("\n");
   const activeIndex = renderedLines.findIndex((line) => stripAnsi(line) === "active");
   const historyIndex = renderedLines.findIndex((line) => stripAnsi(line) === "history");
-  const activeRow = renderedLines.slice(activeIndex + 1, historyIndex).find((line) => line.includes("019f0df6"));
-  const historyRow = renderedLines.slice(historyIndex + 1).find((line) => line.includes("019f0df6"));
-  const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m019f0df6\u001b\[0m)/g)].map((match) => match[1]);
-  const otherSession = output.match(/(\u001b\[[0-9;]*m019f0df7\u001b\[0m)/)?.[1];
+  const activeRow = renderedLines.slice(activeIndex + 1, historyIndex).find((line) => line.includes("01a01e23"));
+  const historyRow = renderedLines.slice(historyIndex + 1).find((line) => line.includes("01a01e23"));
+  const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m01a01e23\u001b\[0m)/g)].map((match) => match[1]);
+  const otherSession = output.match(/(\u001b\[[0-9;]*m01a0219e\u001b\[0m)/)?.[1];
 
   assert.ok(activeRow);
   assert.ok(historyRow);

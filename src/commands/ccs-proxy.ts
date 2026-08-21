@@ -1667,7 +1667,12 @@ function formatProxyFilePath(value: string): string {
   return formatHomePath(value);
 }
 
-function formatProxyRequest(record: ProxyRequestRecord, nowMs: number, priceCache?: ModelPriceCache): TableRow {
+function formatProxyRequest(
+  record: ProxyRequestRecord,
+  nowMs: number,
+  sessionColorIndexes: ReadonlyMap<string, number>,
+  priceCache?: ModelPriceCache,
+): TableRow {
   const completed = record.completed_at !== null;
   const startedAt = Date.parse(record.started_at);
   const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
@@ -1681,7 +1686,7 @@ function formatProxyRequest(record: ProxyRequestRecord, nowMs: number, priceCach
     up: upstream,
     ms: textYellow(formatLatencyMs(latencyMs)),
     size: formatProxyBytes(size),
-    session: formatProxySession(record.session),
+    session: formatProxySession(record.session, sessionColorIndexes),
     model: formatProxyModel(record.request_model, record.upstream_model),
     input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
     output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
@@ -1929,16 +1934,31 @@ async function logProxyUnsupportedPath(stateRoot: string, method: string, path: 
   });
 }
 
-function formatProxySession(value: string | null): string {
+function formatProxySession(value: string | null, colorIndexes: ReadonlyMap<string, number>): string {
   if (!value) {
     return textDim("-");
   }
   const text = truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH);
-  return proxySessionColor(value)(text);
+  const colorIndex = colorIndexes.get(value);
+  if (colorIndex === undefined) {
+    throw new Error(`visible proxy session color was not allocated: ${value}`);
+  }
+  return PROXY_SESSION_COLORS[colorIndex](text);
 }
 
-function proxySessionColor(value: string): (text: string) => string {
-  return PROXY_SESSION_COLORS[stableProxySessionColorIndex(value)];
+function allocateProxySessionColorIndexes(records: ProxyRequestRecord[]): Map<string, number> {
+  const sessions = [...new Set(records.flatMap((record) => record.session ? [record.session] : []))].sort();
+  const available = new Set(PROXY_SESSION_COLORS.map((_, index) => index));
+  const indexes = new Map<string, number>();
+  for (const session of sessions) {
+    let colorIndex = stableProxySessionColorIndex(session);
+    while (available.size > 0 && !available.has(colorIndex)) {
+      colorIndex = (colorIndex + 1) % PROXY_SESSION_COLORS.length;
+    }
+    indexes.set(session, colorIndex);
+    available.delete(colorIndex);
+  }
+  return indexes;
 }
 
 function stableProxySessionColorIndex(value: string): number {
@@ -5187,17 +5207,33 @@ function resolveProxyHistoryRenderCount(metrics: ProxyMetrics, options: ProxyOpt
   return Math.max(0, terminalRows - fixedLines);
 }
 
-function formatProxyActiveRows(metrics: ProxyMetrics, now: Date, view: ProxyView, priceCache?: ModelPriceCache, count = PROXY_RECENT_RENDER_COUNT): string[] {
+function formatProxyActiveRows(
+  metrics: ProxyMetrics,
+  now: Date,
+  view: ProxyView,
+  sessionColorIndexes: ReadonlyMap<string, number>,
+  priceCache?: ModelPriceCache,
+  count = PROXY_RECENT_RENDER_COUNT,
+): string[] {
   if (metrics.active_requests.length === 0) {
     return [
       ...renderProxyRequestTable([], view),
       `  ${textDim("no active requests")}`,
     ];
   }
-  return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), priceCache)), view);
+  return renderProxyRequestTable(
+    metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache)),
+    view,
+  );
 }
 
-function formatProxyHistoryRows(records: ProxyRequestRecord[], count: number, view: ProxyView, priceCache?: ModelPriceCache): string[] {
+function formatProxyHistoryRows(
+  records: ProxyRequestRecord[],
+  count: number,
+  view: ProxyView,
+  sessionColorIndexes: ReadonlyMap<string, number>,
+  priceCache?: ModelPriceCache,
+): string[] {
   if (count === 0) {
     return renderProxyRequestTable([], view);
   }
@@ -5209,7 +5245,7 @@ function formatProxyHistoryRows(records: ProxyRequestRecord[], count: number, vi
   }
   const nowMs = Date.now();
   return renderProxyRequestTable(
-    records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, priceCache), textDim)),
+    records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache), textDim)),
     view,
   );
 }
@@ -5300,6 +5336,10 @@ export function buildProxyStatusLines(
   const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
   const view = options.view ?? "overview";
   const historyVisible = options.historyVisible ?? true;
+  const sessionColorIndexes = allocateProxySessionColorIndexes([
+    ...metrics.active_requests.slice(0, PROXY_RECENT_RENDER_COUNT),
+    ...(historyVisible ? resolvedHistoryRecords.slice(0, historyCount) : []),
+  ]);
   const watchPolicyLines = !options.watch || !state
     ? [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)]
     : state.mode === PROXY_MODE_PASSTHROUGH
@@ -5314,10 +5354,10 @@ export function buildProxyStatusLines(
     ...watchPolicyLines.map((line) => fitTerminalLine(line)),
     fitTerminalLine(formatProxyLatencySummary(metrics)),
     textBold("active"),
-    ...formatProxyActiveRows(metrics, now, view, priceCache),
+    ...formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache),
     ...(historyVisible ? [
       textBold("history"),
-      ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
+      ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, sessionColorIndexes, priceCache),
     ] : []),
     ...(options.watch
       ? [fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))]

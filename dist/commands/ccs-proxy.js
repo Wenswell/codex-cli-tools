@@ -1185,7 +1185,7 @@ function formatProxyPathsLines(options) {
 function formatProxyFilePath(value) {
     return formatHomePath(value);
 }
-function formatProxyRequest(record, nowMs, priceCache) {
+function formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache) {
     const completed = record.completed_at !== null;
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
@@ -1199,7 +1199,7 @@ function formatProxyRequest(record, nowMs, priceCache) {
         up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
-        session: formatProxySession(record.session),
+        session: formatProxySession(record.session, sessionColorIndexes),
         model: formatProxyModel(record.request_model, record.upstream_model),
         input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
         output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
@@ -1433,15 +1433,30 @@ async function logProxyUnsupportedPath(stateRoot, method, path) {
         status: 404,
     });
 }
-function formatProxySession(value) {
+function formatProxySession(value, colorIndexes) {
     if (!value) {
         return textDim("-");
     }
     const text = truncateProxyText(value, PROXY_TABLE_SESSION_WIDTH);
-    return proxySessionColor(value)(text);
+    const colorIndex = colorIndexes.get(value);
+    if (colorIndex === undefined) {
+        throw new Error(`visible proxy session color was not allocated: ${value}`);
+    }
+    return PROXY_SESSION_COLORS[colorIndex](text);
 }
-function proxySessionColor(value) {
-    return PROXY_SESSION_COLORS[stableProxySessionColorIndex(value)];
+function allocateProxySessionColorIndexes(records) {
+    const sessions = [...new Set(records.flatMap((record) => record.session ? [record.session] : []))].sort();
+    const available = new Set(PROXY_SESSION_COLORS.map((_, index) => index));
+    const indexes = new Map();
+    for (const session of sessions) {
+        let colorIndex = stableProxySessionColorIndex(session);
+        while (available.size > 0 && !available.has(colorIndex)) {
+            colorIndex = (colorIndex + 1) % PROXY_SESSION_COLORS.length;
+        }
+        indexes.set(session, colorIndex);
+        available.delete(colorIndex);
+    }
+    return indexes;
 }
 function stableProxySessionColorIndex(value) {
     let hash = 0;
@@ -4276,16 +4291,16 @@ function resolveProxyHistoryRenderCount(metrics, options, state) {
         + 1;
     return Math.max(0, terminalRows - fixedLines);
 }
-function formatProxyActiveRows(metrics, now, view, priceCache, count = PROXY_RECENT_RENDER_COUNT) {
+function formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache, count = PROXY_RECENT_RENDER_COUNT) {
     if (metrics.active_requests.length === 0) {
         return [
             ...renderProxyRequestTable([], view),
             `  ${textDim("no active requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), priceCache)), view);
+    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache)), view);
 }
-function formatProxyHistoryRows(records, count, view, priceCache) {
+function formatProxyHistoryRows(records, count, view, sessionColorIndexes, priceCache) {
     if (count === 0) {
         return renderProxyRequestTable([], view);
     }
@@ -4296,7 +4311,7 @@ function formatProxyHistoryRows(records, count, view, priceCache) {
         ];
     }
     const nowMs = Date.now();
-    return renderProxyRequestTable(records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, priceCache), textDim)), view);
+    return renderProxyRequestTable(records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache), textDim)), view);
 }
 async function readProxyRequestTail(stateRoot, count) {
     if (count <= 0) {
@@ -4374,6 +4389,10 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
     const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
     const view = options.view ?? "overview";
     const historyVisible = options.historyVisible ?? true;
+    const sessionColorIndexes = allocateProxySessionColorIndexes([
+        ...metrics.active_requests.slice(0, PROXY_RECENT_RENDER_COUNT),
+        ...(historyVisible ? resolvedHistoryRecords.slice(0, historyCount) : []),
+    ]);
     const watchPolicyLines = !options.watch || !state
         ? [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)]
         : state.mode === PROXY_MODE_PASSTHROUGH
@@ -4388,10 +4407,10 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ...watchPolicyLines.map((line) => fitTerminalLine(line)),
         fitTerminalLine(formatProxyLatencySummary(metrics)),
         textBold("active"),
-        ...formatProxyActiveRows(metrics, now, view, priceCache),
+        ...formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache),
         ...(historyVisible ? [
             textBold("history"),
-            ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, priceCache),
+            ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, sessionColorIndexes, priceCache),
         ] : []),
         ...(options.watch
             ? [fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))]
