@@ -4243,6 +4243,13 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
         },
         error: null,
     });
+    const extraSessions = Array.from({ length: 9 }, (_, index) =>
+      record(
+        \`history-extra-\${index}\`,
+        \`01b0000\${index}\`,
+        new Date(Date.parse("2026-01-01T00:00:01.000Z") - ((index + 1) * 1000)).toISOString(),
+      )
+    );
     const state = {
       state_schema_version: 2,
       installed_at: "2026-01-01T00:00:00.000Z",
@@ -4271,7 +4278,8 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
         recent_requests: [
           record("history-same", "01a01e23", "2026-01-01T00:00:02.000Z"),
           record("history-other", "01a0219e", "2026-01-01T00:00:01.000Z"),
-          record("history-none", null, "2026-01-01T00:00:00.000Z"),
+          ...extraSessions,
+          record("history-none", null, "2025-12-31T23:59:50.000Z"),
         ],
       },
     };
@@ -4285,6 +4293,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
         listenHost: "127.0.0.1",
         listenPort: 4610,
         stateRoot: "/tmp/codex-tools",
+        historyCount: 12,
       },
     );
     process.stdout.write(JSON.stringify(lines));
@@ -4298,6 +4307,10 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   const historyRow = renderedLines.slice(historyIndex + 1).find((line) => line.includes("01a01e23"));
   const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m01a01e23\u001b\[0m)/g)].map((match) => match[1]);
   const otherSession = output.match(/(\u001b\[[0-9;]*m01a0219e\u001b\[0m)/)?.[1];
+  const sessionColors = new Set(
+    [...output.matchAll(/\u001b\[38;5;(\d+)m01[ab][0-9a-f]{5}\u001b\[0m/g)]
+      .map((match) => Number(match[1])),
+  );
 
   assert.ok(activeRow);
   assert.ok(historyRow);
@@ -4307,6 +4320,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   assert.equal(sameSession[0], sameSession[1]);
   assert.ok(otherSession);
   assert.notEqual(otherSession, sameSession[0]);
+  assert.deepEqual([...sessionColors].sort((left, right) => left - right), [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214]);
   assert.match(output, /\u001b\[2m-\u001b\[0m/);
 });
 

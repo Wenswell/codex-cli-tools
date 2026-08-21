@@ -53,6 +53,10 @@ export function textDim(value: string): string {
   return withAnsi(2, value);
 }
 
+export function textAnsi256(code: number, value: string): string {
+  return withAnsi(`38;5;${code}`, value);
+}
+
 export function textBlue(value: string): string {
   return withAnsi("38;5;81", value);
 }

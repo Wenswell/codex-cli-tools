@@ -42,6 +42,9 @@ export function textBold(value) {
 export function textDim(value) {
     return withAnsi(2, value);
 }
+export function textAnsi256(code, value) {
+    return withAnsi(`38;5;${code}`, value);
+}
 export function textBlue(value) {
     return withAnsi("38;5;81", value);
 }
