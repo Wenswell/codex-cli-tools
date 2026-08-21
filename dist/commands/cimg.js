@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { access, readFile, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { rejectRemovedYesFlags } from "../lib/confirm.js";
 import { ensureDir } from "../lib/fs.js";
@@ -18,6 +18,8 @@ const requestTimeoutMs = 300_000;
 export const CIMG_PROGRESS_INTERVAL_MS = 10_000;
 const requestLogMaxBytes = 16 * 1024 * 1024;
 const requestLogTrimBytes = 12 * 1024 * 1024;
+const maxInputImages = 16;
+const maxInputImageBytes = 50 * 1024 * 1024;
 const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 export const CIMG_SIZES = {
     "1:1": ["1024x1024", "1536x1536", "2048x2048", "2560x2560"],
@@ -68,24 +70,27 @@ export async function runCimg(argv, overrides = {}) {
     }
     const args = parseArgs(argv, dependencies.now());
     const active = resolveActiveProfile(await dependencies.profiles());
-    const endpoint = buildEndpoint(active.profile.baseURL);
+    const mode = requestMode(args);
+    const endpoint = buildEndpoint(active.profile.baseURL, mode);
+    const previewInputs = await readImageInputs(args.inputPaths);
     await assertOutputAvailable(args.outputPath);
     printPreview(active.name, endpoint, args);
     if (!(await dependencies.confirm())) {
         return;
     }
+    const inputs = await verifyImageInputs(previewInputs);
     await ensureDir(dirname(args.outputPath));
     const requestId = dependencies.requestId();
     const startedAt = dependencies.now();
-    const baseEvent = buildBaseEvent(requestId, startedAt, active.name, active.profile.baseURL, endpoint, args);
+    const baseEvent = buildBaseEvent(requestId, startedAt, active.name, active.profile.baseURL, endpoint, args, inputs);
     await dependencies.appendEvent({ ...baseEvent, event: "started" });
     const abortController = new AbortController();
     const cancelRequest = () => abortController.abort();
-    const progress = startGenerationProgress(args.size, args.quality);
+    const progress = startImageProgress(mode, args.size, args.quality);
     process.once("SIGINT", cancelRequest);
     let response;
     try {
-        response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args, abortController.signal);
+        response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args, inputs, abortController.signal);
         await writeFile(args.outputPath, response.bytes, { flag: "wx", mode: 0o600 });
     }
     catch (error) {
@@ -128,7 +133,7 @@ export async function runCimg(argv, overrides = {}) {
             error: null,
         },
     });
-    printCimgValue("result:", textGreen("generated"));
+    printCimgValue("result:", textGreen(mode === "edit" ? "edited" : "generated"));
     printCimgValue("output:", colorPath(formatHomePath(args.outputPath)));
     printCimgValue("image:", `${response.width}x${response.height} ${formatCompactBytes(response.bytes.length)}`);
     printCimgValue("duration:", formatDurationMs(durationMs));
@@ -144,6 +149,7 @@ export function parseArgs(argv, now = new Date()) {
     let size;
     let quality = CIMG_DEFAULT_QUALITY;
     let outputPath;
+    const inputPaths = [];
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         if (arg === "-p" || arg === "--prompt") {
@@ -179,6 +185,11 @@ export function parseArgs(argv, now = new Date()) {
             index += 1;
             continue;
         }
+        if (arg === "-i" || arg === "--image") {
+            inputPaths.push(resolve(requireValue(argv, index)));
+            index += 1;
+            continue;
+        }
         if (isHelp(arg)) {
             throw new Error("help must be used without generation arguments");
         }
@@ -198,7 +209,15 @@ export function parseArgs(argv, now = new Date()) {
     if (!resolvedOutput.toLowerCase().endsWith(".png")) {
         throw new Error("output path must end with .png");
     }
-    return { prompt: normalizedPrompt, ratio, size: resolvedSize, quality, outputPath: resolvedOutput };
+    for (const inputPath of inputPaths) {
+        if (!imageMediaType(inputPath)) {
+            throw new Error(`unsupported input image: ${inputPath}; expected .png | .jpg | .jpeg | .webp`);
+        }
+    }
+    if (inputPaths.length > maxInputImages) {
+        throw new Error(`too many input images: ${inputPaths.length}; maximum is ${maxInputImages}`);
+    }
+    return { prompt: normalizedPrompt, ratio, size: resolvedSize, quality, outputPath: resolvedOutput, inputPaths };
 }
 export function buildRequestBody(args) {
     return {
@@ -210,7 +229,21 @@ export function buildRequestBody(args) {
         output_format: "png",
     };
 }
-export function buildEndpoint(baseURL) {
+export function buildEditRequestBody(args, inputs) {
+    const body = new FormData();
+    const imageField = inputs.length === 1 ? "image" : "image[]";
+    for (const input of inputs) {
+        body.append(imageField, new Blob([new Uint8Array(input.bytes)], { type: input.mediaType }), input.name);
+    }
+    body.append("prompt", args.prompt);
+    body.append("model", CIMG_MODEL);
+    body.append("size", args.size);
+    body.append("quality", args.quality);
+    body.append("n", "1");
+    body.append("output_format", "png");
+    return body;
+}
+export function buildEndpoint(baseURL, mode = "generate") {
     const normalized = baseURL.trim().replace(/\/+$/u, "");
     if (!normalized) {
         throw new Error("active profile baseURL is empty");
@@ -228,7 +261,8 @@ export function buildEndpoint(baseURL) {
     if (url.username || url.password || url.search || url.hash) {
         throw new Error("active profile baseURL must not contain credentials, a query, or a fragment");
     }
-    return `${url.toString().replace(/\/+$/u, "")}/v1/images/generations`;
+    const resource = mode === "edit" ? "edits" : "generations";
+    return `${url.toString().replace(/\/+$/u, "")}/v1/images/${resource}`;
 }
 export function cimgRequestsPath() {
     return resolve(codexToolsCacheDir(), "cimg", "requests.jsonl");
@@ -236,17 +270,18 @@ export function cimgRequestsPath() {
 export function cimgDefaultOutputDir() {
     return join(homeDir(), "Pictures", "cimg");
 }
-async function requestImage(fetchImpl, endpoint, apiKey, args, cancelSignal) {
+async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, cancelSignal) {
     const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
     let response;
     try {
+        const editing = inputs.length > 0;
         response = await fetchImpl(endpoint, {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${apiKey}`,
-                "Content-Type": "application/json",
+                ...(editing ? {} : { "Content-Type": "application/json" }),
             },
-            body: JSON.stringify(buildRequestBody(args)),
+            body: editing ? buildEditRequestBody(args, inputs) : JSON.stringify(buildRequestBody(args)),
             signal: AbortSignal.any([cancelSignal, timeoutSignal]),
         });
     }
@@ -321,12 +356,14 @@ function printStatus(profiles) {
     printCimgValue("defaults:", `${CIMG_DEFAULT_RATIO} ${CIMG_DEFAULT_SIZES[CIMG_DEFAULT_RATIO]} ${CIMG_DEFAULT_QUALITY}`);
     printCimgValue("output:", colorPath(formatHomePath(cimgDefaultOutputDir())));
     printCimgValue("log:", colorPath(formatHomePath(cimgRequestsPath())));
-    console.log("commands: cimg -p TEXT | version|-v | --help");
+    console.log("commands: cimg -p TEXT [-i FILE ...] | version|-v | --help");
 }
 function printPreview(profile, endpoint, args) {
     printCimgValue("profile:", profile);
     printCimgValue("endpoint:", colorUrl(endpoint));
     printCimgValue("model:", CIMG_MODEL);
+    printCimgValue("mode:", requestMode(args));
+    args.inputPaths.forEach((path, index) => printCimgValue(`image ${index + 1}:`, colorPath(formatHomePath(path))));
     printCimgValue("ratio:", args.ratio);
     printCimgValue("size:", args.size);
     printCimgValue("quality:", args.quality);
@@ -339,6 +376,7 @@ function printHelp() {
         "Usage:",
         "  cimg                                                        # show active image generation status",
         "  cimg -p TEXT [--ratio RATIO] [--size SIZE] [--quality QUALITY] [-o FILE] # preview and generate one PNG",
+        "  cimg -p TEXT -i FILE [-i FILE ...] [OPTIONS]                # preview and edit from reference images",
         "  cimg version                                                # print package version",
         "  cimg -v                                                     # print package version",
         "  cimg help | -h | --help                                     # show this help",
@@ -347,6 +385,7 @@ function printHelp() {
         `  --ratio RATIO    ${Object.keys(CIMG_SIZES).join(" | ")} (default: ${CIMG_DEFAULT_RATIO})`,
         "  --size SIZE      one fixed size listed for the selected ratio",
         "  --quality VALUE  auto | low | medium | high (default: auto)",
+        "  -i, --image FILE input PNG, JPEG, or WebP; repeat for multiple reference images",
         "  -o, --out FILE   output PNG path (default: ~/Pictures/cimg/image-<timestamp>.png)",
         "  -p, --prompt     text prompt",
         "",
@@ -376,9 +415,9 @@ async function confirmGeneration() {
         input.close();
     }
 }
-function buildBaseEvent(requestId, recordedAt, profile, baseURL, endpoint, args) {
+function buildBaseEvent(requestId, recordedAt, profile, baseURL, endpoint, args, inputs) {
     return {
-        version: 1,
+        version: 2,
         recorded_at: recordedAt.toISOString(),
         source: "cimg",
         request_id: requestId,
@@ -387,6 +426,7 @@ function buildBaseEvent(requestId, recordedAt, profile, baseURL, endpoint, args)
             base_url: baseURL,
             endpoint,
             model: CIMG_MODEL,
+            mode: requestMode(args),
             ratio: args.ratio,
             size: args.size,
             quality: args.quality,
@@ -395,6 +435,11 @@ function buildBaseEvent(requestId, recordedAt, profile, baseURL, endpoint, args)
             sha256: createHash("sha256").update(args.prompt).digest("hex"),
             characters: [...args.prompt].length,
         },
+        inputs: inputs.map((input) => ({
+            sha256: input.sha256,
+            bytes: input.bytes.length,
+            media_type: input.mediaType,
+        })),
     };
 }
 function normalizeError(error) {
@@ -435,12 +480,13 @@ function isHelp(value) {
 function printCimgValue(label, value) {
     printKeyValue(label, value, 10);
 }
-function startGenerationProgress(size, quality) {
+function startImageProgress(mode, size, quality) {
     const startedAt = Date.now();
     let timer;
     let stopped = false;
     const render = () => {
-        const status = `generating: ${formatDurationMs(Date.now() - startedAt)} ${size} ${quality} Ctrl-C to cancel`;
+        const action = mode === "edit" ? "editing" : "generating";
+        const status = `${action}: ${formatDurationMs(Date.now() - startedAt)} ${size} ${quality} Ctrl-C to cancel`;
         process.stdout.write(`\r\u001b[2K${status}`);
     };
     if (process.stdout.isTTY) {
@@ -449,7 +495,7 @@ function startGenerationProgress(size, quality) {
         timer.unref();
     }
     else {
-        console.log(`generating: ${size} ${quality}`);
+        console.log(`${mode === "edit" ? "editing" : "generating"}: ${size} ${quality}`);
     }
     return {
         stop() {
@@ -465,6 +511,66 @@ function startGenerationProgress(size, quality) {
             }
         },
     };
+}
+function requestMode(args) {
+    return args.inputPaths.length > 0 ? "edit" : "generate";
+}
+async function readImageInputs(paths) {
+    return Promise.all(paths.map(async (path) => {
+        const mediaType = imageMediaType(path);
+        if (!mediaType) {
+            throw new Error(`unsupported input image: ${path}`);
+        }
+        let fileStats;
+        try {
+            fileStats = await stat(path);
+        }
+        catch {
+            throw new Error(`input image is not readable: ${path}`);
+        }
+        if (!fileStats.isFile()) {
+            throw new Error(`input image is not a regular file: ${path}`);
+        }
+        let bytes;
+        try {
+            bytes = await readFile(path);
+        }
+        catch {
+            throw new Error(`input image is not readable: ${path}`);
+        }
+        if (bytes.length >= maxInputImageBytes) {
+            throw new Error(`input image is too large: ${path}; each image must be smaller than 50 MiB`);
+        }
+        return {
+            path,
+            name: basename(path),
+            mediaType,
+            bytes,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+        };
+    }));
+}
+async function verifyImageInputs(previewed) {
+    const current = await readImageInputs(previewed.map((input) => input.path));
+    for (let index = 0; index < previewed.length; index += 1) {
+        if (previewed[index].sha256 !== current[index].sha256) {
+            throw new Error(`input image changed after preview: ${previewed[index].path}`);
+        }
+    }
+    return current;
+}
+function imageMediaType(path) {
+    switch (extname(path).toLowerCase()) {
+        case ".png":
+            return "image/png";
+        case ".jpg":
+        case ".jpeg":
+            return "image/jpeg";
+        case ".webp":
+            return "image/webp";
+        default:
+            return undefined;
+    }
 }
 async function assertOutputAvailable(path) {
     try {
