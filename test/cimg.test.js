@@ -49,6 +49,10 @@ test("cimg help documents the default image directory", async () => {
   const output = await captureStdout(() => runCimg(["--help"]));
   assert.match(output, /default: ~\/Pictures\/cimg\/image-<timestamp>\.png/);
   assert.match(output, /-i, --image FILE input PNG, JPEG, or WebP; repeat for multiple reference images/);
+  assert.match(output, /one input edits the source; repeat -i\/--image for ordered reference images/);
+  assert.match(output, /accepts PNG, JPEG, or WebP; at most 16 files, each smaller than 50 MiB/);
+  assert.match(output, /masked editing is not part of this command/);
+  assert.match(output, /preview is shown before exact yes confirmation; Ctrl-C cancels an active request/);
   assert.match(output, /elapsed time refreshes every 10 seconds in a terminal; Ctrl-C cancels the request/);
 });
 
