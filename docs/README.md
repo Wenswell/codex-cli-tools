@@ -8,6 +8,7 @@ The files below are contributor standards and detailed implementation contracts.
 | [Engineering preferences](./ENGINEERING_PREFERENCES.md) | CLI design, configuration, terminal output, documentation, and release conventions |
 | [Testing guidelines](./TESTING_GUIDELINES.md) | Test selection, assertion depth, and shared test helpers |
 | [CLI runtime records](./CLI_RUNTIME_RECORDS.md) | Runtime state, bounded history, logs, raw archives, and retention |
+| [cimg specification](./CIMG_SPEC.md) | Image generation, editing inputs, requests, outputs, and lifecycle records |
 | [CCS proxy specification](./CCS_PROXY_SPEC.md) | Proxy lifecycle, routing, policies, request records, and status views |
 | [CCS cost specification](./CCS_COST_SPEC.md) | Cost commands, JSON contracts, data sources, pricing, and aggregation |
 
