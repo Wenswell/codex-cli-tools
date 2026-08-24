@@ -33,6 +33,10 @@ These model API paths enter upstream forwarding and request metrics with the act
 - `/chat/completions`
 - `/v1/chat/completions`
 
+When the selected profile sets `routeConversion.enabled=true`, every OpenAI Responses request is translated to Chat Completions before forwarding to a provider that only implements `/chat/completions`. The proxy maps `instructions`, input messages, function calls, function outputs, function and namespace tools, and supported generation parameters to Chat Completions, sends `/v1/chat/completions`, and converts successful Chat JSON or SSE results back to the Responses contract. Hosted `web_search` tools remain unavailable on Chat-only providers. Request conversion failures return local `400` without contacting the upstream; JSON response conversion failures return local `502`; stream conversion failures terminate the response after the already-sent upstream status. The proxy never forwards an unconverted Responses body to `/v1/chat/completions`. Streaming conversion is incremental and emits the required Responses lifecycle through `response.completed` before closing.
+
+`routeConversion.enabled` is a switching-profile setting. `ccs`, `ccs list`, and `ccs PROFILE` display `responses→chat` when it is enabled; otherwise they display `off`. `ccs add PROFILE` is the existing edit path for the setting. The `ccs proxy` overview table displays an `api` column for each request: `R→C` means Responses was converted to Chat Completions and `-` means no conversion. The overview omits the reasoning/status column; token and cost views keep their dedicated measurements.
+
 Every other upstream API path, including `/v1/alpha/search`, is transparently forwarded once with the selected upstream and proxy authentication. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
 
 The `/__codex_proxy/*` namespace is reserved for local control. Unknown local control paths return local `404` JSON with `code: "unsupported_proxy_path"` and a message that identifies `ccs proxy` as the rejecting component. They write one `ccs_proxy_unsupported_path` event to `proxy.log` and do not enter request metrics or history.
@@ -115,13 +119,15 @@ Restart requires installed proxy state. Preview prints the active PID, protocol,
 
 Request records include:
 
-- `schema_version`: request record schema version. Current value is `7`.
+- `schema_version`: request record schema version. Current value is `8`.
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
 - `mode`: proxy mode used for this request: `recovery`, `intercept`, `retry`, or `passthrough`.
 - `method`: HTTP method.
 - `path`: request pathname.
+- `protocol_conversion`: `responses_to_chat` when the selected attempt converts the request, otherwise `null`.
+- `conversion_failure_stage`: `request`, `response_json`, or `response_stream` when conversion fails, otherwise `null`.
 - `status`: observed upstream or local response status.
 - `upstream_status`: last observed upstream HTTP status.
 - `client_status`: status returned to the local Codex client.
@@ -182,7 +188,7 @@ Request records include:
 
 `reasoning_text_observed` records reasoning text fields such as `delta.reasoning_content`, `message.reasoning_content`, and `delta.reasoning`. Text observations stay separate from token-count metrics and guard matching.
 
-`attempt_records` contains one entry per real upstream fetch. Each entry includes `gateway_request_id`, unique `attempt_id`, `attempt`, `attempt_dispatched`, `upstream_fetch_started_at`, headers/progress/completion timestamps, `time_to_first_progress_ms`, upstream and client status, existing timing/model/usage/response-shape facts, `policy_trigger`, `policy_action`, `retry_trigger`, `retry_after_ms`, `retry_delay_ms`, shared retry budget used/remaining, timeout phase/limit/control-loss facts, stream termination, `final_action`, `failure_summary`, and `remaining_retries`. A planned retry creates no attempt record until its fetch is dispatched, and every dispatched attempt completes once.
+`attempt_records` contains one entry per dispatched forwarding attempt. Each entry includes `gateway_request_id`, unique `attempt_id`, `attempt`, `attempt_dispatched`, `upstream_fetch_started_at`, `protocol_conversion`, `upstream_endpoint`, `conversion_failure_stage`, headers/progress/completion timestamps, `time_to_first_progress_ms`, upstream and client status, existing timing/model/usage/response-shape facts, `policy_trigger`, `policy_action`, `retry_trigger`, `retry_after_ms`, `retry_delay_ms`, shared retry budget used/remaining, timeout phase/limit/control-loss facts, stream termination, `final_action`, `failure_summary`, and `remaining_retries`. A request conversion failure records `protocol_conversion=responses_to_chat`, `upstream_endpoint=chat/completions`, `conversion_failure_stage=request`, local client status `400`, `upstream_status=null`, and `final_action=route_conversion_failed`. Response conversion failures use `response_json` or `response_stream` with the same failure code. A planned retry creates no attempt record until dispatch, and every dispatched attempt completes once.
 
 `retry_summary` contains `total`, `reasoning_guard`, `upstream_capacity`, `http_429`, `http_503`, `timeout`, and `transport` counts derived from completed attempts.
 
@@ -190,9 +196,11 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 `proxy-requests.jsonl` stores JSONL-only `request_headers` with whitelisted sanitized request headers. Secret-bearing headers, the internal `x-ccs-profile` routing header, prompt text, and response text stay outside request records.
 
-Request schema version `7` and health protocol version `7` are the sole supported contracts.
+`proxy.log` attempt completion events include `protocol_conversion`, `upstream_endpoint`, and `conversion_failure_stage`. Request error events include `protocol_conversion` and `conversion_failure_stage`, preserving the concrete conversion error message.
 
-Request-record readers require every schema `7` field with its documented type. Previous field names, missing fields, and retired values produce a schema error while the top-level state schema is current. A top-level state schema change clears incompatible snapshots and history through the automatic state upgrade flow.
+Request schema version `8` and health protocol version `7` are the sole supported contracts.
+
+Request-record readers require every schema `8` field with its documented type. Previous field names, missing fields, and retired values produce a schema error while the top-level state schema is current. A top-level state schema change clears incompatible snapshots and history through the automatic state upgrade flow.
 
 ## Upstream forwarding
 
@@ -287,7 +295,7 @@ Continuation recovery counters use the same `proxy.json.metrics.recent_requests`
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. The three visible column sets are:
 
 ```text
-overview  session time up model reas./code dur. size result
+overview  session time up model api dur. size result
 tokens    session time up model input output cached result
 cost      session time up model input$ output$ cached$ total$ result
 ```
@@ -303,7 +311,7 @@ Active overview rows show elapsed time for `dur.`, known response bytes for `siz
 ## Implementation notes
 
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
-- Active and history records pass through the same schema `7` validator. Pending values use the documented `null`, `0`, or empty collection value.
+- Active and history records pass through the same schema `8` validator. Pending values use the documented `null`, `0`, or empty collection value.
 - Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
 - Explicit restart refuses while `active_requests` is non-empty. A new proxy process clears stale persisted active entries before serving traffic, so active entries never carry across process replacement.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
@@ -406,19 +414,19 @@ Reasoning text observation paths:
 The status command provides three request-table views:
 
 ```text
-overview  session time up model reas./code dur. size result
+overview  session time up model api dur. size result
 tokens    session time up model input output cached result
 cost      session time up model input$ output$ cached$ total$ result
 ```
 
 - `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.
 - `session`: equal visible session ids use the same color across active and history rows. The first 11 distinct visible ids use different ANSI 256 colors from `39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214`; allocation is deterministic for the visible id set.
-- `reas./code`: explicit `reasoning_tokens`, `text` for observed reasoning text with absent token count, and HTTP status code. Missing reasoning metadata renders dim `-`; HTTP status keeps the existing status color.
+- `api`: `R→C` when the selected attempt converts Responses traffic to Chat Completions, otherwise dim `-`.
 - `dur.`: elapsed time for active rows and completed duration for history rows.
 - Token columns require the field from every attempt and sum all attempt values.
 - Cost columns calculate each attempt with its own model and tier, sum full-precision values, and format once.
 - Active rows follow the shared `model` rendering rules; SSE streams update active rows after the first model frame is observed.
-- Retry attempts clear active-row `reas./code` and upstream model before the new attempt observes response metadata.
+- Retry attempts update active-row `api` and clear the upstream model before the new attempt observes response metadata.
 - History rows show status-normalized model fields.
 - `up`: upstream name plus yellow attempt count when attempts are greater than one.
 - `result`: optional bracketed local-action prefix from `guard_actions`, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
@@ -452,7 +460,7 @@ cost      session time up model input$ output$ cached$ total$ result
 - SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
-- Status tables display `reas./code` as one combined column.
+- The overview status table displays protocol conversion in `api`; token and cost views keep their dedicated usage columns.
 - Status tables keep equal visible session ids the same color and avoid color reuse among the first 11 distinct visible ids, including ids whose direct hash colors collide. Tests assert the complete selected ANSI color set.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.

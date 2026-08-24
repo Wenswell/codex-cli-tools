@@ -2,11 +2,17 @@
   "profiles": {
     "test001": {
       "baseURL": "https://ai.example.com",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     },
     "test002": {
       "baseURL": "https://codex.example.com",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     }
   },
   "current": "test001",
