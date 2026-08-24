@@ -17,10 +17,10 @@ import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { readProfiles } from "../lib/profiles.js";
-import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
+import { bgDarkBlue, textAnsi256, textBlue, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow } from "../lib/table.js";
-import { fitTerminalLine, formatCommandFooterLines } from "../lib/terminal.js";
+import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
 import { ProxyRetryBudget, decideProxyPolicy, matchesReasoningTokens, parseRetryAfter, retryDelayMs, waitForProxyRetry, } from "../lib/ccs-proxy-policy.js";
 import { determineRouteConversion, convertRequestBody, convertResponseBody, createStreamingResponseConverter, rewriteUpstreamPath, } from "../lib/proxy-router.js";
@@ -83,6 +83,7 @@ const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_API_WIDTH = 4;
 const PROXY_TABLE_MODEL_WIDTH = 10;
+const PROXY_TABLE_STATE_WIDTH = 5;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
@@ -118,6 +119,7 @@ const REQUEST_HEADER_ALLOWLIST = [
     "openai-project",
 ];
 const PROXY_OVERVIEW_TABLE_COLUMNS = [
+    { key: "state", title: "state", width: PROXY_TABLE_STATE_WIDTH, align: "right" },
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
@@ -128,14 +130,14 @@ const PROXY_OVERVIEW_TABLE_COLUMNS = [
     { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
 ];
 const PROXY_TOKEN_TABLE_COLUMNS = [
-    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 5),
     { key: "input_tokens", title: "input", width: 9, align: "right" },
     { key: "output_tokens", title: "output", width: 9, align: "right" },
     { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
     PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_COST_TABLE_COLUMNS = [
-    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 5),
     { key: "input_cost", title: "input$", width: 9, align: "right" },
     { key: "output_cost", title: "output$", width: 9, align: "right" },
     { key: "cached_cost", title: "cached$", width: 9, align: "right" },
@@ -1121,14 +1123,14 @@ function formatProxyUpstreamHits(profileOrder, metrics) {
     const knownNames = [
         ...profileOrder,
         ...Object.keys(metrics.upstream_hit_counts).filter((name) => !profileOrder.includes(name)),
-    ];
+    ].filter((name) => (metrics.upstream_hit_counts[name] ?? 0) > 0);
     if (knownNames.length === 0) {
         return textDim("none");
     }
     return knownNames
         .map((name) => {
         const count = metrics.upstream_hit_counts[name] ?? 0;
-        return `${colorName(truncateProxyText(name, 16))}=${count === 0 ? textDim("0") : colorCount(String(count))}`;
+        return `${colorName(truncateProxyText(name, 16))}=${colorCount(String(count))}`;
     })
         .join(",");
 }
@@ -1148,37 +1150,15 @@ function formatProxyStatusLine(now, state, runtime) {
         : colorCount(String(runtime.protocol));
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
     const mode = state ? colorName(state.mode) : textDim("unset");
-    const deadline = state?.latency_guard.enabled
-        ? `${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
-        : textDim("off");
-    const statusRetry = state
-        ? `${formatDurationMs(state.status_retry.total_window_ms, { maxUnit: "h" })}/${formatDurationMs(state.status_retry.backoff_base_ms)}-${formatDurationMs(state.status_retry.backoff_max_ms)}`
-        : "unset";
     return [
         bgDarkBlue(" ccs proxy "),
         textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
-        `runtime: ${state ? runtimeLabel : textRed("missing")}`,
-        `mode: ${mode}`,
-        `retry: ${state?.mode === PROXY_MODE_RETRY ? colorCount(statusRetry) : textDim("off")}`,
-        `deadline: ${deadline}`,
-        `pid: ${pid}`,
-        `server: ${version}`,
-        `protocol: ${protocol}`,
-        `proxy: ${proxy}`,
-        `refresh: ${textDim(`${PROXY_STATUS_REFRESH_SECONDS}s`)}`,
-    ].join(" ");
-}
-function formatProxyPathsLines(options) {
-    if (options.watch) {
-        return [];
-    }
-    return [
-        `state: ${colorPath(formatProxyFilePath(statePath(options.stateRoot)))}`,
-        `requests: ${colorPath(formatProxyFilePath(proxyRequestsPath(options.stateRoot)))}`,
-        `events: ${colorPath(formatProxyFilePath(proxyLogPath(options.stateRoot)))}`,
-        `runtime: ${colorPath(formatProxyFilePath(proxyRuntimeLogPath(options.stateRoot)))}`,
-        `config: ${colorPath(formatProxyFilePath(options.codexConfigPath))}`,
-    ];
+        state ? runtimeLabel : textRed("missing"),
+        mode,
+        proxy,
+        `pid=${pid}`,
+        `v${version}/p${protocol}`,
+    ].join("  ");
 }
 function formatProxyFilePath(value) {
     return formatHomePath(value);
@@ -1192,6 +1172,7 @@ function formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache) {
     const size = record.response_bytes;
     const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
+        state: completed ? textDim("done") : textYellow("live"),
         time: textDim(time),
         api: record.protocol_conversion === "responses_to_chat" ? colorName("R→C") : textDim("-"),
         up: upstream,
@@ -1218,9 +1199,6 @@ function formatProxyBytes(value) {
 }
 function formatProxyModelDisplayName(model) {
     return model.startsWith("gpt-") ? `o${model.slice(4)}` : model;
-}
-function formatProxyReasoningTokens(reasoningTokens) {
-    return reasoningTokens === null ? textDim("-") : textYellow(String(reasoningTokens));
 }
 export function formatProxyModel(requestModel, upstreamModel) {
     const model = upstreamModel ?? requestModel;
@@ -4211,10 +4189,10 @@ export async function restoreProxy(options) {
 function formatProxyRequestsSummary(metrics, profileOrder) {
     const statusCounts = formatExactProxyStatusCounts(metrics.status_counts);
     return [
-        `status events=${colorCount(String(totalProxyStatusCounts(metrics.status_counts)))}`,
-        `active=${metrics.active_requests.length === 0 ? textDim("0") : textYellow(String(metrics.active_requests.length))}`,
-        ...statusCounts,
-        `upstreams=${formatProxyUpstreamHits(profileOrder, metrics)}`,
+        `requests recent=${colorCount(String(metrics.recent_requests.length))}`,
+        `live=${metrics.active_requests.length === 0 ? textDim("0") : textYellow(String(metrics.active_requests.length))}`,
+        `status=${statusCounts.length > 0 ? statusCounts.join(" ") : textDim("-")}`,
+        `upstream=${formatProxyUpstreamHits(profileOrder, metrics)}`,
     ].join(" ");
 }
 function formatProxyPolicySummary(records) {
@@ -4227,23 +4205,61 @@ function formatProxyPolicySummary(records) {
         transport: summary.transport + record.retry_summary.transport,
     }), { upstream_capacity: 0, http_429: 0, http_503: 0, reasoning_guard: 0, timeout: 0, transport: 0 });
     const retries = totals.upstream_capacity + totals.http_429 + totals.http_503 + totals.reasoning_guard + totals.timeout + totals.transport;
-    return `policy retries=${retries} capacity=${totals.upstream_capacity} 429=${totals.http_429} 503=${totals.http_503} reasoning=${totals.reasoning_guard} timeout=${totals.timeout} transport=${totals.transport}`;
+    if (retries === 0) {
+        return null;
+    }
+    const categories = [
+        ["capacity", totals.upstream_capacity],
+        ["429", totals.http_429],
+        ["503", totals.http_503],
+        ["reasoning", totals.reasoning_guard],
+        ["timeout", totals.timeout],
+        ["transport", totals.transport],
+    ];
+    return [
+        `policy retries=${colorCount(String(retries))}`,
+        ...categories.filter(([, count]) => count > 0).map(([label, count]) => `${label}=${colorCount(String(count))}`),
+    ].join(" ");
 }
-function formatProxyStatusRetrySummary(records) {
+function formatProxyStatusRetrySummary(records, config) {
     const totals = records.reduce((summary, record) => ({
         http_429: summary.http_429 + record.retry_summary.http_429,
         http_503: summary.http_503 + record.retry_summary.http_503,
     }), { http_429: 0, http_503: 0 });
-    return `retry total=${totals.http_429 + totals.http_503} 429=${totals.http_429} 503=${totals.http_503}`;
+    const retryConfig = `${formatDurationMs(config.total_window_ms, { maxUnit: "h" })}/${formatDurationMs(config.backoff_base_ms)}-${formatDurationMs(config.backoff_max_ms)}`;
+    return [
+        `policy retry=${colorCount(retryConfig)}`,
+        ...(totals.http_429 > 0 ? [`429=${colorCount(String(totals.http_429))}`] : []),
+        ...(totals.http_503 > 0 ? [`503=${colorCount(String(totals.http_503))}`] : []),
+    ].join(" ");
 }
 function formatProxyReasoningSummary(metrics) {
     const reasoningCounts = formatGroupedProxyReasoningTokenCounts(metrics.reasoning_token_counts);
+    const recoveryCounts = formatProxyContinuationRecoveryCounts(proxyContinuationRecoveryCounts(metrics.recent_requests));
+    if (reasoningCounts.length === 0 && recoveryCounts.length === 0) {
+        return null;
+    }
     return [
-        `reasoning total=${colorCount(String(totalProxyReasoningTokenCounts(metrics.reasoning_token_counts)))}`,
-        `max=${formatProxyReasoningTokenValue(maxProxyReasoningToken(metrics.reasoning_token_counts))}`,
+        "reasoning",
         ...reasoningCounts,
-        ...formatProxyContinuationRecoveryCounts(proxyContinuationRecoveryCounts(metrics.recent_requests)),
+        ...recoveryCounts,
     ].join(" ");
+}
+function formatProxyPolicyLines(state, metrics) {
+    if (!state || state.mode === PROXY_MODE_PASSTHROUGH) {
+        return [];
+    }
+    if (state.mode === PROXY_MODE_RETRY) {
+        return [formatProxyStatusRetrySummary(metrics.recent_requests, state.status_retry)];
+    }
+    const deadline = state.latency_guard.enabled
+        ? `policy deadline=${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
+        : null;
+    return [
+        deadline,
+        formatProxyPolicySummary(metrics.recent_requests),
+        formatProxyReasoningSummary(metrics),
+    ].filter((line) => line !== null);
 }
 function proxyContinuationRecoveryCounts(records) {
     const counts = {
@@ -4278,31 +4294,6 @@ function formatProxyContinuationRecoveryCounts(counts) {
 }
 function formatProxyStatusCount(value, color) {
     return value === 0 ? textDim("0") : color(String(value));
-}
-function totalProxyStatusCounts(counts) {
-    return Object.values(counts).reduce((sum, count) => sum + count, 0);
-}
-function totalProxyReasoningTokenCounts(counts) {
-    return Object.values(counts).reduce((sum, count) => sum + count, 0);
-}
-function maxProxyReasoningToken(counts) {
-    const values = Object.entries(counts)
-        .filter(([, count]) => count > 0)
-        .map(([reasoningTokens]) => Number(reasoningTokens))
-        .filter((reasoningTokens) => Number.isInteger(reasoningTokens));
-    return values.length === 0 ? null : Math.max(...values);
-}
-function formatProxyReasoningTokenValue(reasoningTokens) {
-    if (reasoningTokens === null) {
-        return textDim("-");
-    }
-    if (reasoningTokens === 0) {
-        return textYellow(String(reasoningTokens));
-    }
-    if (REASONING_EQUALS.includes(reasoningTokens)) {
-        return textRed(String(reasoningTokens));
-    }
-    return textGreen(String(reasoningTokens));
 }
 function formatExactProxyStatusCounts(counts) {
     return Object.entries(counts)
@@ -4343,13 +4334,11 @@ function proxyStatusCountColor(status) {
 }
 function formatProxyLatencySummary(metrics) {
     if (metrics.latency_ms.count === 0) {
-        return `latency last=${textDim("-")} avg=${textDim("-")} min=${textDim("-")} max=${textDim("-")}`;
+        return `latency last=${textDim("-")} avg=${textDim("-")}`;
     }
     return [
         `latency last=${textYellow(formatLatencyMs(metrics.latency_ms.last ?? 0))}`,
         `avg=${textYellow(formatLatencyMs(averageLatency(metrics.latency_ms)))}`,
-        `min=${textYellow(formatLatencyMs(metrics.latency_ms.min ?? 0))}`,
-        `max=${textYellow(formatLatencyMs(metrics.latency_ms.max ?? 0))}`,
     ].join(" ");
 }
 export function proxyRequestTableColumns(view) {
@@ -4369,20 +4358,7 @@ function renderProxyRequestTable(rows, view) {
     }).map((line) => `${PROXY_REQUEST_TABLE_INDENT}${line}`);
 }
 function proxyActiveRowCount(metrics) {
-    return metrics.active_requests.length === 0
-        ? 1
-        : Math.min(metrics.active_requests.length, PROXY_RECENT_RENDER_COUNT);
-}
-function proxyActiveSectionLineCount(metrics) {
-    return 1 + 1 + proxyActiveRowCount(metrics);
-}
-function proxyPathLineCount(options) {
-    return options.watch ? 0 : 5;
-}
-function proxyPolicySummaryLineCount(state, options) {
-    if (!options.watch || !state || isProxyInspectionMode(state.mode))
-        return 2;
-    return state.mode === PROXY_MODE_RETRY ? 1 : 0;
+    return Math.min(metrics.active_requests.length, PROXY_RECENT_RENDER_COUNT);
 }
 function resolveProxyHistoryRenderCount(metrics, options, state) {
     if (options.historyVisible === false) {
@@ -4399,36 +4375,30 @@ function resolveProxyHistoryRenderCount(metrics, options, state) {
         return PROXY_RECENT_RENDER_COUNT;
     }
     const fixedLines = 1
-        + proxyPathLineCount(options)
-        + 2
-        + proxyPolicySummaryLineCount(state, options)
-        + proxyActiveSectionLineCount(metrics)
         + 1
         + 1
-        + 1;
+        + formatProxyPolicyLines(state, metrics).length
+        + 1
+        + proxyActiveRowCount(metrics)
+        + (options.watch ? 1 : 0);
     return Math.max(0, terminalRows - fixedLines);
 }
-function formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache, count = PROXY_RECENT_RENDER_COUNT) {
-    if (metrics.active_requests.length === 0) {
+function formatProxyRequestRows(metrics, historyRecords, historyCount, historyVisible, now, view, sessionColorIndexes, priceCache) {
+    const activeRows = metrics.active_requests
+        .slice(0, PROXY_RECENT_RENDER_COUNT)
+        .map((record) => formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache));
+    const historyRows = historyVisible
+        ? historyRecords
+            .slice(0, historyCount)
+            .map((record) => styleTableRow(formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache), textDim))
+        : [];
+    if (activeRows.length === 0 && historyRows.length === 0) {
         return [
             ...renderProxyRequestTable([], view),
-            `  ${textDim("no active requests")}`,
+            `  ${textDim(historyVisible ? "no requests" : "no live requests")}`,
         ];
     }
-    return renderProxyRequestTable(metrics.active_requests.slice(0, count).map((record) => formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache)), view);
-}
-function formatProxyHistoryRows(records, count, view, sessionColorIndexes, priceCache) {
-    if (count === 0) {
-        return renderProxyRequestTable([], view);
-    }
-    if (records.length === 0) {
-        return [
-            ...renderProxyRequestTable([], view),
-            `  ${textDim("no historical requests")}`,
-        ];
-    }
-    const nowMs = Date.now();
-    return renderProxyRequestTable(records.slice(0, count).map((record) => styleTableRow(formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache), textDim)), view);
+    return renderProxyRequestTable([...activeRows, ...historyRows], view);
 }
 async function readProxyRequestTail(stateRoot, count) {
     if (count <= 0) {
@@ -4510,31 +4480,16 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ...metrics.active_requests.slice(0, PROXY_RECENT_RENDER_COUNT),
         ...(historyVisible ? resolvedHistoryRecords.slice(0, historyCount) : []),
     ]);
-    const watchPolicyLines = !options.watch || !state
-        ? [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)]
-        : state.mode === PROXY_MODE_PASSTHROUGH
-            ? []
-            : state.mode === PROXY_MODE_RETRY
-                ? [formatProxyStatusRetrySummary(metrics.recent_requests)]
-                : [formatProxyPolicySummary(metrics.recent_requests), formatProxyReasoningSummary(metrics)];
+    const policyLines = formatProxyPolicyLines(state, metrics);
     return [
         fitTerminalLine(formatProxyStatusLine(now, state, runtime)),
-        ...formatProxyPathsLines(options).map((line) => fitTerminalLine(line)),
         fitTerminalLine(formatProxyRequestsSummary(metrics, profileOrder)),
-        ...watchPolicyLines.map((line) => fitTerminalLine(line)),
         fitTerminalLine(formatProxyLatencySummary(metrics)),
-        textBold("active"),
-        ...formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache),
-        ...(historyVisible ? [
-            textBold("history"),
-            ...formatProxyHistoryRows(resolvedHistoryRecords, historyCount, view, sessionColorIndexes, priceCache),
-        ] : []),
+        ...policyLines.map((line) => fitTerminalLine(line)),
+        ...formatProxyRequestRows(metrics, resolvedHistoryRecords, historyCount, historyVisible, now, view, sessionColorIndexes, priceCache),
         ...(options.watch
-            ? [fitTerminalLine(textDim(`view: ${view}  history:${historyVisible ? "on" : "off"}  keys: v view  t history  q/Ctrl-C exit`))]
-            : formatCommandFooterLines([{
-                    label: "commands:",
-                    commands: ["watch", "reroute", "mode", "config", "install", "restart", "restore", "serve", "--help"],
-                }]).map(textDim)),
+            ? [fitTerminalLine(textDim(`view=${view} history=${historyVisible ? "on" : "off"}  v:view t:history q:quit`))]
+            : []),
     ];
 }
 async function runProxyStatusOnce(options) {

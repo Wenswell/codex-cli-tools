@@ -257,25 +257,19 @@ Before client headers are committed, total timeout, first-progress timeout, or t
 
 ## Status view
 
-`ccs proxy` prints a full snapshot:
+`ccs proxy` prints a compact operational snapshot:
 
-- Title line: labeled `ccs proxy`, current `HH:mm:ss` time, runtime, mode, active retry window/backoff or `retry: off`, latency deadline, pid, server version, protocol, proxy URL, and refresh interval.
-- Path lines: state, requests, events, runtime, and config paths.
-- Summary line: `status events=... active=... 200=... 404=... 502=... upstreams=...`.
-- Policy line: `policy retries=... capacity=... 429=... 503=... reasoning=... timeout=... transport=...`.
-- Reasoning line: `reasoning total=... max=...` plus any non-zero `0=...`, `516=...`, `1034=...`, `1552=...`, and `other=...` groups. When continuation recovery activity exists, the line also renders `recovery=... recovered=... exhausted=...`.
-- Latency line: `latency last=... avg=... min=... max=...`.
-- `active`: up to 5 current requests rendered by the shared request-row formatter.
-- `history`: completed requests rendered by the shared request-row formatter.
-- Command footer: the immediate proxy subcommands plus the complete-help entry. Status options, modes, and configuration syntax live under `ccs proxy --help`.
+- Runtime line: labeled `ccs proxy`, current `HH:mm:ss` time, health, mode, listen address, pid, and combined package/protocol version.
+- Traffic line: recent completed request count, live request count, non-zero exact status event counts, and non-zero upstream hit counts.
+- Latency line: last and average completed request latency.
+- Policy lines: only active configuration and non-zero activity. `passthrough` has no policy line. `retry` shows its retry window/backoff and non-zero 429/503 retry counts. `intercept` and `recovery` show an enabled deadline, non-zero retry categories, and non-zero reasoning/recovery groups.
+- One request table containing live rows first and completed rows second. The `state` column distinguishes `live` and `done`; completed rows remain dim. The table header is rendered once, and an entirely empty table renders `no requests` once.
 
-```text
-commands: watch | mode | config | install | restart | restore | serve | --help
-```
+Default output omits storage paths, disabled policy values, zero policy counters, latency minimum/maximum, empty request sections, and the command footer. File locations and commands remain documented by `ccs proxy --help` and this specification.
 
 History row count follows these rules:
 
-- TTY output computes the count from `process.stdout.rows` after title, path, summary, active, history header, and command footer lines are reserved.
+- TTY output computes the count from `process.stdout.rows` after runtime, traffic, latency, active policy, live request, table-header, and watch-footer lines are reserved.
 - Tiny terminals can render zero history rows.
 - Non-TTY output renders 5 history rows for deterministic piped output.
 - `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch`.
@@ -284,20 +278,20 @@ History row count follows these rules:
 - Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
 - Explicit `--history N` reads the tail of `proxy-requests.jsonl` when `N` exceeds the snapshot length.
 
-`ccs proxy watch` renders live status in the terminal alternate screen, repaints immediately on terminal resize, and omits path lines. Each refresh reads stored state and current health without changing the runtime. `passthrough` hides policy and reasoning summaries. `retry` renders only `retry total=... 429=... 503=...`. `intercept` and `recovery` retain the complete policy and reasoning summaries. Latency remains visible in every mode. The footer shows the current view, history visibility, and keys; `v` cycles views, `t` toggles history, and `q` or `Ctrl-C` exits.
+`ccs proxy watch` renders the same status layout in the terminal alternate screen and repaints immediately on terminal resize. Each refresh reads stored state and current health without changing the runtime. The compact footer shows the current view, history visibility, and keys; `v` cycles views, `t` toggles completed rows, and `q` exits. `Ctrl-C` also exits through the standard terminal signal path.
 
-`status events` is the sum of exact status-code event counters from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. The policy line sums all retry categories, including separate 429 and 503 counts, from every `retry_summary` in the complete recent-request window. Status counters render in ascending numeric order and omit zero counts.
+Exact status-code event counters come from `proxy.json.metrics.recent_requests`. Each guard retry action contributes its observed upstream status, and each completed model API request contributes its final status unless the final local guard failure is already represented by a `return_status_502` action. Policy retry counts sum every `retry_summary` in the complete recent-request window. Status and policy counters render in ascending or stable category order and omit zero counts.
 
 Continuation recovery counters use the same `proxy.json.metrics.recent_requests` window and the same `guard_actions` fact source. `recovery` counts `continuation_recovery` actions. `recovered` counts requests with at least one continuation recovery action that finish with an accepted status below `400`. `exhausted` counts requests with at least one continuation recovery action and a final `return_status_502` guard action.
 
-`reasoning total` is the sum of explicit reasoning-token events from completed requests in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. `max` is the largest observed `reasoning_tokens` value and renders `-` when none have been observed. Reasoning counters render non-zero fixed groups: `0`, every guarded value from `REASONING_EQUALS`, and `other` for every remaining observed value. Guarded-value counts render red. The `0` count and `recovery` count render yellow. `other` and non-guarded max values render green. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
+Reasoning counters are derived from explicit reasoning-token events in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. The view renders only non-zero fixed groups (`0`, every guarded value from `REASONING_EQUALS`) plus `other` for every remaining observed value. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
 Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. The three visible column sets are:
 
 ```text
-overview  session time up model api dur. size result
-tokens    session time up model input output cached result
-cost      session time up model input$ output$ cached$ total$ result
+overview  state session time up model api dur. size result
+tokens    state session time up model input output cached result
+cost      state session time up model input$ output$ cached$ total$ result
 ```
 
 The model column is 10 cells wide and describes the current or final attempt. Missing request and upstream models render dim `-`. A request-only or upstream-only model renders normally. Equal raw values render the upstream model green; different raw values render the actual upstream model red. Comparison precedes `gpt-` to `o` abbreviation and truncation, so raw `gpt-5.6-sol` and `o5.6-sol` display the same abbreviated text in red.
@@ -414,9 +408,9 @@ Reasoning text observation paths:
 The status command provides three request-table views:
 
 ```text
-overview  session time up model api dur. size result
-tokens    session time up model input output cached result
-cost      session time up model input$ output$ cached$ total$ result
+overview  state session time up model api dur. size result
+tokens    state session time up model input output cached result
+cost      state session time up model input$ output$ cached$ total$ result
 ```
 
 - `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.
@@ -462,7 +456,7 @@ cost      session time up model input$ output$ cached$ total$ result
 - Client aborts during strict SSE buffering complete history as `499`.
 - The overview status table displays protocol conversion in `api`; token and cost views keep their dedicated usage columns.
 - Status tables keep equal visible session ids the same color and avoid color reuse among the first 11 distinct visible ids, including ids whose direct hash colors collide. Tests assert the complete selected ANSI color set.
-- Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and rendered as `reasoning total=... max=...` plus non-zero grouped counts.
+- Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and render only as non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Completed model API requests are appended to bounded `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
 - Background stdout/stderr are written to `proxy-runtime.log`.
