@@ -259,17 +259,18 @@ Before client headers are committed, total timeout, first-progress timeout, or t
 
 `ccs proxy` prints a compact operational snapshot:
 
-- Runtime line: labeled `ccs proxy`, current `HH:mm:ss` time, health, mode, listen address, pid, and combined package/protocol version.
-- Traffic line: recent completed request count, live request count, non-zero exact status event counts, and non-zero upstream hit counts.
-- Latency line: last and average completed request latency.
+- Runtime line: labeled `ccs proxy`, current `HH:mm:ss` time, mode, and last/average completed request latency. Healthy runtime identity fields are omitted; unhealthy state adds diagnostic health and runtime identity.
+- Status line: non-zero exact status event counts.
 - Policy lines: only active configuration and non-zero activity. `passthrough` has no policy line. `retry` shows its retry window/backoff and non-zero 429/503 retry counts. `intercept` and `recovery` show an enabled deadline, non-zero retry categories, and non-zero reasoning/recovery groups.
-- One request table containing live rows first and completed rows second. The `state` column distinguishes `live` and `done`; completed rows remain dim. The table header is rendered once, and an entirely empty table renders `no requests` once.
+- `active` section: current requests use the full request table. When empty, only `active 0` is rendered.
+- `history` section: completed requests remain separate and dim. Consecutive records with the same session, upstream, actual model, and API conversion are grouped under one context line. Group rows render only `time status dur. size result`; consecutive equal status and result values are shown once, then left blank until they change. Token and cost views replace duration/size with their dedicated measurements.
+- Results use canonical failure codes when a structured code exists. Status `499` client-close text renders as `client abort`; reasoning-guard text already represented by guard prefixes is omitted.
 
-Default output omits storage paths, disabled policy values, zero policy counters, latency minimum/maximum, empty request sections, and the command footer. File locations and commands remain documented by `ccs proxy --help` and this specification.
+Default output omits healthy runtime identity, storage paths, disabled policy values, zero policy counters, latency minimum/maximum, empty table headers, and the command footer. File locations and commands remain documented by `ccs proxy --help` and this specification.
 
 History row count follows these rules:
 
-- TTY output computes the count from `process.stdout.rows` after runtime, traffic, latency, active policy, live request, table-header, and watch-footer lines are reserved.
+- TTY output computes the count from `process.stdout.rows` after runtime, status, active policy, active section, history section, history group lines, and watch footer are reserved.
 - Tiny terminals can render zero history rows.
 - Non-TTY output renders 5 history rows for deterministic piped output.
 - `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch`.
@@ -286,12 +287,20 @@ Continuation recovery counters use the same `proxy.json.metrics.recent_requests`
 
 Reasoning counters are derived from explicit reasoning-token events in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. The view renders only non-zero fixed groups (`0`, every guarded value from `REASONING_EQUALS`) plus `other` for every remaining observed value. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
-Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. The three visible column sets are:
+Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. Active rows use these column sets:
 
 ```text
-overview  state session time up model api dur. size result
-tokens    state session time up model input output cached result
-cost      state session time up model input$ output$ cached$ total$ result
+overview  session time up model api dur. size result
+tokens    session time up model input output cached result
+cost      session time up model input$ output$ cached$ total$ result
+```
+
+History group rows use these column sets:
+
+```text
+overview  time status dur. size result
+tokens    time status input output cached result
+cost      time status input$ output$ cached$ total$ result
 ```
 
 The model column is 10 cells wide and describes the current or final attempt. Missing request and upstream models render dim `-`. A request-only or upstream-only model renders normally. Equal raw values render the upstream model green; different raw values render the actual upstream model red. Comparison precedes `gpt-` to `o` abbreviation and truncation, so raw `gpt-5.6-sol` and `o5.6-sol` display the same abbreviated text in red.
@@ -408,9 +417,9 @@ Reasoning text observation paths:
 The status command provides three request-table views:
 
 ```text
-overview  state session time up model api dur. size result
-tokens    state session time up model input output cached result
-cost      state session time up model input$ output$ cached$ total$ result
+overview  session time up model api dur. size result
+tokens    session time up model input output cached result
+cost      session time up model input$ output$ cached$ total$ result
 ```
 
 - `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.

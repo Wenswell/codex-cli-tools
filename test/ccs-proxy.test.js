@@ -627,19 +627,21 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.recent_requests[2].status, 200);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /healthy\s+recovery\s+http:\/\/127\.0\.0\.1:\d+\s+pid=\d+\s+v\S+\/p7/);
+    assert.match(output, /ccs proxy\s+\d\d:\d\d:\d\d\s+recovery\s+last=\S+\s+avg=\S+/);
+    assert.doesNotMatch(output, /healthy|http:\/\/127\.0\.0\.1|pid=|\/p7/);
     assert.doesNotMatch(output, /(?:state|requests|events|runtime|config): ~\//);
     assert.doesNotMatch(output, new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(output, /requests recent=10 live=0 status=200=8 404=1 503=1 upstream=input=10/);
+    assert.match(output, /^status 200=8 404=1 503=1$/m);
     assert.doesNotMatch(output, /^policy /m);
     assert.doesNotMatch(output, /^reasoning /m);
     assert.doesNotMatch(output, /0=0|516=0|1034=0|1552=0|other=0/);
-    assert.match(output, /latency last=\d+ms avg=\d+ms/);
+    assert.match(output, /last=\d+ms\s+avg=\d+ms/);
     assert.doesNotMatch(output, /\bmin=|\bmax=/);
-    assert.match(output, /state\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
-    assert.equal((output.match(/state\s+session\s+time\s+up\s+model/g) ?? []).length, 1);
-    assert.match(output, /done\s+\S+\s+\d\d:\d\d:\d\d\s+input\s+-\s+-\s+\d+ms\s+\d+B\s+down/);
-    assert.match(output, /done\s+\S+\s+\d\d:\d\d:\d\d\s+input\s+-\s+-\s+\d+ms\s+\d+B\s+missing/);
+    assert.match(output, /^active 0$/m);
+    assert.match(output, /^history 10$/m);
+    assert.match(output, /time\s+status\s+dur\.\s+size\s+result/);
+    assert.match(output, /\d\d:\d\d:\d\d\s+503\s+\d+ms\s+\d+B\s+down/);
+    assert.match(output, /\d\d:\d\d:\d\d\s+404\s+\d+ms\s+\d+B\s+missing/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output, /^commands:/m);
@@ -1010,9 +1012,10 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /state\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+    assert.match(output, /active 1\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
     assert.match(output, /chat-stre…/);
-    assert.match(output, /\s-\s+-\s+\d+ms/);
+    assert.match(output, /^\s+-\s+input\s+-$/m);
+    assert.match(output, /\s200\s+\d+ms/);
     assert.match(output, /responses…/);
 
     secondHold.finish();
@@ -1165,8 +1168,8 @@ test("proxy uses an explicit run profile or profiles.current and passes upstream
     assert.equal(state.metrics.recent_requests.find((record) => record.upstream === "input")?.attempts, 1);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /upstream=ciii=5/);
-    assert.match(output, /input=1/);
+    assert.match(output, /^\s+-\s+ciii\s+-$/m);
+    assert.match(output, /^\s+-\s+input\s+-$/m);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -1459,7 +1462,7 @@ test("proxy records upstream http failures and client request attempts separatel
       { isTTY: false, columns: 180, rows: 40 },
       () => captureConsole(() => runProxyCommand(["--history", "2"], proxyOptions)),
     );
-    assert.match(output, /\[client:2\] upstream_http_502: upstream returned HTTP 502/);
+    assert.match(output, /\[client:2\] upstream_http_502/);
 
     const jsonl = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(jsonl.map((record) => record.client_request_attempt), [1, 2]);
@@ -2960,7 +2963,7 @@ test("proxy exhausts Responses continuation recovery before guard response", asy
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /reasoning .*recovery=3 recovered=0 exhausted=1/);
-    assert.match(output, /\[rec:1552 rec:1552 rec:1552 block:1552\] reasoning_guard_triggered reasoning_tokens=1552/);
+    assert.match(output, /\[rec:1552 rec:1552 rec:1552 block:1552\]/);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -3919,7 +3922,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     assert.equal(glmText.reasoning_text_source, "sse.data/choices/0/delta/reasoning_content");
 
     const output = await captureConsole(() => runProxyCommand(["--history", "4"], proxyOptions));
-    assert.match(output, /glm-5\.2\s+-\s+\d+ms/);
+    assert.match(output, /glm-5\.2\n\s+\d\d:\d\d:\d\d\s+200\s+\d+ms/);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -4348,14 +4351,14 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /state\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+  assert.match(lines, /active 2\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+  assert.match(lines, /history 2\n\s+time\s+status\s+dur\.\s+size\s+result/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /live\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+R→C\s+0ms\s+2\.00K/);
-  assert.match(lines, /live\s+019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\s+0ms\s+-/);
-  assert.match(lines, /done\s+019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+-\s+56ms\s+32\.0K/);
-  assert.match(lines, /done\s+019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
-  assert.equal((lines.match(/state\s+session\s+time\s+up\s+model/g) ?? []).length, 1);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+R→C\s+0ms\s+2\.00K/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\s+0ms\s+-/);
+  assert.match(lines, /019f0df6\s+input\s+o5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K/);
+  assert.match(lines, /019f0dfb\s+input\s+o5\.5\n\s+\d\d:\d\d:01\s+502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\]/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
 });
 
@@ -4455,8 +4458,10 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   const { stdout } = await execNodeScript(script);
   const renderedLines = JSON.parse(stdout);
   const output = renderedLines.join("\n");
-  const activeRow = renderedLines.find((line) => stripAnsi(line).trimStart().startsWith("live ") && line.includes("01a01e23"));
-  const historyRow = renderedLines.find((line) => stripAnsi(line).trimStart().startsWith("done ") && line.includes("01a01e23"));
+  const activeIndex = renderedLines.findIndex((line) => stripAnsi(line) === "active 1");
+  const historyIndex = renderedLines.findIndex((line) => stripAnsi(line).startsWith("history "));
+  const activeRow = renderedLines.slice(activeIndex + 1, historyIndex).find((line) => line.includes("01a01e23"));
+  const historyRow = renderedLines.slice(historyIndex + 1).find((line) => stripAnsi(line).trimStart().startsWith("08:00:02"));
   const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m01a01e23\u001b\[0m)/g)].map((match) => match[1]);
   const otherSession = output.match(/(\u001b\[[0-9;]*m01a0219e\u001b\[0m)/)?.[1];
   const sessionColors = new Set(
@@ -4474,6 +4479,45 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   assert.notEqual(otherSession, sameSession[0]);
   assert.deepEqual([...sessionColors].sort((left, right) => left - right), [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214]);
   assert.match(output, /\u001b\[2m-\u001b\[0m/);
+});
+
+test("proxy history groups repeated context and renders status and result changes once", () => {
+  const repeated = (completedAt, status, error) => proxyHistoryRecord({
+    session: "019f0df6",
+    completed_at: completedAt,
+    upstream: "input",
+    request_model: "gpt-5.5",
+    upstream_model: "gpt-5.5",
+    status,
+    error,
+  });
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:04.000Z"),
+    proxyStateFixture({
+      recent_requests: [
+        repeated("2026-01-01T00:00:03.000Z", 499, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:02.000Z", 499, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:01.000Z", 200, null),
+      ],
+    }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.3.7", protocol: 7 },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot: "/tmp/codex-tools",
+      historyCount: 3,
+    },
+  ).map(stripAnsi);
+  const output = lines.join("\n");
+  const historyRows = lines.filter((line) => /^\d\d:\d\d:\d\d\s/.test(line.trimStart()));
+
+  assert.equal((output.match(/019f0df6\s+input\s+o5\.5/g) ?? []).length, 1);
+  assert.equal((output.match(/client abort/g) ?? []).length, 1);
+  assert.match(historyRows[0], /499\s+123ms\s+-\s+client abort/);
+  assert.doesNotMatch(historyRows[1], /499|client abort/);
+  assert.match(historyRows[2], /200\s+123ms/);
 });
 
 test("proxy status result column stays single-line and expands with terminal width", () => {
@@ -4528,13 +4572,13 @@ test("proxy status result column stays single-line and expands with terminal wid
     },
   ));
 
-  const narrowLines = render(100).map(stripAnsi);
+  const narrowLines = render(60).map(stripAnsi);
   const wideLines = render(150).map(stripAnsi);
   const narrowRow = narrowLines.find((line) => line.includes("upstream_error"));
   const wideRow = wideLines.find((line) => line.includes("upstream_error"));
   assert.ok(narrowRow);
   assert.ok(wideRow);
-  assert.equal(narrowRow.length <= 100, true);
+  assert.equal(narrowRow.length <= 60, true);
   assert.equal(wideRow.length <= 150, true);
   assert.equal(narrowRow.includes("diagnostic"), false);
   assert.equal(wideRow.includes("diagnostic"), true);
@@ -4558,7 +4602,8 @@ test("proxy watch hides summaries that do not apply to the active mode", () => {
   ).map(stripAnsi);
   assert.equal(passthrough.some((line) => line.startsWith("policy ")), false);
   assert.equal(passthrough.some((line) => line.startsWith("reasoning ")), false);
-  assert.equal(passthrough.some((line) => line.startsWith("latency ")), true);
+  assert.equal(passthrough[0].includes("last="), true);
+  assert.equal(passthrough[0].includes("avg="), true);
 
   const retryRecord = proxyHistoryRecord({
     mode: "retry",
@@ -4592,9 +4637,9 @@ test("proxy watch hides summaries that do not apply to the active mode", () => {
       options,
     ).join("\n"),
   ));
-  assert.equal(renderedRows("recovery"), 15);
-  assert.equal(renderedRows("retry"), 14);
-  assert.equal(renderedRows("passthrough"), 15);
+  assert.equal(renderedRows("recovery"), 13);
+  assert.equal(renderedRows("retry"), 12);
+  assert.equal(renderedRows("passthrough"), 13);
 });
 
 test("proxy status and reasoning summaries use event counts", () => {
@@ -4672,7 +4717,7 @@ test("proxy status and reasoning summaries use event counts", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /requests recent=3 live=0 status=200=8 502=1 upstream=input=9/);
+  assert.match(lines, /^status 200=8 502=1$/m);
   assert.match(lines, /policy deadline=30\.0s\/10\.0m retry_then_502/);
   assert.match(lines, /policy retries=15 capacity=1 429=3 reasoning=2 timeout=4 transport=5/);
   assert.doesNotMatch(lines, /503=0/);
@@ -4716,7 +4761,7 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
   assert.equal(countHistoryRows(ttyTall), 12);
 
   const ttyTiny = render({}, { isTTY: true, columns: 140, rows: 8 });
-  assert.equal(countHistoryRows(ttyTiny), 4);
+  assert.equal(countHistoryRows(ttyTiny), 2);
 
   const explicit = render({ historyCount: 7 }, { isTTY: true, columns: 140, rows: 8 });
   assert.equal(countHistoryRows(explicit), 7);
@@ -4895,8 +4940,7 @@ test("proxy watch observes an older package and one-shot status replaces it", as
         },
       },
     ));
-    assert.match(watchOutput, /healthy\s+recovery/);
-    assert.match(watchOutput, /v0\.1\.0\/p6/);
+    assert.match(watchOutput, /ccs proxy\s+\d\d:\d\d:\d\d\s+recovery\s+last=-\s+avg=-/);
     assert.equal(oldProxy.exitCode, null);
     process.kill(oldProxyPid, 0);
     await assert.rejects(readFile(join(stateRoot, "proxy.log"), "utf8"), { code: "ENOENT" });
@@ -4906,7 +4950,7 @@ test("proxy watch observes an older package and one-shot status replaces it", as
     oldProxy = null;
 
     const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-    assert.match(statusOutput, new RegExp(`v${packageJson.version.replaceAll(".", "\\.")}\/p7`));
+    assert.doesNotMatch(statusOutput, /pid=|\/p7/);
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
     assert.equal(health.protocol, 7);
     assert.equal(health.version, packageJson.version);
@@ -5335,8 +5379,9 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
     assert.match(output, /ccs proxy/);
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
-    assert.match(output, /healthy\s+recovery\s+http:\/\/127\.0\.0\.1:\d+\s+pid=1234\s+v\S+\/p7/);
-    assert.match(output, /state\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+    assert.match(output, /ccs proxy\s+\d\d:\d\d:\d\d\s+recovery\s+last=-\s+avg=-/);
+    assert.match(output, /active 0/);
+    assert.match(output, /history 0/);
     assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
     assert.match(output, /view=overview history=on\s+v:view t:history q:quit/);
     const frame = output.split("\u001b[H")[1]?.split("\u001b[J")[0] ?? "";
@@ -6284,7 +6329,7 @@ function defaultStatusRetry() {
 
 function countHistoryRows(output) {
   return output.split("\n").map(stripAnsi)
-    .filter((line) => line.trimStart().startsWith("done ")).length;
+    .filter((line) => /^\d\d:\d\d:\d\d\s/.test(line.trimStart())).length;
 }
 
 function reasoningJson(model, reasoningTokens) {
@@ -6312,9 +6357,9 @@ async function closeServer(server) {
 
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
-  assert.deepEqual(titles("overview"), ["state", "session", "time", "up", "model", "api", "dur.", "size", "result"]);
-  assert.deepEqual(titles("tokens"), ["state", "session", "time", "up", "model", "input", "output", "cached", "result"]);
-  assert.deepEqual(titles("cost"), ["state", "session", "time", "up", "model", "input$", "output$", "cached$", "total$", "result"]);
+  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "api", "dur.", "size", "result"]);
+  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "result"]);
+  assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "result"]);
 });
 
 test("proxy view argument parsing accepts one initial view with optional history", () => {
@@ -6357,7 +6402,7 @@ test("proxy watch hidden history omits the section and reports footer state", ()
     },
   );
 
-  assert.equal(lines.some((line) => stripAnsi(line).trimStart().startsWith("done ")), false);
+  assert.equal(lines.some((line) => stripAnsi(line).startsWith("history ")), false);
   assert.match(stripAnsi(lines.at(-1)), /history=off\s+v:view t:history q:quit/);
 });
 
