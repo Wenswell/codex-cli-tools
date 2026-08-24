@@ -9,7 +9,20 @@ export function assertProfile(value, name) {
     if (typeof profile.baseURL !== "string" || typeof profile.apiKey !== "string") {
         throw new Error(`profile ${name} is missing baseURL or apiKey`);
     }
-    return { baseURL: profile.baseURL, apiKey: profile.apiKey };
+    const result = {
+        baseURL: profile.baseURL,
+        apiKey: profile.apiKey,
+    };
+    if (profile.routeConversion !== undefined) {
+        if (!profile.routeConversion
+            || typeof profile.routeConversion !== "object"
+            || !Object.hasOwn(profile.routeConversion, "enabled")
+            || typeof profile.routeConversion.enabled !== "boolean") {
+            throw new Error(`profile ${name} has invalid routeConversion`);
+        }
+        result.routeConversion = { enabled: profile.routeConversion.enabled };
+    }
+    return result;
 }
 export async function readProfiles() {
     const text = await readTextIfExists(profilesPath());

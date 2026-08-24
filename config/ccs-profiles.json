@@ -2,11 +2,17 @@
   "profiles": {
     "input": {
       "baseURL": "https://ai.input.im",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     },
     "ciii": {
       "baseURL": "https://codex.ciii.club",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     }
   },
   "current": "input",

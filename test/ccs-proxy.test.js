@@ -330,7 +330,7 @@ test("proxy state rejects old and incomplete request records", async () => {
     const oldRecord = proxyHistoryRecord({ schema_version: 5 });
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "proxy.json"), JSON.stringify(proxyStateFixture({ recent_requests: [oldRecord] })), "utf8");
-    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.schema_version: expected number 7/);
+    await assert.rejects(readProxyState(home), /recent_requests\[0\]\.schema_version: expected number 8/);
 
     const incompleteRecord = proxyHistoryRecord();
     delete incompleteRecord.final_action;
@@ -488,7 +488,7 @@ test("proxy records active and history request lifecycle", async () => {
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
-          state_schema_version: 2,
+          state_schema_version: 3,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: join(home, ".codex", "config.toml"),
           provider_name: "codex",
@@ -639,10 +639,10 @@ test("proxy records active and history request lifecycle", async () => {
     assert.match(output, /reasoning total=0 max=-/);
     assert.doesNotMatch(output, /0=0|516=0|1034=0|1552=0|other=0/);
     assert.match(output, /latency last=\d+ms avg=\d+ms min=\d+ms max=\d+ms/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result\n\s+no active requests/);
-    assert.match(output, /history\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
-    assert.match(output, /-\s+-\/503\s+\d+ms\s+\d+B\s+down/);
-    assert.match(output, /-\s+-\/404\s+\d+ms\s+\d+B\s+missing/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result\n\s+no active requests/);
+    assert.match(output, /history\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+    assert.match(output, /-\s+-\s+\d+ms\s+\d+B\s+down/);
+    assert.match(output, /-\s+-\s+\d+ms\s+\d+B\s+missing/);
     assert.doesNotMatch(output, /\bmethod\b/);
     assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output.split("\n").find((line) => line.startsWith("status ")) ?? "", /\bok\b/);
@@ -1011,11 +1011,11 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(activeOutputResolved, false);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
+    assert.match(output, /session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
+    assert.match(output, /active\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
     assert.match(output, /chat-stre…/);
-    assert.match(output, /\s-\s+-\/200/);
+    assert.match(output, /\s-\s+-\s+\d+ms/);
     assert.match(output, /responses…/);
 
     secondHold.finish();
@@ -3649,6 +3649,162 @@ test("proxy incremental SSE inspection preserves mixed framing and rejects overs
   }
 });
 
+test("proxy converts Codex Responses traffic for a Chat Completions-only provider", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let requests = 0;
+  const upstream = createServer(async (req, res) => {
+    requests += 1;
+    const url = new URL(req.url, "http://localhost");
+    assert.equal(url.pathname, "/api/v1/chat/completions");
+    const body = JSON.parse(await new Response(req).text());
+    if (body.model === "bad-json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{");
+      return;
+    }
+    if (body.stream) {
+      if (body.model === "bad-stream") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write('data: {"id":"chatcmpl_bad","created":123,"model":"bad-stream","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n\n');
+        setImmediate(() => res.end("data: {\n\n"));
+        return;
+      }
+      assert.deepEqual(body, {
+        model: "stealth/ox-alpha", stream: true, stream_options: { include_usage: true },
+        messages: [{ role: "user", content: "Hello" }],
+      });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"chatcmpl_stream","created":123,"model":"stealth/ox-alpha","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n\n');
+      res.end('data: {"id":"chatcmpl_stream","model":"stealth/ox-alpha","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}\n\ndata: [DONE]\n\n');
+      return;
+    }
+    assert.deepEqual(body, {
+      model: "stealth/ox-alpha", stream: false,
+      messages: [{ role: "system", content: "Answer plainly." }, { role: "user", content: "Hello" }],
+    });
+    const response = JSON.stringify({ id: "chatcmpl_1", created: 123, model: "stealth/ox-alpha", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "Hi" } }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } });
+    res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(response) });
+    res.end(response);
+  });
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, {
+      input: { baseURL: `http://127.0.0.1:${upstreamPort}/api/v1`, apiKey: "input-key", routeConversion: { enabled: true } },
+    }, "input");
+    await listenServer(upstream, upstreamPort);
+    const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+    await ensureProxyRunning(options);
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "stealth/ox-alpha", instructions: "Answer plainly.", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Hello" }] }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-length"), null);
+    const converted = await response.json();
+    assert.equal(converted.object, "response");
+    assert.equal(converted.status, "completed");
+    assert.equal(converted.model, "stealth/ox-alpha");
+    assert.deepEqual(converted.output[0].content, [{ type: "output_text", text: "Hi", annotations: [] }]);
+    assert.deepEqual(converted.usage, { input_tokens: 2, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 3 });
+    const invalid = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: "{" });
+    assert.equal(invalid.status, 400);
+    const invalidPayload = await invalid.json();
+    assert.equal(invalidPayload.error.code, "route_conversion_failed");
+    assert.equal(requests, 1);
+
+    const stream = await fetch(`http://127.0.0.1:${proxyPort}/responses?stream=1`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "stealth/ox-alpha", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Hello" }] }] }),
+    });
+    assert.equal(stream.status, 200);
+    const streamBody = await stream.text();
+    assert.match(streamBody, /event: response\.output_text\.delta/);
+    assert.match(streamBody, /"delta":"Hi"/);
+    assert.match(streamBody, /event: response\.completed/);
+
+    const invalidJsonResponse = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=bad-json`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "bad-json", input: "Hello" }),
+    });
+    assert.equal(invalidJsonResponse.status, 502);
+    await invalidJsonResponse.text();
+
+    const invalidStreamResponse = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=bad-stream`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "bad-stream", stream: true, input: "Hello" }),
+    });
+    assert.equal(invalidStreamResponse.status, 200);
+    await assert.rejects(invalidStreamResponse.text());
+
+    await waitForState(stateRoot, (state) => state.metrics.recent_requests.length === 5);
+    const records = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(records.length, 5);
+    for (const record of records) {
+      assert.equal(record.protocol_conversion, "responses_to_chat");
+      assert.equal(record.attempt_records[0].protocol_conversion, "responses_to_chat");
+      assert.equal(record.attempt_records[0].upstream_endpoint, "chat/completions");
+    }
+    assert.equal(records[0].conversion_failure_stage, null);
+    assert.equal(records[0].attempt_records[0].conversion_failure_stage, null);
+    assert.equal(records[1].status, 400);
+    assert.equal(records[1].upstream_status, null);
+    assert.equal(records[1].final_action, "route_conversion_failed");
+    assert.equal(records[1].conversion_failure_stage, "request");
+    assert.equal(records[1].failure_summary.type, "client_error");
+    assert.equal(records[1].failure_summary.message, invalidPayload.error.message);
+    assert.equal(records[1].attempt_records[0].conversion_failure_stage, "request");
+    assert.equal(records[1].attempt_records[0].upstream_status, null);
+    assert.equal(records[1].attempt_records[0].final_action, "route_conversion_failed");
+    assert.equal(records[3].status, 502);
+    assert.equal(records[3].client_status, 502);
+    assert.equal(records[3].upstream_status, 200);
+    assert.equal(records[3].final_action, "route_conversion_failed");
+    assert.equal(records[3].conversion_failure_stage, "response_json");
+    assert.equal(records[3].failure_summary.code, "route_conversion_failed");
+    assert.equal(records[3].attempt_records[0].conversion_failure_stage, "response_json");
+    assert.equal(records[4].status, 200);
+    assert.equal(records[4].client_status, 200);
+    assert.equal(records[4].upstream_status, 200);
+    assert.equal(records[4].final_action, "route_conversion_failed");
+    assert.equal(records[4].conversion_failure_stage, "response_stream");
+    assert.equal(records[4].failure_summary.code, "route_conversion_failed");
+    assert.equal(records[4].attempt_records[0].conversion_failure_stage, "response_stream");
+    assert.equal(records[4].attempt_records[0].upstream_stream_terminated, true);
+
+    const events = (await readFile(join(stateRoot, "proxy.log"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const conversionAttempts = events.filter((event) => event.event === "ccs_proxy_attempt_completed");
+    assert.equal(conversionAttempts.length, 5);
+    assert.equal(conversionAttempts[1].protocol_conversion, "responses_to_chat");
+    assert.equal(conversionAttempts[1].upstream_endpoint, "chat/completions");
+    assert.equal(conversionAttempts[1].conversion_failure_stage, "request");
+    assert.equal(conversionAttempts[3].conversion_failure_stage, "response_json");
+    assert.equal(conversionAttempts[4].conversion_failure_stage, "response_stream");
+    const conversionErrors = events.filter((event) => event.event === "ccs_proxy_request_error");
+    assert.deepEqual(conversionErrors.map((event) => event.conversion_failure_stage), ["request", "response_json", "response_stream"]);
+    assert.deepEqual(conversionErrors.map((event) => event.protocol_conversion), ["responses_to_chat", "responses_to_chat", "responses_to_chat"]);
+  } finally {
+    await shutdownProxyRuntime({ codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot: join(home, ".config", "codex-tools") }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy records reasoning token sources and reasoning text observations separately", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -3766,8 +3922,7 @@ test("proxy records reasoning token sources and reasoning text observations sepa
     assert.equal(glmText.reasoning_text_source, "sse.data/choices/0/delta/reasoning_content");
 
     const output = await captureConsole(() => runProxyCommand(["--history", "4"], proxyOptions));
-    assert.match(output, /glm-5\.2\s+text\/200/);
-    assert.match(output, /text\/200/);
+    assert.match(output, /glm-5\.2\s+-\s+\d+ms/);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -3865,7 +4020,7 @@ test("proxy writes current request record facts with prompt and response text ou
       (candidate) => candidate.metrics.recent_requests[0]?.request_model === "request-observed",
     );
     const record = state.metrics.recent_requests[0];
-    assert.equal(record.schema_version, 7);
+    assert.equal(record.schema_version, 8);
     assert.equal(record.final_action, "passed");
     assert.equal(record.client_status, 200);
     assert.equal(record.upstream_status, 200);
@@ -4101,7 +4256,7 @@ test("proxy status table renders configured columns and compact units", () => {
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
     {
-      state_schema_version: 2,
+      state_schema_version: 3,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
@@ -4132,6 +4287,7 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 2048,
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5",
+            protocol_conversion: "responses_to_chat",
             reasoning_tokens: 42,
             path: "/active",
           }),
@@ -4195,13 +4351,13 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
+  assert.match(lines, /session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+42\/200\s+0ms\s+2\.00K/);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\/-\s+0ms\s+-/);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+42\/200\s+56ms\s+32\.0K/);
-  assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\/502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
+  assert.match(lines, /active\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result\n\s+019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+R→C\s+0ms\s+2\.00K/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\s+0ms\s+-/);
+  assert.match(lines, /019f0df6\s+\d\d:\d\d:05\s+input\s+o5\.5\s+-\s+56ms\s+32\.0K/);
+  assert.match(lines, /019f0dfb\s+\d\d:\d\d:01\s+input3\s+o5\.5\s+-\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\] reasoning_guard_triggered reasoning_tokens=506/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
 });
 
@@ -4251,7 +4407,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
       )
     );
     const state = {
-      state_schema_version: 2,
+      state_schema_version: 3,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
@@ -4327,7 +4483,7 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
 test("proxy status result column stays single-line and expands with terminal width", () => {
   const stateRoot = "/tmp/codex-tools";
   const state = {
-    state_schema_version: 2,
+    state_schema_version: 3,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",
@@ -4376,13 +4532,13 @@ test("proxy status result column stays single-line and expands with terminal wid
     },
   ));
 
-  const narrowLines = render(118).map(stripAnsi);
+  const narrowLines = render(100).map(stripAnsi);
   const wideLines = render(150).map(stripAnsi);
   const narrowRow = narrowLines.find((line) => line.includes("upstream_error"));
   const wideRow = wideLines.find((line) => line.includes("upstream_error"));
   assert.ok(narrowRow);
   assert.ok(wideRow);
-  assert.equal(narrowRow.length <= 118, true);
+  assert.equal(narrowRow.length <= 100, true);
   assert.equal(wideRow.length <= 150, true);
   assert.equal(narrowRow.includes("diagnostic"), false);
   assert.equal(wideRow.includes("diagnostic"), true);
@@ -4862,9 +5018,9 @@ test("proxy status resets an incompatible state schema and starts the current ru
     const output = stripAnsi(await captureStdout(() => runProxyCommand([], options)));
     await waitForChildExit(oldProxy);
     oldProxy = null;
-    assert.match(output, /state:\s+reset schema legacy -> 2/);
+    assert.match(output, /state:\s+reset schema legacy -> 3/);
     const state = await readProxyState(stateRoot);
-    assert.equal(state.state_schema_version, 2);
+    assert.equal(state.state_schema_version, 3);
     assert.equal(state.installed_at, "2026-01-01T00:00:00.000Z");
     assert.equal(state.mode, "passthrough");
     assert.deepEqual(state.latency_guard, disabledLatencyGuard());
@@ -5103,7 +5259,7 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
     );
     await assert.rejects(
       runProxyCommand(["--history", "7"], proxyOptions),
-      /proxy-requests\.jsonl.*schema_version: expected number 7/,
+      /proxy-requests\.jsonl.*schema_version: expected number 8/,
     );
   } finally {
     await closeServer(health);
@@ -5183,7 +5339,7 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
     assert.match(output, /ccs proxy/);
     assert.match(output, /\u001b\[J\u001b\[\?25h\u001b\[\?1049l$/);
     assert.match(output, /proxy: http:\/\/127\.0\.0\.1:\d+\s+refresh: 1s/);
-    assert.match(output, /session\s+time\s+up\s+model\s+reas\.\/code\s+dur\.\s+size\s+result/);
+    assert.match(output, /session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
     assert.doesNotMatch(output, /^\u001b\[2K(state|requests|events|runtime|config):/m);
     assert.match(output, /view: overview\s+history:on\s+keys: v view\s+t history\s+q\/Ctrl-C exit/);
     const frame = output.split("\u001b[H")[1]?.split("\u001b[J")[0] ?? "";
@@ -5345,7 +5501,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
-          state_schema_version: 2,
+          state_schema_version: 3,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: codexConfigPath,
           provider_name: "codex",
@@ -5801,7 +5957,7 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
     join(stateRoot, "proxy.json"),
     JSON.stringify(
       {
-        state_schema_version: 2,
+        state_schema_version: 3,
         installed_at: "2026-01-01T00:00:00.000Z",
         codex_config_path: join(home, ".codex", "config.toml"),
         provider_name: "codex",
@@ -5914,13 +6070,15 @@ function holdControl() {
 
 function proxyHistoryRecord(overrides) {
   return {
-    schema_version: 7,
+    schema_version: 8,
     id: overrides?.id ?? "history-record",
     started_at: overrides?.started_at ?? "2026-01-01T00:00:00.000Z",
     completed_at: "2026-01-01T00:00:00.000Z",
     mode: "recovery",
     method: "POST",
     path: "/responses",
+    protocol_conversion: null,
+    conversion_failure_stage: null,
     status: 200,
     upstream_status: 200,
     client_status: 200,
@@ -6005,6 +6163,9 @@ function assertCompleteProxyAttemptRecord(record, expected) {
     "completed_at",
     "duration_ms",
     "upstream",
+    "protocol_conversion",
+    "upstream_endpoint",
+    "conversion_failure_stage",
     "upstream_status",
     "upstream_wait_ms",
     "time_to_first_chunk_ms",
@@ -6081,7 +6242,7 @@ function assertCompleteProxyGuardAction(record, expected) {
 
 function proxyStateFixture(metrics = {}) {
   return {
-    state_schema_version: 2,
+    state_schema_version: 3,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",
@@ -6168,7 +6329,7 @@ async function closeServer(server) {
 
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
-  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "reas./code", "dur.", "size", "result"]);
+  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "api", "dur.", "size", "result"]);
   assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "result"]);
   assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "result"]);
 });

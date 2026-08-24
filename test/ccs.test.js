@@ -35,6 +35,29 @@ test("ccs status footer separates direct commands from namespaces", async () => 
   }
 });
 
+test("ccs exposes route conversion in current, list, and profile views", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "https://input.example.test", apiKey: "input-key", routeConversion: { enabled: true } },
+      direct: { baseURL: "https://direct.example.test", apiKey: "direct-key" },
+    },
+    current: "input",
+  });
+  const env = { XDG_CACHE_HOME: join(home, ".cache") };
+  try {
+    const status = await runCcs(["dist/bin/ccs.js"], home, env);
+    const list = await runCcs(["dist/bin/ccs.js", "list"], home, env);
+    const profile = await runCcs(["dist/bin/ccs.js", "input"], home, env);
+
+    assert.match(status, /^conversion:\s+responses→chat$/m);
+    assert.match(list, /input\s+https:\/\/input\.example\.test.*responses→chat/);
+    assert.match(list, /direct\s+https:\/\/direct\.example\.test.*off/);
+    assert.match(profile, /^conversion:\s+responses→chat$/m);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs namespaces use compact footers and local help", async () => {
   const home = await writeProfiles({
     profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
@@ -1363,7 +1386,7 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
     await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-      state_schema_version: 2,
+      state_schema_version: 3,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: join(home, ".codex", "config.toml"),
       provider_name: "codex",
@@ -1517,7 +1540,7 @@ async function writeProfiles(profiles) {
 async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-    state_schema_version: 2,
+    state_schema_version: 3,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: join(home, ".codex", "config.toml"),
     provider_name: "codex",

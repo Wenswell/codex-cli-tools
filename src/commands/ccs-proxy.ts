@@ -32,11 +32,21 @@ import {
   type ProxyPolicyAction,
   type ProxyPolicyTrigger,
 } from "../lib/ccs-proxy-policy.js";
+import {
+  determineRouteConversion,
+  convertRequestBody,
+  convertResponseBody,
+  createStreamingResponseConverter,
+  rewriteUpstreamPath,
+  type RouteConversion,
+} from "../lib/proxy-router.js";
+import { ProtocolConversionError, buildResponsesChatToolContext, type ConversionFailureStage, type ResponsesRequest } from "../lib/responses-to-chat.js";
 
 type ProxyUpstream = {
   name: string;
   baseURL: string;
   apiKey: string;
+  routeConversion?: { enabled: boolean };
 };
 
 class ProxyProfileSelectionError extends Error {}
@@ -55,7 +65,7 @@ type ProxyUsageAttempt = {
 };
 
 type ProxyState = {
-  state_schema_version: 2;
+  state_schema_version: 3;
   installed_at: string;
   codex_config_path: string;
   provider_name: string;
@@ -104,6 +114,7 @@ type ProxyStatusCounts = Record<string, number>;
 type ProxyReasoningTokenCounts = Record<string, number>;
 type ProxyMode = "passthrough" | "retry" | "intercept" | "recovery";
 type ProxyRequestKind = "normal" | "context_compaction";
+type ProxyProtocolConversion = "responses_to_chat";
 type ProxyContinuationRecoveryCounts = {
   attempts: number;
   recovered: number;
@@ -111,13 +122,15 @@ type ProxyContinuationRecoveryCounts = {
 };
 
 type ProxyRequestRecord = {
-  schema_version: 7;
+  schema_version: 8;
   id: string;
   started_at: string;
   completed_at: string | null;
   mode: ProxyMode;
   method: string;
   path: string;
+  protocol_conversion: ProxyProtocolConversion | null;
+  conversion_failure_stage: ConversionFailureStage | null;
   status: number | null;
   upstream_status: number | null;
   client_status: number | null;
@@ -184,6 +197,9 @@ type ProxyAttemptRecord = {
   completed_at: string | null;
   duration_ms: number | null;
   upstream: string | null;
+  protocol_conversion: ProxyProtocolConversion | null;
+  upstream_endpoint: ProxyEndpointClass | null;
+  conversion_failure_stage: ConversionFailureStage | null;
   upstream_status: number | null;
   upstream_wait_ms: number | null;
   time_to_first_chunk_ms: number | null;
@@ -374,7 +390,7 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const PROXY_HEALTH_PROTOCOL = 7;
-const PROXY_STATE_SCHEMA_VERSION = 2;
+const PROXY_STATE_SCHEMA_VERSION = 3;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
 const PROXY_MODE_RETRY = "retry";
@@ -413,7 +429,8 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-const PROXY_REQUEST_SCHEMA_VERSION = 7;
+const PROXY_REQUEST_SCHEMA_VERSION = 8;
+const proxyConversionFailures = new WeakMap<Response, { stage: ConversionFailureStage; message: string }>();
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
@@ -421,7 +438,7 @@ const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
-const PROXY_TABLE_REASONING_STATUS_WIDTH = 10;
+const PROXY_TABLE_API_WIDTH = 4;
 const PROXY_TABLE_MODEL_WIDTH = 10;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_START_TIMEOUT_MS = 5000;
@@ -463,7 +480,7 @@ const PROXY_OVERVIEW_TABLE_COLUMNS: TableColumn[] = [
   { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
   { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
   { key: "model", title: "model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
-  { key: "reasoning_status", title: "reas./code", width: PROXY_TABLE_REASONING_STATUS_WIDTH, align: "right" },
+  { key: "api", title: "api", width: PROXY_TABLE_API_WIDTH, align: "right" },
   { key: "ms", title: "dur.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
   { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
   { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
@@ -979,7 +996,12 @@ function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string)
     }
     throw new Error(`profiles.current ${name} has no apiKey`);
   }
-  return { name, baseURL, apiKey: profile.apiKey };
+  return {
+    name,
+    baseURL,
+    apiKey: profile.apiKey,
+    routeConversion: profile.routeConversion,
+  };
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -1069,6 +1091,8 @@ function parseProxyRequestRecord(value: unknown, source: string): ProxyRequestRe
   ] as const) {
     requireProxyField(request, field, source, isNullableString, "string or null");
   }
+  requireProxyField(request, "protocol_conversion", source, (value) => value === null || value === "responses_to_chat", "responses_to_chat or null");
+  requireProxyField(request, "conversion_failure_stage", source, isConversionFailureStage, "conversion failure stage or null");
   requireProxyField(request, "mode", source, (value) => normalizeProxyMode(value) !== null, "proxy mode");
   requireProxyField(request, "request_kind", source, (value) => value === REQUEST_KIND_NORMAL || value === REQUEST_KIND_CONTEXT_COMPACTION, "request kind");
   for (const field of ["status", "upstream_status", "client_status"] as const) {
@@ -1171,6 +1195,10 @@ function requireProxyField(
 
 function isNullableString(value: unknown): boolean {
   return value === null || typeof value === "string";
+}
+
+function isConversionFailureStage(value: unknown): boolean {
+  return value === null || value === "request" || value === "response_json" || value === "response_stream";
 }
 
 function isNullableInteger(value: unknown): boolean {
@@ -1435,6 +1463,9 @@ async function completeProxyRequestMetric(state: ProxyState, stateRoot: string, 
       event: "ccs_proxy_attempt_completed",
       gateway_request_id: attempt.gateway_request_id,
       attempt_id: attempt.attempt_id,
+      protocol_conversion: attempt.protocol_conversion,
+      upstream_endpoint: attempt.upstream_endpoint,
+      conversion_failure_stage: attempt.conversion_failure_stage,
       final_action: attempt.final_action,
       upstream_http_status: attempt.upstream_status,
       client_http_status: attempt.client_http_status,
@@ -1593,25 +1624,6 @@ function formatProxyUpstreamHits(profileOrder: string[], metrics: ProxyMetrics):
     .join(",");
 }
 
-function formatProxyStatusCode(status: number | null): string {
-  if (status === null) {
-    return textDim("-");
-  }
-  if (status >= 500) {
-    return textRed(String(status));
-  }
-  if (status >= 400) {
-    return textYellow(String(status));
-  }
-  if (status >= 300) {
-    return textYellow(String(status));
-  }
-  if (status > 0) {
-    return textGreen(String(status));
-  }
-  return textDim("");
-}
-
 function truncateProxyText(value: string, max = 40): string {
   return truncateVisible(value, max);
 }
@@ -1682,7 +1694,7 @@ function formatProxyRequest(
   const upstream = formatProxyUpstream(record.upstream, record.attempts);
   return {
     time: textDim(time),
-    reasoning_status: formatProxyReasoningStatus(record.reasoning_tokens, record.reasoning_text_observed, record.status),
+    api: record.protocol_conversion === "responses_to_chat" ? colorName("R→C") : textDim("-"),
     up: upstream,
     ms: textYellow(formatLatencyMs(latencyMs)),
     size: formatProxyBytes(size),
@@ -1714,13 +1726,6 @@ function formatProxyModelDisplayName(model: string): string {
 
 function formatProxyReasoningTokens(reasoningTokens: number | null): string {
   return reasoningTokens === null ? textDim("-") : textYellow(String(reasoningTokens));
-}
-
-function formatProxyReasoningStatus(reasoningTokens: number | null, reasoningTextObserved: boolean, status: number | null): string {
-  const reasoning = reasoningTokens === null && reasoningTextObserved
-    ? textBlue("text")
-    : formatProxyReasoningTokens(reasoningTokens);
-  return `${reasoning}${textDim("/")}${formatProxyStatusCode(status)}`;
 }
 
 export function formatProxyModel(requestModel: string | null, upstreamModel: string | null): string {
@@ -1920,6 +1925,8 @@ async function logProxyRequestError(stateRoot: string, request: ProxyRequestReco
     path: request.path,
     upstream: request.upstream,
     attempts: request.attempts,
+    protocol_conversion: request.protocol_conversion,
+    conversion_failure_stage: request.conversion_failure_stage,
     status,
     error,
   });
@@ -2609,7 +2616,16 @@ function isUpstreamCapacityError(status: number, body: Buffer): boolean {
 
 function rewriteUpstreamUrl(requestUrl: URL, upstreamBaseUrl: string): string {
   const upstream = new URL(upstreamBaseUrl);
-  upstream.pathname = requestUrl.pathname.replace(/\/+$/, "") || "/";
+  const basePath = upstream.pathname.replace(/\/+$/, "");
+  let requestPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
+  if (basePath && basePath !== "/" && requestPath !== basePath && !requestPath.startsWith(`${basePath}/`)) {
+    if (basePath.endsWith("/v1") && (requestPath === "/v1" || requestPath.startsWith("/v1/"))) {
+      requestPath = requestPath.slice(3) || "/";
+    }
+    upstream.pathname = `${basePath}${requestPath.startsWith("/") ? "" : "/"}${requestPath}`;
+  } else {
+    upstream.pathname = requestPath;
+  }
   upstream.search = requestUrl.search;
   upstream.hash = "";
   return upstream.toString();
@@ -2831,6 +2847,24 @@ async function forwardRequest(
   signal?: AbortSignal,
 ): Promise<Response> {
   const requestUrl = new URL(request.url || "/", "http://localhost");
+
+  // Conversion is profile-scoped because Codex always speaks Responses.
+  const conversion = determineRouteConversion(requestUrl.pathname, upstream.routeConversion?.enabled === true);
+  let convertedBody = body;
+
+  if (conversion?.needsConversion) {
+    const result = convertRequestBody(body, conversion);
+    if (result.error) {
+      const response = new Response(JSON.stringify({ error: { message: result.error, type: "invalid_request_error", code: "route_conversion_failed" } }), {
+        status: 400,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+      proxyConversionFailures.set(response, { stage: "request", message: result.error });
+      return response;
+    }
+    convertedBody = result.body;
+  }
+
   const headers = new Headers();
   for (const [key, value] of Object.entries(request.headers)) {
     if (value === undefined) {
@@ -2859,12 +2893,24 @@ async function forwardRequest(
   }
   headers.set("authorization", `Bearer ${upstream.apiKey}`);
 
-  return fetch(rewriteUpstreamUrl(requestUrl, upstream.baseURL), {
+  if (convertedBody.length !== body.length) {
+    headers.set("content-length", convertedBody.length.toString());
+  }
+
+  const finalUrl = conversion?.needsConversion
+    ? rewriteUpstreamUrl(
+        new URL(rewriteUpstreamPath(requestUrl.pathname, conversion), requestUrl),
+        upstream.baseURL
+      )
+    : rewriteUpstreamUrl(requestUrl, upstream.baseURL);
+
+  const response = await fetch(finalUrl, {
     method: request.method,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : convertedBody,
     signal,
   });
+  return response;
 }
 
 type ProxyOutcome = {
@@ -2989,6 +3035,7 @@ class ProxyResponseWriteError extends Error {
     readonly responseBytes: number,
     readonly timeout: ProxyLatencyTimeoutError | null = null,
     readonly inspectionLimit = false,
+    readonly conversionFailureStage: ConversionFailureStage | null = null,
   ) {
     super(message);
     this.name = "ProxyResponseWriteError";
@@ -3896,6 +3943,7 @@ async function fetchUpstreamWithTransportRetry(
     const priorAttempt = currentProxyAttemptRecord(attemptState);
     attemptState.attempts += 1;
     const attemptRecord = createProxyAttemptRecord(attemptState.gatewayRequestId, attemptState.attempts, upstream.name);
+    annotateProxyAttemptRoute(request, upstream, attemptRecord);
     if (priorAttempt) {
       attemptRecord.retry_budget_used = priorAttempt.retry_budget_used;
       attemptRecord.retry_budget_remaining = priorAttempt.retry_budget_remaining;
@@ -3932,6 +3980,12 @@ async function fetchUpstreamWithTransportRetry(
       }
       await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
       const response = await fetchPromise;
+      const conversionFailure = finishRequestConversionFailure(response, attemptState, upstream.name);
+      if (conversionFailure) {
+        if (firstProgressTimer) clearTimeout(firstProgressTimer);
+        if (totalTimer) clearTimeout(totalTimer);
+        return conversionFailure;
+      }
       markProxyAttemptHeaders(attemptState, response.status);
       timeoutState.phase = "response_body";
       return {
@@ -4010,9 +4064,12 @@ async function proxyThroughActiveUpstreamPassthrough(
     attemptStartedAtMs: [performance.now()],
   };
   attemptRecords.push(createProxyAttemptRecord(gatewayRequestId, 1, upstream.name));
+  annotateProxyAttemptRoute(request, upstream, attemptRecords.at(-1)!);
   await callbacks.onAttempt?.(1, upstream.name);
   try {
     const response = await forwardRequest(request, upstream, body, callbacks.signal);
+    const conversionFailure = finishRequestConversionFailure(response, attemptState, upstream.name);
+    if (conversionFailure) return conversionFailure;
     markProxyAttemptHeaders(attemptState, response.status);
     await callbacks.onResponseStart?.(response.status, upstream.name);
     const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
@@ -4081,11 +4138,14 @@ async function proxyThroughActiveUpstreamStatusRetry(
     }
     attemptState.attempts += 1;
     attemptState.attemptRecords.push(createProxyAttemptRecord(gatewayRequestId, attemptState.attempts, upstream.name));
+    annotateProxyAttemptRoute(request, upstream, attemptState.attemptRecords.at(-1)!);
     attemptState.attemptStartedAtMs.push(performance.now());
     await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
 
     try {
       const response = await forwardRequest(request, upstream, body, callbacks.signal);
+      const conversionFailure = finishRequestConversionFailure(response, attemptState, upstream.name);
+      if (conversionFailure) return conversionFailure;
       markProxyAttemptHeaders(attemptState, response.status);
       await callbacks.onResponseStart?.(response.status, upstream.name);
       const attempt = currentProxyAttemptRecord(attemptState)!;
@@ -4202,6 +4262,33 @@ function isFetchFailedError(error: unknown): boolean {
   return error instanceof TypeError && error.message === "fetch failed";
 }
 
+function finishRequestConversionFailure(
+  response: Response,
+  attemptState: ProxyAttemptState,
+  upstream: string,
+): ProxyOutcome | null {
+  const failure = proxyConversionFailures.get(response);
+  if (failure?.stage !== "request") return null;
+  const stage = failure.stage;
+  const attempt = currentProxyAttemptRecord(attemptState);
+  const message = failure.message;
+  const failureSummary = proxyFailureSummary("client_error", "route_conversion_failed", message);
+  if (attempt) {
+    attempt.conversion_failure_stage = stage;
+    attempt.client_http_status = 400;
+    completeProxyAttempt(attempt, "route_conversion_failed", { failureSummary, remainingRetries: 0 });
+  }
+  return createProxyOutcome({
+    response,
+    upstream,
+    upstreamStatus: null,
+    attempts: attemptState.attempts,
+    attemptRecords: attemptState.attemptRecords,
+    failureSummary,
+    error: `route_conversion_failed: ${message}`,
+  });
+}
+
 function isClientAbortError(error: unknown, signal: AbortSignal | undefined): boolean {
   if (signal?.aborted) {
     return true;
@@ -4282,6 +4369,9 @@ function createProxyAttemptRecord(gatewayRequestId: string, attempt: number, ups
     completed_at: null,
     duration_ms: null,
     upstream,
+    protocol_conversion: null,
+    upstream_endpoint: null,
+    conversion_failure_stage: null,
     upstream_status: null,
     upstream_wait_ms: null,
     time_to_first_chunk_ms: null,
@@ -4321,6 +4411,13 @@ function createProxyAttemptRecord(gatewayRequestId: string, attempt: number, ups
     failure_summary: null,
     remaining_retries: null,
   };
+}
+
+function annotateProxyAttemptRoute(request: IncomingMessage, upstream: ProxyUpstream, attempt: ProxyAttemptRecord): void {
+  const requestPath = new URL(request.url || "/", "http://localhost").pathname;
+  const conversion = determineRouteConversion(requestPath, upstream.routeConversion?.enabled === true);
+  attempt.protocol_conversion = conversion?.needsConversion ? "responses_to_chat" : null;
+  attempt.upstream_endpoint = conversion?.needsConversion ? "chat/completions" : proxyEndpointClass(requestPath);
 }
 
 function currentProxyAttemptRecord(attemptState: ProxyAttemptState): ProxyAttemptRecord | null {
@@ -4547,6 +4644,9 @@ function requestFinalAction(input: { status: number | null; error: string | null
   if (input.status === 499) {
     return "client_aborted";
   }
+  if (input.failureSummary?.code === "route_conversion_failed") {
+    return "route_conversion_failed";
+  }
   if (input.failureSummary?.code === "upstream_total_timeout" || input.failureSummary?.code === "upstream_first_progress_timeout") {
     return input.status === NON_STREAM_STATUS_CODE ? "timeout_returned_502" : "timeout_disconnected_after_forward";
   }
@@ -4702,16 +4802,54 @@ async function writeResponse(
   onResponseBytes?: ProxyResponseBytesObserver,
   existingScanner?: ProxySseScanner,
   inspectStream = true,
+  conversion?: RouteConversion,
 ): Promise<number> {
-  res.writeHead(response.status, responseHeadersToObject(response.headers));
+  let finalResponse = response;
+  if (conversion?.needsConversion && response.body) {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/event-stream")) {
+      const converter = createStreamingResponseConverter(conversion);
+      const upstreamStream = Readable.fromWeb(response.body as never);
+      upstreamStream.on("error", (error) => {
+        if (!converter!.endAfterUpstreamDisconnect()) converter!.destroy(error);
+      });
+      const convertedStream = upstreamStream.pipe(converter!);
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+
+      finalResponse = new Response(Readable.toWeb(convertedStream) as ReadableStream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    } else {
+      const responseText = await response.text();
+      const converted = convertResponseBody(Buffer.from(responseText), conversion);
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+      finalResponse = new Response(converted, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
+  }
+
+  res.writeHead(finalResponse.status, responseHeadersToObject(finalResponse.headers));
   onHeadersWritten?.();
-  if (!response.body) {
+  if (!finalResponse.body) {
     return endEmptyResponse(res);
   }
-  const scanner = existingScanner ?? (inspectStream && isStreamContentType(`${response.headers.get("content-type") || ""}`)
-    ? new ProxySseScanner(endpointClass)
-    : null);
-  return writeReadableResponse(res, Readable.fromWeb(response.body as never), scanner, modelObserver, onResponseBytes);
+  const scanner = conversion?.needsConversion
+    ? (inspectStream && isStreamContentType(`${finalResponse.headers.get("content-type") || ""}`)
+      ? new ProxySseScanner(endpointClass)
+      : null)
+    : existingScanner ?? (inspectStream && isStreamContentType(`${finalResponse.headers.get("content-type") || ""}`)
+      ? new ProxySseScanner(endpointClass)
+      : null);
+  return writeReadableResponse(res, Readable.fromWeb(finalResponse.body as never), scanner, modelObserver, onResponseBytes);
 }
 
 async function endEmptyResponse(res: ServerResponse): Promise<number> {
@@ -4804,6 +4942,7 @@ async function writeReadableResponse(
       responseBytes,
       error instanceof ProxyLatencyTimeoutError ? error : null,
       error instanceof ProxyInspectionLimitError,
+      error instanceof ProtocolConversionError ? error.stage : null,
     )));
     res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
     res.on("close", () => {
@@ -5680,6 +5819,8 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           mode,
           method,
           path: url.pathname,
+          protocol_conversion: null,
+          conversion_failure_stage: null,
           status: null,
           upstream_status: null,
           client_status: null,
@@ -5743,6 +5884,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         let status: number | null = null;
         let upstreamStatus: number | null = null;
         let upstream: string | null = null;
+        let upstreamConversion: RouteConversion | undefined = undefined;
         let attempts = 0;
         let responseBytes = 0;
         let upstreamModel: string | null = null;
@@ -5812,8 +5954,10 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
                 };
               },
             onAttempt: async (attemptCount, upstreamName) => {
+              const attempt = attemptRecords.at(-1);
               activeRecord.upstream = upstreamName;
               activeRecord.attempts = attemptCount;
+              activeRecord.protocol_conversion = attempt?.protocol_conversion ?? null;
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
             onResponseStart: async (responseStatus, upstreamName) => {
@@ -5829,8 +5973,11 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           const guardedCallbacks: ProxyForwardCallbacks = {
             ...passthroughCallbacks,
             onAttempt: async (attemptCount, upstreamName) => {
+              const attempt = attemptRecords.at(-1);
               activeRecord.upstream = upstreamName;
               activeRecord.attempts = attemptCount;
+              activeRecord.protocol_conversion = attempt?.protocol_conversion ?? null;
+              activeRecord.conversion_failure_stage = null;
               if (attemptCount > 1) {
                 activeRecord.status = null;
                 activeRecord.upstream_status = null;
@@ -5889,6 +6036,10 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
             },
           };
+          const upstreamEndpointClass: ProxyEndpointClass | null = endpointClass === "responses"
+            && upstreamProfile.routeConversion?.enabled === true
+            ? "chat/completions"
+            : endpointClass;
           const outcome = mode === PROXY_MODE_PASSTHROUGH || !route.policyManaged
             ? await proxyThroughActiveUpstreamPassthrough(
               req,
@@ -5912,7 +6063,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               req,
               upstreamProfile,
               body,
-              endpointClass,
+              upstreamEndpointClass,
               activeRecord.request_kind,
               requestJson,
               activeRecord.id,
@@ -5927,6 +6078,15 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           status = outcome.response.status;
           upstreamStatus = outcome.upstreamStatus;
           upstream = outcome.upstream;
+          upstreamConversion = endpointClass === "responses"
+            && upstreamProfile.routeConversion?.enabled === true
+            && outcome.response.status >= 200
+            && outcome.response.status < 300
+            ? {
+                needsConversion: true,
+                toolContext: buildResponsesChatToolContext((requestJson ?? {}) as ResponsesRequest),
+              }
+            : undefined;
           attempts = outcome.attempts;
           upstreamModel = outcome.upstreamModel;
           upstreamModelSource = outcome.upstreamModelSource;
@@ -5980,6 +6140,11 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
           activeRecord.has_reasoning_item = hasReasoningItem;
           activeRecord.failure_summary = failureSummary;
           activeRecord.error = errorText;
+          activeRecord.protocol_conversion = lastProxyAttemptRecord(attemptRecords)?.protocol_conversion ?? activeRecord.protocol_conversion;
+          activeRecord.conversion_failure_stage = lastProxyAttemptRecord(attemptRecords)?.conversion_failure_stage ?? null;
+          if (activeRecord.conversion_failure_stage === "request" && errorText) {
+            await logProxyRequestError(options.stateRoot, activeRecord, status, errorText);
+          }
           await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
           const streamModelObserver: ProxyWriteModelObserver = {
             model: upstreamModel,
@@ -5999,6 +6164,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             responseProgress.observe,
             outcome.streamScanner,
             route.policyManaged && isProxyInspectionMode(mode),
+            upstreamConversion,
           );
           if (outcome.streamScanner) {
             const inspection = outcome.streamScanner.currentInspection();
@@ -6049,16 +6215,29 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         } catch (error) {
           const timeoutAfterForward = error instanceof ProxyResponseWriteError && error.timeout !== null && res.headersSent;
           const inspectionLimitAfterForward = error instanceof ProxyResponseWriteError && error.inspectionLimit && res.headersSent;
-          const responseControlLost = timeoutAfterForward || inspectionLimitAfterForward;
+          const conversionFailureStage = error instanceof ProtocolConversionError
+            ? error.stage
+            : error instanceof ProxyResponseWriteError
+              ? error.conversionFailureStage
+              : null;
+          const conversionAfterForward = conversionFailureStage === "response_stream" && res.headersSent;
+          const responseControlLost = timeoutAfterForward || inspectionLimitAfterForward || conversionAfterForward;
           if (error instanceof ProxyResponseWriteError) {
             status = responseControlLost ? (activeRecord.status ?? status) : error.status;
             responseBytes = error.responseBytes;
             errorText = error.message;
           } else {
-            status = status ?? (error instanceof ProxyProfileSelectionError ? 400 : 500);
+            status = status ?? (error instanceof ProxyProfileSelectionError
+              ? 400
+              : error instanceof ProtocolConversionError ? NON_STREAM_STATUS_CODE : 500);
             errorText = error instanceof Error ? error.message : String(error);
           }
-          failureSummary = error instanceof ProxyProfileSelectionError
+          if (conversionFailureStage && !res.headersSent) {
+            status = NON_STREAM_STATUS_CODE;
+          }
+          failureSummary = conversionFailureStage
+            ? proxyFailureSummary("gateway_error", "route_conversion_failed", errorText)
+            : error instanceof ProxyProfileSelectionError
             ? proxyFailureSummary("client_error", "invalid_proxy_profile", errorText)
             : responseControlLost
             ? proxyFailureSummary(
@@ -6076,33 +6255,44 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
               errorText,
             );
           const pendingAttempt = lastProxyAttemptRecord(attemptRecords);
+          activeRecord.conversion_failure_stage = conversionFailureStage;
+          if (pendingAttempt) {
+            pendingAttempt.conversion_failure_stage = conversionFailureStage;
+          }
           if (responseControlLost && pendingAttempt && error instanceof ProxyResponseWriteError) {
-            if (error.timeout) {
-              pendingAttempt.timeout_phase = error.timeout.phase;
-              pendingAttempt.timeout_limit_ms = error.timeout.limitMs;
-            }
-            pendingAttempt.timeout_response_control_lost = true;
             pendingAttempt.upstream_stream_terminated = true;
             pendingAttempt.client_http_status = status;
-            if (inspectionLimitAfterForward) {
-              pendingAttempt.policy_trigger = "response_inspection_limit";
-              pendingAttempt.policy_action = "return_502";
+            if (conversionAfterForward) {
+              completeProxyAttempt(pendingAttempt, "route_conversion_failed", { failureSummary });
+            } else {
+              if (error.timeout) {
+                pendingAttempt.timeout_phase = error.timeout.phase;
+                pendingAttempt.timeout_limit_ms = error.timeout.limitMs;
+              }
+              pendingAttempt.timeout_response_control_lost = true;
+              if (inspectionLimitAfterForward) {
+                pendingAttempt.policy_trigger = "response_inspection_limit";
+                pendingAttempt.policy_action = "return_502";
+              }
+              completeProxyAttempt(
+                pendingAttempt,
+                inspectionLimitAfterForward ? "response_inspection_limit_disconnected_after_forward" : "timeout_disconnected_after_forward",
+                { failureSummary },
+              );
             }
-            completeProxyAttempt(
-              pendingAttempt,
-              inspectionLimitAfterForward ? "response_inspection_limit_disconnected_after_forward" : "timeout_disconnected_after_forward",
-              { failureSummary },
-            );
           } else {
             completeLastPendingProxyAttemptRecord(
               attemptRecords,
-              status === 499 ? "client_aborted" : "gateway_error",
+              conversionFailureStage ? "route_conversion_failed" : status === 499 ? "client_aborted" : "gateway_error",
               { failureSummary },
             );
           }
           upstream = activeRecord.upstream;
           attempts = activeRecord.attempts;
-          if (status !== 499) {
+          if (conversionAfterForward) {
+            res.destroy(error instanceof Error ? error : undefined);
+          }
+          if (status !== 499 && !conversionAfterForward) {
             if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb)) {
               responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
             }
@@ -6141,6 +6331,8 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
 
         const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
         const lastAttempt = lastProxyAttemptRecord(attemptRecords);
+        activeRecord.protocol_conversion = lastAttempt?.protocol_conversion ?? activeRecord.protocol_conversion;
+        activeRecord.conversion_failure_stage = lastAttempt?.conversion_failure_stage ?? activeRecord.conversion_failure_stage;
         const attemptTiming = requestTimingFromAttempt(lastAttempt);
         const finalAction = requestFinalAction({ status, error: errorText, failureSummary });
         const retrySummary = createRetrySummary(attemptRecords);

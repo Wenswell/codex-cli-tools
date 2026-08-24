@@ -968,7 +968,14 @@ async function addProfile(defaultName) {
         const existing = profiles[name];
         const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
         const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
-        profiles[name] = { baseURL, apiKey };
+        // Ask about route conversion
+        const enableConversion = await askYesNo(input, "Provider only supports Chat Completions (convert Responses → Chat)", existing?.routeConversion?.enabled ?? false);
+        const profile = { baseURL, apiKey };
+        if (enableConversion) {
+            profile.routeConversion = { enabled: true };
+            console.log(textDim("  → Codex Responses traffic will use the provider's Chat Completions endpoint"));
+        }
+        profiles[name] = profile;
     }
     finally {
         input.close();
@@ -1002,9 +1009,11 @@ function printProfile(name, profiles) {
     }
     const normalized = assertProfile(profile, name);
     printProfileSummary("profile", name, normalized);
+    printKeyValue("conversion:", formatRouteConversion(normalized));
 }
 function printProfileDetails(name, profile) {
     printProfileSummary("profile", name, profile);
+    printKeyValue("conversion:", formatRouteConversion(profile));
 }
 async function resolveRunRoute(profileBaseUrl) {
     const runtime = await ensureProxyRunning(proxyOptions());
@@ -1040,6 +1049,9 @@ function formatDisplayPath(path) {
 }
 function printProfileSummary(label, name, profile) {
     printKeyValue(`${label}:`, `${colorName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`);
+}
+function formatRouteConversion(profile) {
+    return profile.routeConversion?.enabled ? textGreen("responses→chat") : textDim("off");
 }
 function buildUsageUrl(baseURL) {
     const value = baseURL.trim();
@@ -1262,6 +1274,22 @@ async function askOptional(input, label, current) {
     const value = await input.question(`${label}${suffix}: `);
     return value || current || "";
 }
+async function askYesNo(input, label, defaultValue) {
+    const defaultText = defaultValue ? "Y/n" : "y/N";
+    const value = await input.question(`${label} [${defaultText}]: `);
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === "") {
+        return defaultValue;
+    }
+    if (trimmed === "y" || trimmed === "yes") {
+        return true;
+    }
+    if (trimmed === "n" || trimmed === "no") {
+        return false;
+    }
+    // Invalid input, use default
+    return defaultValue;
+}
 function createPrompt() {
     const rl = createInterface({
         input: process.stdin,
@@ -1346,6 +1374,7 @@ async function printStatus() {
     const normalized = assertProfile(profile, current);
     printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}`);
     printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
+    printKeyValue("conversion:", formatRouteConversion(normalized));
     printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
     return normalized;
 }
@@ -1357,6 +1386,7 @@ async function printProfileList(profiles, includeUsage) {
         profile,
         type: includeUsage ? textDim("codex") : "",
         marker: name === current ? textGreen("*") : "",
+        conversion: formatRouteConversion(profile),
         usage: includeUsage ? await formatProfileUsageColumns(profile) : [],
     })));
     const usageRows = includeUsage
@@ -1365,6 +1395,7 @@ async function printProfileList(profiles, includeUsage) {
             profile,
             type: textDim("usage"),
             marker: "",
+            conversion: textDim("-"),
             usage: await formatProfileUsageColumns(profile),
         })))
         : [];
@@ -1375,6 +1406,7 @@ async function printProfileList(profiles, includeUsage) {
         { key: "name", title: "" },
         { key: "url", title: "" },
         { key: "key", title: "" },
+        { key: "conversion", title: "" },
         ...(includeUsage ? usageTableColumns() : []),
     ];
     printTable(columns, rows.map((row) => ({
@@ -1383,6 +1415,7 @@ async function printProfileList(profiles, includeUsage) {
         name: colorName(row.name),
         url: colorUrl(row.profile.baseURL),
         key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+        conversion: row.conversion,
         ...usageTableValues(row.usage),
     })), { header: false });
 }

@@ -523,7 +523,10 @@ Example:
   "profiles": {
     "input": {
       "baseURL": "https://ai.input.im",
-      "apiKey": "codex-key"
+      "apiKey": "codex-key",
+      "routeConversion": {
+        "enabled": false
+      }
     }
   },
   "usage": {
@@ -550,11 +553,17 @@ config/ccs-profiles.json
   "profiles": {
     "input": {
       "baseURL": "https://ai.input.im",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     },
     "ciii": {
       "baseURL": "https://codex.ciii.club",
-      "apiKey": ""
+      "apiKey": "",
+      "routeConversion": {
+        "enabled": false
+      }
     }
   },
   "current": "input",
@@ -568,7 +577,7 @@ config/ccs-profiles.json
 }
 ```
 
-Fill in the API keys manually. The file is written with `0600` permissions.
+Set `routeConversion.enabled` to `true` for a provider that only accepts Chat Completions. The proxy keeps Codex on the Responses API and translates both directions. `ccs`, `ccs list`, and `ccs PROFILE` show the active value. Fill in the API keys manually. The file is written with `0600` permissions.
 
 `ccs init` first reads the current Codex API settings from:
 
@@ -745,6 +754,7 @@ Behavior:
 - Latency deadlines are disabled by default. `ccs proxy config latency FIRST TOTAL [ACTION]` enables them after exact `yes`; `ccs proxy config latency off` disables them.
 - `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
 - `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while explicit profile launches remain pinned to their requested profile.
+- A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.
 - In `retry` mode, only HTTP 429 and 503 are withheld. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original 429/503 response, and client abort stops the wait. Other statuses and all accepted response bodies are forwarded without inspection.
 - After `ccs toggle`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429/503. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
 - Upstream HTTP responses are forwarded as received when the active policy accepts them. Upstream `4xx` and `5xx` responses record `failure_summary.type=upstream_error` and render the upstream failure summary in the history `result` column.
@@ -760,7 +770,7 @@ Behavior:
 - `backups/config-<timestamp>.toml` is a complete `config.toml` snapshot made before install; `backups/config-restore-<timestamp>.toml` is a complete snapshot made before restore. They are archives for manual inspection or recovery, are not automatically selected by `restore`, and are not automatically deleted.
 - A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
 - `ccs proxy` without arguments ensures the installed runtime, prints runtime state, paths, summaries, active requests, and completed history once, then exits. `ccs proxy watch` reads state and health without starting, upgrading, or replacing the runtime. Its table-focused view keeps `passthrough` policy summaries hidden, shows only 429/503 retry counts in `retry`, and shows the complete policy and reasoning summaries in inspection modes. Latency statistics remain visible in every mode.
-- Every view begins with `session time up model` and ends with `result`. Overview adds `reas./code dur. size`; tokens adds `input output cached`; cost adds `input$ output$ cached$ total$`. Active `dur.` is elapsed time and history `dur.` is total request time. Equal visible session ids keep the same color across active and history rows, while the first 11 distinct visible ids use different ANSI 256 palette colors. The 10-cell model column shows the available actual model, colors equal request/upstream models green and differing actual upstream models red, then abbreviates `gpt-` to `o` and truncates.
+- Every view begins with `session time up model` and ends with `result`. Overview adds `api dur. size`, where `api` shows `R→C` for Responses-to-Chat-Completions conversion; tokens adds `input output cached`; cost adds `input$ output$ cached$ total$`. Active `dur.` is elapsed time and history `dur.` is total request time. Equal visible session ids keep the same color across active and history rows, while the first 11 distinct visible ids use different ANSI 256 palette colors. The 10-cell model column shows the available actual model, colors equal request/upstream models green and differing actual upstream models red, then abbreviates `gpt-` to `o` and truncates.
 - Token and cost columns aggregate every proxy-owned upstream attempt. `input` is uncached input (`input_tokens - cached_input_tokens`), matching the `input$` pricing basis; `cached` reports cached input separately. A token total appears only when every attempt reports the required fields. Cost uses each attempt's exact upstream/request model and response/request/config service tier with local cached prices and profile overrides; it performs no network refresh. Missing facts render as `-`, and cached input above input tokens renders `invalid`.
 - `ccs proxy` terminal output displays local file paths under `$HOME` with `~/`.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.
@@ -768,7 +778,8 @@ Behavior:
 - In `recovery` and `intercept`, an enabled latency policy starts the absolute total deadline with the first upstream fetch and spans retries and waits. The first-progress deadline restarts for each real attempt and accepts only non-empty output text, a final answer, or a tool call as progress.
 - In `recovery` and `intercept`, SSE inspection is incremental across arbitrary chunks, mixed LF/CR/CRLF delimiters, and a BOM split across chunks. Accepted bytes are forwarded unchanged. A candidate SSE event larger than 1 MiB fails with `response_inspection_limit_exceeded`. `passthrough` does not run this scanner.
 - The live proxy view separates `active` and `history`. `active` contains supported model API requests currently being processed by the proxy, including upstream SSE buffering before client headers are written. Streamed byte progress persists the first observation immediately, coalesces later updates to at most once per second, and writes the exact final count at completion. Completed, failed, and fully streamed model API responses move to `history`, whose data rows are dimmed while section labels and table headers remain at normal intensity. `proxy.json.metrics.recent_requests` keeps the newest 100 completed model API requests as a compact status snapshot; `proxy-requests.jsonl` keeps bounded completed model API request history in completion order. Compact state history is written before the complete JSONL record append, so JSONL append failures are recorded in `proxy.log` after the client response state is settled. Default status rendering reads history from `proxy.json`. TTY output computes history row count from terminal height, non-TTY output uses 5 history rows, and `--history N` overrides both. When `--history N` exceeds the snapshot length, status rendering reads the tail of `proxy-requests.jsonl`.
-- Active and history records use request schema `7`; proxy health uses protocol `7`. State snapshots and JSONL history require the current contract. `retry_summary` separates HTTP 429 and 503 retries. JSONL `attempt_records` identify each real upstream dispatch and store status retry triggers and delays without prompt or response bodies.
+- Active and history records use request schema `8`; proxy health uses protocol `7`. State snapshots and JSONL history require the current contract. `retry_summary` separates HTTP 429 and 503 retries. JSONL `attempt_records` identify each dispatched forwarding attempt and store protocol conversion, actual upstream endpoint, conversion failure stage, status retry triggers, and delays without prompt or response bodies.
+- `proxy.log` includes protocol conversion and failure stage on request-error and attempt-completion events, so request, JSON-response, and streaming-response conversion failures remain distinguishable.
 - For supported model paths, proxy metrics record request facts, retry summary, and timing. Intervention modes also record inspected upstream metadata, usage, reasoning observations, and response shape. `passthrough` deliberately leaves response-content-derived fields empty. Session display uses `x-codex-turn-metadata.session_id` when present and otherwise reads `session_id` from the JSON request body, including for transparently forwarded paths. `latency_ms` is total proxy request latency, `upstream_wait_ms` is final-attempt time to upstream headers, and `client_ttfb_ms` is time to proxy response headers written to the client. Request records store `request_body_sha256`; prompt and response text stay outside runtime records.
 - Proxy-internal retry attempts render as a yellow number after the upstream name, such as `input3`. The `result` column combines successful policy-action prefixes and failure summaries. Repeated Codex client requests use `client:<attempt>`; guard actions use `guard`, `cap`, `rec`, `block`, and `err` prefixes. The visible detail uses local `error` first, then `failure_summary.code/message` for upstream HTTP failures.
 - Proxy tables format elapsed time and byte size with compact 3-significant-digit units after the base unit, such as `56ms`, `2.34s`, `43.2s`, `3.12m`, `32.0K`, and `3.41M`.
