@@ -1386,7 +1386,7 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
     await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-      state_schema_version: 3,
+      state_schema_version: 4,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: join(home, ".codex", "config.toml"),
       provider_name: "codex",
@@ -1394,6 +1394,7 @@ test("ccs sync preserves proxy routing by rejecting a model_provider change", as
       proxy_base_url: "http://127.0.0.1:4610",
       mode: "recovery",
       status_retry: {
+        enabled: false,
         total_window_ms: 3_600_000,
         backoff_base_ms: 1000,
         backoff_max_ms: 30_000,
@@ -1540,7 +1541,7 @@ async function writeProfiles(profiles) {
 async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-    state_schema_version: 3,
+    state_schema_version: 4,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: join(home, ".codex", "config.toml"),
     provider_name: "codex",
@@ -1548,6 +1549,7 @@ async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
     proxy_base_url: `http://127.0.0.1:${proxyPort}`,
     mode: "passthrough",
     status_retry: {
+      enabled: false,
       total_window_ms: 3_600_000,
       backoff_base_ms: 1000,
       backoff_max_ms: 30_000,

@@ -33,15 +33,15 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const PROXY_HEALTH_PROTOCOL = 7;
-const PROXY_STATE_SCHEMA_VERSION = 3;
+const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
-const PROXY_MODE_RETRY = "retry";
 const PROXY_MODE_INTERCEPT = "intercept";
 const PROXY_MODE_RECOVERY = "recovery";
 const PROXY_DEFAULT_MODE = PROXY_MODE_RECOVERY;
 const PROXY_INSTALL_MODE = PROXY_MODE_PASSTHROUGH;
 const PROXY_DEFAULT_STATUS_RETRY = {
+    enabled: false,
     total_window_ms: 60 * 60 * 1000,
     backoff_base_ms: 1000,
     backoff_max_ms: 30_000,
@@ -66,6 +66,9 @@ const CONTINUATION_MARKER_TEXT = "Continue thinking...";
 const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
+const PROXY_HISTORY_FULL_ROW_LIMIT = 5;
+const PROXY_HISTORY_COMPACT_SAMPLE_LIMIT = 6;
+const PROXY_HISTORY_DEFAULT_RECORD_COUNT = PROXY_HISTORY_FULL_ROW_LIMIT + PROXY_HISTORY_COMPACT_SAMPLE_LIMIT;
 const PROXY_ACTIVE_PROGRESS_WRITE_INTERVAL_MS = 1000;
 const PROXY_JSONL_TAIL_BLOCK_BYTES = 64 * 1024;
 const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
@@ -77,12 +80,13 @@ const proxyConversionFailures = new WeakMap();
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
 const PROXY_TABLE_TIME_WIDTH = 8 + 1;
-const PROXY_TABLE_UPSTREAM_WIDTH = 6;
 const PROXY_TABLE_LATENCY_WIDTH = 6;
 const PROXY_TABLE_SIZE_WIDTH = 6;
 const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
-const PROXY_TABLE_API_WIDTH = 4;
-const PROXY_TABLE_MODEL_WIDTH = 10;
+const PROXY_TABLE_PROVIDER_WIDTH = 6;
+const PROXY_TABLE_MODEL_WIDTH = 8;
+const PROXY_TABLE_ROUTE_WIDTH = PROXY_TABLE_PROVIDER_WIDTH + 1 + PROXY_TABLE_MODEL_WIDTH;
+const PROXY_TABLE_STATE_WIDTH = 12;
 const PROXY_TABLE_STATUS_WIDTH = 6;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_HISTORY_TABLE_INDENT = "    ";
@@ -119,47 +123,49 @@ const REQUEST_HEADER_ALLOWLIST = [
     "openai-organization",
     "openai-project",
 ];
-const PROXY_OVERVIEW_TABLE_COLUMNS = [
+const PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS = [
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
-    { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
-    { key: "up", title: "up", width: PROXY_TABLE_UPSTREAM_WIDTH, align: "right" },
-    { key: "model", title: "model", width: PROXY_TABLE_MODEL_WIDTH, align: "right" },
-    { key: "api", title: "api", width: PROXY_TABLE_API_WIDTH, align: "right" },
-    { key: "ms", title: "dur.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
+    { key: "route", title: "route", width: PROXY_TABLE_ROUTE_WIDTH, align: "left" },
+    { key: "state", title: "state", width: PROXY_TABLE_STATE_WIDTH, align: "left" },
+    { key: "age", title: "age", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
-    { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
 ];
-const PROXY_TOKEN_TABLE_COLUMNS = [
-    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+const PROXY_ACTIVE_TOKEN_TABLE_COLUMNS = [
+    ...PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS.slice(0, 3),
     { key: "input_tokens", title: "input", width: 9, align: "right" },
     { key: "output_tokens", title: "output", width: 9, align: "right" },
     { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
-    PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
-const PROXY_COST_TABLE_COLUMNS = [
-    ...PROXY_OVERVIEW_TABLE_COLUMNS.slice(0, 4),
+const PROXY_ACTIVE_COST_TABLE_COLUMNS = [
+    ...PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS.slice(0, 3),
     { key: "input_cost", title: "input$", width: 9, align: "right" },
     { key: "output_cost", title: "output$", width: 9, align: "right" },
     { key: "cached_cost", title: "cached$", width: 9, align: "right" },
     { key: "total_cost", title: "total$", width: 9, align: "right" },
-    PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS = [
-    PROXY_OVERVIEW_TABLE_COLUMNS[1],
+    { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "status", title: "status", width: PROXY_TABLE_STATUS_WIDTH, align: "right" },
-    PROXY_OVERVIEW_TABLE_COLUMNS[5],
-    PROXY_OVERVIEW_TABLE_COLUMNS[6],
-    PROXY_OVERVIEW_TABLE_COLUMNS.at(-1),
+    { key: "ms", title: "dur.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
+    { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
+    { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
 ];
 const PROXY_HISTORY_TOKEN_TABLE_COLUMNS = [
-    PROXY_TOKEN_TABLE_COLUMNS[1],
+    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[0],
     PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[1],
-    ...PROXY_TOKEN_TABLE_COLUMNS.slice(4),
+    { key: "input_tokens", title: "input", width: 9, align: "right" },
+    { key: "output_tokens", title: "output", width: 9, align: "right" },
+    { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
+    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_HISTORY_COST_TABLE_COLUMNS = [
-    PROXY_COST_TABLE_COLUMNS[1],
+    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[0],
     PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[1],
-    ...PROXY_COST_TABLE_COLUMNS.slice(4),
+    { key: "input_cost", title: "input$", width: 9, align: "right" },
+    { key: "output_cost", title: "output$", width: 9, align: "right" },
+    { key: "cached_cost", title: "cached$", width: 9, align: "right" },
+    { key: "total_cost", title: "total$", width: 9, align: "right" },
+    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_SESSION_COLOR_CODES = [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214];
 function statePath(stateRoot) {
@@ -303,7 +309,7 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!response.ok) {
-            return { healthy: false, pid: null, version: null, protocol: null, mode: null };
+            return { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
         }
         const payload = await response.json().catch(() => null);
         return {
@@ -312,10 +318,11 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             version: typeof payload?.version === "string" ? payload.version : null,
             protocol: payload && Number.isInteger(payload.protocol) ? Number(payload.protocol) : null,
             mode: normalizeProxyMode(payload?.mode),
+            statusRetryEnabled: typeof payload?.status_retry_enabled === "boolean" ? payload.status_retry_enabled : null,
         };
     }
     catch {
-        return { healthy: false, pid: null, version: null, protocol: null, mode: null };
+        return { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
     }
 }
 function assertProxyHealthRuntime(health) {
@@ -837,6 +844,7 @@ function normalizeProxyState(state) {
 }
 function parseProxyStatusRetry(value, source) {
     const raw = requireProxyObject(value, source);
+    const enabled = requireProxyField(raw, "enabled", source, (field) => typeof field === "boolean", "boolean");
     const totalWindowMs = requireProxyField(raw, "total_window_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
     const backoffBaseMs = requireProxyField(raw, "backoff_base_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
     const backoffMaxMs = requireProxyField(raw, "backoff_max_ms", source, isPositiveProxyTimerMs, "positive timer-range integer");
@@ -847,6 +855,7 @@ function parseProxyStatusRetry(value, source) {
         throw new Error(`invalid proxy request data at ${source}: backoff_max_ms must not exceed total_window_ms`);
     }
     return {
+        enabled,
         total_window_ms: totalWindowMs,
         backoff_base_ms: backoffBaseMs,
         backoff_max_ms: backoffMaxMs,
@@ -878,9 +887,6 @@ function normalizeProxyMode(value) {
     if (value === PROXY_MODE_PASSTHROUGH) {
         return PROXY_MODE_PASSTHROUGH;
     }
-    if (value === PROXY_MODE_RETRY) {
-        return PROXY_MODE_RETRY;
-    }
     if (value === PROXY_MODE_INTERCEPT) {
         return PROXY_MODE_INTERCEPT;
     }
@@ -891,6 +897,9 @@ function normalizeProxyMode(value) {
 }
 function isProxyInspectionMode(mode) {
     return mode === PROXY_MODE_INTERCEPT || mode === PROXY_MODE_RECOVERY;
+}
+function proxyStatusRetryEnabled(state) {
+    return state.status_retry.enabled;
 }
 function ensureProxyMetrics(state) {
     return state.metrics ?? createProxyMetrics();
@@ -1152,6 +1161,7 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
         : colorCount(String(runtime.protocol));
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
     const mode = state ? colorName(state.mode) : textDim("unset");
+    const statusRetry = state && proxyStatusRetryEnabled(state) ? textGreen("retry") : null;
     const latency = metrics.latency_ms.count === 0
         ? [`last=${textDim("-")}`, `avg=${textDim("-")}`]
         : [
@@ -1165,6 +1175,7 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
         bgDarkBlue(" ccs proxy "),
         textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
         mode,
+        ...(statusRetry ? [statusRetry] : []),
         ...latency,
         ...runtimeDetails,
     ].join("  ");
@@ -1172,28 +1183,38 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
 function formatProxyFilePath(value) {
     return formatHomePath(value);
 }
-function formatProxyRequest(record, nowMs, sessionColorIndexes, priceCache) {
+function formatProxyHistoryRequest(record, nowMs, priceCache) {
     const completed = record.completed_at !== null;
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
     const time = formatProxyTime(record.completed_at ?? record.started_at);
     const latencyMs = completed ? record.latency_ms : elapsedMs;
     const size = record.response_bytes;
-    const upstream = formatProxyUpstream(record.upstream, record.attempts);
     return {
         time: textDim(time),
         status: formatProxyRequestStatus(record.status),
-        api: record.protocol_conversion === "responses_to_chat" ? colorName("R→C") : textDim("-"),
-        up: upstream,
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
-        session: formatProxySession(record.session, sessionColorIndexes),
-        model: formatProxyModel(record.request_model, record.upstream_model),
         input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
         output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
         cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
         ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
         error: formatProxyError(record),
+    };
+}
+function formatProxyActiveRequest(record, nowMs, sessionColorIndexes, priceCache) {
+    const startedAt = Date.parse(record.started_at);
+    const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
+    return {
+        session: formatProxySession(record.session, sessionColorIndexes),
+        route: formatProxyRoute(record),
+        state: formatProxyActiveState(record),
+        age: textYellow(formatLatencyMs(elapsedMs)),
+        size: formatProxyBytes(record.response_bytes),
+        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
+        output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
+        cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
+        ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
     };
 }
 function formatProxyRequestStatus(status) {
@@ -1213,14 +1234,17 @@ function formatProxyBytes(value) {
     return formatCompactBytes(value);
 }
 function formatProxyModelDisplayName(model) {
-    return model.startsWith("gpt-") ? `o${model.slice(4)}` : model;
+    if (model.startsWith("gpt-")) {
+        return model.slice(4);
+    }
+    return /^o\d/.test(model) ? model.slice(1) : model;
 }
 export function formatProxyModel(requestModel, upstreamModel) {
     const model = upstreamModel ?? requestModel;
     if (!model) {
         return textDim("-");
     }
-    const display = truncateProxyText(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH);
+    const display = truncateVisible(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH, "");
     if (requestModel && upstreamModel === requestModel) {
         return textGreen(display);
     }
@@ -1228,6 +1252,43 @@ export function formatProxyModel(requestModel, upstreamModel) {
         return textRed(display);
     }
     return colorName(display);
+}
+function formatProxyProvider(upstream) {
+    return upstream
+        ? colorName(truncateVisible(upstream, PROXY_TABLE_PROVIDER_WIDTH, ""))
+        : textDim("-");
+}
+function formatProxyRoute(record) {
+    return `${formatProxyProvider(record.upstream)}${textDim("/")}${formatProxyModel(record.request_model, record.upstream_model)}`;
+}
+function formatProxyActiveState(record) {
+    const retryState = proxyActiveRetryState(record);
+    if (retryState) {
+        return textYellow(retryState);
+    }
+    if (record.status === null) {
+        const retries = Math.max(0, record.attempts - 1);
+        return textYellow(`waiting${retries > 0 ? ` x${retries}` : ""}`);
+    }
+    if (record.status >= 400) {
+        return proxyStatusCountColor(record.status)(`forward:${record.status}`);
+    }
+    const retries = Math.max(0, record.attempts - 1);
+    const conversion = record.protocol_conversion === "responses_to_chat" ? ":R→C" : "";
+    return textGreen(`stream${conversion}${retries > 0 ? ` x${retries}` : ""}`);
+}
+function proxyActiveRetryState(record) {
+    const lastAction = record.guard_actions.at(-1);
+    if (record.response_bytes === 0 && lastAction?.action === "continuation_recovery") {
+        return `retry:rec x${Math.max(1, record.attempts)}`;
+    }
+    if (record.response_bytes === 0 && lastAction?.action === "internal_retry") {
+        return `retry:${lastAction.reasoning_tokens === null ? record.status ?? "upstream" : "guard"} x${Math.max(1, record.attempts)}`;
+    }
+    if ((record.status === 429 || record.status === 503) && record.response_bytes === 0) {
+        return `retry:${record.status} x${Math.max(1, record.attempts)}`;
+    }
+    return null;
 }
 export function formatProxyAttemptTokens(attempts, field) {
     if (attempts.length === 0) {
@@ -1323,7 +1384,9 @@ export function formatProxyUsd(value) {
 function formatProxyError(record) {
     const prefix = formatProxyErrorPrefix(record);
     const displayError = proxyDisplayError(record);
-    const error = displayError ? textRed(displayError) : textDim("");
+    const error = displayError
+        ? (record.status === null ? textRed : proxyStatusCountColor(record.status))(displayError)
+        : textDim("");
     if (prefix && error) {
         return `${prefix} ${error}`;
     }
@@ -1457,13 +1520,6 @@ function stableProxySessionColorIndex(value) {
         hash = ((hash * 31) + value.charCodeAt(index)) >>> 0;
     }
     return hash % PROXY_SESSION_COLOR_CODES.length;
-}
-function formatProxyUpstream(upstream, attempts) {
-    if (!upstream) {
-        return textDim("-");
-    }
-    const suffix = attempts > 1 ? textYellow(String(attempts)) : "";
-    return `${colorName(truncateProxyText(upstream, PROXY_TABLE_UPSTREAM_WIDTH - visibleLength(suffix)))}${suffix}`;
 }
 export function resolveProxySwitchBaseUrl(state) {
     return state?.proxy_base_url ?? null;
@@ -2465,7 +2521,7 @@ function proxyPayloadHasVisibleText(value, reasoningContext) {
     }
     return false;
 }
-async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endpointClass, requestKind, requestJson, gatewayRequestId, attemptRecords, mode, latencyGuard, callbacks = {}) {
+async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endpointClass, requestKind, requestJson, gatewayRequestId, attemptRecords, mode, latencyGuard, callbacks = {}, statusRetryConfig) {
     const recoveryMode = mode === PROXY_MODE_RECOVERY;
     const reasoningEnabled = mode !== PROXY_MODE_PASSTHROUGH;
     const preparedRequest = recoveryMode
@@ -2484,6 +2540,8 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
     const retryBudget = new ProxyRetryBudget(GUARD_RETRY_ATTEMPTS);
     let totalDeadlineAtMs = null;
     let pendingRetry = null;
+    let statusRetryCount = 0;
+    const statusRetryDeadlineAtMs = statusRetryConfig ? Date.now() + statusRetryConfig.total_window_ms : null;
     let currentBody = preparedRequest.requestBody;
     let currentRequestJson = preparedRequest.requestJson;
     const stripAutoEncryptedReasoning = preparedRequest.autoAddedEncryptedReasoning;
@@ -2543,7 +2601,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 });
                 await callbacks.onGuardAction?.(pendingForDispatch.guardAction);
                 pendingRetry = null;
-            });
+            }, isProxyInspectionMode(mode));
         }
         catch (error) {
             if (!(error instanceof ProxyLatencyTimeoutError))
@@ -2596,6 +2654,60 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         const response = fetched.response;
         const status = response.status;
         await callbacks.onResponseStart?.(status, upstream.name);
+        if (statusRetryConfig && isRetryableUpstreamStatus(status)) {
+            const attempt = currentProxyAttemptRecord(attemptState);
+            const trigger = status === 429 ? "http_429" : "http_503";
+            const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), statusRetryConfig.total_window_ms);
+            const retryAfterMs = retryAfter.kind === "missing_or_invalid" ? null : retryAfter.delayMs;
+            const delayMs = retryAfter.kind === "missing_or_invalid"
+                ? retryDelayMs(statusRetryCount, statusRetryConfig.backoff_base_ms, statusRetryConfig.backoff_max_ms)
+                : retryAfter.delayMs;
+            const remainingMs = statusRetryDeadlineAtMs === null ? 0 : statusRetryDeadlineAtMs - Date.now();
+            attempt.policy_trigger = trigger;
+            attempt.policy_action = "retry_then_pass_through";
+            attempt.retry_after_ms = retryAfterMs;
+            attempt.retry_delay_ms = delayMs;
+            attempt.retry_budget_used = statusRetryCount;
+            attempt.retry_budget_remaining = 0;
+            if (retryAfter.kind !== "exceeds_limit" && remainingMs > 0 && delayMs <= remainingMs) {
+                const waitAbort = new AbortController();
+                const abortFromClient = () => waitAbort.abort("client");
+                if (callbacks.signal?.aborted)
+                    abortFromClient();
+                else
+                    callbacks.signal?.addEventListener("abort", abortFromClient, { once: true });
+                const unregisterWait = callbacks.onStatusRetryWait?.({
+                    requestId: gatewayRequestId,
+                    upstream: upstream.name,
+                    status,
+                    attempt: attemptState.attempts,
+                    waitingSince: new Date().toISOString(),
+                    wake: () => waitAbort.abort("reroute"),
+                });
+                let waitResult;
+                try {
+                    waitResult = await waitForProxyRetry(delayMs, waitAbort.signal, statusRetryDeadlineAtMs);
+                }
+                finally {
+                    unregisterWait?.();
+                    callbacks.signal?.removeEventListener("abort", abortFromClient);
+                }
+                if (waitResult === "aborted" && waitAbort.signal.reason !== "reroute") {
+                    await response.body?.cancel().catch(() => undefined);
+                    throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+                }
+                if (waitResult === "ready" || waitAbort.signal.reason === "reroute") {
+                    await response.body?.cancel().catch(() => undefined);
+                    statusRetryCount += 1;
+                    attempt.retry_trigger = trigger;
+                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status), remainingRetries: 0 });
+                    if (callbacks.resolveRetryUpstream) {
+                        upstream = await callbacks.resolveRetryUpstream();
+                    }
+                    continue;
+                }
+            }
+        }
         const headers = responseHeadersToObject(response.headers);
         const responseContentType = `${response.headers.get("content-type") || ""}`;
         const responseIsStream = isStreamContentType(responseContentType)
@@ -3144,7 +3256,7 @@ async function prepareProxyDirectStream(fetched, endpointClass, attemptStartedAt
         throw error;
     }
 }
-async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptState, callbacks, latencyGuard, totalDeadlineAtMs, onGuardRetryDispatched) {
+async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptState, callbacks, latencyGuard, totalDeadlineAtMs, onGuardRetryDispatched, allowTransportRetry = true) {
     let fetchFailedRetries = 0;
     let guardRetryDispatched = false;
     while (true) {
@@ -3232,15 +3344,17 @@ async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptS
             const message = error instanceof Error ? error.message : String(error);
             const code = fetchFailed ? "upstream_fetch_failed" : "upstream_error";
             const failureSummary = proxyFailureSummaryFromError(code, error);
-            await callbacks.onGuardAction?.(createProxyGuardAction({
-                action: "upstream_error",
-                upstream: upstream.name,
-                attempt: attemptState.attempts,
-                status: null,
-                reasoningTokens: null,
-                error: `${code}: ${message}`,
-            }));
-            if (fetchFailed && fetchFailedRetries < FETCH_FAILED_TRANSPORT_RETRIES) {
+            if (allowTransportRetry) {
+                await callbacks.onGuardAction?.(createProxyGuardAction({
+                    action: "upstream_error",
+                    upstream: upstream.name,
+                    attempt: attemptState.attempts,
+                    status: null,
+                    reasoningTokens: null,
+                    error: `${code}: ${message}`,
+                }));
+            }
+            if (allowTransportRetry && fetchFailed && fetchFailedRetries < FETCH_FAILED_TRANSPORT_RETRIES) {
                 fetchFailedRetries += 1;
                 const attempt = currentProxyAttemptRecord(attemptState);
                 if (attempt) {
@@ -4262,20 +4376,25 @@ function formatProxyReasoningSummary(metrics) {
     ].join(" ");
 }
 function formatProxyPolicyLines(state, metrics) {
-    if (!state || state.mode === PROXY_MODE_PASSTHROUGH) {
+    if (!state) {
         return [];
     }
-    if (state.mode === PROXY_MODE_RETRY) {
-        return [formatProxyStatusRetrySummary(metrics.recent_requests, state.status_retry)];
+    const lines = [];
+    if (proxyStatusRetryEnabled(state)) {
+        lines.push(formatProxyStatusRetrySummary(metrics.recent_requests, state.status_retry));
     }
+    const mode = state.mode;
+    if (mode === PROXY_MODE_PASSTHROUGH)
+        return lines;
     const deadline = state.latency_guard.enabled
         ? `policy deadline=${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
         : null;
-    return [
+    lines.push(...[
         deadline,
         formatProxyPolicySummary(metrics.recent_requests),
         formatProxyReasoningSummary(metrics),
-    ].filter((line) => line !== null);
+    ].filter((line) => line !== null));
+    return lines;
 }
 function proxyContinuationRecoveryCounts(records) {
     const counts = {
@@ -4350,10 +4469,10 @@ function proxyStatusCountColor(status) {
 }
 export function proxyRequestTableColumns(view) {
     if (view === "tokens")
-        return PROXY_TOKEN_TABLE_COLUMNS;
+        return PROXY_ACTIVE_TOKEN_TABLE_COLUMNS;
     if (view === "cost")
-        return PROXY_COST_TABLE_COLUMNS;
-    return PROXY_OVERVIEW_TABLE_COLUMNS;
+        return PROXY_ACTIVE_COST_TABLE_COLUMNS;
+    return PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS;
 }
 function proxyHistoryTableColumns(view) {
     if (view === "tokens")
@@ -4379,13 +4498,7 @@ function proxyActiveRowCount(metrics) {
     return Math.min(metrics.active_requests.length, PROXY_RECENT_RENDER_COUNT);
 }
 function proxyHistoryGroupKey(record) {
-    return JSON.stringify([
-        record.session,
-        record.upstream,
-        record.request_model,
-        record.upstream_model,
-        record.protocol_conversion,
-    ]);
+    return record.session === null ? `request:${record.id}` : `session:${record.session}`;
 }
 function resolveProxyHistoryRenderCount(metrics, options, state) {
     if (options.historyVisible === false) {
@@ -4395,11 +4508,11 @@ function resolveProxyHistoryRenderCount(metrics, options, state) {
         return options.historyCount;
     }
     if (!process.stdout.isTTY) {
-        return PROXY_RECENT_RENDER_COUNT;
+        return PROXY_HISTORY_DEFAULT_RECORD_COUNT;
     }
     const terminalRows = process.stdout.rows;
     if (!Number.isInteger(terminalRows) || terminalRows <= 0) {
-        return PROXY_RECENT_RENDER_COUNT;
+        return PROXY_HISTORY_DEFAULT_RECORD_COUNT;
     }
     let usedLines = 1
         + (formatProxyStatusSummary(metrics) ? 1 : 0)
@@ -4409,23 +4522,27 @@ function resolveProxyHistoryRenderCount(metrics, options, state) {
         + 1
         + (options.watch ? 1 : 0);
     let count = 0;
-    let previousGroupKey = null;
+    const recordsPerGroup = new Map();
     for (const record of metrics.recent_requests) {
         const groupKey = proxyHistoryGroupKey(record);
-        const addedLines = 1 + (count === 0 ? 1 : 0) + (groupKey === previousGroupKey ? 0 : 1);
+        const recordsInGroup = (recordsPerGroup.get(groupKey) ?? 0) + 1;
+        const newGroup = recordsInGroup === 1;
+        const addedLines = (count === 0 ? 1 : 0)
+            + (newGroup ? 1 : 0)
+            + (recordsInGroup <= PROXY_HISTORY_FULL_ROW_LIMIT || recordsInGroup === PROXY_HISTORY_FULL_ROW_LIMIT + 1 ? 1 : 0);
         if (usedLines + addedLines > terminalRows) {
             break;
         }
         usedLines += addedLines;
         count += 1;
-        previousGroupKey = groupKey;
+        recordsPerGroup.set(groupKey, recordsInGroup);
     }
     return count;
 }
 function formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache) {
     const activeRows = metrics.active_requests
         .slice(0, PROXY_RECENT_RENDER_COUNT)
-        .map((record) => formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache));
+        .map((record) => formatProxyActiveRequest(record, now.getTime(), sessionColorIndexes, priceCache));
     if (activeRows.length === 0) {
         return [`${textBold("active")} ${textDim("0")}`];
     }
@@ -4437,8 +4554,7 @@ function formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCac
 function formatProxyHistoryContext(record, sessionColorIndexes) {
     return [
         formatProxySession(record.session, sessionColorIndexes),
-        formatProxyUpstream(record.upstream, 1),
-        formatProxyModel(record.request_model, record.upstream_model),
+        formatProxyRoute(record),
         ...(record.protocol_conversion === "responses_to_chat" ? [colorName("R→C")] : []),
     ].join("  ");
 }
@@ -4451,31 +4567,62 @@ function formatProxyHistoryRows(metrics, records, count, now, view, sessionColor
         `${textBold("history")} ${colorCount(String(metrics.recent_requests.length))}`,
         ...renderProxyTable(proxyHistoryTableColumns(view), [], PROXY_HISTORY_TABLE_INDENT),
     ];
-    let previousGroupKey = null;
-    let previousStatus;
-    let previousResult;
-    for (const record of visibleRecords) {
-        const groupKey = proxyHistoryGroupKey(record);
-        if (groupKey !== previousGroupKey) {
-            lines.push(`${PROXY_REQUEST_TABLE_INDENT}${formatProxyHistoryContext(record, sessionColorIndexes)}`);
-            previousGroupKey = groupKey;
-            previousStatus = undefined;
-            previousResult = undefined;
+    for (const group of proxyHistoryGroups(visibleRecords)) {
+        lines.push(`${PROXY_REQUEST_TABLE_INDENT}${formatProxyHistoryContext(group[0], sessionColorIndexes)}`);
+        const completeRows = group
+            .slice(0, PROXY_HISTORY_FULL_ROW_LIMIT)
+            .map((record) => styleTableRow(formatProxyHistoryRequest(record, now.getTime(), priceCache), textDim));
+        lines.push(...renderProxyTable(proxyHistoryTableColumns(view), completeRows, PROXY_HISTORY_TABLE_INDENT, false));
+        if (group.length > PROXY_HISTORY_FULL_ROW_LIMIT) {
+            lines.push(formatProxyHistoryEarlier(group.slice(PROXY_HISTORY_FULL_ROW_LIMIT)));
         }
-        const row = formatProxyRequest(record, now.getTime(), sessionColorIndexes, priceCache);
-        const result = String(row.error ?? "");
-        if (record.status === previousStatus)
-            row.status = "";
-        if (result === previousResult)
-            row.error = "";
-        previousStatus = record.status;
-        previousResult = result;
-        lines.push(...renderProxyTable(proxyHistoryTableColumns(view), [styleTableRow(row, textDim)], PROXY_HISTORY_TABLE_INDENT, false));
     }
     return lines;
 }
-async function readProxyRequestTail(stateRoot, count) {
-    if (count <= 0) {
+function proxyHistoryGroups(records) {
+    const groups = new Map();
+    for (const record of records) {
+        const key = proxyHistoryGroupKey(record);
+        const group = groups.get(key);
+        if (group)
+            group.push(record);
+        else
+            groups.set(key, [record]);
+    }
+    return [...groups.values()];
+}
+function takeProxyHistoryGroups(records, count) {
+    const groupKeys = new Set();
+    const selected = [];
+    for (const record of records) {
+        const key = proxyHistoryGroupKey(record);
+        if (!groupKeys.has(key) && groupKeys.size === count) {
+            break;
+        }
+        groupKeys.add(key);
+        selected.push(record);
+    }
+    return selected;
+}
+function formatProxyHistoryEarlier(records) {
+    const maxWidth = process.stdout.columns ? Math.max(1, process.stdout.columns - PROXY_HISTORY_TABLE_INDENT.length) : Number.POSITIVE_INFINITY;
+    const pairs = [];
+    for (const record of records.slice(0, PROXY_HISTORY_COMPACT_SAMPLE_LIMIT)) {
+        const candidate = `${formatProxyRequestStatus(record.status)}/${textYellow(formatLatencyMs(record.latency_ms))}`;
+        const remaining = records.length - pairs.length - 1;
+        const suffix = remaining > 0 ? ` ${textDim(`... +${remaining}`)}` : "";
+        const line = `${textDim("earlier")} ${[...pairs, candidate].join(" ")}${suffix}`;
+        if (visibleLength(line) > maxWidth) {
+            break;
+        }
+        pairs.push(candidate);
+    }
+    const remaining = records.length - pairs.length;
+    const suffix = remaining > 0 ? ` ${textDim(`... +${remaining}`)}` : "";
+    return `${PROXY_HISTORY_TABLE_INDENT}${textDim("earlier")} ${pairs.join(" ")}${suffix}`;
+}
+async function readProxyRequestTail(stateRoot, groupCount) {
+    if (groupCount <= 0) {
         return [];
     }
     let file;
@@ -4493,23 +4640,27 @@ async function readProxyRequestTail(stateRoot, count) {
         let position = stat.size;
         let carry = "";
         const records = [];
-        while (position > 0 && records.length < count) {
+        const groupKeys = new Set();
+        while (position > 0 && groupKeys.size < groupCount) {
             const length = Math.min(PROXY_JSONL_TAIL_BLOCK_BYTES, position);
             position -= length;
             const buffer = Buffer.allocUnsafe(length);
             await file.read(buffer, 0, length, position);
             const lines = `${buffer.toString("utf8")}${carry}`.split("\n");
             carry = position > 0 ? lines.shift() ?? "" : "";
-            for (let index = lines.length - 1; index >= 0 && records.length < count; index -= 1) {
+            for (let index = lines.length - 1; index >= 0 && groupKeys.size < groupCount; index -= 1) {
                 const line = lines[index].trim();
                 if (!line) {
                     continue;
                 }
-                records.push(parseProxyRequestRecord(parseJsonObject(line), `${proxyRequestsPath(stateRoot)}:${index + 1}`));
+                const record = parseProxyRequestRecord(parseJsonObject(line), `${proxyRequestsPath(stateRoot)}:${index + 1}`);
+                records.push(record);
+                groupKeys.add(proxyHistoryGroupKey(record));
             }
         }
-        if (position === 0 && carry.trim() && records.length < count) {
-            records.push(parseProxyRequestRecord(parseJsonObject(carry.trim()), proxyRequestsPath(stateRoot)));
+        if (position === 0 && carry.trim() && groupKeys.size < groupCount) {
+            const record = parseProxyRequestRecord(parseJsonObject(carry.trim()), proxyRequestsPath(stateRoot));
+            records.push(record);
         }
         return records;
     }
@@ -4521,7 +4672,11 @@ async function resolveProxyHistoryRecords(stateRoot, metrics, count, explicitHis
     if (count <= 0) {
         return [];
     }
-    if (explicitHistory && count > metrics.recent_requests.length) {
+    if (explicitHistory) {
+        const snapshotRecords = takeProxyHistoryGroups(metrics.recent_requests, count);
+        if (proxyHistoryGroups(snapshotRecords).length === count) {
+            return snapshotRecords;
+        }
         return readProxyRequestTail(stateRoot, count);
     }
     return metrics.recent_requests.slice(0, count);
@@ -4547,12 +4702,14 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ? { ...state.metrics, ...proxyMetricsFromRecentRequests(state.metrics.recent_requests) }
         : createProxyMetrics();
     const historyCount = resolveProxyHistoryRenderCount(metrics, options, state);
-    const resolvedHistoryRecords = historyRecords ?? metrics.recent_requests.slice(0, historyCount);
+    const resolvedHistoryRecords = historyRecords ?? (options.historyCount === undefined
+        ? metrics.recent_requests.slice(0, historyCount)
+        : takeProxyHistoryGroups(metrics.recent_requests, historyCount));
     const view = options.view ?? "overview";
     const historyVisible = options.historyVisible ?? true;
     const sessionColorIndexes = allocateProxySessionColorIndexes([
         ...metrics.active_requests.slice(0, PROXY_RECENT_RENDER_COUNT),
-        ...(historyVisible ? resolvedHistoryRecords.slice(0, historyCount) : []),
+        ...(historyVisible ? resolvedHistoryRecords : []),
     ]);
     const statusSummary = formatProxyStatusSummary(metrics);
     const policyLines = formatProxyPolicyLines(state, metrics);
@@ -4562,7 +4719,7 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         ...policyLines.map((line) => fitTerminalLine(line)),
         ...formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache),
         ...(historyVisible
-            ? formatProxyHistoryRows(metrics, resolvedHistoryRecords, historyCount, now, view, sessionColorIndexes, priceCache)
+            ? formatProxyHistoryRows(metrics, resolvedHistoryRecords, resolvedHistoryRecords.length, now, view, sessionColorIndexes, priceCache)
             : []),
         ...(options.watch
             ? [fitTerminalLine(textDim(`view=${view} history=${historyVisible ? "on" : "off"}  v:view t:history q:quit`))]
@@ -4606,7 +4763,7 @@ export function proxyWatchKeyAction(key, view, historyVisible) {
 }
 export async function shutdownProxyRuntime(options) {
     const state = await readProxyState(options.stateRoot);
-    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null, mode: null };
+    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
     const file = pidPath(options.stateRoot);
     if (!fs.existsSync(file)) {
         if (state && health.healthy && health.pid !== null) {
@@ -4737,14 +4894,16 @@ async function applyProxyReroutePlan(plan) {
         }),
     });
 }
-export async function setProxyMode(options, mode) {
+export async function setProxyMode(options, mode, retryEnabled) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
     const previousMode = state.mode;
-    await writeProxyState(options.stateRoot, { ...state, mode });
-    const health = await readProxyHealth({ ...state, mode });
+    const nextRetryEnabled = retryEnabled ?? proxyStatusRetryEnabled(state);
+    const nextState = { ...state, mode, status_retry: { ...state.status_retry, enabled: nextRetryEnabled } };
+    await writeProxyState(options.stateRoot, nextState);
+    const health = await readProxyHealth(nextState);
     if (health.healthy && health.protocol !== PROXY_HEALTH_PROTOCOL) {
         await shutdownProxyRuntime(options);
     }
@@ -4777,9 +4936,9 @@ export async function serveProxy(options) {
                     if (route.endpoint === "reroute") {
                         const profiles = await readProfiles();
                         const profile = resolveProxyUpstream(profiles).name;
-                        if (currentState.mode !== PROXY_MODE_RETRY) {
+                        if (!proxyStatusRetryEnabled(currentState)) {
                             res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
-                            res.end(JSON.stringify({ error: `proxy reroute requires retry mode; mode=${currentState.mode}` }));
+                            res.end(JSON.stringify({ error: `proxy reroute requires enabled status retry; mode=${currentState.mode}` }));
                             return;
                         }
                         if (method === "GET") {
@@ -4830,6 +4989,7 @@ export async function serveProxy(options) {
                         version: packageVersion(),
                         protocol: PROXY_HEALTH_PROTOCOL,
                         mode: currentState.mode,
+                        status_retry_enabled: proxyStatusRetryEnabled(currentState),
                     }));
                     return;
                 }
@@ -4847,6 +5007,7 @@ export async function serveProxy(options) {
                 }
                 const requestState = await readProxyState(options.stateRoot) ?? state;
                 const mode = requestState.mode;
+                const retryEnabled = proxyStatusRetryEnabled(requestState);
                 const downstreamAbort = new AbortController();
                 let responseFinished = false;
                 res.once("finish", () => {
@@ -5086,11 +5247,11 @@ export async function serveProxy(options) {
                         && upstreamProfile.routeConversion?.enabled === true
                         ? "chat/completions"
                         : endpointClass;
-                    const outcome = mode === PROXY_MODE_PASSTHROUGH || !route.policyManaged
+                    const outcome = !route.policyManaged || (mode === PROXY_MODE_PASSTHROUGH && !retryEnabled)
                         ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, activeRecord.id, attemptRecords, passthroughCallbacks)
-                        : mode === PROXY_MODE_RETRY
+                        : mode === PROXY_MODE_PASSTHROUGH
                             ? await proxyThroughActiveUpstreamStatusRetry(req, upstreamProfile, body, activeRecord.id, attemptRecords, requestState.status_retry, passthroughCallbacks)
-                            : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, upstreamEndpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, guardedCallbacks);
+                            : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, upstreamEndpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, isProxyInspectionMode(mode) ? guardedCallbacks : passthroughCallbacks, retryEnabled ? requestState.status_retry : undefined);
                     if (route.policyManaged && isProxyInspectionMode(mode)) {
                         enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
                     }
@@ -5419,9 +5580,9 @@ function usageHelpLines() {
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
-        "  ccs proxy mode                           # print active proxy intervention mode",
-        "  ccs proxy mode passthrough               # disable proxy policy after confirmation",
-        "  ccs proxy mode retry                     # retry upstream HTTP 429 and 503 only",
+        "  ccs proxy mode                           # print response mode and status retry state",
+        "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
+        "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
         "  ccs proxy mode recovery                  # enable continuation recovery mode",
         "  ccs proxy mode intercept                 # enable guard intercept mode",
         "  ccs proxy config                         # print active proxy policy configuration",
@@ -5480,8 +5641,8 @@ function parseProxyUserMode(value) {
     if (value === PROXY_MODE_RECOVERY) {
         return PROXY_MODE_RECOVERY;
     }
-    if (value === PROXY_MODE_RETRY) {
-        return PROXY_MODE_RETRY;
+    if (value === "retry") {
+        return "retry";
     }
     throw new Error("ccs proxy mode requires passthrough, retry, recovery, or intercept");
 }
@@ -5530,7 +5691,7 @@ function printProxyLatencyGuard(value) {
     printKeyValue("first_action:", value.first_progress_action, 15);
     printKeyValue("total:", `${value.total_timeout_ms}ms`, 15);
 }
-function parseProxyStatusRetryConfig(args) {
+function parseProxyStatusRetryConfig(args, enabled) {
     if (args.length !== 3) {
         throw new Error("ccs proxy config retry requires WINDOW BASE MAX milliseconds");
     }
@@ -5541,12 +5702,14 @@ function parseProxyStatusRetryConfig(args) {
         return Number(value);
     });
     return parseProxyStatusRetry({
+        enabled,
         total_window_ms: totalWindowMs,
         backoff_base_ms: backoffBaseMs,
         backoff_max_ms: backoffMaxMs,
     }, "retry config");
 }
 function printProxyStatusRetry(value) {
+    printKeyValue("retry:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
     printKeyValue("retry_statuses:", "429,503", 15);
     printKeyValue("retry_window:", `${value.total_window_ms}ms`, 15);
     printKeyValue("backoff_base:", `${value.backoff_base_ms}ms`, 15);
@@ -5608,22 +5771,40 @@ export async function runProxyCommand(args, options) {
         if (rest.length === 0) {
             const state = await readProxyState(options.stateRoot);
             printKeyValue("mode:", state ? colorName(state.mode) : textDim("missing"), 5);
+            if (state)
+                printKeyValue("retry:", proxyStatusRetryEnabled(state) ? textGreen("enabled") : textDim("disabled"), 5);
             return;
         }
         rejectRemovedYesFlags(rest, "ccs proxy mode");
         const mode = parseProxyUserMode(rest[0]);
-        rejectProxyCommandArgs(rest.slice(1), `ccs proxy mode ${mode}`);
+        const retryArgument = rest[1];
+        if (mode === "retry") {
+            if (rest.length > 2 || (retryArgument !== undefined && retryArgument !== "on" && retryArgument !== "off")) {
+                throw new Error(`ccs proxy mode retry requires optional on or off`);
+            }
+        }
+        else if (rest.length > 2 || (retryArgument !== undefined && retryArgument !== "retry")) {
+            throw new Error(`unknown argument for ccs proxy mode ${mode}: ${retryArgument ?? rest[2]}`);
+        }
         const state = await readProxyState(options.stateRoot);
         if (!state) {
             throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
         }
-        printKeyValue("plan:", `proxy mode ${state.mode} -> ${mode}`, 5);
+        const nextMode = mode === "retry" ? state.mode : mode;
+        const nextRetryEnabled = mode === "retry"
+            ? retryArgument !== "off"
+            : retryArgument === "retry"
+                ? true
+                : proxyStatusRetryEnabled(state);
+        printKeyValue("plan:", `proxy mode ${state.mode} -> ${nextMode}`, 5);
+        printKeyValue("retry:", `${proxyStatusRetryEnabled(state) ? "enabled" : "disabled"} -> ${nextRetryEnabled ? "enabled" : "disabled"}`, 5);
         printKeyValue("note:", "no changes are written unless you type yes", 5);
         if (!(await confirmApply())) {
             return;
         }
-        const result = await setProxyMode(options, mode);
+        const result = await setProxyMode(options, nextMode, nextRetryEnabled);
         printKeyValue("mode:", formatProxyModeChange(result), 5);
+        printKeyValue("retry:", nextRetryEnabled ? textGreen("enabled") : textDim("disabled"), 5);
         printProxyModeRuntime(result.runtime);
         return;
     }
@@ -5641,7 +5822,7 @@ export async function runProxyCommand(args, options) {
         if (rest[0] !== "latency" && rest[0] !== "retry") {
             throw new Error(`unknown argument for ccs proxy config: ${rest[0]}`);
         }
-        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1)) : state.status_retry;
+        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1), state.status_retry.enabled) : state.status_retry;
         const latencyGuard = rest[0] === "latency" ? parseProxyLatencyConfig(rest.slice(1)) : state.latency_guard;
         if (rest[0] === "retry")
             printProxyStatusRetry(statusRetry);
@@ -5677,6 +5858,7 @@ export async function runProxyCommand(args, options) {
         printKeyValue("state:", textGreen(formatProxyFilePath(applied.statePath)), 8);
         printKeyValue("proxy:", textGreen(applied.state.proxy_base_url), 8);
         printKeyValue("mode:", textGreen(applied.state.mode), 8);
+        printKeyValue("retry:", applied.state.status_retry.enabled ? textGreen("enabled") : textDim("disabled"), 8);
         printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
         printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
         printKeyValue("server:", runtime?.version ? textGreen(runtime.version) : textDim("none"), 8);

@@ -488,7 +488,7 @@ test("proxy records active and history request lifecycle", async () => {
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
-          state_schema_version: 3,
+          state_schema_version: 4,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: join(home, ".codex", "config.toml"),
           provider_name: "codex",
@@ -1010,13 +1010,13 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.equal(activeOutputResolved, false);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+    assert.match(output, /session\s+route\s+state\s+age\s+size/);
     assert.doesNotMatch(output, /\bnull\b/);
-    assert.match(output, /active 1\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
-    assert.match(output, /chat-stre…/);
-    assert.match(output, /^\s+-\s+input\s+-$/m);
+    assert.match(output, /active 1\n\s+session\s+route\s+state\s+age\s+size/);
+    assert.match(output, /input\/chat-str/);
+    assert.match(output, /^\s+-\s+input\/-$/m);
     assert.match(output, /\s200\s+\d+ms/);
-    assert.match(output, /responses…/);
+    assert.match(output, /input\/response/);
 
     secondHold.finish();
     assert.equal(await (await activeOutputFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
@@ -1168,8 +1168,8 @@ test("proxy uses an explicit run profile or profiles.current and passes upstream
     assert.equal(state.metrics.recent_requests.find((record) => record.upstream === "input")?.attempts, 1);
 
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(output, /^\s+-\s+ciii\s+-$/m);
-    assert.match(output, /^\s+-\s+input\s+-$/m);
+    assert.match(output, /^\s+-\s+ciii\/-$/m);
+    assert.match(output, /^\s+-\s+input\/-$/m);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -2648,8 +2648,8 @@ test("proxy retry mode handles only HTTP 429 and 503 within the configured windo
     await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
     const statePath = join(stateRoot, "proxy.json");
     const configured = JSON.parse(await readFile(statePath, "utf8"));
-    configured.mode = "retry";
-    configured.status_retry = { total_window_ms: 1000, backoff_base_ms: 5, backoff_max_ms: 10 };
+    configured.mode = "passthrough";
+    configured.status_retry = { enabled: true, total_window_ms: 1000, backoff_base_ms: 5, backoff_max_ms: 10 };
     await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
     await listenServer(upstream, upstreamPort);
 
@@ -2668,7 +2668,7 @@ test("proxy retry mode handles only HTTP 429 and 503 within the configured windo
 
     let state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.attempts === 3);
     let record = state.metrics.recent_requests[0];
-    assert.equal(record.mode, "retry");
+    assert.equal(record.mode, "passthrough");
     assert.equal(record.reasoning_tokens, null);
     assert.deepEqual(record.guard_actions, []);
     assert.deepEqual(record.retry_summary, {
@@ -2706,6 +2706,60 @@ test("proxy retry mode handles only HTTP 429 and 503 within the configured windo
       listenPort: proxyPort,
       stateRoot: join(home, ".config", "codex-tools"),
     }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy passthrough status retry forwards the final response without inspection", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-passthrough-retry-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let hits = 0;
+  const upstream = createServer((_req, res) => {
+    hits += 1;
+    const status = hits === 1 ? 429 : 200;
+    res.writeHead(status, { "content-type": "application/json", "retry-after": "0", "x-upstream-byte-contract": "unchanged" });
+    res.end(JSON.stringify({ status, usage: { output_tokens_details: { reasoning_tokens: 1552 } } }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    configured.status_retry = { enabled: true, total_window_ms: 1000, backoff_base_ms: 5, backoff_max_ms: 10 };
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+    await ensureProxyRunning(options);
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((candidate) => candidate.json());
+    assert.equal(health.mode, "passthrough");
+    assert.equal(health.status_retry_enabled, true);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body: "{}" });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-upstream-byte-contract"), "unchanged");
+    await response.arrayBuffer();
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.attempts === 2);
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 2);
+    assert.equal(record.mode, "passthrough");
+    assert.equal(record.reasoning_tokens, null);
+    assert.deepEqual(record.guard_actions, []);
+    assert.equal(record.retry_summary.http_429, 1);
+    assert.deepEqual(record.usage_attempts.map((attempt) => attempt.input_tokens), [null, null]);
+  } finally {
+    await shutdownProxyRuntime({ codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot: join(home, ".config", "codex-tools") }).catch(() => null);
     await closeServer(upstream);
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
@@ -2753,8 +2807,8 @@ test("proxy reroute moves waiting default-profile requests to the current provid
     await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "old", ["old", "next"]);
     const stateFile = join(stateRoot, "proxy.json");
     const configured = JSON.parse(await readFile(stateFile, "utf8"));
-    configured.mode = "retry";
-    configured.status_retry = { total_window_ms: 60_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 };
+    configured.mode = "passthrough";
+    configured.status_retry = { enabled: true, total_window_ms: 60_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 };
     await writeFile(stateFile, JSON.stringify(configured, null, 2), "utf8");
     await listenServer(oldUpstream, oldPort);
     await listenServer(nextUpstream, nextPort);
@@ -4256,14 +4310,14 @@ test("proxy status table renders configured columns and compact units", () => {
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
     {
-      state_schema_version: 3,
+      state_schema_version: 4,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
       mode: "recovery",
-      status_retry: { total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
+      status_retry: { enabled: false, total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
       latency_guard: {
         enabled: false,
         first_progress_timeout_ms: 0,
@@ -4351,15 +4405,65 @@ test("proxy status table renders configured columns and compact units", () => {
     },
   ).join("\n");
 
-  assert.match(lines, /active 2\n\s+session\s+time\s+up\s+model\s+api\s+dur\.\s+size\s+result/);
+  assert.match(lines, /active 2\n\s+session\s+route\s+state\s+age\s+size/);
   assert.match(lines, /history 2\n\s+time\s+status\s+dur\.\s+size\s+result/);
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+o5\.5\s+R→C\s+0ms\s+2\.00K/);
-  assert.match(lines, /019f0df6\s+\d\d:\d\d:00\s+input\s+-\s+-\s+0ms\s+-/);
-  assert.match(lines, /019f0df6\s+input\s+o5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K/);
-  assert.match(lines, /019f0dfb\s+input\s+o5\.5\n\s+\d\d:\d\d:01\s+502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\]/);
+  assert.match(lines, /019f0df6\s+input\/5\.5\s+stream:R→C\s+0ms\s+2\.00K/);
+  assert.match(lines, /019f0df6\s+input\/-\s+waiting\s+0ms\s+-/);
+  assert.match(lines, /019f0df6\s+input\/5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K/);
+  assert.match(lines, /019f0dfb\s+input\/5\.5\n\s+\d\d:\d\d:01\s+502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\]/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
+});
+
+test("proxy active rows compact route, state, and retry facts", () => {
+  const lines = withStdoutProperties({ isTTY: true, noColor: false, columns: 120 }, () => buildProxyStatusLines(
+    new Date("2026-01-01T00:00:20.000Z"),
+    proxyStateFixture({
+      active_requests: [
+        proxyHistoryRecord({
+          id: "streaming",
+          completed_at: null,
+          started_at: "2026-01-01T00:00:10.000Z",
+          status: 200,
+          upstream: "openrouter",
+          request_model: "gpt-5.6-terra",
+          upstream_model: "gpt-5.6-terra",
+          protocol_conversion: "responses_to_chat",
+          response_bytes: 128 * 1024,
+        }),
+        proxyHistoryRecord({
+          id: "retrying",
+          completed_at: null,
+          started_at: "2026-01-01T00:00:05.000Z",
+          mode: "passthrough",
+          status: 503,
+          upstream: "openrouter",
+          attempts: 2,
+          request_model: "o5.6-terra",
+          upstream_model: "o5.6-terra",
+        }),
+      ],
+      recent_requests: [],
+    }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.3.8", protocol: 7 },
+    {
+      codexConfigPath: "/home/test/.codex/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot: "/tmp/codex-tools",
+    },
+  ));
+  const plainLines = lines.map(stripAnsi);
+  const activeStart = plainLines.indexOf("active 2");
+  const historyStart = plainLines.indexOf("history 0");
+  const active = lines.slice(activeStart, historyStart).join("\n");
+
+  assert.match(stripAnsi(active), /session\s+route\s+state\s+age\s+size/);
+  assert.match(stripAnsi(active), /openro\/5\.6-terr\s+stream:R→C\s+10\.0s\s+128K/);
+  assert.match(stripAnsi(active), /openro\/5\.6-terr\s+retry:503 x2\s+15\.0s\s+-/);
+  assert.doesNotMatch(stripAnsi(active), /result/);
 });
 
 test("proxy status keeps active rows bright and dims history rows in TTY output", async () => {
@@ -4408,13 +4512,13 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
       )
     );
     const state = {
-      state_schema_version: 3,
+      state_schema_version: 4,
       installed_at: "2026-01-01T00:00:00.000Z",
       codex_config_path: "/home/test/.codex/config.toml",
       provider_name: "codex",
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
-      status_retry: { total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
+      status_retry: { enabled: false, total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
       latency_guard: {
         enabled: false,
         first_progress_timeout_ms: 0,
@@ -4481,23 +4585,28 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
   assert.match(output, /\u001b\[2m-\u001b\[0m/);
 });
 
-test("proxy history groups repeated context and renders status and result changes once", () => {
-  const repeated = (completedAt, status, error) => proxyHistoryRecord({
+test("proxy history keeps five complete events and compacts older status-duration trends", () => {
+  const repeated = (completedAt, status, latencyMs, error) => proxyHistoryRecord({
     session: "019f0df6",
     completed_at: completedAt,
     upstream: "input",
     request_model: "gpt-5.5",
     upstream_model: "gpt-5.5",
     status,
+    latency_ms: latencyMs,
     error,
   });
   const lines = buildProxyStatusLines(
     new Date("2026-01-01T00:00:04.000Z"),
     proxyStateFixture({
       recent_requests: [
-        repeated("2026-01-01T00:00:03.000Z", 499, "client closed response before upstream stream completed"),
-        repeated("2026-01-01T00:00:02.000Z", 499, "client closed response before upstream stream completed"),
-        repeated("2026-01-01T00:00:01.000Z", 200, null),
+        repeated("2026-01-01T00:00:07.000Z", 499, 11_500, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:06.000Z", 200, 5_750, null),
+        repeated("2026-01-01T00:00:05.000Z", 499, 9_540, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:04.000Z", 499, 18_200, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:03.000Z", 200, 5_910, null),
+        repeated("2026-01-01T00:00:02.000Z", 499, 18_400, "client closed response before upstream stream completed"),
+        repeated("2026-01-01T00:00:01.000Z", 200, 4_310, null),
       ],
     }),
     ["input"],
@@ -4507,23 +4616,25 @@ test("proxy history groups repeated context and renders status and result change
       listenHost: "127.0.0.1",
       listenPort: 4610,
       stateRoot: "/tmp/codex-tools",
-      historyCount: 3,
+      historyCount: 7,
     },
   ).map(stripAnsi);
   const output = lines.join("\n");
   const historyRows = lines.filter((line) => /^\d\d:\d\d:\d\d\s/.test(line.trimStart()));
 
-  assert.equal((output.match(/019f0df6\s+input\s+o5\.5/g) ?? []).length, 1);
-  assert.equal((output.match(/client abort/g) ?? []).length, 1);
-  assert.match(historyRows[0], /499\s+123ms\s+-\s+client abort/);
-  assert.doesNotMatch(historyRows[1], /499|client abort/);
-  assert.match(historyRows[2], /200\s+123ms/);
+  assert.equal((output.match(/019f0df6\s+input\/5\.5/g) ?? []).length, 1);
+  assert.equal(historyRows.length, 5);
+  assert.equal((output.match(/client abort/g) ?? []).length, 3);
+  assert.match(historyRows[0], /499\s+11\.5s\s+-\s+client abort/);
+  assert.match(historyRows[1], /200\s+5\.75s/);
+  assert.match(historyRows[2], /499\s+9\.54s\s+-\s+client abort/);
+  assert.match(output, /earlier\s+499\/18\.4s\s+200\/4\.31s/);
 });
 
 test("proxy status result column stays single-line and expands with terminal width", () => {
   const stateRoot = "/tmp/codex-tools";
   const state = {
-    state_schema_version: 3,
+    state_schema_version: 4,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",
@@ -4606,7 +4717,7 @@ test("proxy watch hides summaries that do not apply to the active mode", () => {
   assert.equal(passthrough[0].includes("avg="), true);
 
   const retryRecord = proxyHistoryRecord({
-    mode: "retry",
+    mode: "passthrough",
     retry_summary: {
       total: 3,
       reasoning_guard: 0,
@@ -4619,7 +4730,7 @@ test("proxy watch hides summaries that do not apply to the active mode", () => {
   });
   const retry = buildProxyStatusLines(
     new Date("2026-01-01T00:00:00.000Z"),
-    { ...proxyStateFixture({ recent_requests: [retryRecord] }), mode: "retry" },
+    { ...proxyStateFixture({ recent_requests: [retryRecord] }), mode: "passthrough", status_retry: { ...defaultStatusRetry(), enabled: true } },
     ["input"],
     runtime,
     options,
@@ -4637,9 +4748,8 @@ test("proxy watch hides summaries that do not apply to the active mode", () => {
       options,
     ).join("\n"),
   ));
-  assert.equal(renderedRows("recovery"), 13);
-  assert.equal(renderedRows("retry"), 12);
-  assert.equal(renderedRows("passthrough"), 13);
+  assert.equal(renderedRows("recovery"), 5);
+  assert.equal(renderedRows("passthrough"), 5);
 });
 
 test("proxy status and reasoning summaries use event counts", () => {
@@ -4756,15 +4866,71 @@ test("proxy status history count follows TTY rows, non-TTY default, and explicit
 
   const nonTty = render({}, { isTTY: false, columns: 140, rows: 40 });
   assert.equal(countHistoryRows(nonTty), 5);
+  assert.match(nonTty, /earlier\s+200\/123ms/);
 
   const ttyTall = render({}, { isTTY: true, columns: 140, rows: 24 });
-  assert.equal(countHistoryRows(ttyTall), 12);
+  assert.equal(countHistoryRows(ttyTall), 5);
+  assert.match(ttyTall, /earlier\s+200\/123ms.*\+1/);
 
   const ttyTiny = render({}, { isTTY: true, columns: 140, rows: 8 });
   assert.equal(countHistoryRows(ttyTiny), 2);
 
   const explicit = render({ historyCount: 7 }, { isTTY: true, columns: 140, rows: 8 });
-  assert.equal(countHistoryRows(explicit), 7);
+  assert.equal(countHistoryRows(explicit), 5);
+  assert.match(explicit, /earlier\s+200\/123ms\s+200\/123ms/);
+});
+
+test("proxy history renders each session in one group across route changes", () => {
+  const records = [
+    proxyHistoryRecord({ id: "a-new", session: "session-a", request_model: "new-model", upstream_model: "new-model" }),
+    proxyHistoryRecord({ id: "b", session: "session-b", request_model: "other-model", upstream_model: "other-model" }),
+    proxyHistoryRecord({ id: "a-old", session: "session-a", request_model: "old-model", upstream_model: "old-model" }),
+    proxyHistoryRecord({ id: "anonymous", session: null, request_model: "anonymous-model", upstream_model: "anonymous-model" }),
+  ];
+  const output = withStdoutProperties({ isTTY: false, columns: 160, rows: 40 }, () => buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    proxyStateFixture({ recent_requests: records }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.3.11", protocol: 7 },
+    {
+      codexConfigPath: "/tmp/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot: "/tmp/codex-tools",
+      historyCount: 4,
+    },
+  ).map(stripAnsi).join("\n"));
+
+  assert.equal((output.match(/^\s+session-a\s/gm) ?? []).length, 1);
+  assert.match(output, /^\s+session-a\s+input\/new-mode/m);
+  assert.doesNotMatch(output, /^\s+session-a\s+input\/old-mode/m);
+  assert.equal(countHistoryRows(output), 4);
+});
+
+test("proxy --history counts session groups rather than request records", () => {
+  const records = [
+    proxyHistoryRecord({ id: "a-new", session: "session-a" }),
+    proxyHistoryRecord({ id: "a-prior", session: "session-a" }),
+    proxyHistoryRecord({ id: "b", session: "session-b" }),
+    proxyHistoryRecord({ id: "c", session: "session-c" }),
+  ];
+  const output = withStdoutProperties({ isTTY: false, columns: 160, rows: 40 }, () => buildProxyStatusLines(
+    new Date("2026-01-01T00:00:00.000Z"),
+    proxyStateFixture({ recent_requests: records }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.3.12", protocol: 7 },
+    {
+      codexConfigPath: "/tmp/config.toml",
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
+      stateRoot: "/tmp/codex-tools",
+      historyCount: 2,
+    },
+  ).map(stripAnsi).join("\n"));
+
+  assert.equal((output.match(/^\s+session-[ab]\s/gm) ?? []).length, 2);
+  assert.doesNotMatch(output, /^\s+session-c\s/m);
+  assert.equal(countHistoryRows(output), 3);
 });
 
 test("proxy rejects invalid and removed command arguments", async () => {
@@ -5059,9 +5225,9 @@ test("proxy status resets an incompatible state schema and starts the current ru
     const output = stripAnsi(await captureStdout(() => runProxyCommand([], options)));
     await waitForChildExit(oldProxy);
     oldProxy = null;
-    assert.match(output, /state:\s+reset schema legacy -> 3/);
+    assert.match(output, /state:\s+reset schema legacy -> 4/);
     const state = await readProxyState(stateRoot);
-    assert.equal(state.state_schema_version, 3);
+    assert.equal(state.state_schema_version, 4);
     assert.equal(state.installed_at, "2026-01-01T00:00:00.000Z");
     assert.equal(state.mode, "passthrough");
     assert.deepEqual(state.latency_guard, disabledLatencyGuard());
@@ -5248,13 +5414,15 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
       latency_ms: { last: 10, count: 8, sum: 80, min: 10, max: 10 },
       recent_requests: Array.from({ length: 5 }, (_, index) => proxyHistoryRecord({
         id: `snapshot-${index}`,
+        session: `snapshot-session-${index}`,
         completed_at: `2026-01-01T00:00:${String(50 - index).padStart(2, "0")}.000Z`,
         path: `/snapshot-${index}`,
-        request_model: `snapshot-${index}`,
+        request_model: `snap-${index}`,
       })),
     });
     const jsonlRecords = Array.from({ length: 8 }, (_, index) => proxyHistoryRecord({
       id: `jsonl-${index}`,
+      session: index === 6 || index === 7 ? "jsonl-session-6" : `jsonl-session-${index}`,
       completed_at: `2026-01-01T00:00:${String(10 + index).padStart(2, "0")}.000Z`,
       path: `/jsonl-${index}`,
       request_model: `jsonl-${index}`,
@@ -5273,24 +5441,24 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
     };
     const defaultOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.equal(countHistoryRows(defaultOutput), 5);
-    assert.match(defaultOutput, /snapshot-4/);
+    assert.match(defaultOutput, /snap-4/);
     assert.doesNotMatch(defaultOutput, /\/jsonl-/);
 
     const onceOutput = await captureConsole(() => runProxyCommand(["--history", "3"], proxyOptions));
     assert.equal(countHistoryRows(onceOutput), 3);
-    assert.match(onceOutput, /snapshot-2/);
-    assert.doesNotMatch(onceOutput, /snapshot-3/);
+    assert.match(onceOutput, /snap-2/);
+    assert.doesNotMatch(onceOutput, /snap-3/);
 
     const snapshotOutput = await captureConsole(() => runProxyCommand(["--history", "5"], proxyOptions));
     assert.equal(countHistoryRows(snapshotOutput), 5);
-    assert.match(snapshotOutput, /snapshot-4/);
+    assert.match(snapshotOutput, /snap-4/);
     assert.doesNotMatch(snapshotOutput, /\/jsonl-/);
 
     const jsonlOutput = await captureConsole(() => runProxyCommand(["--history", "7"], proxyOptions));
-    assert.equal(countHistoryRows(jsonlOutput), 7);
+    assert.equal(countHistoryRows(jsonlOutput), 8);
     assert.match(jsonlOutput, /jsonl-7/);
     assert.match(jsonlOutput, /jsonl-1/);
-    assert.doesNotMatch(jsonlOutput, /jsonl-0/);
+    assert.match(jsonlOutput, /jsonl-0/);
     assert.doesNotMatch(jsonlOutput, /\/snapshot-/);
 
     await writeFile(
@@ -5436,6 +5604,7 @@ test("proxy watch repaints immediately on terminal resize", async () => {
       latency_ms: { last: 10, count: 12, sum: 120, min: 10, max: 10 },
       recent_requests: Array.from({ length: 12 }, (_, index) => proxyHistoryRecord({
         id: `resize-${index}`,
+        session: `resize-session-${index}`,
         completed_at: `2026-01-01T00:00:${String(59 - index).padStart(2, "0")}.000Z`,
         path: `/resize-${index}`,
         request_model: `resize-${index}`,
@@ -5543,7 +5712,7 @@ test("proxy startup clears persisted active requests from older processes", asyn
       join(stateRoot, "proxy.json"),
       JSON.stringify(
         {
-          state_schema_version: 3,
+          state_schema_version: 4,
           installed_at: "2026-01-01T00:00:00.000Z",
           codex_config_path: codexConfigPath,
           provider_name: "codex",
@@ -5999,7 +6168,7 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
     join(stateRoot, "proxy.json"),
     JSON.stringify(
       {
-        state_schema_version: 3,
+        state_schema_version: 4,
         installed_at: "2026-01-01T00:00:00.000Z",
         codex_config_path: join(home, ".codex", "config.toml"),
         provider_name: "codex",
@@ -6284,7 +6453,7 @@ function assertCompleteProxyGuardAction(record, expected) {
 
 function proxyStateFixture(metrics = {}) {
   return {
-    state_schema_version: 3,
+    state_schema_version: 4,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: "/home/test/.codex/config.toml",
     provider_name: "codex",
@@ -6321,6 +6490,7 @@ function disabledLatencyGuard() {
 
 function defaultStatusRetry() {
   return {
+    enabled: false,
     total_window_ms: 3_600_000,
     backoff_base_ms: 1000,
     backoff_max_ms: 30_000,
@@ -6357,9 +6527,9 @@ async function closeServer(server) {
 
 test("proxy request views expose the confirmed column sets", () => {
   const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
-  assert.deepEqual(titles("overview"), ["session", "time", "up", "model", "api", "dur.", "size", "result"]);
-  assert.deepEqual(titles("tokens"), ["session", "time", "up", "model", "input", "output", "cached", "result"]);
-  assert.deepEqual(titles("cost"), ["session", "time", "up", "model", "input$", "output$", "cached$", "total$", "result"]);
+  assert.deepEqual(titles("overview"), ["session", "route", "state", "age", "size"]);
+  assert.deepEqual(titles("tokens"), ["session", "route", "state", "input", "output", "cached"]);
+  assert.deepEqual(titles("cost"), ["session", "route", "state", "input$", "output$", "cached$", "total$"]);
 });
 
 test("proxy view argument parsing accepts one initial view with optional history", () => {
@@ -6409,13 +6579,13 @@ test("proxy watch hidden history omits the section and reports footer state", ()
 test("proxy model rendering compares raw values before abbreviation and truncation", async () => {
   withStdoutProperties({ isTTY: true, noColor: false, columns: 120 }, () => {
     assert.equal(stripAnsi(formatProxyModel(null, null)), "-");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", null)), "o5.6");
-    assert.equal(stripAnsi(formatProxyModel(null, "gpt-5.6-mini")), "o5.6-mini");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6")), "o5.6");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6-mini")), "o5.6-mini");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6-sol", "o5.6-sol")), "o5.6-sol");
-    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")), `o12345678${String.fromCodePoint(0x2026)}`);
-    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")).length, 10);
+    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", null)), "5.6");
+    assert.equal(stripAnsi(formatProxyModel(null, "gpt-5.6-mini")), "5.6-mini");
+    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6")), "5.6");
+    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6-mini")), "5.6-mini");
+    assert.equal(stripAnsi(formatProxyModel("gpt-5.6-sol", "o5.6-sol")), "5.6-sol");
+    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")), "12345678");
+    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")).length, 8);
   });
   const script = `
     ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 120 })}

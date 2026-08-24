@@ -24,7 +24,7 @@ Local control endpoints:
 - `GET /__codex_proxy/reroute`
 - `POST /__codex_proxy/reroute`
 
-Health responses include `status`, `pid`, `version`, `protocol`, and `mode`. The reroute endpoints inspect and wake eligible status-retry waits. Control requests are handled before metrics and never enter request history.
+Health responses include `status`, `pid`, `version`, `protocol`, `mode`, and `status_retry_enabled`. The reroute endpoints inspect and wake eligible status-retry waits. Control requests are handled before metrics and never enter request history.
 
 These model API paths enter upstream forwarding and request metrics with the active proxy mode policy:
 
@@ -51,7 +51,7 @@ Graceful shutdown stops accepting new requests, drains active responses, and clo
 
 `proxy.json.latency_guard` is the sole latency-policy configuration. It contains `enabled`, `first_progress_timeout_ms`, `first_progress_action`, and `total_timeout_ms`; a new install sets it to disabled with both thresholds `0` and action `return_502`. `ccs proxy config` prints these active values. `ccs proxy config latency FIRST TOTAL [ACTION]` and `ccs proxy config latency off` preview the resulting values and require exact `yes` before writing. Thresholds are non-negative Node timer-range millisecond integers, at least one is positive when enabled, and `ACTION` is `return_502` or `retry_then_502`.
 
-`proxy.json.status_retry` contains `total_window_ms`, `backoff_base_ms`, and `backoff_max_ms`. Defaults are `3600000`, `1000`, and `30000`. `ccs proxy config retry WINDOW BASE MAX` previews and writes these millisecond values with the same exact-`yes` contract. Values are positive Node timer-range integers and require `BASE <= MAX <= WINDOW`.
+`proxy.json.status_retry` is independent from `mode` and contains `enabled`, `total_window_ms`, `backoff_base_ms`, and `backoff_max_ms`. It defaults to disabled with values `3600000`, `1000`, and `30000`. `ccs proxy mode retry [on|off]` changes only `enabled`; `ccs proxy config retry WINDOW BASE MAX` previews and writes timing values with the same exact-`yes` contract. Values are positive Node timer-range integers and require `BASE <= MAX <= WINDOW`.
 
 Each operation creates a complete config snapshot before writing. The install snapshot is named `backups/config-<timestamp>.toml`; the restore snapshot is named `backups/config-restore-<timestamp>.toml`. These files are archives, not an automatic restore source. `ccs proxy restore` computes the target from the active profile instead of copying the install snapshot, so a profile change is respected. Backups are retained until the state directory is removed.
 
@@ -76,9 +76,9 @@ ccs proxy restart
 
 `restart` prints the current and target runtime details and states that nothing changes unless exact `yes` is entered. Apply refuses while `metrics.active_requests` is non-empty, gracefully stops the current runtime, starts the current package version, and verifies the health protocol and version. It preserves proxy routing, mode, latency configuration, counters, and completed history. When a runtime was running, the replacement has a different PID.
 
-Running one-shot `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. `ccs proxy watch` only reads state and health; it does not start, upgrade, or replace a runtime. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while disabling intervention; it does not stop the runtime.
+Running one-shot `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. `ccs proxy watch` only reads state and health; it does not start, upgrade, or replace a runtime. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while selecting transparent response forwarding; it does not stop the runtime or change status retry.
 
-`proxy.json.state_schema_version` is independent from package and health protocol versions. Ordinary package updates keep current state. A missing or different state schema is a destructive upgrade boundary: installed proxy commands gracefully stop the old runtime, preserve stable installation and local routing fields, reset mode to `passthrough`, disable latency policy, clear metrics and `proxy-requests.jsonl`, write the current schema, and append `ccs_proxy_state_reset` to `proxy.log`. Persisted active rows are not authoritative across process versions; a stop timeout leaves state unchanged. The command prints the schema transition once. Config backups plus event and runtime logs remain intact. A malformed current-schema file remains an error and is not reset.
+`proxy.json.state_schema_version` is independent from package and health protocol versions. Ordinary package updates keep current state. A missing or different state schema is a destructive upgrade boundary: installed proxy commands gracefully stop the old runtime, preserve stable installation and local routing fields, reset mode to `passthrough`, disable status retry and latency policy, clear metrics and `proxy-requests.jsonl`, write the current schema, and append `ccs_proxy_state_reset` to `proxy.log`. Persisted active rows are not authoritative across process versions; a stop timeout leaves state unchanged. The command prints the schema transition once. Config backups plus event and runtime logs remain intact. A malformed current-schema file remains an error and is not reset.
 
 If `restart` reports `proxy state file was not found`, inspect the current provider URL. Use `ccs proxy install` only when the provider has a direct URL and no proxy state exists. If the provider still points to the local proxy, restore its direct URL from a known profile or config archive first.
 
@@ -123,7 +123,7 @@ Request records include:
 - `id`: local request id.
 - `started_at`: request start timestamp.
 - `completed_at`: completion timestamp for history records; `null` for active records.
-- `mode`: proxy mode used for this request: `recovery`, `intercept`, `retry`, or `passthrough`.
+- `mode`: response handling mode used for this request: `recovery`, `intercept`, or `passthrough`.
 - `method`: HTTP method.
 - `path`: request pathname.
 - `protocol_conversion`: `responses_to_chat` when the selected attempt converts the request, otherwise `null`.
@@ -208,13 +208,13 @@ The proxy resolves one active upstream for each client request. A non-empty inte
 
 The selected profile must exist and contain non-empty `baseURL` and `apiKey`; invalid explicit selections return local `400` and record failure code `invalid_proxy_profile` before contacting any upstream. The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, `x-api-key`, and `x-ccs-profile` headers, then sets `Authorization: Bearer <selected profile apiKey>` before the upstream request. This keeps ordinary running Codex CLI processes on the latest `profiles.current` while preserving explicit wrapper profile selection.
 
-`ccs proxy install` requires absent proxy state and an explicit `model_provider` with an existing `base_url`. Its preview captures the source config, provider, current URL, proxy URL, and backup path. Apply rejects source changes after preview, backs up the config, starts and health-checks the proxy in `passthrough` mode, changes only the routed provider's `base_url`, and verifies both the exact target content and the parsed local routing value. If apply fails after config writing starts, it restores the source only when the file still contains the planned target, stops the runtime, removes proxy state, and keeps the backup. Status retry begins only after explicit `ccs proxy mode retry` confirmation.
+`ccs proxy install` requires absent proxy state and an explicit `model_provider` with an existing `base_url`. Its preview captures the source config, provider, current URL, proxy URL, and backup path. Apply rejects source changes after preview, backs up the config, starts and health-checks the proxy in `passthrough` mode with status retry disabled, changes only the routed provider's `base_url`, and verifies both the exact target content and the parsed local routing value. If apply fails after config writing starts, it restores the source only when the file still contains the planned target, stops the runtime, removes proxy state, and keeps the backup.
 
-`ccs proxy mode passthrough|retry|recovery|intercept` previews the current and target values and requires exact `yes`. `passthrough` performs one upstream fetch and skips proxy policy. `retry` checks only upstream response status and retries 429/503; it does not buffer or inspect response bodies, run latency policy, retry transport errors, or perform reasoning recovery. `recovery` enables continuation recovery for eligible streaming Responses guard hits and uses ordinary guard retry when recovery is unavailable. `intercept` disables continuation recovery and uses ordinary guard retry.
+`ccs proxy mode passthrough [retry]|retry [on|off]|recovery|intercept` previews the current and target values and requires exact `yes`. `mode` selects response handling: `passthrough` forwards without inspection, `recovery` enables continuation recovery for eligible streaming Responses guard hits, and `intercept` uses ordinary guard retry. `retry` changes the independent 429/503 status-retry policy without changing response handling. `ccs proxy mode passthrough retry` enables transparent forwarding with status retry.
 
-In `retry` mode, the total window starts immediately before the first upstream fetch. A 429/503 response uses `Retry-After` seconds or HTTP date when the delay fits the configured window; a missing or invalid header uses full-jitter exponential backoff from `backoff_base_ms` through `backoff_max_ms`. A wait is abortable by the client. Before every retry dispatch, requests without `x-ccs-profile` reload `profiles.current`; explicit profile requests stay pinned. No attempt is dispatched after the window, and exhaustion returns the last original upstream status, headers, and body. Other statuses use one attempt and are forwarded immediately.
+When status retry is enabled, the total window starts immediately before the first upstream fetch. A 429/503 response uses `Retry-After` seconds or HTTP date when the delay fits the configured window; a missing or invalid header uses full-jitter exponential backoff from `backoff_base_ms` through `backoff_max_ms`. A wait is abortable by the client. Before every retry dispatch, requests without `x-ccs-profile` reload `profiles.current`; explicit profile requests stay pinned. No attempt is dispatched after the window, and exhaustion returns the last original upstream status, headers, and body. In passthrough mode, the final response is forwarded without inspection.
 
-`ccs proxy reroute` requires a healthy matching runtime in `retry` mode. `GET /__codex_proxy/reroute` returns the current profile and in-memory requests that are waiting after 429/503 and are not explicitly pinned. The CLI prints that plan and performs no action when the set is empty. After exact `yes`, `POST /__codex_proxy/reroute` verifies that the current profile still matches the preview, wakes the previewed requests that are still eligible, and reports rerouted and skipped IDs. Each awakened request cancels only its backoff wait, retains its original client connection, body, deadline, and counters, then resolves the current profile before its next dispatch. Fetching, forwarding, completed, and pinned requests are never registered for reroute.
+`ccs proxy reroute` requires a healthy matching runtime with status retry enabled. `GET /__codex_proxy/reroute` returns the current profile and in-memory requests that are waiting after 429/503 and are not explicitly pinned. The CLI prints that plan and performs no action when the set is empty. After exact `yes`, `POST /__codex_proxy/reroute` verifies that the current profile still matches the preview, wakes the previewed requests that are still eligible, and reports rerouted and skipped IDs. Each awakened request cancels only its backoff wait, retains its original client connection, body, deadline, and counters, then resolves the current profile before its next dispatch. Fetching, forwarding, completed, and pinned requests are never registered for reroute.
 
 `ccs proxy restore` resolves `profiles.current` while building its preview and targets that profile's `baseURL`. Apply rejects config or proxy-state changes after preview, backs up the current config, changes and verifies only `state.provider_name`'s `base_url`, then stops the proxy and removes state. Install and restore backups remain available. Every other TOML field, `profiles.json`, and authentication data remain unchanged. Restore is for returning to direct routing or preparing a clean reinstall; an ordinary package update uses `ccs proxy restart`.
 
@@ -230,7 +230,7 @@ Transport-level `TypeError: fetch failed` is retried once in `recovery` and `int
 
 ## Reasoning guard
 
-Capacity, reasoning, transport retry, latency, and inspection policies are active only in `recovery` and `intercept`. The separate `retry` mode uses only HTTP 429/503 status facts. `passthrough` records status, duration, and forwarded bytes without applying policy.
+Capacity, reasoning, transport retry, latency, and inspection policies are active only in `recovery` and `intercept`. Independent status retry uses only HTTP 429/503 facts and may be enabled with any response mode. `passthrough` records status, duration, and forwarded bytes without response inspection.
 
 - `reasoning_equals`: `516`, `1034`, `1552`.
 - `guard_retry_attempts`: `3`.
@@ -262,8 +262,8 @@ Before client headers are committed, total timeout, first-progress timeout, or t
 - Runtime line: labeled `ccs proxy`, current `HH:mm:ss` time, mode, and last/average completed request latency. Healthy runtime identity fields are omitted; unhealthy state adds diagnostic health and runtime identity.
 - Status line: non-zero exact status event counts.
 - Policy lines: only active configuration and non-zero activity. `passthrough` has no policy line. `retry` shows its retry window/backoff and non-zero 429/503 retry counts. `intercept` and `recovery` show an enabled deadline, non-zero retry categories, and non-zero reasoning/recovery groups.
-- `active` section: current requests use the full request table. When empty, only `active 0` is rendered.
-- `history` section: completed requests remain separate and dim. Consecutive records with the same session, upstream, actual model, and API conversion are grouped under one context line. Group rows render only `time status dur. size result`; consecutive equal status and result values are shown once, then left blank until they change. Token and cost views replace duration/size with their dedicated measurements.
+- `active` section: current requests use a compact operational table with `session route state age size`. `route` combines the selected provider and actual/request model. `state` identifies `waiting`, `stream`, `stream:R→C`, active retry such as `retry:503 x2`, or an in-progress non-retry error forward such as `forward:502`. `age` is total time since the proxy accepted the client request and `size` is bytes already written to that client; neither resets between internal attempts. Active rows have no terminal `result` column. When empty, only `active 0` is rendered.
+- `history` section: completed requests remain separate and dim. Every non-empty session appears in one group, regardless of route, model, or API conversion changes; the context line uses that session's newest record and route. Requests without a session remain separate groups. Each group keeps its newest five complete event rows with `time status dur. size result`; status, duration, and size always render for every complete row. Older records in that group become one `earlier` trend line containing only ordered `status/dur.` pairs. The line keeps the first six older pairs that fit the configured display contract and ends with `... +N` when still older events are omitted. Token and cost views replace the complete-row duration/size fields with their dedicated measurements; their `earlier` line remains status/duration trend data.
 - Results use canonical failure codes when a structured code exists. Status `499` client-close text renders as `client abort`; reasoning-guard text already represented by guard prefixes is omitted.
 
 Default output omits healthy runtime identity, storage paths, disabled policy values, zero policy counters, latency minimum/maximum, empty table headers, and the command footer. File locations and commands remain documented by `ccs proxy --help` and this specification.
@@ -272,12 +272,12 @@ History row count follows these rules:
 
 - TTY output computes the count from `process.stdout.rows` after runtime, status, active policy, active section, history section, history group lines, and watch footer are reserved.
 - Tiny terminals can render zero history rows.
-- Non-TTY output renders 5 history rows for deterministic piped output.
-- `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch`.
-- `N` is a positive integer.
+- Non-TTY output reads 11 history records: five full records plus up to six compact older trend samples for one history group.
+- `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch` with up to `N` history groups.
+- `N` is a positive integer. A non-empty session is one history group; each request without a session is one group.
 - Default rendering reads completed history from `proxy.json.metrics.recent_requests`.
-- Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot has enough rows.
-- Explicit `--history N` reads the tail of `proxy-requests.jsonl` when `N` exceeds the snapshot length.
+- Explicit `--history N` reads `proxy.json.metrics.recent_requests` when the snapshot contains enough groups.
+- Explicit `--history N` reads the tail of `proxy-requests.jsonl` when the snapshot contains fewer than `N` groups.
 
 `ccs proxy watch` renders the same status layout in the terminal alternate screen and repaints immediately on terminal resize. Each refresh reads stored state and current health without changing the runtime. The compact footer shows the current view, history visibility, and keys; `v` cycles views, `t` toggles completed rows, and `q` exits. `Ctrl-C` also exits through the standard terminal signal path.
 
@@ -287,12 +287,12 @@ Continuation recovery counters use the same `proxy.json.metrics.recent_requests`
 
 Reasoning counters are derived from explicit reasoning-token events in `proxy.json.metrics.recent_requests`. Each guard action with `reasoning_tokens` contributes one event, and the final response `reasoning_tokens` contributes one event when present. A final local `502 reasoning_guard_triggered` records the last guarded value through its `return_status_502` action, so the matching request field does not add a second count for the same observation. The view renders only non-zero fixed groups (`0`, every guarded value from `REASONING_EQUALS`) plus `other` for every remaining observed value. Requests with reasoning text observations and absent explicit token counts do not increment `reasoning_token_counts`.
 
-Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned, and the final result column takes remaining width and is left-aligned. `overview` is the default. Active rows use these column sets:
+Request tables use the shared terminal table renderer. Fixed-width columns are right-aligned; the history result column takes remaining width and is left-aligned. `overview` is the default. Active rows use these column sets:
 
 ```text
-overview  session time up model api dur. size result
-tokens    session time up model input output cached result
-cost      session time up model input$ output$ cached$ total$ result
+overview  session route state age size
+tokens    session route state input output cached
+cost      session route state input$ output$ cached$ total$
 ```
 
 History group rows use these column sets:
@@ -303,19 +303,19 @@ tokens    time status input output cached result
 cost      time status input$ output$ cached$ total$ result
 ```
 
-The model column is 10 cells wide and describes the current or final attempt. Missing request and upstream models render dim `-`. A request-only or upstream-only model renders normally. Equal raw values render the upstream model green; different raw values render the actual upstream model red. Comparison precedes `gpt-` to `o` abbreviation and truncation, so raw `gpt-5.6-sol` and `o5.6-sol` display the same abbreviated text in red.
+`route` is 15 cells: provider uses six cells and direct truncation without an ellipsis, then `/`, then model uses eight cells. Model display removes `gpt-` or an `o` prefix before a model number: `gpt-5.6-terra` and `o5.6-terra` both render as `5.6-terr`. Missing provider or model renders dim `-`. A request-only or upstream-only model renders normally. Equal raw request/upstream models render green; different raw values render the actual upstream model red. Comparison precedes normalization and truncation.
 
-Token and cost columns aggregate all `usage_attempts`; the model column remains attempt-local. `input` sums `input_tokens - cached_input_tokens` for every attempt, matching the `input$` pricing basis. `cached` sums cached input separately. A token column renders only when every attempt has the fields required by that calculation, then uses decimal `K` with at most one decimal place. Cached input above input tokens renders `input` as `invalid`. Missing attempt data renders dim `-`.
+Token and cost columns aggregate all `usage_attempts`; the route model remains current-attempt-local. `input` sums `input_tokens - cached_input_tokens` for every attempt, matching the `input$` pricing basis. `cached` sums cached input separately. A token column renders only when every attempt has the fields required by that calculation, then uses decimal `K` with at most one decimal place. Cached input above input tokens renders `input` as `invalid`. Missing attempt data renders dim `-`.
 
 Cost lookup reads the local model price cache once per frame, applies `profiles.json` overrides, and performs no network refresh. Each attempt uses its stored exact pricing model and normalized tier: `default|standard` selects standard pricing and `fast|priority` selects fast pricing. Input cost subtracts cached input before applying input price; cached and output components use their own prices. Components sum unrounded attempt values and format once. Missing usage, unsupported tiers, or missing prices render the affected component and total as `-`. Cached input above input tokens renders input and total as `invalid`. USD values render as `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.
 
-Active overview rows show elapsed time for `dur.`, known response bytes for `size`, and observed attempt facts. History `dur.` is total request time. The `result` column retains client and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
+Active overview `age` is total request time so far and `size` is known client-forwarded bytes. History `dur.` is total request time. The history `result` column retains client and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
 
 ## Implementation notes
 
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
 - Active and history records pass through the same schema `8` validator. Pending values use the documented `null`, `0`, or empty collection value.
-- Status output builds active and history rows with one request-row formatter. The formatter derives pending or completed timing and byte display from `completed_at`.
+- Status output has separate active and history row formatters. They share normalized record facts but use distinct table shapes.
 - Explicit restart refuses while `active_requests` is non-empty. A new proxy process clears stale persisted active entries before serving traffic, so active entries never carry across process replacement.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
 - Completed model API requests append to bounded `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
@@ -417,22 +417,22 @@ Reasoning text observation paths:
 The status command provides three request-table views:
 
 ```text
-overview  session time up model api dur. size result
-tokens    session time up model input output cached result
-cost      session time up model input$ output$ cached$ total$ result
+active overview  session route state age size
+active tokens    session route state input output cached
+active cost      session route state input$ output$ cached$ total$
+history overview time status dur. size result
+history tokens   time status input output cached result
+history cost     time status input$ output$ cached$ total$ result
 ```
 
-- `model`: current/final actual model in 10 cells; equal request/upstream values are green, differing actual upstream values are red, and missing values are dim.
+- `route`: provider/model with six direct-truncated provider cells and eight normalized direct-truncated model cells. It is a single active column and a history context value.
 - `session`: equal visible session ids use the same color across active and history rows. The first 11 distinct visible ids use different ANSI 256 colors from `39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214`; allocation is deterministic for the visible id set.
-- `api`: `R→C` when the selected attempt converts Responses traffic to Chat Completions, otherwise dim `-`.
-- `dur.`: elapsed time for active rows and completed duration for history rows.
+- `state`: active `waiting` and `retry:*` values are yellow, `stream` is green, and `forward:<status>` uses the status color. `R→C` and retry count stay in this column.
+- `age`: elapsed time for the full active client request. `dur.` is completed request duration in history rows.
 - Token columns require the field from every attempt and sum all attempt values.
 - Cost columns calculate each attempt with its own model and tier, sum full-precision values, and format once.
-- Active rows follow the shared `model` rendering rules; SSE streams update active rows after the first model frame is observed.
-- Retry attempts update active-row `api` and clear the upstream model before the new attempt observes response metadata.
-- History rows show status-normalized model fields.
-- `up`: upstream name plus yellow attempt count when attempts are greater than one.
-- `result`: optional bracketed local-action prefix from `guard_actions`, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
+- Active rows update route and state after each upstream attempt; active rows never show a terminal result.
+- History `result`: optional bracketed local-action prefix from `guard_actions`, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
 
@@ -463,24 +463,24 @@ cost      session time up model input$ output$ cached$ total$ result
 - SSE reasoning guard matches retry the same upstream after strict buffering and record `internal_retry`.
 - Exhausted reasoning guard retry budget returns `502 reasoning_guard_triggered` and records `return_status_502`.
 - Client aborts during strict SSE buffering complete history as `499`.
-- The overview status table displays protocol conversion in `api`; token and cost views keep their dedicated usage columns.
+- Active overview displays protocol conversion inside `state`; token and cost views keep their dedicated usage columns.
 - Status tables keep equal visible session ids the same color and avoid color reuse among the first 11 distinct visible ids, including ids whose direct hash colors collide. Tests assert the complete selected ANSI color set.
 - Reasoning token counts are persisted in `metrics.reasoning_token_counts` on the event basis and render only as non-zero grouped counts.
 - Guard actions are persisted in request history and written to `proxy.log`.
 - Completed model API requests are appended to bounded `proxy-requests.jsonl`; `metrics.recent_requests` remains capped at 100.
 - Background stdout/stderr are written to `proxy-runtime.log`.
-- Status history count follows TTY rows, non-TTY fixed 5, and explicit `--history N`.
+- Status history count follows TTY rows, non-TTY reads 11 records for five complete rows plus compact trend samples, and explicit `--history N` groups.
 - Watch repaints on terminal resize.
 - Guard action prefixes render in the status table `result` column.
 - Model rendering covers missing, request-only, upstream-only, equal, different, raw comparison before abbreviation, width, and ANSI color semantics.
 - Token rendering covers missing attempt data, zero, decimal `K` boundaries, and the confirmed `999.9K` maximum.
 - Cost rendering covers per-attempt model and tier selection, cached subtraction, missing facts and prices, invalid cached counts, standard and fast prices, full-precision sums, and adaptive USD output.
-- Status tables right-align fixed columns, left-align the final `result` column as one current-width line, and format time/size with compact 3-significant-digit units after the base unit.
+- Active and history tables right-align fixed numeric columns; only history has a final `result` column. Time and size use compact 3-significant-digit units after the base unit.
 - Existing active/history lifecycle, byte counts, session short id, status groups, and concurrent metrics tests continue to pass.
 
 ### Decisions
 
-- Status table model column name is `model`.
+- Active route column name is `route`.
 - Stream model extraction stops at the first valid model value.
 - Stream reasoning token extraction stores the latest explicit count.
 - Reasoning text observations stay separate from token-count metrics.
