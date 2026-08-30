@@ -719,6 +719,7 @@ ccs proxy config latency off
 ccs proxy config latency FIRST TOTAL [return_502|retry_then_502]
 ccs proxy install
 ccs proxy restart
+ccs proxy restart --force
 ccs proxy restore
 ccs proxy serve
 ```
@@ -743,7 +744,7 @@ For a normal tool update, leave the installed routing and state in place:
 2. Run `ccs proxy restart` and confirm it with exact `yes`.
 3. Run `ccs proxy` and verify the new PID, current package version, health protocol, and preserved mode/history.
 
-`restart` preserves `config.toml` routing, proxy state, mode, and history. It refuses to restart while requests are active. Proxy shutdown stops accepting new requests, drains active responses, and closes idle keep-alive connections immediately. Running one-shot `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI. `ccs proxy watch` only observes state and health, so a long-running watch from an earlier package cannot replace a newer runtime.
+`restart` preserves `config.toml` routing, proxy state, mode, and history. It refuses to restart while requests are active. Use `ccs proxy restart --force` to preview those requests, then, after exact `yes`, terminate the old proxy and all of its active client connections before starting the replacement. Proxy shutdown stops accepting new requests, drains active responses, and closes idle keep-alive connections immediately. Running one-shot `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI. `ccs proxy watch` only observes state and health, so a long-running watch from an earlier package cannot replace a newer runtime.
 
 `proxy.json` has an explicit state schema version. When an update changes that schema, the next installed proxy command automatically stops the old runtime, preserves local routing and installation metadata, resets policy to safe `passthrough` defaults, clears incompatible request metrics/history, and starts the current runtime when needed. Current-schema corruption remains an explicit error; manual cache-file deletion is not part of the update flow.
 
