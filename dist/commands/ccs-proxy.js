@@ -374,6 +374,21 @@ async function waitForProxyStop(state) {
     }
     throw new Error(`proxy did not stop: ${healthUrl(state)}`);
 }
+async function waitForProxyProcessExit(pid) {
+    const deadline = Date.now() + PROXY_START_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        try {
+            process.kill(pid, 0);
+        }
+        catch (error) {
+            if (error.code === "ESRCH")
+                return;
+            throw error;
+        }
+        await sleep(PROXY_HEALTH_POLL_MS);
+    }
+    throw new Error(`proxy process did not exit: PID=${pid}`);
+}
 async function acquireProxyStartLock(stateRoot) {
     await mkdir(stateRoot, { recursive: true });
     const lockPath = proxyStartLockPath(stateRoot);
@@ -4821,12 +4836,27 @@ export async function shutdownProxyRuntime(options) {
     await rm(file, { force: true });
     return `Proxy stopped. PID=${targetPid}`;
 }
-async function buildProxyRestartPlan(options) {
+async function forceShutdownProxyRuntime(options, health, activeRequestCount) {
+    if (!health.healthy || health.pid === null) {
+        return shutdownProxyRuntime(options);
+    }
+    try {
+        process.kill(health.pid, "SIGKILL");
+    }
+    catch (error) {
+        if (error.code !== "ESRCH")
+            throw error;
+    }
+    await waitForProxyProcessExit(health.pid);
+    await rm(pidPath(options.stateRoot), { force: true });
+    return `Proxy forcibly stopped. PID=${health.pid} active=${activeRequestCount}`;
+}
+async function buildProxyRestartPlan(options, force = false) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
-    if (state.metrics.active_requests.length > 0) {
+    if (!force && state.metrics.active_requests.length > 0) {
         throw new Error(`proxy restart requires no active requests; active=${state.metrics.active_requests.length}`);
     }
     return {
@@ -4834,6 +4864,8 @@ async function buildProxyRestartPlan(options) {
         providerName: state.provider_name,
         proxyBaseUrl: state.proxy_base_url,
         mode: state.mode,
+        force,
+        activeRequests: state.metrics.active_requests,
         current: await readProxyHealth(state),
         targetVersion: packageVersion(),
         targetProtocol: PROXY_HEALTH_PROTOCOL,
@@ -4848,7 +4880,7 @@ export async function restartProxyRuntime(options, plan) {
         || state.mode !== plan.mode) {
         throw new Error(`proxy state changed after preview: ${statePath(options.stateRoot)}`);
     }
-    if (state.metrics.active_requests.length > 0) {
+    if (!plan.force && state.metrics.active_requests.length > 0) {
         throw new Error(`proxy restart requires no active requests; active=${state.metrics.active_requests.length}`);
     }
     const current = await readProxyHealth(state);
@@ -4861,7 +4893,9 @@ export async function restartProxyRuntime(options, plan) {
     if (current.healthy) {
         await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
             event: "ccs_proxy_runtime_restart",
-            reason: "explicit",
+            reason: plan.force ? "explicit_force" : "explicit",
+            forced: plan.force,
+            active_requests: state.metrics.active_requests.length,
             old_protocol: current.protocol,
             new_protocol: plan.targetProtocol,
             old_version: current.version,
@@ -4869,7 +4903,9 @@ export async function restartProxyRuntime(options, plan) {
             pid: current.pid,
         });
     }
-    const stopped = await shutdownProxyRuntime(options);
+    const stopped = plan.force
+        ? await forceShutdownProxyRuntime(options, current, state.metrics.active_requests.length)
+        : await shutdownProxyRuntime(options);
     const runtime = await ensureProxyRunning(options);
     if (!runtime) {
         throw new Error(`proxy state file was not found after restart: ${statePath(options.stateRoot)}`);
@@ -5694,7 +5730,7 @@ function usageHelpLines() {
         "  ccs proxy config latency off             # disable latency deadlines after confirmation",
         "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
-        "  ccs proxy restart                        # restart the installed background proxy after confirmation",
+        "  ccs proxy restart [--force]              # restart; force terminates active requests after confirmation",
         "  ccs proxy restore                        # restore active profile routing and remove proxy state",
         "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
     ];
@@ -6018,8 +6054,11 @@ export async function runProxyCommand(args, options) {
     }
     if (command === "restart") {
         rejectRemovedYesFlags(rest, "ccs proxy restart");
-        rejectProxyCommandArgs(rest, "ccs proxy restart");
-        const plan = await buildProxyRestartPlan(options);
+        if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== "--force")) {
+            throw new Error(`unknown argument for ccs proxy restart: ${rest[0] ?? ""}`);
+        }
+        const force = rest[0] === "--force";
+        const plan = await buildProxyRestartPlan(options, force);
         printKeyValue("provider:", plan.providerName, 9);
         printKeyValue("routing:", `${colorUrl(plan.proxyBaseUrl)} (unchanged)`, 9);
         printKeyValue("mode:", `${colorName(plan.mode)} (unchanged)`, 9);
@@ -6027,8 +6066,15 @@ export async function runProxyCommand(args, options) {
             ? `PID=${plan.current.pid ?? "unknown"} server=${plan.current.version ?? "unknown"} protocol=${plan.current.protocol ?? "unknown"}`
             : textDim("not running"), 9);
         printKeyValue("target:", `server=${plan.targetVersion} protocol=${plan.targetProtocol}`, 9);
-        printKeyValue("requests:", textGreen("active=0"), 9);
-        printKeyValue("note:", "new requests are briefly unavailable during restart", 9);
+        printKeyValue("requests:", plan.activeRequests.length === 0
+            ? textGreen("active=0")
+            : textRed(`active=${plan.activeRequests.length}`), 9);
+        for (const request of plan.activeRequests) {
+            printKeyValue("request:", `${request.id} session=${request.session ?? "-"} path=${request.path}`, 9);
+        }
+        printKeyValue("note:", force
+            ? "force terminates active client connections before restart"
+            : "new requests are briefly unavailable during restart", 9);
         printKeyValue("confirm:", "no changes are written unless you type yes", 9);
         if (!(await confirmApply())) {
             return;

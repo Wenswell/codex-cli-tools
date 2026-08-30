@@ -5138,6 +5138,7 @@ test("proxy rejects invalid and removed command arguments", async () => {
     ["mode", "recovery", "extra"],
     ["reroute", "extra"],
     ["restart", "extra"],
+    ["restart", "--force", "extra"],
     ["install", "extra"],
     ["restore", "extra"],
   ]) {
@@ -5502,6 +5503,36 @@ test("proxy restart previews, requires yes, preserves state, and rejects active 
     );
     assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
 
+    const forcePreview = stripAnsi(await captureStdout(() => runProxyCommand(["restart", "--force"], options)));
+    assert.match(forcePreview, /requests:\s+active=1/);
+    assert.match(forcePreview, /request:\s+restart-active/);
+    assert.match(forcePreview, /force terminates active client connections before restart/);
+    assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
+
+    const stdinIsTtyForForce = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    let forceAnswered = false;
+    let forceOutput;
+    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+    try {
+      forceOutput = stripAnsi(await captureStdout(() => runProxyCommand(["restart", "--force"], options), {
+        isTTY: true,
+        onWrite(currentOutput) {
+          if (!forceAnswered && currentOutput.includes("Apply changes?")) {
+            forceAnswered = true;
+            process.stdin.emit("data", Buffer.from("yes\n"));
+          }
+        },
+      }));
+    } finally {
+      if (stdinIsTtyForForce) Object.defineProperty(process.stdin, "isTTY", stdinIsTtyForForce);
+      else delete process.stdin.isTTY;
+    }
+    assert.equal(forceAnswered, true);
+    assert.match(forceOutput, /forcibly stopped/);
+    const forceHealth = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
+    assert.notEqual(forceHealth.pid, initialPid);
+    assert.equal((await readProxyState(stateRoot)).metrics.active_requests.length, 0);
+
     const readyState = await readProxyState(stateRoot);
     await writeFile(
       join(stateRoot, "proxy.json"),
@@ -5512,7 +5543,7 @@ test("proxy restart previews, requires yes, preserves state, and rejects active 
     const preview = stripAnsi(await captureStdout(() => runProxyCommand(["restart"], options)));
     assert.match(preview, /restart/i);
     assert.match(preview, /no changes are written unless you type yes/);
-    assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
+    assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, forceHealth.pid);
     assert.deepEqual(await readProxyState(stateRoot), preservedState);
     assert.equal(await readFile(codexConfigPath, "utf8"), configText);
 
@@ -5538,7 +5569,7 @@ test("proxy restart previews, requires yes, preserves state, and rejects active 
     assert.equal(answered, true);
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
     const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-    assert.notEqual(health.pid, initialPid);
+    assert.notEqual(health.pid, forceHealth.pid);
     assert.equal(health.version, packageJson.version);
     assert.equal(health.protocol, 7);
     assert.match(output, new RegExp(`server:\\s+${packageJson.version.replaceAll(".", "\\.")}`));

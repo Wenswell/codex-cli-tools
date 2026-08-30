@@ -86,9 +86,12 @@ For a normal tool update, update the package or linked clone, then restart the i
 ```bash
 # update the package or rebuild the linked clone
 ccs proxy restart
+ccs proxy restart --force
 ```
 
 `restart` prints the current and target runtime details and states that nothing changes unless exact `yes` is entered. Apply refuses while `metrics.active_requests` is non-empty, gracefully stops the current runtime, starts the current package version, and verifies the health protocol and version. It preserves proxy routing, mode, latency configuration, counters, and completed history. When a runtime was running, the replacement has a different PID.
+
+`restart --force` is the deliberate interruption path. Its preview lists the active requests that will lose their client connection. After exact `yes`, it terminates the old proxy process, including its in-flight upstream work, then starts and verifies a new process. Persisted active rows are cleared during new-process startup; completed history remains unchanged.
 
 Running one-shot `ccs proxy` also replaces a healthy runtime whose protocol or package version does not match the current CLI. `ccs proxy watch` only reads state and health; it does not start, upgrade, or replace a runtime. Use explicit `restart` after an update for a visible preview, confirmation, and result. `ccs proxy mode passthrough` keeps the local URL while selecting transparent response forwarding; it does not stop the runtime or change status retry.
 
@@ -104,7 +107,7 @@ An earlier state schema is reset automatically by the next installed proxy comma
 
 `ccs proxy restart` is the only explicit public runtime replacement command. There are no separate `start` or `stop` commands: one-shot installed proxy commands start a missing compatible runtime when needed, while `watch` remains read-only. Stopping while the configured provider still points to the local URL would break routing.
 
-Restart requires installed proxy state. Preview prints the active PID, protocol, and package version plus the target protocol and package version, then requires exact `yes`. Apply rechecks that `metrics.active_requests` is empty before stopping the runtime. It preserves `proxy.json`, `proxy-requests.jsonl`, routing, mode, policy configuration, counters, and completed history, then verifies the new PID and matching health contract. An explicit restart with active requests fails without stopping the runtime or changing state.
+Restart requires installed proxy state. Preview prints the active PID, protocol, and package version plus the target protocol and package version, then requires exact `yes`. Ordinary apply rechecks that `metrics.active_requests` is empty before stopping the runtime. `restart --force` instead lists those active requests and terminates the old proxy process after confirmation, so every affected client connection closes immediately. Both forms preserve `proxy.json`, `proxy-requests.jsonl`, routing, mode, policy configuration, counters, and completed history, then verify the new PID and matching health contract. The new process clears stale active rows before serving.
 
 ## Request lifecycle
 
@@ -332,7 +335,7 @@ Active overview `age` is total request time so far and `size` is known client-fo
 - `metrics.active_requests` and `metrics.recent_requests` use the same request record type.
 - Active and history records pass through the same schema `8` validator. Pending values use the documented `null`, `0`, or empty collection value.
 - Status output has separate active and history row formatters. They share normalized record facts but use distinct table shapes.
-- Explicit restart refuses while `active_requests` is non-empty. A new proxy process clears stale persisted active entries before serving traffic, so active entries never carry across process replacement.
+- Ordinary explicit restart refuses while `active_requests` is non-empty; `restart --force` terminates them with the old process. A new proxy process clears stale persisted active entries before serving traffic, so active entries never carry across process replacement.
 - Current upstream display is derived from `profiles.current`; recent upstream hit counts remain visible through `upstream_hit_counts`.
 - Completed model API requests append to bounded `proxy-requests.jsonl` inside the serialized proxy metrics mutation queue, preserving completion order with the state snapshot update.
 - State-file counters are recomputed from `metrics.recent_requests` after every completed request and when state files are read.
