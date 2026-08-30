@@ -15,6 +15,10 @@ export type Profile = {
 
 export type ProfilesFile = {
   profiles?: Record<string, Profile>;
+  proxy?: {
+    /** Exact upstream API path to switching-profile routing. */
+    pathProfiles?: Record<string, string>;
+  };
   usage?: Record<string, Profile>;
   current?: string;
   toggle?: string[];
@@ -63,10 +67,26 @@ export async function readProfiles(): Promise<ProfilesFile> {
   }
 
   try {
-    return parseJsonObject(text) as ProfilesFile;
+    const profiles = parseJsonObject(text) as ProfilesFile;
+    assertProxyPathProfiles(profiles.proxy?.pathProfiles);
+    return profiles;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`invalid profiles.json: ${message}`);
+  }
+}
+
+function assertProxyPathProfiles(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid profiles.json: proxy.pathProfiles must be an object");
+  }
+  for (const [pathname, profile] of Object.entries(value)) {
+    if (!pathname.startsWith("/") || typeof profile !== "string" || !profile.trim()) {
+      throw new Error(`invalid profiles.json: proxy.pathProfiles.${pathname} must map an absolute path to a non-empty profile name`);
+    }
   }
 }
 

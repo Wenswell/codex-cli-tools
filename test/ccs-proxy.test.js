@@ -805,6 +805,88 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
   }
 });
 
+test("proxy routes alpha search to its mapped profile and preserves explicit profile priority", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const defaultPort = await reservePort();
+  const searchPort = await reservePort();
+  const defaultHits = [];
+  const searchHits = [];
+  const defaultUpstream = createServer(async (req, res) => {
+    defaultHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "default" }));
+  });
+  const searchUpstream = createServer(async (req, res) => {
+    searchHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "search" }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      proxyPort,
+      {
+        default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
+        search: { baseURL: `http://127.0.0.1:${searchPort}`, apiKey: "search-key" },
+      },
+      "default",
+      ["default", "search"],
+      { pathProfiles: { "/v1/alpha/search": "search" } },
+    );
+    await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(searchUpstream, searchPort)]);
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const body = JSON.stringify({ query: "codex proxy" });
+    const mapped = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search?limit=3`, {
+      method: "POST",
+      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await mapped.json(), { provider: "search" });
+    assert.deepEqual(searchHits, [{ authorization: "Bearer search-key", url: "/v1/alpha/search?limit=3", body }]);
+    assert.deepEqual(defaultHits, []);
+
+    const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search`, {
+      method: "POST",
+      headers: { "x-ccs-profile": "default", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await pinned.json(), { provider: "default" });
+    assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/alpha/search", body }]);
+
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 2);
+    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["default", "search"]);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await Promise.all([closeServer(defaultUpstream), closeServer(searchUpstream)]);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy records request and upstream model metadata for OpenAI paths", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -6149,7 +6231,7 @@ async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
   );
 }
 
-async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, current, toggle = [current]) {
+async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, current, toggle = [current], proxy) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(
     join(stateRoot, "profiles.json"),
@@ -6158,6 +6240,7 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
         profiles,
         current,
         toggle,
+        ...(proxy ? { proxy } : {}),
       },
       null,
       2,

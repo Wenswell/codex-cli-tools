@@ -999,27 +999,28 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
   return profiles.current ? [profiles.current] : [];
 }
 
-function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string): ProxyUpstream {
-  const name = requestedProfile || profiles.current;
+function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string, requestPath?: string): ProxyUpstream {
+  const pathProfile = requestPath ? profiles.proxy?.pathProfiles?.[requestPath] : undefined;
+  const name = requestedProfile || pathProfile || profiles.current;
   if (!name) {
     throw new Error("profiles.current was not found");
   }
   const profile = profiles.profiles?.[name];
   if (!profile) {
-    if (requestedProfile) {
+    if (requestedProfile || pathProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} was not found`);
     }
     throw new Error(`profiles.current ${name} was not found in profiles`);
   }
   const baseURL = profile?.baseURL;
   if (!baseURL) {
-    if (requestedProfile) {
+    if (requestedProfile || pathProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no baseURL`);
     }
     throw new Error(`profiles.current ${name} has no baseURL`);
   }
   if (!profile.apiKey) {
-    if (requestedProfile) {
+    if (requestedProfile || pathProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no apiKey`);
     }
     throw new Error(`profiles.current ${name} has no apiKey`);
@@ -6116,7 +6117,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
         try {
           const profiles = await readProfiles();
           const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
-          const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile);
+          const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname);
           const body = await readBody(req);
           const requestJson = parseJsonBody(body);
           const turnMetadata = parseCodexTurnMetadata(req.headers);
@@ -6134,7 +6135,7 @@ export async function serveProxy(options: ProxyOptions): Promise<void> {
             signal: downstreamAbort.signal,
             resolveRetryUpstream: requestedProfile
               ? undefined
-              : async () => resolveProxyUpstream(await readProfiles()),
+              : async () => resolveProxyUpstream(await readProfiles(), undefined, url.pathname),
             onStatusRetryWait: requestedProfile
               ? undefined
               : (wait) => {
