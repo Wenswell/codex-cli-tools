@@ -2220,7 +2220,7 @@ function nextUsageTopServerInterval(current: number, changed: boolean): number {
     ?? usageTopServerIntervalsMs[usageTopServerIntervalsMs.length - 1];
 }
 
-function nextUsageTopRefreshInterval(current: number, changed: boolean, mode: UsageTopRefreshOptions["intervalMode"]): number {
+export function nextUsageTopRefreshInterval(current: number, changed: boolean, mode: UsageTopRefreshOptions["intervalMode"]): number {
   return mode === "server"
     ? nextUsageTopServerInterval(current, changed)
     : nextUsageTopInterval(current, changed);
@@ -2251,12 +2251,14 @@ async function refreshUsageTopEntries(
     const state = states.get(entry.name) ?? {};
     const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
     states.set(entry.name, state);
+    const stale = !nextEntry.usage && entry.usage !== null;
+    const changedOrStale = changed || stale;
     const interval = options.resetInterval
       ? usageTopMinIntervalMs
-      : nextUsageTopRefreshInterval(entry.refreshIntervalMs, changed, options.intervalMode);
+      : nextUsageTopRefreshInterval(entry.refreshIntervalMs, changedOrStale, options.intervalMode);
     const maxIntervalIdleCount = options.resetInterval || !options.stopAtMaxIdle
       ? 0
-      : nextUsageTopMaxIdleCount(entry, changed, interval);
+      : nextUsageTopMaxIdleCount(entry, changedOrStale, interval);
     const done = options.stopAtMaxIdle
       && !options.resetInterval
       && maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
@@ -2264,7 +2266,7 @@ async function refreshUsageTopEntries(
     return {
       ...nextEntry,
       usage: nextEntry.usage ?? entry.usage,
-      stale: nextEntry.usage ? false : entry.usage !== null,
+      stale,
       refreshIntervalMs: interval,
       maxIntervalIdleCount,
       done,

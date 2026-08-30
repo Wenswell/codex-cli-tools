@@ -1667,7 +1667,7 @@ function nextUsageTopServerInterval(current, changed) {
     return usageTopServerIntervalsMs.find((interval) => interval > current)
         ?? usageTopServerIntervalsMs[usageTopServerIntervalsMs.length - 1];
 }
-function nextUsageTopRefreshInterval(current, changed, mode) {
+export function nextUsageTopRefreshInterval(current, changed, mode) {
     return mode === "server"
         ? nextUsageTopServerInterval(current, changed)
         : nextUsageTopInterval(current, changed);
@@ -1691,19 +1691,21 @@ async function refreshUsageTopEntries(entries, states, options) {
         const state = states.get(entry.name) ?? {};
         const changed = updateUsageTopState(state, nextEntry.usage, refreshedAt);
         states.set(entry.name, state);
+        const stale = !nextEntry.usage && entry.usage !== null;
+        const changedOrStale = changed || stale;
         const interval = options.resetInterval
             ? usageTopMinIntervalMs
-            : nextUsageTopRefreshInterval(entry.refreshIntervalMs, changed, options.intervalMode);
+            : nextUsageTopRefreshInterval(entry.refreshIntervalMs, changedOrStale, options.intervalMode);
         const maxIntervalIdleCount = options.resetInterval || !options.stopAtMaxIdle
             ? 0
-            : nextUsageTopMaxIdleCount(entry, changed, interval);
+            : nextUsageTopMaxIdleCount(entry, changedOrStale, interval);
         const done = options.stopAtMaxIdle
             && !options.resetInterval
             && maxIntervalIdleCount >= usageTopMaxIntervalIdleLimit;
         return {
             ...nextEntry,
             usage: nextEntry.usage ?? entry.usage,
-            stale: nextEntry.usage ? false : entry.usage !== null,
+            stale,
             refreshIntervalMs: interval,
             maxIntervalIdleCount,
             done,

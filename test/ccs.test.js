@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
+import { nextUsageTopRefreshInterval, runCcs as runCcsCommand } from "../dist/commands/ccs.js";
 import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
 import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
 
@@ -1139,6 +1139,11 @@ test("ccs status agent reloads the current switching profile", async () => {
       await rm(home, { recursive: true, force: true });
     }
   }
+});
+
+test("ccs top treats stale values as refresh changes", () => {
+  assert.equal(nextUsageTopRefreshInterval(60_000, true, "top"), 25_000);
+  assert.equal(nextUsageTopRefreshInterval(120_000, true, "server"), 25_000);
 });
 
 test("ccs top history server rejects oversized windows", async () => {
