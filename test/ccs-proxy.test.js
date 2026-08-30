@@ -2995,6 +2995,101 @@ test("proxy reroute moves waiting default-profile requests to the current provid
   }
 });
 
+test("proxy cancel stops a pinned session retry wait without another upstream request", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-cancel-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const sessionId = "01a051ad-4f4d-7000-8000-000000000001";
+  const session = "01a051ad";
+  let hits = 0;
+  const upstream = createServer((_req, res) => {
+    hits += 1;
+    res.writeHead(503, { "content-type": "application/json", "retry-after": "30" });
+    res.end(JSON.stringify({ error: "capacity" }));
+  });
+  const stateRoot = join(home, ".config", "codex-tools");
+  const options = {
+    codexConfigPath: join(home, ".codex", "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: proxyPort,
+    stateRoot,
+  };
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    configured.status_retry = { enabled: true, total_window_ms: 60_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 };
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    await ensureProxyRunning(options);
+    await waitForFetchOk("http://127.0.0.1:" + proxyPort + "/__codex_proxy/health");
+
+    const pending = fetch("http://127.0.0.1:" + proxyPort + "/responses", {
+      method: "POST",
+      headers: {
+        "x-ccs-profile": "input",
+        "x-codex-turn-metadata": JSON.stringify({ session_id: sessionId }),
+      },
+      body: "{}",
+    });
+    let cancelStatus;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      cancelStatus = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel?target=" + session).then((response) => response.json());
+      if (cancelStatus.requests?.length === 1) break;
+      await delay(25);
+    }
+    assert.equal(cancelStatus.requests.length, 1);
+    assert.equal(cancelStatus.requests[0].session, session);
+    assert.equal(cancelStatus.requests[0].status, 503);
+    assert.equal(hits, 1);
+    const rerouteStatus = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/reroute").then((response) => response.json());
+    assert.deepEqual(rerouteStatus.requests, []);
+
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["cancel", session], options)));
+    assert.match(preview, /target:\s+01a051ad/);
+    assert.match(preview, /eligible:\s+1/);
+    assert.match(preview, /no requests are cancelled unless you type yes/);
+
+    const applied = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ request_ids: [cancelStatus.requests[0].request_id] }),
+    }).then((response) => response.json());
+    assert.deepEqual(applied.cancelled, [cancelStatus.requests[0].request_id]);
+    assert.deepEqual(applied.skipped, []);
+    await assert.rejects(pending);
+    await delay(100);
+    assert.equal(hits, 1);
+
+    const state = await waitForState(
+      stateRoot,
+      (candidate) => candidate.metrics.active_requests.length === 0
+        && candidate.metrics.recent_requests[0]?.session === session,
+    );
+    const record = state.metrics.recent_requests[0];
+    assert.equal(record.status, 499);
+    assert.equal(record.final_action, "client_aborted");
+    assert.equal(record.failure_summary.code, "proxy_retry_cancelled");
+    assert.equal(record.error, "retry cancelled by ccs proxy");
+    assert.equal(record.attempts, 1);
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy exhausts Responses continuation recovery before guard response", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
