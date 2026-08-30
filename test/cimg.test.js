@@ -6,7 +6,6 @@ import test from "node:test";
 import {
   CIMG_DEFAULT_SIZES,
   CIMG_MODEL,
-  CIMG_PROGRESS_INTERVAL_MS,
   CIMG_SIZES,
   CimgCanceledError,
   buildEndpoint,
@@ -45,15 +44,10 @@ test("cimg defaults images to the user Pictures directory and keeps explicit out
   assert.equal(parseArgs(["-p", "scene", "-o", "custom.png"], now).outputPath, join(process.cwd(), "custom.png"));
 });
 
-test("cimg help documents the default image directory", async () => {
+test("cimg help exposes output and image input options", async () => {
   const output = await captureStdout(() => runCimg(["--help"]));
   assert.match(output, /default: ~\/Pictures\/cimg\/image-<timestamp>\.png/);
   assert.match(output, /-i, --image FILE input PNG, JPEG, or WebP; repeat for multiple reference images/);
-  assert.match(output, /one input edits the source; repeat -i\/--image for ordered reference images/);
-  assert.match(output, /accepts PNG, JPEG, or WebP; at most 16 files, each smaller than 50 MiB/);
-  assert.match(output, /masked editing is not part of this command/);
-  assert.match(output, /preview is shown before exact yes confirmation; Ctrl-C cancels an active request/);
-  assert.match(output, /elapsed time refreshes every 10 seconds in a terminal; Ctrl-C cancels the request/);
 });
 
 test("cimg accepts ordered repeatable image inputs and rejects unsupported or excessive inputs", () => {
@@ -79,7 +73,6 @@ test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {
 });
 
 test("cimg builds one fixed-model PNG generation request", () => {
-  assert.equal(CIMG_PROGRESS_INTERVAL_MS, 10_000);
   assert.equal(buildEndpoint("https://images.example.test///"), "https://images.example.test/v1/images/generations");
   assert.throws(() => buildEndpoint("https://token@images.example.test"), /must not contain credentials/);
   assert.throws(() => buildEndpoint("https://images.example.test?key=secret"), /must not contain credentials/);

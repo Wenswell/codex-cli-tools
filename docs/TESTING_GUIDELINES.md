@@ -35,6 +35,9 @@ Tests should fail for product problems and durable contracts. They should stay f
 - Cosmetic color choices without semantic meaning.
 - Full snapshots of terminal output that mix many unrelated concerns.
 - Tests that mirror the implementation line by line without protecting a user-visible result or stored data contract.
+- Tests that require a production export solely to assert an internal constant or
+  obsolete helper. Keep non-critical implementation details module-local and
+  test the observable contract instead.
 
 ## Placement
 
