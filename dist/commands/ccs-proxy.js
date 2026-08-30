@@ -31,6 +31,7 @@ const DEFAULT_LISTEN_HOST = "127.0.0.1";
 const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
+const CANCEL_PATH = "/__codex_proxy/cancel";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const PROXY_HEALTH_PROTOCOL = 7;
 const PROXY_STATE_SCHEMA_VERSION = 4;
@@ -86,7 +87,7 @@ const PROXY_TABLE_SESSION_WIDTH = 8 + 1;
 const PROXY_TABLE_PROVIDER_WIDTH = 6;
 const PROXY_TABLE_MODEL_WIDTH = 8;
 const PROXY_TABLE_ROUTE_WIDTH = PROXY_TABLE_PROVIDER_WIDTH + 1 + PROXY_TABLE_MODEL_WIDTH;
-const PROXY_TABLE_STATE_WIDTH = 12;
+const PROXY_TABLE_STATE_WIDTH = 14;
 const PROXY_TABLE_STATUS_WIDTH = 6;
 const PROXY_REQUEST_TABLE_INDENT = "  ";
 const PROXY_HISTORY_TABLE_INDENT = "    ";
@@ -298,6 +299,12 @@ function healthUrl(state) {
 }
 function rerouteUrl(state) {
     return new URL(REROUTE_PATH, state.proxy_base_url).toString();
+}
+function cancelUrl(state, target) {
+    const url = new URL(CANCEL_PATH, state.proxy_base_url);
+    if (target)
+        url.searchParams.set("target", target);
+    return url.toString();
 }
 async function sleep(ms) {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -2096,9 +2103,12 @@ async function readBody(request) {
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
 function extractSessionShortId(requestJson, turnMetadata) {
-    const sessionId = jsonStringAt(turnMetadata, ["session_id"])
-        ?? findJsonStringField(requestJson, "session_id");
+    const sessionId = extractSessionId(requestJson, turnMetadata);
     return sessionId ? shortSessionId(sessionId) : null;
+}
+function extractSessionId(requestJson, turnMetadata) {
+    return jsonStringAt(turnMetadata, ["session_id"])
+        ?? findJsonStringField(requestJson, "session_id");
 }
 function proxyEndpointClass(pathname) {
     if (pathname === "/v1/chat/completions" || pathname === "/chat/completions") {
@@ -2115,6 +2125,9 @@ function classifyProxyRoute(method, pathname) {
     }
     if ((method === "GET" || method === "POST") && pathname === REROUTE_PATH) {
         return { kind: "control", endpoint: "reroute" };
+    }
+    if ((method === "GET" || method === "POST") && pathname === CANCEL_PATH) {
+        return { kind: "control", endpoint: "cancel" };
     }
     if (pathname === "/__codex_proxy" || pathname.startsWith("/__codex_proxy/")) {
         return { kind: "invalid" };
@@ -2684,6 +2697,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                     attempt: attemptState.attempts,
                     waitingSince: new Date().toISOString(),
                     wake: () => waitAbort.abort("reroute"),
+                    cancel: () => waitAbort.abort("cancel"),
                 });
                 let waitResult;
                 try {
@@ -2695,7 +2709,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 }
                 if (waitResult === "aborted" && waitAbort.signal.reason !== "reroute") {
                     await response.body?.cancel().catch(() => undefined);
-                    throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+                    throw new ProxyResponseWriteError(waitAbort.signal.reason === "cancel" ? "retry cancelled by ccs proxy" : "client closed response before upstream retry", 499, 0);
                 }
                 if (waitResult === "ready" || waitAbort.signal.reason === "reroute") {
                     await response.body?.cancel().catch(() => undefined);
@@ -3521,6 +3535,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
                 attempt: attemptState.attempts,
                 waitingSince: new Date().toISOString(),
                 wake: () => waitAbort.abort("reroute"),
+                cancel: () => waitAbort.abort("cancel"),
             });
             let waitResult;
             try {
@@ -3533,7 +3548,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             if (waitResult === "aborted") {
                 if (waitAbort.signal.reason !== "reroute") {
                     await response.body?.cancel().catch(() => undefined);
-                    throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
+                    throw new ProxyResponseWriteError(waitAbort.signal.reason === "cancel" ? "retry cancelled by ccs proxy" : "client closed response before upstream retry", 499, 0);
                 }
             }
             if (waitResult === "deadline") {
@@ -4879,6 +4894,18 @@ async function proxyRerouteRequest(state, init) {
     }
     return payload;
 }
+async function proxyCancelRequest(state, target, init) {
+    const response = await fetch(cancelUrl(state, init?.method === "GET" ? target : undefined), {
+        headers: { accept: "application/json", "content-type": "application/json" },
+        signal: AbortSignal.timeout(PROXY_HEALTH_TIMEOUT_MS),
+        ...init,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(typeof payload?.error === "string" ? payload.error : `proxy cancel failed with HTTP ${response.status}`);
+    }
+    return payload;
+}
 async function buildProxyReroutePlan(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state)
@@ -4893,6 +4920,19 @@ async function applyProxyReroutePlan(plan) {
             profile: plan.status.profile,
             request_ids: plan.status.requests.map((request) => request.request_id),
         }),
+    });
+}
+async function buildProxyCancelPlan(options, target) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state)
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    assertProxyHealthRuntime(await readProxyHealth(state));
+    return { state, status: await proxyCancelRequest(state, target, { method: "GET" }) };
+}
+async function applyProxyCancelPlan(plan) {
+    return proxyCancelRequest(plan.state, plan.status.target, {
+        method: "POST",
+        body: JSON.stringify({ request_ids: plan.status.requests.map((request) => request.request_id) }),
     });
 }
 export async function setProxyMode(options, mode, retryEnabled) {
@@ -4918,7 +4958,7 @@ export async function serveProxy(options) {
     }
     await resetProxyActiveRequestsOnStart(state, options.stateRoot);
     let closing = false;
-    const rerouteWaits = new Map();
+    const statusRetryWaits = new Map();
     const server = createServer((req, res) => {
         res.once("finish", () => {
             if (closing)
@@ -4934,20 +4974,66 @@ export async function serveProxy(options) {
                 const route = classifyProxyRoute(method, url.pathname);
                 if (route.kind === "control") {
                     const currentState = await readProxyState(options.stateRoot) ?? state;
-                    if (route.endpoint === "reroute") {
+                    if (route.endpoint === "reroute" || route.endpoint === "cancel") {
                         const profiles = await readProfiles();
                         const profile = resolveProxyUpstream(profiles).name;
-                        if (!proxyStatusRetryEnabled(currentState)) {
+                        if (route.endpoint === "reroute" && !proxyStatusRetryEnabled(currentState)) {
                             res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
                             res.end(JSON.stringify({ error: `proxy reroute requires enabled status retry; mode=${currentState.mode}` }));
+                            return;
+                        }
+                        if (route.endpoint === "cancel") {
+                            if (method === "GET") {
+                                const selector = new URL(req.url || "/", "http://localhost").searchParams.get("target") ?? "";
+                                const matches = [...statusRetryWaits.values()].filter((wait) => selector.length > 0
+                                    && (wait.request_id === selector || (wait.session_id !== null && wait.session_id.startsWith(selector))));
+                                const sessionIds = new Set(matches.map((wait) => wait.session_id).filter((value) => value !== null));
+                                if (selector.length > 0 && !matches.some((wait) => wait.request_id === selector) && sessionIds.size > 1) {
+                                    res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+                                    res.end(JSON.stringify({ error: "proxy cancel target is ambiguous; use a full request ID" }));
+                                    return;
+                                }
+                                const payload = {
+                                    target: selector,
+                                    requests: matches.map(({ session_id: _sessionId, pinned: _pinned, wake: _wake, cancel: _cancel, ...request }) => request),
+                                };
+                                res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                                res.end(JSON.stringify(payload));
+                                return;
+                            }
+                            const payload = parseJsonBody(await readBody(req));
+                            const requestIds = payload && typeof payload === "object" && !Array.isArray(payload)
+                                ? payload.request_ids
+                                : null;
+                            if (!Array.isArray(requestIds) || !requestIds.every((id) => typeof id === "string")) {
+                                res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+                                res.end(JSON.stringify({ error: "proxy cancel preview is stale; run ccs proxy cancel again" }));
+                                return;
+                            }
+                            const cancelled = [];
+                            const skipped = [];
+                            for (const requestId of [...new Set(requestIds)]) {
+                                const wait = statusRetryWaits.get(requestId);
+                                if (!wait) {
+                                    skipped.push(requestId);
+                                    continue;
+                                }
+                                statusRetryWaits.delete(requestId);
+                                wait.cancel();
+                                cancelled.push(requestId);
+                            }
+                            const result = { cancelled, skipped };
+                            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify(result));
                             return;
                         }
                         if (method === "GET") {
                             const payload = {
                                 mode: currentState.mode,
                                 profile,
-                                requests: [...rerouteWaits.values()]
-                                    .map(({ wake: _wake, ...request }) => request)
+                                requests: [...statusRetryWaits.values()]
+                                    .filter((wait) => !wait.pinned)
+                                    .map(({ session_id: _sessionId, pinned: _pinned, cancel: _cancel, wake: _wake, ...request }) => request)
                                     .sort((left, right) => left.waiting_since.localeCompare(right.waiting_since)),
                             };
                             res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
@@ -4969,12 +5055,12 @@ export async function serveProxy(options) {
                         const rerouted = [];
                         const skipped = [];
                         for (const requestId of [...new Set(requestIds)]) {
-                            const wait = rerouteWaits.get(requestId);
+                            const wait = statusRetryWaits.get(requestId);
                             if (!wait) {
                                 skipped.push(requestId);
                                 continue;
                             }
-                            rerouteWaits.delete(requestId);
+                            statusRetryWaits.delete(requestId);
                             wait.wake();
                             rerouted.push(requestId);
                         }
@@ -5010,14 +5096,23 @@ export async function serveProxy(options) {
                 const mode = requestState.mode;
                 const retryEnabled = proxyStatusRetryEnabled(requestState);
                 const downstreamAbort = new AbortController();
+                const abortDownstream = () => {
+                    if (!downstreamAbort.signal.aborted)
+                        downstreamAbort.abort("client");
+                };
                 let responseFinished = false;
                 res.once("finish", () => {
                     responseFinished = true;
                 });
                 res.once("close", () => {
                     if (!responseFinished) {
-                        downstreamAbort.abort();
+                        abortDownstream();
                     }
+                });
+                req.once("aborted", abortDownstream);
+                req.socket.once("close", () => {
+                    if (!responseFinished)
+                        abortDownstream();
                 });
                 const requestStartedAt = new Date();
                 const requestStartedAtMs = performance.now();
@@ -5130,11 +5225,12 @@ export async function serveProxy(options) {
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
                     const turnMetadata = parseCodexTurnMetadata(req.headers);
+                    const sessionId = extractSessionId(requestJson, turnMetadata);
                     requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
-                    activeRecord.session = extractSessionShortId(requestJson, turnMetadata);
+                    activeRecord.session = sessionId ? shortSessionId(sessionId) : null;
                     activeRecord.client_turn_id = nullableStringField(turnMetadata?.turn_id);
                     activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
                     activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
@@ -5145,24 +5241,25 @@ export async function serveProxy(options) {
                         resolveRetryUpstream: requestedProfile
                             ? undefined
                             : async () => resolveProxyUpstream(await readProfiles(), undefined, url.pathname),
-                        onStatusRetryWait: requestedProfile
-                            ? undefined
-                            : (wait) => {
-                                const entry = {
-                                    request_id: wait.requestId,
-                                    session: activeRecord.session,
-                                    upstream: wait.upstream,
-                                    status: wait.status,
-                                    attempt: wait.attempt,
-                                    waiting_since: wait.waitingSince,
-                                    wake: wait.wake,
-                                };
-                                rerouteWaits.set(wait.requestId, entry);
-                                return () => {
-                                    if (rerouteWaits.get(wait.requestId) === entry)
-                                        rerouteWaits.delete(wait.requestId);
-                                };
-                            },
+                        onStatusRetryWait: (wait) => {
+                            const entry = {
+                                request_id: wait.requestId,
+                                session_id: sessionId,
+                                session: activeRecord.session,
+                                upstream: wait.upstream,
+                                status: wait.status,
+                                attempt: wait.attempt,
+                                waiting_since: wait.waitingSince,
+                                pinned: requestedProfile.length > 0,
+                                wake: wait.wake,
+                                cancel: wait.cancel,
+                            };
+                            statusRetryWaits.set(wait.requestId, entry);
+                            return () => {
+                                if (statusRetryWaits.get(wait.requestId) === entry)
+                                    statusRetryWaits.delete(wait.requestId);
+                            };
+                        },
                         onAttempt: async (attemptCount, upstreamName) => {
                             const attempt = attemptRecords.at(-1);
                             activeRecord.upstream = upstreamName;
@@ -5407,13 +5504,15 @@ export async function serveProxy(options) {
                         ? proxyFailureSummary("gateway_error", "route_conversion_failed", errorText)
                         : error instanceof ProxyProfileSelectionError
                             ? proxyFailureSummary("client_error", "invalid_proxy_profile", errorText)
-                            : responseControlLost
-                                ? proxyFailureSummary("gateway_error", inspectionLimitAfterForward
-                                    ? "response_inspection_limit_exceeded"
-                                    : error instanceof ProxyResponseWriteError && error.timeout?.timeoutType === "total"
-                                        ? "upstream_total_timeout"
-                                        : "upstream_first_progress_timeout", errorText)
-                                : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
+                            : errorText === "retry cancelled by ccs proxy"
+                                ? proxyFailureSummary("client_error", "proxy_retry_cancelled", errorText)
+                                : responseControlLost
+                                    ? proxyFailureSummary("gateway_error", inspectionLimitAfterForward
+                                        ? "response_inspection_limit_exceeded"
+                                        : error instanceof ProxyResponseWriteError && error.timeout?.timeoutType === "total"
+                                            ? "upstream_total_timeout"
+                                            : "upstream_first_progress_timeout", errorText)
+                                    : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
                     const pendingAttempt = lastProxyAttemptRecord(attemptRecords);
                     activeRecord.conversion_failure_stage = conversionFailureStage;
                     if (pendingAttempt) {
@@ -5446,7 +5545,10 @@ export async function serveProxy(options) {
                     if (conversionAfterForward) {
                         res.destroy(error instanceof Error ? error : undefined);
                     }
-                    if (status !== 499 && !conversionAfterForward) {
+                    if (status === 499 && errorText === "retry cancelled by ccs proxy") {
+                        res.destroy();
+                    }
+                    else if (status !== 499 && !conversionAfterForward) {
                         if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb)) {
                             responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
                         }
@@ -5581,6 +5683,7 @@ function usageHelpLines() {
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
+        "  ccs proxy cancel TARGET                 # cancel waiting 429/503 requests by request or session id",
         "  ccs proxy mode                           # print response mode and status retry state",
         "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
         "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
@@ -5723,7 +5826,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "reroute", "mode", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "mode", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
@@ -5765,6 +5868,29 @@ export async function runProxyCommand(args, options) {
         const result = await applyProxyReroutePlan(plan);
         printKeyValue("profile:", colorName(result.profile), 9);
         printKeyValue("rerouted:", textGreen(String(result.rerouted.length)), 9);
+        printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
+        return;
+    }
+    if (command === "cancel") {
+        if (rest.length !== 1 || !rest[0]) {
+            throw new Error("ccs proxy cancel requires TARGET");
+        }
+        const plan = await buildProxyCancelPlan(options, rest[0]);
+        printKeyValue("target:", rest[0], 9);
+        printKeyValue("eligible:", String(plan.status.requests.length), 9);
+        for (const request of plan.status.requests) {
+            const waitedMs = Math.max(0, Date.now() - Date.parse(request.waiting_since));
+            printKeyValue("request:", `${request.request_id} session=${request.session ?? "-"} upstream=${request.upstream} status=${request.status} attempt=${request.attempt} wait=${formatDurationMs(waitedMs)}`, 9);
+        }
+        if (plan.status.requests.length === 0) {
+            printKeyValue("result:", "no waiting 429/503 requests", 9);
+            return;
+        }
+        printKeyValue("confirm:", "no requests are cancelled unless you type yes", 9);
+        if (!(await confirmApply()))
+            return;
+        const result = await applyProxyCancelPlan(plan);
+        printKeyValue("cancelled:", textGreen(String(result.cancelled.length)), 9);
         printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
         return;
     }

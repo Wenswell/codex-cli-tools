@@ -255,6 +255,7 @@ ccs pricing refresh
 ccs proxy [--history N] [--view overview|tokens|cost]
 ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
+ccs proxy cancel SESSION_OR_REQUEST
 ccs proxy mode [passthrough [retry]|retry [on|off]|recovery|intercept]
 ccs proxy config
 ccs proxy install|restore|serve
@@ -705,6 +706,7 @@ ccs proxy watch
 ccs proxy watch --history N
 ccs proxy watch --view overview|tokens|cost
 ccs proxy reroute
+ccs proxy cancel SESSION_OR_REQUEST
 ccs proxy mode
 ccs proxy mode passthrough
 ccs proxy mode passthrough retry
@@ -759,8 +761,9 @@ Behavior:
 - `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
 - `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while explicit profile launches remain pinned to their requested profile.
 - A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.
-- When status retry is enabled, only HTTP 429 and 503 are withheld. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original 429/503 response, and client abort stops the wait. In `passthrough`, final responses remain uninspected.
+- When status retry is enabled, only HTTP 429 and 503 are withheld. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original 429/503 response. An aborted request, premature client socket close, or unfinished response close stops the wait and prevents another upstream attempt. In `passthrough`, final responses remain uninspected.
 - After `ccs toggle`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429/503. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
+- Use `ccs proxy cancel SESSION_OR_REQUEST` when a Codex UI session has been closed but its request connection is still open. The target is the displayed session prefix or an exact request ID. It previews only current 429/503 retry waits and requires exact `yes`; ambiguous session prefixes are rejected. Cancellation also applies to pinned waits, prevents the next attempt, and records status `499`.
 - Upstream HTTP responses are forwarded as received when the active policy accepts them. Upstream `4xx` and `5xx` responses record `failure_summary.type=upstream_error` and render the upstream failure summary in the history `result` column.
 - In `recovery` and `intercept`, upstream capacity errors retry the same upstream when an error response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively. Plain `429` and `5xx` responses without that text are forwarded as received. Capacity defaults to `retry_then_pass_through`; HTTP 429 defaults to `pass_through`. Capacity, 429, reasoning, and first-progress retries share the three-retry policy budget; transport retry remains independent.
 - A retryable Capacity response uses `Retry-After` seconds or HTTP date when present. Values over 60 seconds are not waited; missing or invalid values use bounded jitter. Retry waits stop on client abort or the absolute total deadline.
