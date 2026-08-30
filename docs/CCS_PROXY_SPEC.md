@@ -37,7 +37,19 @@ When the selected profile sets `routeConversion.enabled=true`, every OpenAI Resp
 
 `routeConversion.enabled` is a switching-profile setting. `ccs`, `ccs list`, and `ccs PROFILE` display `responses→chat` when it is enabled; otherwise they display `off`. `ccs add PROFILE` is the existing edit path for the setting. The `ccs proxy` overview table displays an `api` column for each request: `R→C` means Responses was converted to Chat Completions and `-` means no conversion. The overview omits the reasoning/status column; token and cost views keep their dedicated measurements.
 
-Every other upstream API path, including `/v1/alpha/search`, is transparently forwarded once with the selected upstream and proxy authentication. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
+Every other upstream API path is transparently forwarded once with the selected upstream and proxy authentication. Set an exact path mapping in `profiles.json` to route one of these paths to another switching profile:
+
+```json
+{
+  "proxy": {
+    "pathProfiles": {
+      "/v1/alpha/search": "search"
+    }
+  }
+}
+```
+
+`/v1/alpha/search` therefore uses the `search` profile in this example. Path matching uses the URL pathname only: query parameters do not affect selection, and no prefix or wildcard matching exists. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
 
 The `/__codex_proxy/*` namespace is reserved for local control. Unknown local control paths return local `404` JSON with `code: "unsupported_proxy_path"` and a message that identifies `ccs proxy` as the rejecting component. They write one `ccs_proxy_unsupported_path` event to `proxy.log` and do not enter request metrics or history.
 
@@ -204,9 +216,9 @@ Request-record readers require every schema `8` field with its documented type. 
 
 ## Upstream forwarding
 
-The proxy resolves one active upstream for each client request. A non-empty internal `x-ccs-profile` header selects that named profile; requests without the header use `profiles.current`. `cx run PROFILE`, `cxx run PROFILE`, and `cxxs run PROFILE` set the header through a temporary Codex provider `http_headers` override, so their processes remain pinned without changing stored state. `ccs toggle` owns the default selection by changing `profiles.current`.
+The proxy resolves one active upstream for each client request. A non-empty internal `x-ccs-profile` header selects that named profile; otherwise an exact `profiles.json.proxy.pathProfiles[request.pathname]` mapping selects its named profile; requests without either use `profiles.current`. `cx run PROFILE`, `cxx run PROFILE`, and `cxxs run PROFILE` set the header through a temporary Codex provider `http_headers` override, so their processes remain pinned without changing stored state. `ccs toggle` owns the default selection by changing `profiles.current`.
 
-The selected profile must exist and contain non-empty `baseURL` and `apiKey`; invalid explicit selections return local `400` and record failure code `invalid_proxy_profile` before contacting any upstream. The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, `x-api-key`, and `x-ccs-profile` headers, then sets `Authorization: Bearer <selected profile apiKey>` before the upstream request. This keeps ordinary running Codex CLI processes on the latest `profiles.current` while preserving explicit wrapper profile selection.
+The selected profile must exist and contain non-empty `baseURL` and `apiKey`; invalid explicit or path-mapped selections return local `400` and record failure code `invalid_proxy_profile` before contacting any upstream. The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, `x-api-key`, and `x-ccs-profile` headers, then sets `Authorization: Bearer <selected profile apiKey>` before the upstream request. This keeps ordinary running Codex CLI processes on the latest `profiles.current` while preserving explicit wrapper profile selection.
 
 `ccs proxy install` requires absent proxy state and an explicit `model_provider` with an existing `base_url`. Its preview captures the source config, provider, current URL, proxy URL, and backup path. Apply rejects source changes after preview, backs up the config, starts and health-checks the proxy in `passthrough` mode with status retry disabled, changes only the routed provider's `base_url`, and verifies both the exact target content and the parsed local routing value. If apply fails after config writing starts, it restores the source only when the file still contains the planned target, stops the runtime, removes proxy state, and keeps the backup.
 
@@ -454,8 +466,8 @@ history cost     time status input$ output$ cached$ total$ result
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - Compact state history is updated before appending the complete JSONL request record.
-- The proxy selects an explicit `x-ccs-profile` request profile when present and otherwise selects `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
-- Status retries reload `profiles.current` before each later attempt, and `ccs proxy reroute` wakes eligible unpinned 429/503 waits without creating another client request.
+- The proxy selects an explicit `x-ccs-profile` request profile when present, then an exact `proxy.pathProfiles` pathname mapping, and otherwise `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
+- Status retries reload the profile configuration before each later attempt and retain the original request pathname; `ccs proxy reroute` wakes eligible unpinned 429/503 waits without creating another client request.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body and recorded as `upstream_error` failures.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
 - Transport `fetch failed` is retried once and repeated failure returns `502 upstream_error/upstream_fetch_failed`.
