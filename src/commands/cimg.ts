@@ -17,7 +17,7 @@ const CIMG_DEFAULT_RATIO = "1:1";
 const CIMG_DEFAULT_QUALITY = "auto";
 
 const requestTimeoutMs = 300_000;
-export const CIMG_PROGRESS_INTERVAL_MS = 10_000;
+const CIMG_PROGRESS_INTERVAL_MS = 10_000;
 const requestLogMaxBytes = 16 * 1024 * 1024;
 const requestLogTrimBytes = 12 * 1024 * 1024;
 const maxInputImages = 16;

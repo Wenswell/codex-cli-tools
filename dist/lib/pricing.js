@@ -341,24 +341,6 @@ export function calculateCodexCostBreakdown(modelUsage, cache, speed) {
     }
     return breakdown;
 }
-export function calculateCodexCostUSD(modelUsage, cache, speed) {
-    let cost = 0;
-    for (const [model, usage] of modelUsage) {
-        const price = modelPrice(cache, model, speed, usage);
-        if (!price) {
-            continue;
-        }
-        const nonCachedInputTokens = usage.inputTokens - usage.cachedInputTokens;
-        if (nonCachedInputTokens < 0) {
-            throw new Error(`cached input exceeds input for model: ${model}`);
-        }
-        cost +=
-            nonCachedInputTokens * price.input +
-                usage.cachedInputTokens * price.cacheRead +
-                usage.outputTokens * price.output;
-    }
-    return cost;
-}
 function readFiniteNumber(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

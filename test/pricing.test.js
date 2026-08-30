@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   calculateCodexCostBreakdown,
-  calculateCodexCostUSD,
   missingPricingModels,
   modelPricingStatus,
   readModelPriceCache,
@@ -90,7 +89,7 @@ test("pricing breakdown rejects cached input above total input", () => {
   );
 });
 
-test("pricing skips missing models and reports them separately", () => {
+test("pricing reports models with missing prices", () => {
   const modelUsage = new Map([
     ["known-model", usage(100, 20)],
     ["missing-model", usage(50, 10)],
@@ -99,7 +98,6 @@ test("pricing skips missing models and reports them separately", () => {
     "known-model": modelPriceFixture(0.000001),
   });
 
-  assert.equal(calculateCodexCostUSD(modelUsage, cache, "standard"), 0.00014);
   assert.deepEqual(missingPricingModels(modelUsage, cache, "standard"), ["missing-model"]);
 });
 
