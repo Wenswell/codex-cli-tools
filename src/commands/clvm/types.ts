@@ -107,7 +107,7 @@ export type ClosedConnectionEntry = ConnectionEntry & {
   closedAt: string;
 };
 
-export type CloseFailureEntry = ConnectionEntry & {
+type CloseFailureEntry = ConnectionEntry & {
   failedAt: string;
   error: ClvmErrorDetail;
   raw: unknown;
@@ -160,7 +160,7 @@ export type ClvmConnectionsResponse = {
   raw: ClvmRawHttpResponse;
 };
 
-export type ClvmRawReference = RuntimeRawReference;
+type ClvmRawReference = RuntimeRawReference;
 
 export type ClvmSampleRecord = {
   version: number;
@@ -196,7 +196,7 @@ export type ClvmSampleRecord = {
   raw: unknown;
 };
 
-export type ClvmFailureRecord = {
+type ClvmFailureRecord = {
   version: number;
   ok: false;
   status: "unavailable";
@@ -210,11 +210,11 @@ export type ClvmFailureRecord = {
 };
 
 export type ClvmRuntimeRecord = ClvmSampleRecord | ClvmFailureRecord;
-export type ClvmStateSampleRecord = Omit<ClvmSampleRecord, "raw">;
-export type ClvmStateFailureRecord = Omit<ClvmFailureRecord, "raw">;
+type ClvmStateSampleRecord = Omit<ClvmSampleRecord, "raw">;
+type ClvmStateFailureRecord = Omit<ClvmFailureRecord, "raw">;
 export type ClvmStateRecord = ClvmStateSampleRecord | ClvmStateFailureRecord;
-export type ClvmHistorySampleRecord = Omit<ClvmSampleRecord, "raw" | "result">;
-export type ClvmHistoryFailureRecord = Omit<ClvmFailureRecord, "raw">;
+type ClvmHistorySampleRecord = Omit<ClvmSampleRecord, "raw" | "result">;
+type ClvmHistoryFailureRecord = Omit<ClvmFailureRecord, "raw">;
 export type ClvmHistoryRecord = ClvmHistorySampleRecord | ClvmHistoryFailureRecord;
 
 export type ClvmRuntimeRecordDedupe = {

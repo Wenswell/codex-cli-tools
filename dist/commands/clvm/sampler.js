@@ -142,7 +142,7 @@ function readConnections(payload) {
 function readObjectValue(value, key) {
     return value[key];
 }
-export function getDomainCandidates(connection) {
+function getDomainCandidates(connection) {
     const metadataValue = connection.metadata;
     const metadata = isPlainObject(metadataValue) ? metadataValue : {};
     const candidates = domainFields.map((field) => metadata[field]);
@@ -151,7 +151,7 @@ export function getDomainCandidates(connection) {
     }
     return normalizeDomains(candidates);
 }
-export function findDomainMatch(connection, domains) {
+function findDomainMatch(connection, domains) {
     const candidates = getDomainCandidates(connection);
     for (const candidate of candidates) {
         const domain = domains.find((target) => domainMatches(candidate, target));

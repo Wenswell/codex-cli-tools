@@ -66,6 +66,8 @@ in the command-specific specifications.
 - Prefer tests that protect behavior, data contracts, safety/privacy boundaries, parser behavior, retention limits, and calculations.
 - Exact terminal-output assertions should name the user-facing display contract they protect.
 - Cross-cutting testing rules live in [testing guidelines](./TESTING_GUIDELINES.md).
+- Export source symbols only for a current cross-module or test consumer. Package
+  binaries are the public surface; internal helpers stay module-local.
 
 ## Documentation
 

@@ -1,6 +1,6 @@
 import { padVisibleLeft, padVisibleRight, textBold, truncateVisible, visibleLength } from "./text.js";
 
-export type TableAlign = "left" | "right";
+type TableAlign = "left" | "right";
 
 export type TableColumn = {
   key: string;

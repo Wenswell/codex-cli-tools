@@ -1,4 +1,4 @@
-export function writeLiveFrame(lines, stream = process.stdout) {
+function writeLiveFrame(lines, stream = process.stdout) {
     stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 export function pinLiveViewFooter(lines, rows) {

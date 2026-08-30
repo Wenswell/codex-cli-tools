@@ -198,7 +198,7 @@ export function matchingModelNames(pattern, models) {
     const regexp = modelNamePatternRegExp(pattern);
     return models.filter((model) => regexp.test(model)).sort();
 }
-export function modelNamePatternRegExp(pattern) {
+function modelNamePatternRegExp(pattern) {
     return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
 }
 function escapeRegExp(value) {
@@ -218,7 +218,7 @@ export async function resolveCodexCostSpeed(speed) {
     }
     throw new Error(`unsupported Codex service_tier for ccs cost --speed auto: ${serviceTier}`);
 }
-export function modelPrice(cache, model, speed, usage) {
+function modelPrice(cache, model, speed, usage) {
     const parts = modelPriceParts(cache, model, speed);
     if (!parts) {
         return null;
