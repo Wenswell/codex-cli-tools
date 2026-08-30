@@ -13,8 +13,8 @@ import { textDim, textGreen, textRed, textYellow } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 
 export const CIMG_MODEL = "gpt-image-2";
-export const CIMG_DEFAULT_RATIO = "1:1";
-export const CIMG_DEFAULT_QUALITY = "auto";
+const CIMG_DEFAULT_RATIO = "1:1";
+const CIMG_DEFAULT_QUALITY = "auto";
 
 const requestTimeoutMs = 300_000;
 export const CIMG_PROGRESS_INTERVAL_MS = 10_000;
@@ -37,7 +37,7 @@ export const CIMG_SIZES = {
 } as const;
 
 export type CimgRatio = keyof typeof CIMG_SIZES;
-export type CimgQuality = "auto" | "low" | "medium" | "high";
+type CimgQuality = "auto" | "low" | "medium" | "high";
 
 export const CIMG_DEFAULT_SIZES: Record<CimgRatio, string> = {
   "1:1": "1024x1024",
@@ -364,7 +364,7 @@ export function buildEndpoint(baseURL: string, mode: CimgMode = "generate"): str
   return `${url.toString().replace(/\/+$/u, "")}/v1/images/${resource}`;
 }
 
-export function cimgRequestsPath(): string {
+function cimgRequestsPath(): string {
   return resolve(codexToolsCacheDir(), "cimg", "requests.jsonl");
 }
 

@@ -2,9 +2,6 @@ import { createHash } from "node:crypto";
 import { access, appendFile, chmod, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureDir, writeTextFileAtomic } from "./fs.js";
-export async function appendJsonLine(path, value, mode = 0o600) {
-    await appendRuntimeLine(path, `${JSON.stringify(value)}\n`, mode);
-}
 export async function appendBoundedJsonLine(path, value, options) {
     if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0) {
         throw new Error("jsonl maxBytes must be a positive integer");

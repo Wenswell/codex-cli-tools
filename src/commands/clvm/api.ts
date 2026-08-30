@@ -148,7 +148,7 @@ export function clvmErrorRaw(error: unknown): unknown {
   return null;
 }
 
-export function errorCauseDetail(error: unknown): { name: string; message: string } {
+function errorCauseDetail(error: unknown): { name: string; message: string } {
   if (error instanceof Error) {
     return {
       name: error.name,

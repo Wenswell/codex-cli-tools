@@ -3,7 +3,7 @@ import { colorName, colorUrl, printKeyValue } from "../lib/output.js";
 import { maskSecret, textBold, textDim, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
 import { resolveCodexProfileLaunch } from "./codex-profile.js";
-export function runCodexSearch(args, options = {}) {
+function runCodexSearch(args, options = {}) {
     const toolName = toolNameFromArgv();
     if (isVersionArgument(args[0])) {
         if (args.length !== 1) {

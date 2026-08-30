@@ -12,7 +12,7 @@ type CodexSearchOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
-export function runCodexSearch(
+function runCodexSearch(
   args: string[],
   options: CodexSearchOptions = {},
 ): void {

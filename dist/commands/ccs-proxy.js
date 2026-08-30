@@ -4871,7 +4871,7 @@ async function buildProxyRestartPlan(options, force = false) {
         targetProtocol: PROXY_HEALTH_PROTOCOL,
     };
 }
-export async function restartProxyRuntime(options, plan) {
+async function restartProxyRuntime(options, plan) {
     const state = await readProxyState(options.stateRoot);
     if (!state
         || state.installed_at !== plan.installedAt
@@ -4987,7 +4987,7 @@ export async function setProxyMode(options, mode, retryEnabled) {
     const runtime = await ensureProxyRunning(options);
     return { previousMode, mode, runtime };
 }
-export async function serveProxy(options) {
+async function serveProxy(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);

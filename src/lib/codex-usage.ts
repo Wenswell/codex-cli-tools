@@ -94,7 +94,7 @@ export function systemTimezone(): string {
   return DateTime.local().zoneName || "UTC";
 }
 
-export function validateTimezone(timezone: string): void {
+function validateTimezone(timezone: string): void {
   if (!DateTime.now().setZone(timezone).isValid) {
     throw new Error(`invalid timezone: ${timezone}`);
   }
@@ -183,19 +183,19 @@ export function filterCodexUsageEvents(events: CodexUsageEvent[], options: Codex
 }
 
 export function aggregateDaily(events: CodexUsageEvent[], timezone: string): CodexUsageRow[] {
-  return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)), "key-asc");
+  return sortRowsByKey(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)));
 }
 
 export function aggregateWeekly(events: CodexUsageEvent[], timezone: string): CodexUsageRow[] {
-  return sortedRows(aggregateBy(events, (event) => mondayWeekKey(localDateKey(event.timestampMs, timezone))), "key-asc");
+  return sortRowsByKey(aggregateBy(events, (event) => mondayWeekKey(localDateKey(event.timestampMs, timezone))));
 }
 
 export function aggregateMonthly(events: CodexUsageEvent[], timezone: string): CodexUsageRow[] {
-  return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone).slice(0, 7)), "key-asc");
+  return sortRowsByKey(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone).slice(0, 7)));
 }
 
 export function aggregateProjects(events: CodexUsageEvent[]): CodexUsageRow[] {
-  return sortedRows(aggregateBy(events, (event) => event.project), "cost-placeholder");
+  return aggregateBy(events, (event) => event.project);
 }
 
 export function aggregateProjectDaily(events: CodexUsageEvent[], timezone: string, project: string): CodexUsageRow[] {
@@ -209,18 +209,12 @@ export function aggregateDayTimeBuckets(
   bucketMinutes: number,
 ): CodexUsageRow[] {
   const dayEvents = events.filter((event) => localDateKey(event.timestampMs, timezone) === date);
-  return sortedRows(aggregateBy(dayEvents, (event) => timeBucketKey(event.timestampMs, timezone, bucketMinutes)), "key-asc");
+  return sortRowsByKey(aggregateBy(dayEvents, (event) => timeBucketKey(event.timestampMs, timezone, bucketMinutes)));
 }
 
 export function aggregateDayProjects(events: CodexUsageEvent[], timezone: string, date: string): CodexUsageRow[] {
   const dayEvents = events.filter((event) => localDateKey(event.timestampMs, timezone) === date);
   return aggregateProjects(dayEvents);
-}
-
-export function sortRowsByCost(rows: CodexUsageRow[], costOf: (aggregate: CodexUsageAggregate) => number): CodexUsageRow[] {
-  return [...rows].sort((left, right) => (
-    costOf(right.aggregate) - costOf(left.aggregate) || left.key.localeCompare(right.key)
-  ));
 }
 
 export function dateRangeForDay(date: string, timezone: string): CodexUsageRange {
@@ -238,11 +232,8 @@ function aggregateBy(events: CodexUsageEvent[], keyOf: (event: CodexUsageEvent) 
   return [...groups.entries()].map(([key, aggregate]) => ({ key, aggregate }));
 }
 
-function sortedRows(rows: CodexUsageRow[], mode: "key-asc" | "cost-placeholder"): CodexUsageRow[] {
-  if (mode === "key-asc") {
-    return [...rows].sort((left, right) => left.key.localeCompare(right.key));
-  }
-  return rows;
+function sortRowsByKey(rows: CodexUsageRow[]): CodexUsageRow[] {
+  return [...rows].sort((left, right) => left.key.localeCompare(right.key));
 }
 
 async function newestCodexStateDb(): Promise<string> {

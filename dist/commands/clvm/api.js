@@ -110,7 +110,7 @@ export function clvmErrorRaw(error) {
     }
     return null;
 }
-export function errorCauseDetail(error) {
+function errorCauseDetail(error) {
     if (error instanceof Error) {
         return {
             name: error.name,

@@ -31,10 +31,6 @@ export type JsonLineRetentionOptions = {
   mode?: number;
 };
 
-export async function appendJsonLine(path: string, value: unknown, mode = 0o600): Promise<void> {
-  await appendRuntimeLine(path, `${JSON.stringify(value)}\n`, mode);
-}
-
 export async function appendBoundedJsonLine(path: string, value: unknown, options: JsonLineRetentionOptions): Promise<void> {
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0) {
     throw new Error("jsonl maxBytes must be a positive integer");

@@ -12,8 +12,8 @@ import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { textDim, textGreen, textRed, textYellow } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 export const CIMG_MODEL = "gpt-image-2";
-export const CIMG_DEFAULT_RATIO = "1:1";
-export const CIMG_DEFAULT_QUALITY = "auto";
+const CIMG_DEFAULT_RATIO = "1:1";
+const CIMG_DEFAULT_QUALITY = "auto";
 const requestTimeoutMs = 300_000;
 export const CIMG_PROGRESS_INTERVAL_MS = 10_000;
 const requestLogMaxBytes = 16 * 1024 * 1024;
@@ -264,7 +264,7 @@ export function buildEndpoint(baseURL, mode = "generate") {
     const resource = mode === "edit" ? "edits" : "generations";
     return `${url.toString().replace(/\/+$/u, "")}/v1/images/${resource}`;
 }
-export function cimgRequestsPath() {
+function cimgRequestsPath() {
     return resolve(codexToolsCacheDir(), "cimg", "requests.jsonl");
 }
 export function cimgDefaultOutputDir() {

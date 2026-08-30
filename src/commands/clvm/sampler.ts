@@ -178,7 +178,7 @@ function readObjectValue(value: Record<string, unknown>, key: string): unknown {
   return value[key];
 }
 
-export function getDomainCandidates(connection: Record<string, unknown>): string[] {
+function getDomainCandidates(connection: Record<string, unknown>): string[] {
   const metadataValue = connection.metadata;
   const metadata = isPlainObject(metadataValue) ? metadataValue : {};
   const candidates = domainFields.map((field) => metadata[field]);
@@ -190,7 +190,7 @@ export function getDomainCandidates(connection: Record<string, unknown>): string
   return normalizeDomains(candidates);
 }
 
-export function findDomainMatch(connection: Record<string, unknown>, domains: string[]): DomainMatch | null {
+function findDomainMatch(connection: Record<string, unknown>, domains: string[]): DomainMatch | null {
   const candidates = getDomainCandidates(connection);
 
   for (const candidate of candidates) {

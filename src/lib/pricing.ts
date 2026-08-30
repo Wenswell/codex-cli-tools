@@ -16,7 +16,7 @@ export type CodexTokenUsage = {
 
 export type CodexModelUsage = CodexTokenUsage;
 
-export type ModelPrice = {
+type ModelPrice = {
   input: number;
   cacheRead: number;
   output: number;
@@ -76,7 +76,7 @@ export const litellmPricingUrl =
 
 const remoteModelPriceTimeoutMs = 5_000;
 
-export type LiteLlmModelPrice = {
+type LiteLlmModelPrice = {
   input_cost_per_token?: unknown;
   input_cost_per_token_priority?: unknown;
   output_cost_per_token?: unknown;
@@ -327,7 +327,7 @@ export function matchingModelNames(pattern: string, models: string[]): string[] 
   return models.filter((model) => regexp.test(model)).sort();
 }
 
-export function modelNamePatternRegExp(pattern: string): RegExp {
+function modelNamePatternRegExp(pattern: string): RegExp {
   return new RegExp(`^${pattern.split("*").map(escapeRegExp).join(".*")}$`);
 }
 
@@ -351,7 +351,7 @@ export async function resolveCodexCostSpeed(speed: CodexCostSpeed): Promise<Reso
   throw new Error(`unsupported Codex service_tier for ccs cost --speed auto: ${serviceTier}`);
 }
 
-export function modelPrice(
+function modelPrice(
   cache: ModelPriceCache,
   model: string,
   speed: ResolvedCodexCostSpeed,

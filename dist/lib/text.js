@@ -57,27 +57,12 @@ export function textGreen(value) {
 export function textMagenta(value) {
     return withAnsi("38;5;213", value);
 }
-export function textOrange(value) {
-    return withAnsi("38;5;208", value);
-}
 export function textRed(value) {
     return withAnsi("38;5;203", value);
 }
 export function textYellow(value) {
     return withAnsi("38;5;221", value);
 }
-export function bgBlue(value) {
-    return withAnsi("30;48;5;153", value);
-}
 export function bgDarkBlue(value) {
     return withAnsi("38;5;231;48;5;24", value);
-}
-export function bgGreen(value) {
-    return withAnsi("30;48;5;194", value);
-}
-export function bgRed(value) {
-    return withAnsi("30;48;5;224", value);
-}
-export function bgGray(value) {
-    return withAnsi("30;48;5;252", value);
 }

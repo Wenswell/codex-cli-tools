@@ -1,6 +1,6 @@
 export type LiveViewRender = () => string[] | Promise<string[]>;
 
-export type LiveViewKeyControls = {
+type LiveViewKeyControls = {
   stop: () => void;
   render: () => void;
 };
@@ -27,7 +27,7 @@ export type RunLiveViewOptions = LiveViewControllerOptions & {
   onceWhenDisabled?: boolean;
 };
 
-export function writeLiveFrame(lines: string[], stream: NodeJS.WriteStream = process.stdout): void {
+function writeLiveFrame(lines: string[], stream: NodeJS.WriteStream = process.stdout): void {
   stream.write(`\u001b[H${lines.map((line) => `\u001b[2K${line}`).join("\n")}\u001b[J`);
 }
 

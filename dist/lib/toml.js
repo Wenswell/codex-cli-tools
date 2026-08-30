@@ -43,7 +43,7 @@ export function readTopLevelTomlString(content, key) {
     }
     return null;
 }
-export function mergeTomlDefaults(template, existing) {
+function mergeTomlDefaults(template, existing) {
     if (!existing.trim()) {
         return ensureTrailingNewline(template);
     }

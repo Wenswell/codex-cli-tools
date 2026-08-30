@@ -17,7 +17,7 @@ const taskStartBoundaryToleranceMs = 1000;
 export function systemTimezone() {
     return DateTime.local().zoneName || "UTC";
 }
-export function validateTimezone(timezone) {
+function validateTimezone(timezone) {
     if (!DateTime.now().setZone(timezone).isValid) {
         throw new Error(`invalid timezone: ${timezone}`);
     }
@@ -93,30 +93,27 @@ export function filterCodexUsageEvents(events, options) {
         && (!options.project || event.project === options.project)));
 }
 export function aggregateDaily(events, timezone) {
-    return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)), "key-asc");
+    return sortRowsByKey(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone)));
 }
 export function aggregateWeekly(events, timezone) {
-    return sortedRows(aggregateBy(events, (event) => mondayWeekKey(localDateKey(event.timestampMs, timezone))), "key-asc");
+    return sortRowsByKey(aggregateBy(events, (event) => mondayWeekKey(localDateKey(event.timestampMs, timezone))));
 }
 export function aggregateMonthly(events, timezone) {
-    return sortedRows(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone).slice(0, 7)), "key-asc");
+    return sortRowsByKey(aggregateBy(events, (event) => localDateKey(event.timestampMs, timezone).slice(0, 7)));
 }
 export function aggregateProjects(events) {
-    return sortedRows(aggregateBy(events, (event) => event.project), "cost-placeholder");
+    return aggregateBy(events, (event) => event.project);
 }
 export function aggregateProjectDaily(events, timezone, project) {
     return aggregateDaily(events.filter((event) => event.project === project), timezone);
 }
 export function aggregateDayTimeBuckets(events, timezone, date, bucketMinutes) {
     const dayEvents = events.filter((event) => localDateKey(event.timestampMs, timezone) === date);
-    return sortedRows(aggregateBy(dayEvents, (event) => timeBucketKey(event.timestampMs, timezone, bucketMinutes)), "key-asc");
+    return sortRowsByKey(aggregateBy(dayEvents, (event) => timeBucketKey(event.timestampMs, timezone, bucketMinutes)));
 }
 export function aggregateDayProjects(events, timezone, date) {
     const dayEvents = events.filter((event) => localDateKey(event.timestampMs, timezone) === date);
     return aggregateProjects(dayEvents);
-}
-export function sortRowsByCost(rows, costOf) {
-    return [...rows].sort((left, right) => (costOf(right.aggregate) - costOf(left.aggregate) || left.key.localeCompare(right.key)));
 }
 export function dateRangeForDay(date, timezone) {
     return { since: date, until: date, timezone };
@@ -131,11 +128,8 @@ function aggregateBy(events, keyOf) {
     }
     return [...groups.entries()].map(([key, aggregate]) => ({ key, aggregate }));
 }
-function sortedRows(rows, mode) {
-    if (mode === "key-asc") {
-        return [...rows].sort((left, right) => left.key.localeCompare(right.key));
-    }
-    return rows;
+function sortRowsByKey(rows) {
+    return [...rows].sort((left, right) => left.key.localeCompare(right.key));
 }
 async function newestCodexStateDb() {
     const dir = codexDir();

@@ -73,10 +73,6 @@ export function textMagenta(value: string): string {
   return withAnsi("38;5;213", value);
 }
 
-export function textOrange(value: string): string {
-  return withAnsi("38;5;208", value);
-}
-
 export function textRed(value: string): string {
   return withAnsi("38;5;203", value);
 }
@@ -85,22 +81,6 @@ export function textYellow(value: string): string {
   return withAnsi("38;5;221", value);
 }
 
-export function bgBlue(value: string): string {
-  return withAnsi("30;48;5;153", value);
-}
-
 export function bgDarkBlue(value: string): string {
   return withAnsi("38;5;231;48;5;24", value);
-}
-
-export function bgGreen(value: string): string {
-  return withAnsi("30;48;5;194", value);
-}
-
-export function bgRed(value: string): string {
-  return withAnsi("30;48;5;224", value);
-}
-
-export function bgGray(value: string): string {
-  return withAnsi("30;48;5;252", value);
 }

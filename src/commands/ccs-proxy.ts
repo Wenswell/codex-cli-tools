@@ -5870,7 +5870,7 @@ async function buildProxyRestartPlan(options: ProxyOptions, force = false): Prom
   };
 }
 
-export async function restartProxyRuntime(options: ProxyOptions, plan: ProxyRestartPlan): Promise<{ stopped: string; runtime: ProxyRuntimeState }> {
+async function restartProxyRuntime(options: ProxyOptions, plan: ProxyRestartPlan): Promise<{ stopped: string; runtime: ProxyRuntimeState }> {
   const state = await readProxyState(options.stateRoot);
   if (!state
     || state.installed_at !== plan.installedAt
@@ -6002,7 +6002,7 @@ export async function setProxyMode(options: ProxyOptions, mode: ProxyMode, retry
   return { previousMode, mode, runtime };
 }
 
-export async function serveProxy(options: ProxyOptions): Promise<void> {
+async function serveProxy(options: ProxyOptions): Promise<void> {
   const state = await readProxyState(options.stateRoot);
   if (!state) {
     throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
