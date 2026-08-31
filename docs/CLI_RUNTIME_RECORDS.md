@@ -45,6 +45,7 @@ Large raw payloads should use content-addressed archives:
 - Store identical raw payloads once and let multiple history records point to the same archive file.
 - Enforce payload-size, file-count, and total-byte limits for raw archive directories.
 - Redact secret-like headers and metadata before writing enabled raw records.
+- Explicit finite packet captures may preserve byte-exact bodies without automatic retention when the user chooses both the target and record count. Keep them in a dedicated private directory, redact authentication headers, fail visibly on incomplete writes, and leave ordinary state/history contracts unchanged.
 
 ## Counters
 
