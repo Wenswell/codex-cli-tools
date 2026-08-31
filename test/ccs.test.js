@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { nextUsageTopRefreshInterval, runCcs as runCcsCommand } from "../dist/commands/ccs.js";
 import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
-import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript } from "./helpers/terminal.js";
+import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript, stripAnsi } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -219,7 +219,7 @@ test("Codex profile launch uses the direct URL and rejects unknown profiles", as
   }
 });
 
-test("ccs r prints colored app-server daemon status and version", async () => {
+test("ccs r prints app-server daemon status and version", async () => {
   const binDir = await createFakeCodex(`console.log(JSON.stringify({
     status: "running",
     appServerVersion: "0.144.3",
@@ -233,8 +233,9 @@ test("ccs r prints colored app-server daemon status and version", async () => {
       cwd: repoRoot,
       env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, NO_COLOR: "" },
     });
-    assert.match(stdout, /status:\s+\u001b\[38;5;114mrunning\u001b\[0m/);
-    assert.match(stdout, /version:\s+\u001b\[38;5;81m0\.144\.3\u001b\[0m/);
+    const output = stripAnsi(stdout);
+    assert.match(output, /status:\s+running/);
+    assert.match(output, /version:\s+0\.144\.3/);
   } finally {
     await rm(binDir, { recursive: true, force: true });
   }

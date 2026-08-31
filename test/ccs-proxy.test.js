@@ -4723,127 +4723,6 @@ test("proxy active rows compact route, state, and retry facts", () => {
   assert.doesNotMatch(stripAnsi(active), /result/);
 });
 
-test("proxy status keeps active rows bright and dims history rows in TTY output", async () => {
-  const script = `
-    ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 180 })}
-    const { buildProxyStatusLines } = await import("./dist/commands/ccs-proxy.js");
-    const record = (id, session, completedAt) => ({
-      id,
-      started_at: "2026-01-01T00:00:00.000Z",
-      completed_at: completedAt,
-      method: "POST",
-      path: "/responses",
-      status: completedAt ? 200 : null,
-      upstream: "input",
-      attempts: 1,
-      latency_ms: completedAt ? 50 : 0,
-      request_bytes: 1024,
-      response_bytes: completedAt ? 2048 : 0,
-      session,
-      request_kind: "normal",
-      request_model: "gpt-5.5",
-      upstream_model: "gpt-5.5",
-        upstream_model_source: null,
-        reasoning_tokens: null,
-        reasoning_tokens_source: null,
-        usage_attempts: [],
-        reasoning_text_observed: false,
-        reasoning_text_source: null,
-        guard_actions: [],
-        retry_summary: {
-          total: 0,
-          reasoning_guard: 0,
-          upstream_capacity: 0,
-          http_429: 0,
-          http_503: 0,
-          timeout: 0,
-          transport: 0,
-        },
-        error: null,
-    });
-    const extraSessions = Array.from({ length: 9 }, (_, index) =>
-      record(
-        \`history-extra-\${index}\`,
-        \`01b0000\${index}\`,
-        new Date(Date.parse("2026-01-01T00:00:01.000Z") - ((index + 1) * 1000)).toISOString(),
-      )
-    );
-    const state = {
-      state_schema_version: 4,
-      installed_at: "2026-01-01T00:00:00.000Z",
-      codex_config_path: "/home/test/.codex/config.toml",
-      provider_name: "codex",
-      original_base_url: "https://proxy.example.com",
-      proxy_base_url: "http://127.0.0.1:4610",
-      status_retry: { enabled: false, total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
-      latency_guard: {
-        enabled: false,
-        first_progress_timeout_ms: 0,
-        first_progress_action: "return_502",
-        total_timeout_ms: 0,
-      },
-      listen_host: "127.0.0.1",
-      listen_port: 4610,
-      profile_order: ["input"],
-      backup_path: "/tmp/backup.toml",
-      metrics: {
-        total_requests: 3,
-        active_requests: [{ ...record("active-same", "01a01e23", null), path: "/alpha/search" }],
-        status_counts: { "200": 2 },
-        reasoning_token_counts: {},
-        upstream_hit_counts: { input: 2 },
-        latency_ms: { last: 50, count: 2, sum: 100, min: 50, max: 50 },
-        recent_requests: [
-          { ...record("history-same", "01a01e23", "2026-01-01T00:00:02.000Z"), path: "/v1/alpha/search" },
-          record("history-other", "01a0219e", "2026-01-01T00:00:01.000Z"),
-          ...extraSessions,
-          record("history-none", null, "2025-12-31T23:59:50.000Z"),
-        ],
-      },
-    };
-    const lines = buildProxyStatusLines(
-      new Date("2026-01-01T00:00:03.000Z"),
-      state,
-      ["input"],
-      { healthy: true, started: false, pid: 1234, state: null, version: "0.2.2", protocol: 3 },
-      {
-        codexConfigPath: "/home/test/.codex/config.toml",
-        listenHost: "127.0.0.1",
-        listenPort: 4610,
-        stateRoot: "/tmp/codex-tools",
-        historyCount: 12,
-      },
-    );
-    process.stdout.write(JSON.stringify(lines));
-  `;
-  const { stdout } = await execNodeScript(script);
-  const renderedLines = JSON.parse(stdout);
-  const output = renderedLines.join("\n");
-  const activeIndex = renderedLines.findIndex((line) => stripAnsi(line) === "active 1");
-  const historyIndex = renderedLines.findIndex((line) => stripAnsi(line).startsWith("history "));
-  const activeRow = renderedLines.slice(activeIndex + 1, historyIndex).find((line) => line.includes("01a01e23"));
-  const historyRow = renderedLines.slice(historyIndex + 1).find((line) => stripAnsi(line).trimStart().startsWith("08:00:02"));
-  const sameSession = [...output.matchAll(/(\u001b\[[0-9;]*m01a01e23\u001b\[0m)/g)].map((match) => match[1]);
-  const otherSession = output.match(/(\u001b\[[0-9;]*m01a0219e\u001b\[0m)/)?.[1];
-  const sessionColors = new Set(
-    [...output.matchAll(/\u001b\[38;5;(\d+)m01[ab][0-9a-f]{5}\u001b\[0m/g)]
-      .map((match) => Number(match[1])),
-  );
-
-  assert.ok(activeRow);
-  assert.ok(historyRow);
-  assert.match(activeRow, /\u001b\[38;5;114m\[S\]\u001b\[0m/);
-  assert.match(historyRow, /\u001b\[38;5;114m\[S\]\u001b\[0m/);
-  assert.doesNotMatch(activeRow, /^\s*\u001b\[2m/);
-  assert.match(historyRow, /^\s*\u001b\[2m/);
-  assert.equal(sameSession.length, 2);
-  assert.equal(sameSession[0], sameSession[1]);
-  assert.ok(otherSession);
-  assert.notEqual(otherSession, sameSession[0]);
-  assert.deepEqual([...sessionColors].sort((left, right) => left - right), [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214]);
-  assert.match(output, /\u001b\[2m-\u001b\[0m/);
-});
-
 test("proxy history keeps five complete events and compacts older status-duration trends", () => {
   const repeated = (completedAt, status, latencyMs, error) => proxyHistoryRecord({
     session: "019f0df6",
@@ -6867,7 +6746,7 @@ test("proxy watch hidden history omits the section and reports footer state", ()
   assert.match(stripAnsi(lines.at(-1)), /history=off\s+v:view t:history q:quit/);
 });
 
-test("proxy model rendering compares raw values before abbreviation and truncation", async () => {
+test("proxy model rendering compares raw values before abbreviation and truncation", () => {
   withStdoutProperties({ isTTY: true, noColor: false, columns: 120 }, () => {
     assert.equal(stripAnsi(formatProxyModel(null, null)), "-");
     assert.equal(stripAnsi(formatProxyModel("gpt-5.6", null)), "5.6");
@@ -6878,21 +6757,6 @@ test("proxy model rendering compares raw values before abbreviation and truncati
     assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")), "12345678");
     assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")).length, 8);
   });
-  const script = `
-    ${stdoutPropertiesScript({ noColor: false, isTTY: true, columns: 120 })}
-    const { formatProxyModel } = await import("./dist/commands/ccs-proxy.js");
-    process.stdout.write(JSON.stringify({
-      equal: formatProxyModel("gpt-5.6", "gpt-5.6"),
-      different: formatProxyModel("gpt-5.6", "gpt-5.6-mini"),
-      displayCollision: formatProxyModel("gpt-5.6-sol", "o5.6-sol"),
-      missing: formatProxyModel(null, null),
-    }));
-  `;
-  const colors = JSON.parse((await execNodeScript(script)).stdout);
-  assert.match(colors.equal, /\u001b\[38;5;114m/);
-  assert.match(colors.different, /\u001b\[38;5;203m/);
-  assert.match(colors.displayCollision, /\u001b\[38;5;203m/);
-  assert.match(colors.missing, /\u001b\[2m/);
 });
 
 test("proxy usage attempts project every internal, transport, and passthrough attempt exactly once", () => {

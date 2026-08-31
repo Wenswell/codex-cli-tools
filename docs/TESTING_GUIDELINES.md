@@ -33,6 +33,8 @@ Tests should fail for product problems and durable contracts. They should stay f
 - Incidental wording in decorative titles.
 - Exact gaps between unrelated header fields.
 - Cosmetic color choices without semantic meaning.
+- Do not turn documented visual styling into exact ANSI-code, palette-index, or dim/bold assertions. Test the visible label or state meaning after stripping ANSI; reserve control-sequence assertions for terminal lifecycle behavior such as clearing, cursor restoration, and alternate-screen handling.
+- Avoid spawning a TTY subprocess only to prove a documented color. This adds process and fixture cost while coupling tests to the current palette and renderer.
 - Full snapshots of terminal output that mix many unrelated concerns.
 - Tests that mirror the implementation line by line without protecting a user-visible result or stored data contract.
 - Tests that require a production export solely to assert an internal constant or
