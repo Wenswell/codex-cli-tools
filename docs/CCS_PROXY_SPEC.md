@@ -160,7 +160,7 @@ Request records include:
 - `stream_duration_ms`: streaming time from first upstream chunk to final upstream chunk for the final attempt.
 - `request_bytes`: request body byte count.
 - `response_bytes`: completed response body byte count.
-- Active `response_bytes` progress writes the first observation immediately, coalesces later stream updates to at most once per second, and persists the exact final count before completion.
+- Active records do not persist streaming `response_bytes` progress. The proxy keeps byte progress in memory while forwarding and persists the exact final count when the request completes, avoiding periodic state-file writes during long streams.
 - `session`: short Codex session id from `x-codex-turn-metadata.session_id` when present, otherwise from the JSON request body's `session_id`.
 - `client_turn_id`: Codex turn id parsed from `x-codex-turn-metadata`.
 - `client_request_attempt`: repeated local client request count for the same `client_turn_id` and `request_body_sha256` inside the compact state window. The first request is `1`.
