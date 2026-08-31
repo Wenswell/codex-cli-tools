@@ -1,11 +1,11 @@
-export type LiveViewRender = () => string[] | Promise<string[]>;
+type LiveViewRender = () => string[] | Promise<string[]>;
 
 type LiveViewKeyControls = {
   stop: () => void;
   render: () => void;
 };
 
-export type LiveViewControllerOptions = {
+type LiveViewControllerOptions = {
   stream?: NodeJS.WriteStream;
   input?: NodeJS.ReadStream;
   enabled?: boolean;
@@ -14,7 +14,7 @@ export type LiveViewControllerOptions = {
   onKey?: (key: string, controls: LiveViewKeyControls) => void;
 };
 
-export type LiveViewController = {
+type LiveViewController = {
   readonly enabled: boolean;
   start: () => void;
   stop: () => void;
@@ -22,7 +22,7 @@ export type LiveViewController = {
   setResizeRender: (render: (() => void) | null) => void;
 };
 
-export type RunLiveViewOptions = LiveViewControllerOptions & {
+type RunLiveViewOptions = LiveViewControllerOptions & {
   intervalMs: number;
   onceWhenDisabled?: boolean;
 };

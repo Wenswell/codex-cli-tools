@@ -16,7 +16,7 @@ export type TableColumn = {
 
 export type TableRow = Record<string, string | number | null | undefined>;
 
-export type RenderTableOptions = {
+type RenderTableOptions = {
   gap?: number;
   maxWidth?: number;
   header?: boolean;

@@ -1,4 +1,4 @@
-export type DurationFormatOptions = {
+type DurationFormatOptions = {
   maxUnit?: "m" | "h";
 };
 

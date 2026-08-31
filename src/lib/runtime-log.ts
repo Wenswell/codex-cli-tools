@@ -12,7 +12,7 @@ export type RuntimeRawReference = {
   max_bytes?: number;
 };
 
-export type RuntimeRawWriteResult = {
+type RuntimeRawWriteResult = {
   ref: RuntimeRawReference | null;
   retainedPath: string | null;
 };
@@ -25,7 +25,7 @@ export type RuntimeRawArchiveOptions = {
   mode?: number;
 };
 
-export type JsonLineRetentionOptions = {
+type JsonLineRetentionOptions = {
   maxBytes: number;
   trimToBytes?: number;
   mode?: number;
