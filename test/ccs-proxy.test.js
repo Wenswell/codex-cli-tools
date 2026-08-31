@@ -417,6 +417,75 @@ test("proxy config prints latency state and writes only after exact confirmation
   }
 });
 
+test("proxy search config selects and enables an alpha search profile", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-search-config-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const stateRoot = join(home, ".config", "codex-tools");
+  const options = {
+    codexConfigPath: join(home, ".codex", "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: 4610,
+    stateRoot,
+  };
+  const apply = async (args) => {
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    let answered = false;
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      await captureStdout(() => runProxyCommand(args, options), {
+        isTTY: true,
+        onWrite(output) {
+          if (!answered && output.includes("Apply changes?")) {
+            answered = true;
+            process.stdin.emit("data", Buffer.from("yes\n"));
+          }
+        },
+      });
+    } finally {
+      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
+      else delete process.stdin.isTTY;
+    }
+    assert.equal(answered, true);
+  };
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      4610,
+      { search: { baseURL: "https://search.example.test", apiKey: "search-key" } },
+      "search",
+    );
+
+    const status = stripAnsi(await captureStdout(() => runProxyCommand(["search"], options)));
+    assert.match(status, /search:\s+down/);
+    assert.match(status, /profile:\s+none/);
+    assert.match(status, /commands:\s+up \| down \| set PROFILE/);
+    await assert.rejects(() => runProxyCommand(["search", "up"], options), /requires a profile/);
+
+    await apply(["search", "set", "search"]);
+    let profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.search, { enabled: false, profile: "search" });
+
+    await apply(["search", "up"]);
+    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.search, { enabled: true, profile: "search" });
+
+    await apply(["search", "down"]);
+    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.search, { enabled: false, profile: "search" });
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy records active and history request lifecycle", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
@@ -839,7 +908,7 @@ test("proxy routes alpha search to its mapped profile and preserves explicit pro
       },
       "default",
       ["default", "search"],
-      { pathProfiles: { "/v1/alpha/search": "search" } },
+      { search: { enabled: true, profile: "search" } },
     );
     await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(searchUpstream, searchPort)]);
     const proxyOptions = {

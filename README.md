@@ -570,8 +570,9 @@ config/ccs-profiles.json
   "current": "input",
   "toggle": ["input", "ciii"],
   "proxy": {
-    "pathProfiles": {
-      "/v1/alpha/search": "ciii"
+    "search": {
+      "enabled": true,
+      "profile": "ciii"
     }
   },
   "top": {
@@ -585,7 +586,7 @@ config/ccs-profiles.json
 
 Set `routeConversion.enabled` to `true` for a provider that only accepts Chat Completions. The proxy keeps Codex on the Responses API and translates both directions. `ccs`, `ccs list`, and `ccs PROFILE` show the active value. Fill in the API keys manually. The file is written with `0600` permissions.
 
-When proxy mode is installed, `proxy.pathProfiles` routes exact upstream URL paths to an existing profile. The mapping above sends `/v1/alpha/search` to `ciii`; query parameters do not affect the match. An explicit `cx run PROFILE` (or equivalent) profile remains higher priority than a path mapping.
+When proxy mode is installed, use `ccs proxy search` to inspect alpha-search forwarding, `ccs proxy search set PROFILE` to select its provider, and `ccs proxy search up|down` to enable or disable it. The example above sends `/v1/alpha/search` to `ciii`; an explicit `cx run PROFILE` (or equivalent) profile remains higher priority.
 
 `ccs init` first reads the current Codex API settings from:
 

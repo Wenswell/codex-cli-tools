@@ -31,7 +31,7 @@ export async function readProfiles() {
     }
     try {
         const profiles = parseJsonObject(text);
-        assertProxyPathProfiles(profiles.proxy?.pathProfiles);
+        assertProxySearch(profiles.proxy?.search);
         return profiles;
     }
     catch (error) {
@@ -39,17 +39,22 @@ export async function readProfiles() {
         throw new Error(`invalid profiles.json: ${message}`);
     }
 }
-function assertProxyPathProfiles(value) {
+function assertProxySearch(value) {
     if (value === undefined) {
         return;
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error("invalid profiles.json: proxy.pathProfiles must be an object");
+        throw new Error("invalid profiles.json: proxy.search must be an object");
     }
-    for (const [pathname, profile] of Object.entries(value)) {
-        if (!pathname.startsWith("/") || typeof profile !== "string" || !profile.trim()) {
-            throw new Error(`invalid profiles.json: proxy.pathProfiles.${pathname} must map an absolute path to a non-empty profile name`);
-        }
+    const search = value;
+    if (typeof search.enabled !== "boolean") {
+        throw new Error("invalid profiles.json: proxy.search.enabled must be boolean");
+    }
+    if (search.profile !== undefined && (typeof search.profile !== "string" || !search.profile.trim())) {
+        throw new Error("invalid profiles.json: proxy.search.profile must be a non-empty profile name");
+    }
+    if (search.enabled && !search.profile) {
+        throw new Error("invalid profiles.json: proxy.search.profile is required when search is enabled");
     }
 }
 export async function writeProfiles(profiles) {
