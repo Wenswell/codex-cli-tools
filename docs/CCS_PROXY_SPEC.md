@@ -39,7 +39,7 @@ When the selected profile sets `routeConversion.enabled=true`, every OpenAI Resp
 
 `routeConversion.enabled` is a switching-profile setting. `ccs`, `ccs list`, and `ccs PROFILE` display `responses→chat` when it is enabled; otherwise they display `off`. `ccs add PROFILE` is the existing edit path for the setting. The `ccs proxy` overview table displays an `api` column for each request: `R→C` means Responses was converted to Chat Completions and `-` means no conversion. The overview omits the reasoning/status column; token and cost views keep their dedicated measurements.
 
-Every other upstream API path is transparently forwarded once with the selected upstream and proxy authentication. `ccs proxy search set PROFILE` selects the profile for `/v1/alpha/search`; `ccs proxy search up` enables that forwarding and `down` disables it. The persisted configuration is:
+Every other upstream API path is transparently forwarded once with the selected upstream and proxy authentication. `ccs proxy search set PROFILE` selects the profile for `/alpha/search` and `/v1/alpha/search`; `ccs proxy search up` enables that forwarding and `down` disables it. The persisted configuration is:
 
 ```json
 {
@@ -52,7 +52,7 @@ Every other upstream API path is transparently forwarded once with the selected 
 }
 ```
 
-`/v1/alpha/search` therefore uses the `search` profile in this example. Query parameters do not affect selection. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
+`/alpha/search` and `/v1/alpha/search` therefore use the `search` profile in this example. Query parameters do not affect selection. These requests enter request metrics but do not use status retry, response inspection, guard retry, or continuation recovery.
 
 The `/__codex_proxy/*` namespace is reserved for local control. Unknown local control paths return local `404` JSON with `code: "unsupported_proxy_path"` and a message that identifies `ccs proxy` as the rejecting component. They write one `ccs_proxy_unsupported_path` event to `proxy.log` and do not enter request metrics or history.
 
@@ -222,7 +222,7 @@ Request-record readers require every schema `8` field with its documented type. 
 
 ## Upstream forwarding
 
-The proxy resolves one active upstream for each client request. A non-empty internal `x-ccs-profile` header selects that named profile; otherwise an enabled `profiles.json.proxy.search` selects its named profile for `/v1/alpha/search`; requests without either use `profiles.current`. `cx run PROFILE`, `cxx run PROFILE`, and `cxxs run PROFILE` set the header through a temporary Codex provider `http_headers` override, so their processes remain pinned without changing stored state. `ccs toggle` owns the default selection by changing `profiles.current`.
+The proxy resolves one active upstream for each client request. A non-empty internal `x-ccs-profile` header selects that named profile; otherwise an enabled `profiles.json.proxy.search` selects its named profile for `/alpha/search` and `/v1/alpha/search`; requests without either use `profiles.current`. `cx run PROFILE`, `cxx run PROFILE`, and `cxxs run PROFILE` set the header through a temporary Codex provider `http_headers` override, so their processes remain pinned without changing stored state. `ccs toggle` owns the default selection by changing `profiles.current`.
 
 The selected profile must exist and contain non-empty `baseURL` and `apiKey`; invalid explicit or search-configured selections return local `400` and record failure code `invalid_proxy_profile` before contacting any upstream. The proxy owns upstream authentication in proxy mode. It removes incoming `Authorization`, `api-key`, `x-api-key`, and `x-ccs-profile` headers, then sets `Authorization: Bearer <selected profile apiKey>` before the upstream request. This keeps ordinary running Codex CLI processes on the latest `profiles.current` while preserving explicit wrapper profile selection.
 
@@ -329,7 +329,7 @@ Token and cost columns aggregate all `usage_attempts`; the route model remains c
 
 Cost lookup reads the local model price cache once per frame, applies `profiles.json` overrides, and performs no network refresh. Each attempt uses its stored exact pricing model and normalized tier: `default|standard` selects standard pricing and `fast|priority` selects fast pricing. Input cost subtracts cached input before applying input price; cached and output components use their own prices. Components sum unrounded attempt values and format once. Missing usage, unsupported tiers, or missing prices render the affected component and total as `-`. Cached input above input tokens renders input and total as `invalid`. USD values render as `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.
 
-Active overview `age` is total request time so far and `size` is known client-forwarded bytes. History `dur.` is total request time. The history `result` column retains client and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
+Active overview `age` is total request time so far and `size` is known client-forwarded bytes. Search requests for `/alpha/search` and `/v1/alpha/search` display a green `[S]` in active `state` and history `result`. History `dur.` is total request time. The history `result` column retains search, client, and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
 
 ## Implementation notes
 
@@ -447,12 +447,12 @@ history cost     time status input$ output$ cached$ total$ result
 
 - `route`: provider/model with six direct-truncated provider cells and eight normalized direct-truncated model cells. It is a single active column and a history context value.
 - `session`: equal visible session ids use the same color across active and history rows. The first 11 distinct visible ids use different ANSI 256 colors from `39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214`; allocation is deterministic for the visible id set.
-- `state`: active `waiting` and `retry:*` values are yellow, `stream` is green, and `forward:<status>` uses the status color. `R→C` and retry count stay in this column.
+- `state`: active `waiting` and `retry:*` values are yellow, `stream` is green, and `forward:<status>` uses the status color. Search requests start with `[S]`; `R→C` and retry count stay in this column.
 - `age`: elapsed time for the full active client request. `dur.` is completed request duration in history rows.
 - Token columns require the field from every attempt and sum all attempt values.
 - Cost columns calculate each attempt with its own model and tier, sum full-precision values, and format once.
 - Active rows update route and state after each upstream attempt; active rows never show a terminal result.
-- History `result`: optional bracketed local-action prefix from `guard_actions`, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
+- History `result`: optional bracketed search and local-action prefix, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
 
@@ -474,7 +474,7 @@ history cost     time status input$ output$ cached$ total$ result
 - Context compaction requests are recorded with `request_kind=context_compaction` and use ordinary guard retry.
 - Completed JSONL request records include `attempt_records`; compact state history omits them.
 - Compact state history is updated before appending the complete JSONL request record.
-- The proxy selects an explicit `x-ccs-profile` request profile when present, then an enabled `proxy.search` profile for `/v1/alpha/search`, and otherwise `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
+- The proxy selects an explicit `x-ccs-profile` request profile when present, then an enabled `proxy.search` profile for `/alpha/search` or `/v1/alpha/search`, and otherwise `profiles.current`; `profiles.toggle` entries are unused by proxy forwarding.
 - Status retries reload the profile configuration before each later attempt and retain the original request pathname; `ccs proxy reroute` wakes eligible unpinned 429/503 waits without creating another client request.
 - Upstream `401`, `403`, `408`, `429`, and `5xx` responses are passed through with original status and body and recorded as `upstream_error` failures.
 - Upstream capacity error bodies matching `Selected model is at capacity. Please try a different model.` retry the same upstream within the guard retry budget; ordinary `429` responses continue to pass through.
