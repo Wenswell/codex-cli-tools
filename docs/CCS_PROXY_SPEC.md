@@ -26,6 +26,9 @@ Local control endpoints:
 - `POST /__codex_proxy/reroute`
 - `GET /__codex_proxy/cancel`
 - `POST /__codex_proxy/cancel`
+- `GET /__codex_proxy/capture`
+- `POST /__codex_proxy/capture`
+- `DELETE /__codex_proxy/capture`
 
 Health responses include `status`, `pid`, `version`, `protocol`, `mode`, and `status_retry_enabled`. The reroute endpoints inspect and wake eligible status-retry waits. Control requests are handled before metrics and never enter request history.
 
@@ -126,9 +129,9 @@ Restart requires installed proxy state. Preview prints the active PID, protocol,
 
 ## Session packet capture
 
-`ccs proxy capture TARGET COUNT` arms one in-memory capture task for the next `COUNT` requests whose full Codex session id starts with `TARGET`. `TARGET` follows the session-target rule used by `ccs proxy cancel`: an exact request id is not relevant to this session-only command, and a prefix that encounters more than one full session id fails as ambiguous. Only one capture task can be active. `ccs proxy capture` reports the active task or `inactive`.
+`ccs proxy capture TARGET COUNT` arms one in-memory capture task for the next `COUNT` requests whose full Codex session id starts with `TARGET`. `TARGET` follows the session-target rule used by `ccs proxy cancel`: an exact request id is not relevant to this session-only command, and a prefix that encounters more than one full session id fails as ambiguous. Only one capture task can be active. `ccs proxy capture` reports the active task or `inactive`; `ccs proxy capture cancel` cancels the active task.
 
-Capture starts after the command succeeds; earlier and already-active requests are excluded. The first matching request binds the task to its full session id. Each completed match consumes one count, including local proxy errors and client-aborted responses. The task becomes inactive after `COUNT` records are written. Proxy restart discards an unfinished in-memory task.
+Capture starts after the command succeeds; earlier and already-active requests are excluded. The first matching request binds the task to its full session id. Each completed match consumes one count, including local proxy errors and client-aborted responses. The task becomes inactive after `COUNT` records are written. `ccs proxy capture cancel` makes the task inactive immediately; a request already claimed before cancellation may still finish writing its complete record. Proxy restart discards an unfinished in-memory task.
 
 Each record represents the client/proxy HTTP boundary after any retry, guard, or protocol conversion. Metadata version `2` stores the request id, full session id, method, URL path and query, timestamps, response status observed at the client boundary, final client status, final action, failure summary, retry summary, byte counts, sanitized request headers, response headers, and body file names. This keeps an upstream response distinguishable from a later stream or local failure. Request and response bodies are saved byte-for-byte in separate files; SSE remains raw SSE bytes. Authentication-bearing headers, cookies, proxy authorization, and API-key headers are replaced with `[redacted]`. Other headers are retained. Files use private permissions: capture directories `0700`, files `0600`.
 

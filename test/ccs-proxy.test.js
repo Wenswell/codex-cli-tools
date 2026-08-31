@@ -1001,6 +1001,11 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
     const output = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
     assert.match(output, /capture:\s+active/);
     assert.match(output, /count:\s+2/);
+    const cancelled = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "cancel"], proxyOptions)));
+    assert.match(cancelled, /capture:\s+inactive/);
+    assert.match(cancelled, /cancelled:\s+yes/);
+    const restarted = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
+    assert.match(restarted, /capture:\s+active/);
 
     async function send(sessionId, index) {
       const body = JSON.stringify({ session_id: sessionId, input: `secret prompt ${index}` });
@@ -1026,8 +1031,13 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
     assert.match(inactive, /capture:\s+inactive/);
     const captureRoot = join(stateRoot, "captures");
     const captureDirs = await readdir(captureRoot);
-    assert.equal(captureDirs.length, 1);
-    const captureDir = join(captureRoot, captureDirs[0]);
+    assert.equal(captureDirs.length, 2);
+    const captureDirEntries = await Promise.all(captureDirs.map(async (directory) => ({
+      directory,
+      metadataFiles: (await readdir(join(captureRoot, directory))).filter((file) => file.endsWith(".json")),
+    })));
+    assert.deepEqual(captureDirEntries.map((entry) => entry.metadataFiles.length).sort(), [0, 2]);
+    const captureDir = join(captureRoot, captureDirEntries.find((entry) => entry.metadataFiles.length === 2).directory);
     assert.equal((await stat(captureDir)).mode & 0o777, 0o700);
     const files = (await readdir(captureDir)).sort();
     const metadataFiles = files.filter((file) => file.endsWith(".json"));

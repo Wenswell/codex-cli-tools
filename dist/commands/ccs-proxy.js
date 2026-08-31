@@ -2193,7 +2193,7 @@ function classifyProxyRoute(method, pathname) {
     if ((method === "GET" || method === "POST") && pathname === CANCEL_PATH) {
         return { kind: "control", endpoint: "cancel" };
     }
-    if ((method === "GET" || method === "POST") && pathname === CAPTURE_PATH) {
+    if ((method === "GET" || method === "POST" || method === "DELETE") && pathname === CAPTURE_PATH) {
         return { kind: "control", endpoint: "capture" };
     }
     if (pathname === "/__codex_proxy" || pathname.startsWith("/__codex_proxy/")) {
@@ -5036,6 +5036,9 @@ async function proxyCaptureRequest(state, init) {
     }
     return payload;
 }
+async function proxyCaptureCancelRequest(state) {
+    return proxyCaptureRequest(state, { method: "DELETE" });
+}
 async function proxyCaptureStatus(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state)
@@ -5116,6 +5119,18 @@ async function serveProxy(options) {
                         if (method === "GET") {
                             res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
                             res.end(JSON.stringify(publicCaptureStatus(captureTask)));
+                            return;
+                        }
+                        if (method === "DELETE") {
+                            const cancelledTask = captureTask;
+                            captureTask = null;
+                            const cancelledStatus = publicCaptureStatus(cancelledTask);
+                            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({
+                                cancelled: cancelledTask !== null,
+                                task: cancelledStatus.task,
+                                directory: cancelledStatus.directory,
+                            }));
                             return;
                         }
                         const payload = parseJsonBody(await readBody(req));
@@ -5904,7 +5919,7 @@ function usageHelpLines() {
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
         "  ccs proxy cancel TARGET                 # cancel waiting 429/503 requests by request or session id",
-        "  ccs proxy capture [TARGET COUNT]        # capture complete client HTTP exchanges for one session",
+        "  ccs proxy capture [TARGET COUNT|cancel] # capture or cancel a session capture",
         "  ccs proxy mode                           # print response mode and status retry state",
         "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
         "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
@@ -6148,6 +6163,21 @@ export async function runProxyCommand(args, options) {
         return;
     }
     if (command === "capture") {
+        if (rest.length === 1 && rest[0] === "cancel") {
+            const { state, status } = await proxyCaptureStatus(options);
+            if (!status.active) {
+                printKeyValue("capture:", textDim("inactive"), 10);
+                printKeyValue("result:", "no active capture", 10);
+                return;
+            }
+            const cancelled = await proxyCaptureCancelRequest(state);
+            printKeyValue("capture:", textDim("inactive"), 10);
+            printKeyValue("cancelled:", cancelled.cancelled ? textGreen("yes") : textYellow("no"), 10);
+            if (cancelled.directory) {
+                printKeyValue("directory:", colorPath(formatProxyFilePath(cancelled.directory)), 10);
+            }
+            return;
+        }
         if (rest.length === 0) {
             const { status } = await proxyCaptureStatus(options);
             printKeyValue("capture:", status.active ? textGreen("active") : textDim("inactive"), 10);
