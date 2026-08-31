@@ -636,7 +636,7 @@ test("proxy records active and history request lifecycle", async () => {
     await streamStarted;
     await waitForState(
       stateRoot,
-      (candidate) => candidate.metrics.active_requests[0]?.response_bytes === Buffer.byteLength("data: one\n\n"),
+      (candidate) => candidate.metrics.active_requests[0]?.status === 200,
     );
     state = await readProxyState(stateRoot);
     assert.ok(state);
@@ -645,16 +645,16 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.active_requests[0].status, 200);
     assert.equal(state.metrics.active_requests[0].upstream, "input");
     assert.equal(state.metrics.active_requests[0].attempts, 1);
-    assert.equal(state.metrics.active_requests[0].response_bytes, Buffer.byteLength("data: one\n\n"));
+    assert.equal(state.metrics.active_requests[0].response_bytes, 0);
     assert.equal(state.metrics.recent_requests[0].path, "/responses");
     const activeOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(activeOutput, /\b11B\b/);
+    assert.match(activeOutput, /\s-\s/);
 
     writeStreamBurst();
     await new Promise((resolve) => setTimeout(resolve, 100));
     state = await readProxyState(stateRoot);
     assert.ok(state);
-    assert.equal(state.metrics.active_requests[0].response_bytes, Buffer.byteLength("data: one\n\n"));
+    assert.equal(state.metrics.active_requests[0].response_bytes, 0);
 
     finishStream();
     const streamResponse = await streamFetch;

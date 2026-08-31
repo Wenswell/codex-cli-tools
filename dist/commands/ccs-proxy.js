@@ -71,7 +71,6 @@ const PROXY_RECENT_RENDER_COUNT = 5;
 const PROXY_HISTORY_FULL_ROW_LIMIT = 5;
 const PROXY_HISTORY_COMPACT_SAMPLE_LIMIT = 6;
 const PROXY_HISTORY_DEFAULT_RECORD_COUNT = PROXY_HISTORY_FULL_ROW_LIMIT + PROXY_HISTORY_COMPACT_SAMPLE_LIMIT;
-const PROXY_ACTIVE_PROGRESS_WRITE_INTERVAL_MS = 1000;
 const PROXY_JSONL_TAIL_BLOCK_BYTES = 64 * 1024;
 const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
@@ -955,59 +954,6 @@ async function updateProxyActiveRequestMetric(state, stateRoot, record) {
     await mutateProxyMetrics(state, stateRoot, (metrics) => {
         metrics.active_requests = metrics.active_requests.map((request) => request.id === record.id ? record : request);
     });
-}
-function createProxyResponseProgressWriter(persist) {
-    let latestBytes = 0;
-    let observed = false;
-    let persistedBytes = null;
-    let timer = null;
-    let writeQueue = Promise.resolve();
-    let writeError = null;
-    const enqueue = (responseBytes) => {
-        if (writeError)
-            return Promise.reject(writeError);
-        const operation = writeQueue.then(async () => {
-            if (responseBytes === persistedBytes)
-                return;
-            await persist(responseBytes);
-            persistedBytes = responseBytes;
-        });
-        writeQueue = operation.catch((error) => {
-            writeError = error;
-        });
-        return operation;
-    };
-    const schedule = () => {
-        if (timer)
-            return;
-        timer = setTimeout(() => {
-            timer = null;
-            void enqueue(latestBytes).catch(() => undefined);
-        }, PROXY_ACTIVE_PROGRESS_WRITE_INTERVAL_MS);
-        timer.unref();
-    };
-    return {
-        observe: async (responseBytes) => {
-            latestBytes = Math.max(latestBytes, responseBytes);
-            if (!observed) {
-                observed = true;
-                await enqueue(latestBytes);
-                return;
-            }
-            schedule();
-        },
-        finish: async (responseBytes) => {
-            latestBytes = responseBytes;
-            if (timer) {
-                clearTimeout(timer);
-                timer = null;
-            }
-            await writeQueue;
-            if (writeError)
-                throw writeError;
-            await enqueue(responseBytes);
-        },
-    };
 }
 async function completeProxyRequestMetric(state, stateRoot, record) {
     let completedRecord = null;
@@ -5210,10 +5156,6 @@ async function serveProxy(options) {
                     retry_summary: createEmptyProxyRetrySummary(),
                     error: null,
                 };
-                const responseProgress = createProxyResponseProgressWriter(async (receivedBytes) => {
-                    activeRecord.response_bytes = receivedBytes;
-                    await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                });
                 let clientTtfbMs = null;
                 const recordClientTtfb = () => {
                     if (clientTtfbMs !== null) {
@@ -5311,9 +5253,6 @@ async function serveProxy(options) {
                             activeRecord.upstream_status = responseStatus;
                             activeRecord.upstream = upstreamName;
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                        onResponseBytes: async (receivedBytes) => {
-                            await responseProgress.observe(receivedBytes);
                         },
                     };
                     const guardedCallbacks = {
@@ -5467,7 +5406,7 @@ async function serveProxy(options) {
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                     };
-                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, responseProgress.observe, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode), upstreamConversion);
+                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, undefined, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode), upstreamConversion);
                     if (outcome.streamScanner) {
                         const inspection = outcome.streamScanner.currentInspection();
                         const streamAttemptState = { gatewayRequestId: activeRecord.id, attempts, attemptRecords, attemptStartedAtMs: [] };
@@ -5618,10 +5557,8 @@ async function serveProxy(options) {
                     activeRecord.failure_summary = failureSummary;
                     activeRecord.error = errorText;
                     await logProxyRequestError(options.stateRoot, activeRecord, status, errorText);
-                    await responseProgress.finish(responseBytes);
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                 }
-                await responseProgress.finish(responseBytes);
                 const latencyMs = Math.max(0, performance.now() - requestStartedAtMs);
                 const lastAttempt = lastProxyAttemptRecord(attemptRecords);
                 activeRecord.protocol_conversion = lastAttempt?.protocol_conversion ?? activeRecord.protocol_conversion;
