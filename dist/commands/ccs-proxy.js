@@ -78,6 +78,7 @@ const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
 const PROXY_REQUEST_SCHEMA_VERSION = 8;
+const STATUS_RETRY_ATTEMPTS = 3;
 const proxyConversionFailures = new WeakMap();
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
@@ -363,7 +364,7 @@ function startCaptureRequest(task, sessionId, requestId, method, url, requestHea
         responseChunks: [],
     };
 }
-async function writeCaptureRecord(task, capture, completedAt) {
+async function writeCaptureRecord(task, capture, completedAt, completion) {
     const prefix = String(capture.sequence).padStart(3, "0");
     const requestFile = `${prefix}-${capture.requestId}-request.body`;
     const responseFile = `${prefix}-${capture.requestId}-response.body`;
@@ -374,7 +375,7 @@ async function writeCaptureRecord(task, capture, completedAt) {
     await writeFile(path.join(task.directory, requestFile), capture.requestBody, { mode: 0o600 });
     await writeFile(path.join(task.directory, responseFile), responseBody, { mode: 0o600 });
     await writeTextFileAtomic(path.join(task.directory, metadataFile), stringifyJson({
-        version: 1,
+        version: 2,
         capture_id: task.id,
         sequence: capture.sequence,
         request_id: capture.requestId,
@@ -384,6 +385,12 @@ async function writeCaptureRecord(task, capture, completedAt) {
         started_at: capture.startedAt,
         completed_at: completedAt,
         status: capture.responseStatus,
+        response_status: capture.responseStatus,
+        upstream_status: completion.upstreamStatus,
+        final_client_status: completion.clientStatus,
+        final_action: completion.finalAction,
+        failure_summary: completion.failureSummary,
+        retry_summary: completion.retrySummary,
         request_headers: capture.requestHeaders,
         response_headers: sanitizeCaptureHeaders(capture.responseHeaders),
         request_bytes: capture.requestBody.length,
@@ -1469,7 +1476,7 @@ function proxyFailureSummaryDisplay(summary) {
         return null;
     }
     if (summary.code && summary.message) {
-        return summary.code;
+        return summary.code + ": " + summary.message;
     }
     return summary.message ?? summary.code;
 }
@@ -2728,7 +2735,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         const response = fetched.response;
         const status = response.status;
         await callbacks.onResponseStart?.(status, upstream.name);
-        if (statusRetryConfig && isRetryableUpstreamStatus(status)) {
+        if (statusRetryConfig && statusRetryCount < STATUS_RETRY_ATTEMPTS && isRetryableUpstreamStatus(status)) {
             const attempt = currentProxyAttemptRecord(attemptState);
             const trigger = status === 429 ? "http_429" : "http_503";
             const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), statusRetryConfig.total_window_ms);
@@ -2775,7 +2782,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                     await response.body?.cancel().catch(() => undefined);
                     statusRetryCount += 1;
                     attempt.retry_trigger = trigger;
-                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status), remainingRetries: 0 });
+                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status, response.headers), remainingRetries: Math.max(0, STATUS_RETRY_ATTEMPTS - statusRetryCount) });
                     if (callbacks.resolveRetryUpstream) {
                         upstream = await callbacks.resolveRetryUpstream();
                     }
@@ -3084,7 +3091,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                 error,
             });
         }
-        const failureSummary = proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType);
+        const failureSummary = proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType, response.headers);
         const finalAttempt = currentProxyAttemptRecord(attemptState);
         if (finalAttempt.policy_trigger === null) {
             applyProxyAttemptPolicy(finalAttempt, { trigger: policyDecision.trigger, action: policyDecision.action, retryBudget });
@@ -3226,7 +3233,7 @@ function proxyResponseBodyReadError(error, signal, responseBytes) {
     if (isClientAbortError(error, signal)) {
         return new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
     }
-    return new ProxyResponseWriteError(message, 502, responseBytes);
+    return new ProxyResponseWriteError(`upstream stream terminated: ${message}`, 502, responseBytes);
 }
 async function prepareProxyDirectStream(fetched, endpointClass, attemptStartedAtMs) {
     const response = fetched.response;
@@ -3477,7 +3484,7 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, ga
             return conversionFailure;
         markProxyAttemptHeaders(attemptState, response.status);
         await callbacks.onResponseStart?.(response.status, upstream.name);
-        const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
+        const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
         const attempt = currentProxyAttemptRecord(attemptState);
         attempt.client_http_status = response.status;
         completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
@@ -3512,7 +3519,7 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, ga
     }
 }
 function isRetryableUpstreamStatus(status) {
-    return status === 429 || status === 503;
+    return status === 429 || status === 503 || status === 520;
 }
 async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, body, gatewayRequestId, attemptRecords, config, callbacks) {
     const attemptState = {
@@ -3544,8 +3551,8 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             markProxyAttemptHeaders(attemptState, response.status);
             await callbacks.onResponseStart?.(response.status, upstream.name);
             const attempt = currentProxyAttemptRecord(attemptState);
-            const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status) : null;
-            if (!isRetryableUpstreamStatus(response.status)) {
+            const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
+            if (!isRetryableUpstreamStatus(response.status) || retries >= STATUS_RETRY_ATTEMPTS) {
                 attempt.client_http_status = response.status;
                 completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
                 return createProxyOutcome({
@@ -3627,7 +3634,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             retries += 1;
             attempt.retry_trigger = trigger;
             attempt.retry_budget_used = retries;
-            completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: null });
+            completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: Math.max(0, STATUS_RETRY_ATTEMPTS - retries) });
         }
         catch (error) {
             if (error instanceof ProxyResponseWriteError)
@@ -3898,7 +3905,7 @@ function proxyFailureSummaryFromError(code, error) {
     const message = error instanceof Error ? error.message : String(error);
     return proxyFailureSummary("upstream_error", code, message);
 }
-function proxyFailureSummaryFromBufferedPayload(status, buffer, contentType) {
+function proxyFailureSummaryFromBufferedPayload(status, buffer, contentType, headers) {
     if (status < 400) {
         return null;
     }
@@ -3907,14 +3914,14 @@ function proxyFailureSummaryFromBufferedPayload(status, buffer, contentType) {
             const parsed = JSON.parse(buffer.toString("utf8"));
             const summary = proxyFailureSummaryFromJsonPayload(parsed);
             if (summary) {
-                return summary;
+                return appendProxyFailureDiagnostics(summary, headers);
             }
         }
         catch {
-            return proxyHttpFailureSummary(status);
+            return proxyHttpFailureSummary(status, headers);
         }
     }
-    return proxyHttpFailureSummary(status);
+    return proxyHttpFailureSummary(status, headers);
 }
 function proxyFailureSummaryFromJsonPayload(parsed) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -3931,8 +3938,27 @@ function proxyFailureSummaryFromJsonPayload(parsed) {
     }
     return null;
 }
-function proxyHttpFailureSummary(status) {
-    return proxyFailureSummary("upstream_error", `upstream_http_${status}`, `upstream returned HTTP ${status}`);
+function proxyHttpFailureSummary(status, headers) {
+    return appendProxyFailureDiagnostics(proxyFailureSummary("upstream_error", `upstream_http_${status}`, `upstream returned HTTP ${status}`), headers);
+}
+function appendProxyFailureDiagnostics(summary, headers) {
+    const diagnostics = proxyFailureDiagnostics(headers);
+    if (!diagnostics)
+        return summary;
+    return { ...summary, message: summary.message ? `${summary.message}; ${diagnostics}` : diagnostics };
+}
+function proxyFailureDiagnostics(headers) {
+    if (!headers)
+        return null;
+    const requestId = ["x-oneapi-request-id", "x-request-id", "request-id", "openai-request-id", "x-amzn-requestid"]
+        .map((name) => headers.get(name))
+        .find((value) => Boolean(value));
+    const values = [["server", headers.get("server")], ["request_id", requestId], ["cf_ray", headers.get("cf-ray")]]
+        .flatMap(([name, value]) => {
+        const normalized = typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 128) : "";
+        return normalized ? [`${name}=${normalized}`] : [];
+    });
+    return values.length > 0 ? values.join(" ") : null;
 }
 function proxyUpstreamFinalAction(status) {
     return status >= 400 ? "upstream_error" : "passed";
@@ -3992,6 +4018,9 @@ function requestFinalAction(input) {
     }
     if (input.failureSummary?.code === "upstream_fetch_failed" || input.error?.includes("upstream_fetch_failed")) {
         return "upstream_fetch_failed";
+    }
+    if (input.failureSummary?.code === "upstream_stream_terminated" || input.error?.startsWith("upstream stream terminated:")) {
+        return "upstream_stream_terminated";
     }
     if (input.error) {
         return "gateway_error";
@@ -4224,7 +4253,9 @@ async function writeReadableResponse(res, stream, scanner, modelObserver, onResp
                 });
             }
         });
-        stream.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 502, responseBytes, error instanceof ProxyLatencyTimeoutError ? error : null, error instanceof ProxyInspectionLimitError, error instanceof ProtocolConversionError ? error.stage : null)));
+        stream.on("error", (error) => finish(new ProxyResponseWriteError(error instanceof ProxyLatencyTimeoutError || error instanceof ProxyInspectionLimitError || error instanceof ProtocolConversionError
+            ? error.message
+            : `upstream stream terminated: ${error.message}`, 502, responseBytes, error instanceof ProxyLatencyTimeoutError ? error : null, error instanceof ProxyInspectionLimitError, error instanceof ProtocolConversionError ? error.stage : null)));
         res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
         res.on("close", () => {
             if (!finished) {
@@ -5660,19 +5691,22 @@ async function serveProxy(options) {
                     if (conversionFailureStage && !res.headersSent) {
                         status = NON_STREAM_STATUS_CODE;
                     }
+                    const upstreamStreamTerminated = errorText?.startsWith("upstream stream terminated:") === true;
                     failureSummary = conversionFailureStage
                         ? proxyFailureSummary("gateway_error", "route_conversion_failed", errorText)
                         : error instanceof ProxyProfileSelectionError
                             ? proxyFailureSummary("client_error", "invalid_proxy_profile", errorText)
                             : errorText === "retry cancelled by ccs proxy"
                                 ? proxyFailureSummary("client_error", "proxy_retry_cancelled", errorText)
-                                : responseControlLost
-                                    ? proxyFailureSummary("gateway_error", inspectionLimitAfterForward
-                                        ? "response_inspection_limit_exceeded"
-                                        : error instanceof ProxyResponseWriteError && error.timeout?.timeoutType === "total"
-                                            ? "upstream_total_timeout"
-                                            : "upstream_first_progress_timeout", errorText)
-                                    : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
+                                : upstreamStreamTerminated
+                                    ? proxyFailureSummary("upstream_error", "upstream_stream_terminated", errorText)
+                                    : responseControlLost
+                                        ? proxyFailureSummary("gateway_error", inspectionLimitAfterForward
+                                            ? "response_inspection_limit_exceeded"
+                                            : error instanceof ProxyResponseWriteError && error.timeout?.timeoutType === "total"
+                                                ? "upstream_total_timeout"
+                                                : "upstream_first_progress_timeout", errorText)
+                                        : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
                     const pendingAttempt = lastProxyAttemptRecord(attemptRecords);
                     activeRecord.conversion_failure_stage = conversionFailureStage;
                     if (pendingAttempt) {
@@ -5698,7 +5732,7 @@ async function serveProxy(options) {
                         }
                     }
                     else {
-                        completeLastPendingProxyAttemptRecord(attemptRecords, conversionFailureStage ? "route_conversion_failed" : status === 499 ? "client_aborted" : "gateway_error", { failureSummary });
+                        completeLastPendingProxyAttemptRecord(attemptRecords, conversionFailureStage ? "route_conversion_failed" : status === 499 ? "client_aborted" : upstreamStreamTerminated ? "upstream_stream_terminated" : "gateway_error", { failureSummary });
                     }
                     upstream = activeRecord.upstream;
                     attempts = activeRecord.attempts;
@@ -5795,7 +5829,13 @@ async function serveProxy(options) {
                 });
                 if (captureOwner && captureRequest) {
                     try {
-                        await writeCaptureRecord(captureOwner, captureRequest, completedAt);
+                        await writeCaptureRecord(captureOwner, captureRequest, completedAt, {
+                            upstreamStatus,
+                            clientStatus: status,
+                            finalAction,
+                            failureSummary,
+                            retrySummary,
+                        });
                         captureOwner.captured += 1;
                         if (captureOwner.captured >= captureOwner.requested && captureTask?.id === captureOwner.id) {
                             captureTask = null;

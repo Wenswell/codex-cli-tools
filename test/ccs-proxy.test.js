@@ -832,10 +832,11 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
 
     await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_unsupported_path"/);
     const events = (await readFile(join(stateRoot, "proxy.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    assert.deepEqual(events.map((event) => event.event), ["ccs_proxy_unsupported_path"]);
-    assert.deepEqual(events.map((event) => event.path), ["/__codex_proxy/unknown"]);
+    const unsupportedEvents = events.filter((event) => event.event === "ccs_proxy_unsupported_path");
+    assert.equal(unsupportedEvents.length, 1);
+    assert.deepEqual(unsupportedEvents.map((event) => event.path), ["/__codex_proxy/unknown"]);
     assert.doesNotMatch(await readFile(join(stateRoot, "proxy.log"), "utf8"), /query-secret|api_key/);
-    assert.deepEqual(events.map((event) => event.status), [404]);
+    assert.deepEqual(unsupportedEvents.map((event) => event.status), [404]);
     assert.equal(upstreamHits, 1);
 
     const state = await waitForState(
@@ -1034,6 +1035,12 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
 
     const records = await Promise.all(metadataFiles.map(async (file) => JSON.parse(await readFile(join(captureDir, file), "utf8"))));
     records.sort((left, right) => left.sequence - right.sequence);
+    assert.deepEqual(records.map((record) => record.version), [2, 2]);
+    assert.deepEqual(records.map((record) => record.upstream_status), [200, 200]);
+    assert.deepEqual(records.map((record) => record.final_client_status), [200, 200]);
+    assert.deepEqual(records.map((record) => record.final_action), ["passed", "passed"]);
+    assert.deepEqual(records.map((record) => record.failure_summary), [null, null]);
+    assert.deepEqual(records.map((record) => record.retry_summary.total), [0, 0]);
     assert.deepEqual(records.map((record) => record.session_id), ["session-alpha-full", "session-alpha-full"]);
     assert.deepEqual(records.map((record) => record.url), ["/v1/responses?turn=1", "/v1/responses?turn=2"]);
     assert.equal(records[0].request_headers.authorization, "[redacted]");
@@ -2871,7 +2878,7 @@ test("proxy passthrough forwards one untouched upstream response without policy"
   }
 });
 
-test("proxy retry mode handles only HTTP 429 and 503 within the configured window", async () => {
+test("proxy retry mode handles HTTP 429, 503, and 520 with bounded attempts", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -2882,15 +2889,15 @@ test("proxy retry mode handles only HTTP 429 and 503 within the configured windo
     const testCase = new URL(req.url ?? "/", "http://localhost").searchParams.get("case");
     if (testCase === "recover") {
       hits.recover += 1;
-      const status = hits.recover === 1 ? 429 : hits.recover === 2 ? 503 : 200;
+      const status = hits.recover === 1 ? 429 : hits.recover === 2 ? 520 : 200;
       res.writeHead(status, { "content-type": "application/json", "retry-after": "0" });
       res.end(JSON.stringify({ status, hit: hits.recover }));
       return;
     }
     if (testCase === "exhausted") {
       hits.exhausted += 1;
-      res.writeHead(503, { "content-type": "application/json", "retry-after": "0.6" });
-      res.end(JSON.stringify({ status: 503, hit: hits.exhausted }));
+      res.writeHead(520, { "content-type": "application/json", "retry-after": "0", server: "cloudflare", "x-request-id": "oneapi-520", "cf-ray": "ray-520" });
+      res.end(JSON.stringify({ status: 520, hit: hits.exhausted }));
       return;
     }
     hits.other += 1;
@@ -2939,12 +2946,13 @@ test("proxy retry mode handles only HTTP 429 and 503 within the configured windo
     });
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=exhausted`, { method: "POST", body: "{}" });
-    assert.equal(exhausted.status, 503);
-    assert.deepEqual(await exhausted.json(), { status: 503, hit: 2 });
-    state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.status === 503);
+    assert.equal(exhausted.status, 520);
+    assert.deepEqual(await exhausted.json(), { status: 520, hit: 4 });
+    state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.status === 520);
     record = state.metrics.recent_requests[0];
-    assert.equal(record.attempts, 2);
-    assert.equal(record.retry_summary.http_503, 1);
+    assert.equal(record.attempts, 4);
+    assert.equal(record.retry_summary.http_503, 3);
+    assert.match(record.failure_summary.message, /server=cloudflare request_id=oneapi-520 cf_ray=ray-520/);
 
     const other = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=other`, { method: "POST", body: "{}" });
     assert.equal(other.status, 502);
