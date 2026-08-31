@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, open, readFile, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer } from "node:http";
@@ -32,9 +32,10 @@ const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
+const CAPTURE_PATH = "/__codex_proxy/capture";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
-const PROXY_HEALTH_PROTOCOL = 7;
+const PROXY_HEALTH_PROTOCOL = 8;
 const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
 const PROXY_MODE_PASSTHROUGH = "passthrough";
@@ -305,6 +306,91 @@ function cancelUrl(state, target) {
     if (target)
         url.searchParams.set("target", target);
     return url.toString();
+}
+function captureUrl(state) {
+    return new URL(CAPTURE_PATH, state.proxy_base_url).toString();
+}
+function captureRootPath(stateRoot) {
+    return path.join(stateRoot, "captures");
+}
+const REDACTED_CAPTURE_HEADERS = new Set([
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "api-key",
+    "x-api-key",
+    CCS_PROXY_PROFILE_HEADER,
+]);
+function sanitizeCaptureHeaders(headers) {
+    const sanitized = {};
+    for (const [key, raw] of Object.entries(headers)) {
+        if (raw === undefined)
+            continue;
+        const lower = key.toLowerCase();
+        const value = Array.isArray(raw) ? raw.join(", ") : raw;
+        sanitized[lower] = REDACTED_CAPTURE_HEADERS.has(lower) ? "[redacted]" : value;
+    }
+    return sanitized;
+}
+function publicCaptureStatus(task) {
+    if (!task)
+        return { active: false, task: null, directory: null };
+    const { directory, ...publicTask } = task;
+    return { active: true, task: publicTask, directory };
+}
+function startCaptureRequest(task, sessionId, requestId, method, url, requestHeaders, requestBody) {
+    if (!task || task.claimed >= task.requested || !sessionId || !sessionId.startsWith(task.target))
+        return null;
+    if (task.sessionId && task.sessionId !== sessionId) {
+        task.error = "capture target is ambiguous; use a longer session prefix";
+        return null;
+    }
+    task.sessionId ??= sessionId;
+    task.claimed += 1;
+    return {
+        taskId: task.id,
+        sequence: task.claimed,
+        requestId,
+        sessionId,
+        method,
+        url,
+        startedAt: new Date().toISOString(),
+        requestHeaders: sanitizeCaptureHeaders(requestHeaders),
+        requestBody,
+        responseStatus: null,
+        responseHeaders: {},
+        responseChunks: [],
+    };
+}
+async function writeCaptureRecord(task, capture, completedAt) {
+    const prefix = String(capture.sequence).padStart(3, "0");
+    const requestFile = `${prefix}-${capture.requestId}-request.body`;
+    const responseFile = `${prefix}-${capture.requestId}-response.body`;
+    const metadataFile = `${prefix}-${capture.requestId}.json`;
+    const responseBody = capture.responseChunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(capture.responseChunks);
+    await mkdir(task.directory, { recursive: true, mode: 0o700 });
+    await chmod(task.directory, 0o700);
+    await writeFile(path.join(task.directory, requestFile), capture.requestBody, { mode: 0o600 });
+    await writeFile(path.join(task.directory, responseFile), responseBody, { mode: 0o600 });
+    await writeTextFileAtomic(path.join(task.directory, metadataFile), stringifyJson({
+        version: 1,
+        capture_id: task.id,
+        sequence: capture.sequence,
+        request_id: capture.requestId,
+        session_id: capture.sessionId,
+        method: capture.method,
+        url: capture.url,
+        started_at: capture.startedAt,
+        completed_at: completedAt,
+        status: capture.responseStatus,
+        request_headers: capture.requestHeaders,
+        response_headers: sanitizeCaptureHeaders(capture.responseHeaders),
+        request_bytes: capture.requestBody.length,
+        response_bytes: responseBody.length,
+        request_body_file: requestFile,
+        response_body_file: responseFile,
+    }), 0o600);
 }
 async function sleep(ms) {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -2099,6 +2185,9 @@ function classifyProxyRoute(method, pathname) {
     }
     if ((method === "GET" || method === "POST") && pathname === CANCEL_PATH) {
         return { kind: "control", endpoint: "cancel" };
+    }
+    if ((method === "GET" || method === "POST") && pathname === CAPTURE_PATH) {
+        return { kind: "control", endpoint: "capture" };
     }
     if (pathname === "/__codex_proxy" || pathname.startsWith("/__codex_proxy/")) {
         return { kind: "invalid" };
@@ -3992,7 +4081,7 @@ function createBufferedResponse(buffer, status, headers, contentType = "", strip
 function responseStatusAllowsBody(status) {
     return status !== 101 && status !== 204 && status !== 205 && status !== 304;
 }
-function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten) {
+function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten, responseObserver) {
     if (res.destroyed || res.writableEnded) {
         return false;
     }
@@ -4001,12 +4090,15 @@ function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten) {
         return false;
     }
     const payload = JSON.stringify({ error: { message } });
-    res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+    const headers = { "content-type": "application/json; charset=utf-8" };
+    responseObserver?.onStart(status, headers);
+    responseObserver?.onChunk(Buffer.from(payload));
+    res.writeHead(status, headers);
     onHeadersWritten?.();
     res.end(payload);
     return true;
 }
-async function writeResponse(res, response, endpointClass, modelObserver, onHeadersWritten, onResponseBytes, existingScanner, inspectStream = true, conversion) {
+async function writeResponse(res, response, endpointClass, modelObserver, onHeadersWritten, onResponseBytes, existingScanner, inspectStream = true, conversion, responseObserver) {
     let finalResponse = response;
     if (conversion?.needsConversion && response.body) {
         const contentType = response.headers.get("content-type") || "";
@@ -4040,7 +4132,9 @@ async function writeResponse(res, response, endpointClass, modelObserver, onHead
             });
         }
     }
-    res.writeHead(finalResponse.status, responseHeadersToObject(finalResponse.headers));
+    const responseHeaders = responseHeadersToObject(finalResponse.headers);
+    responseObserver?.onStart(finalResponse.status, responseHeaders);
+    res.writeHead(finalResponse.status, responseHeaders);
     onHeadersWritten?.();
     if (!finalResponse.body) {
         return endEmptyResponse(res);
@@ -4052,7 +4146,7 @@ async function writeResponse(res, response, endpointClass, modelObserver, onHead
         : existingScanner ?? (inspectStream && isStreamContentType(`${finalResponse.headers.get("content-type") || ""}`)
             ? new ProxySseScanner(endpointClass)
             : null);
-    return writeReadableResponse(res, Readable.fromWeb(finalResponse.body), scanner, modelObserver, onResponseBytes);
+    return writeReadableResponse(res, Readable.fromWeb(finalResponse.body), scanner, modelObserver, onResponseBytes, responseObserver);
 }
 async function endEmptyResponse(res) {
     return new Promise((resolve, reject) => {
@@ -4081,7 +4175,7 @@ function updateProxyModelObserver(modelObserver, extraction) {
     modelObserver.source = extraction.source;
     return Promise.resolve(modelObserver.update?.(extraction));
 }
-async function writeReadableResponse(res, stream, scanner, modelObserver, onResponseBytes) {
+async function writeReadableResponse(res, stream, scanner, modelObserver, onResponseBytes, responseObserver) {
     return new Promise((resolve, reject) => {
         let responseBytes = 0;
         let settled = false;
@@ -4112,6 +4206,7 @@ async function writeReadableResponse(res, stream, scanner, modelObserver, onResp
         };
         stream.on("data", (chunk) => {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            responseObserver?.onChunk(value);
             responseBytes += value.length;
             void queueResponseBytesUpdate(responseBytes).catch((error) => {
                 stream.destroy(error instanceof Error ? error : new Error(String(error)));
@@ -4898,6 +4993,25 @@ async function proxyCancelRequest(state, target, init) {
     }
     return payload;
 }
+async function proxyCaptureRequest(state, init) {
+    const response = await fetch(captureUrl(state), {
+        headers: { accept: "application/json", "content-type": "application/json" },
+        signal: AbortSignal.timeout(PROXY_HEALTH_TIMEOUT_MS),
+        ...init,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(typeof payload?.error === "string" ? payload.error : `proxy capture failed with HTTP ${response.status}`);
+    }
+    return payload;
+}
+async function proxyCaptureStatus(options) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state)
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    assertProxyHealthRuntime(await readProxyHealth(state));
+    return { state, status: await proxyCaptureRequest(state) };
+}
 async function buildProxyReroutePlan(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state)
@@ -4951,6 +5065,7 @@ async function serveProxy(options) {
     await resetProxyActiveRequestsOnStart(state, options.stateRoot);
     let closing = false;
     const statusRetryWaits = new Map();
+    let captureTask = null;
     const server = createServer((req, res) => {
         res.once("finish", () => {
             if (closing)
@@ -4966,6 +5081,41 @@ async function serveProxy(options) {
                 const route = classifyProxyRoute(method, url.pathname);
                 if (route.kind === "control") {
                     const currentState = await readProxyState(options.stateRoot) ?? state;
+                    if (route.endpoint === "capture") {
+                        if (method === "GET") {
+                            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify(publicCaptureStatus(captureTask)));
+                            return;
+                        }
+                        const payload = parseJsonBody(await readBody(req));
+                        const target = payload && typeof payload === "object" && !Array.isArray(payload)
+                            ? payload.target
+                            : null;
+                        const count = payload && typeof payload === "object" && !Array.isArray(payload)
+                            ? payload.count
+                            : null;
+                        if (captureTask) {
+                            res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ error: "proxy capture already has an active task" }));
+                            return;
+                        }
+                        if (typeof target !== "string" || target.length === 0 || !Number.isSafeInteger(count) || Number(count) <= 0) {
+                            res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ error: "proxy capture requires a non-empty target and positive integer count" }));
+                            return;
+                        }
+                        const id = randomUUID();
+                        const directory = path.join(captureRootPath(options.stateRoot), `${Date.now()}-${id}`);
+                        await mkdir(directory, { recursive: true, mode: 0o700 });
+                        await chmod(directory, 0o700);
+                        captureTask = {
+                            id, target, sessionId: null, requested: Number(count), claimed: 0, captured: 0,
+                            startedAt: new Date().toISOString(), directory, error: null,
+                        };
+                        res.writeHead(201, { "content-type": "application/json; charset=utf-8" });
+                        res.end(JSON.stringify(publicCaptureStatus(captureTask)));
+                        return;
+                    }
                     if (route.endpoint === "reroute" || route.endpoint === "cancel") {
                         const profiles = await readProfiles();
                         const profile = resolveProxyUpstream(profiles).name;
@@ -5200,6 +5350,19 @@ async function serveProxy(options) {
                 let hasReasoningItem = false;
                 let failureSummary = null;
                 let errorText = null;
+                let captureOwner = null;
+                let captureRequest = null;
+                const captureResponseObserver = {
+                    onStart: (responseStatus, headers) => {
+                        if (!captureRequest)
+                            return;
+                        captureRequest.responseStatus = responseStatus;
+                        captureRequest.responseHeaders = headers;
+                    },
+                    onChunk: (chunk) => {
+                        captureRequest?.responseChunks.push(Buffer.from(chunk));
+                    },
+                };
                 const attemptRecords = [];
                 let requestHeaders = {};
                 let requestServiceTier = null;
@@ -5207,13 +5370,25 @@ async function serveProxy(options) {
                 const configServiceTier = readTopLevelTomlString(requestStartConfig, "service_tier");
                 const endpointClass = route.endpointClass;
                 try {
-                    const profiles = await readProfiles();
-                    const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
-                    const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname);
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
                     const turnMetadata = parseCodexTurnMetadata(req.headers);
                     const sessionId = extractSessionId(requestJson, turnMetadata);
+                    captureOwner = captureTask;
+                    captureRequest = startCaptureRequest(captureOwner, sessionId, activeRecord.id, method, `${url.pathname}${url.search}`, req.headers, body);
+                    if (captureOwner?.error) {
+                        await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+                            event: "ccs_proxy_capture_failed",
+                            capture_id: captureOwner.id,
+                            error: captureOwner.error,
+                        });
+                        if (captureTask?.id === captureOwner.id)
+                            captureTask = null;
+                        captureOwner = null;
+                    }
+                    const profiles = await readProfiles();
+                    const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
+                    const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname);
                     requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
@@ -5413,7 +5588,7 @@ async function serveProxy(options) {
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                     };
-                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, undefined, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode), upstreamConversion);
+                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, undefined, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode), upstreamConversion, captureResponseObserver);
                     if (outcome.streamScanner) {
                         const inspection = outcome.streamScanner.currentInspection();
                         const streamAttemptState = { gatewayRequestId: activeRecord.id, attempts, attemptRecords, attemptStartedAtMs: [] };
@@ -5534,7 +5709,7 @@ async function serveProxy(options) {
                         res.destroy();
                     }
                     else if (status !== 499 && !conversionAfterForward) {
-                        if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb)) {
+                        if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb, captureResponseObserver)) {
                             responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
                         }
                     }
@@ -5573,9 +5748,10 @@ async function serveProxy(options) {
                 const attemptTiming = requestTimingFromAttempt(lastAttempt);
                 const finalAction = requestFinalAction({ status, error: errorText, failureSummary });
                 const retrySummary = createRetrySummary(attemptRecords);
+                const completedAt = new Date().toISOString();
                 await completeProxyRequestMetric(state, options.stateRoot, {
                     ...activeRecord,
-                    completed_at: new Date().toISOString(),
+                    completed_at: completedAt,
                     status,
                     upstream_status: upstreamStatus,
                     client_status: status,
@@ -5617,6 +5793,27 @@ async function serveProxy(options) {
                     request_headers: requestHeaders,
                     attempt_records: attemptRecords,
                 });
+                if (captureOwner && captureRequest) {
+                    try {
+                        await writeCaptureRecord(captureOwner, captureRequest, completedAt);
+                        captureOwner.captured += 1;
+                        if (captureOwner.captured >= captureOwner.requested && captureTask?.id === captureOwner.id) {
+                            captureTask = null;
+                        }
+                    }
+                    catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        captureOwner.error = message;
+                        if (captureTask?.id === captureOwner.id)
+                            captureTask = null;
+                        await appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+                            event: "ccs_proxy_capture_failed",
+                            capture_id: captureOwner.id,
+                            request_id: captureRequest.requestId,
+                            error: message,
+                        });
+                    }
+                }
             }
             catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
@@ -5667,6 +5864,7 @@ function usageHelpLines() {
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
         "  ccs proxy cancel TARGET                 # cancel waiting 429/503 requests by request or session id",
+        "  ccs proxy capture [TARGET COUNT]        # capture complete client HTTP exchanges for one session",
         "  ccs proxy mode                           # print response mode and status retry state",
         "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
         "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
@@ -5841,7 +6039,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "mode", "search", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
@@ -5907,6 +6105,35 @@ export async function runProxyCommand(args, options) {
         const result = await applyProxyCancelPlan(plan);
         printKeyValue("cancelled:", textGreen(String(result.cancelled.length)), 9);
         printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
+        return;
+    }
+    if (command === "capture") {
+        if (rest.length === 0) {
+            const { status } = await proxyCaptureStatus(options);
+            printKeyValue("capture:", status.active ? textGreen("active") : textDim("inactive"), 10);
+            if (status.task) {
+                printKeyValue("target:", status.task.target, 10);
+                printKeyValue("session:", status.task.sessionId ?? textDim("waiting"), 10);
+                printKeyValue("progress:", `${status.task.captured}/${status.task.requested}`, 10);
+                printKeyValue("directory:", colorPath(formatProxyFilePath(status.directory)), 10);
+            }
+            return;
+        }
+        if (rest.length !== 2 || !rest[0] || !/^[1-9]\d*$/.test(rest[1] ?? "")) {
+            throw new Error("ccs proxy capture requires TARGET and a positive integer COUNT");
+        }
+        const { state, status } = await proxyCaptureStatus(options);
+        if (status.active)
+            throw new Error("proxy capture already has an active task");
+        const started = await proxyCaptureRequest(state, {
+            method: "POST",
+            body: JSON.stringify({ target: rest[0], count: Number(rest[1]) }),
+        });
+        printKeyValue("capture:", textGreen("active"), 10);
+        printKeyValue("target:", rest[0], 10);
+        printKeyValue("count:", rest[1], 10);
+        printKeyValue("directory:", colorPath(formatProxyFilePath(started.directory)), 10);
+        printKeyValue("note:", "authentication headers are redacted; files remain until manually removed", 10);
         return;
     }
     if (command === "mode") {

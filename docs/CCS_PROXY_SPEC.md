@@ -11,6 +11,7 @@ Proxy state lives under `~/.cache/codex-tools/proxy`:
 - `proxy.log`: bounded guard, unsupported-path, upstream-error, and local proxy error events as JSONL up to 16M.
 - `proxy-runtime.log`: bounded background process stdout and stderr up to 16M.
 - `proxy.pid`: background process id.
+- `captures/<timestamp>-<id>/`: explicitly requested client-boundary packet captures. Each captured request has one metadata JSON file plus byte-exact request and response body files.
 - `backups/config-<timestamp>.toml`: complete `config.toml` snapshot made before `ccs proxy install`; the path is stored in `proxy.json.backup_path` while the install is active.
 - `backups/config-restore-<timestamp>.toml`: complete `config.toml` snapshot made before `ccs proxy restore`.
 
@@ -123,6 +124,16 @@ Restart requires installed proxy state. Preview prints the active PID, protocol,
 - Client-aborted response streams are completed as failed history with status `499`.
 - Proxy state writes are serialized in the proxy process so concurrent requests update one metrics snapshot in order.
 
+## Session packet capture
+
+`ccs proxy capture TARGET COUNT` arms one in-memory capture task for the next `COUNT` requests whose full Codex session id starts with `TARGET`. `TARGET` follows the session-target rule used by `ccs proxy cancel`: an exact request id is not relevant to this session-only command, and a prefix that encounters more than one full session id fails as ambiguous. Only one capture task can be active. `ccs proxy capture` reports the active task or `inactive`.
+
+Capture starts after the command succeeds; earlier and already-active requests are excluded. The first matching request binds the task to its full session id. Each completed match consumes one count, including local proxy errors and client-aborted responses. The task becomes inactive after `COUNT` records are written. Proxy restart discards an unfinished in-memory task.
+
+Each record represents the client/proxy HTTP boundary after any retry, guard, or protocol conversion. Metadata stores the request id, full session id, method, URL path and query, timestamps, final client status, byte counts, sanitized request headers, response headers, and body file names. Request and response bodies are saved byte-for-byte in separate files; SSE remains raw SSE bytes. Authentication-bearing headers, cookies, proxy authorization, and API-key headers are replaced with `[redacted]`. Other headers are retained. Files use private permissions: capture directories `0700`, files `0600`.
+
+Capture data is an explicit diagnostic archive: it is not copied into `proxy.json`, `proxy-requests.jsonl`, or `proxy.log`, has no automatic retention or silent payload truncation, and remains until manually removed. A capture write failure ends the task and records an explicit proxy event rather than producing a successful partial record. Ordinary runtime records continue to exclude prompt and response bodies.
+
 ## Metrics schema
 
 `metrics` keeps compact operational counters for the state-file window:
@@ -216,7 +227,7 @@ Each compact `usage_attempts` entry stores `attempt`, `input_tokens`, `output_to
 
 `proxy.log` attempt completion events include `protocol_conversion`, `upstream_endpoint`, and `conversion_failure_stage`. Request error events include `protocol_conversion` and `conversion_failure_stage`, preserving the concrete conversion error message.
 
-Request schema version `8` and health protocol version `7` are the sole supported contracts.
+Request schema version `8` and health protocol version `8` are the sole supported contracts.
 
 Request-record readers require every schema `8` field with its documented type. Previous field names, missing fields, and retired values produce a schema error while the top-level state schema is current. A top-level state schema change clears incompatible snapshots and history through the automatic state upgrade flow.
 
