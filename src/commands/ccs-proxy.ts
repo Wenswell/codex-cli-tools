@@ -16,7 +16,7 @@ import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } 
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache, type ModelPriceCache } from "../lib/pricing.js";
-import { readProfiles, type ProfilesFile } from "../lib/profiles.js";
+import { assertProfile, readProfiles, writeProfiles, type ProfilesFile, type ProxySearchConfig } from "../lib/profiles.js";
 import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow, type TableColumn, type TableRow } from "../lib/table.js";
@@ -394,6 +394,7 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
+const SEARCH_PROXY_PATH = "/v1/alpha/search";
 const PROXY_HEALTH_PROTOCOL = 7;
 const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
@@ -1023,27 +1024,29 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
 }
 
 function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string, requestPath?: string): ProxyUpstream {
-  const pathProfile = requestPath ? profiles.proxy?.pathProfiles?.[requestPath] : undefined;
-  const name = requestedProfile || pathProfile || profiles.current;
+  const searchProfile = requestPath === SEARCH_PROXY_PATH && profiles.proxy?.search?.enabled
+    ? profiles.proxy.search.profile
+    : undefined;
+  const name = requestedProfile || searchProfile || profiles.current;
   if (!name) {
     throw new Error("profiles.current was not found");
   }
   const profile = profiles.profiles?.[name];
   if (!profile) {
-    if (requestedProfile || pathProfile) {
+    if (requestedProfile || searchProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} was not found`);
     }
     throw new Error(`profiles.current ${name} was not found in profiles`);
   }
   const baseURL = profile?.baseURL;
   if (!baseURL) {
-    if (requestedProfile || pathProfile) {
+    if (requestedProfile || searchProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no baseURL`);
     }
     throw new Error(`profiles.current ${name} has no baseURL`);
   }
   if (!profile.apiKey) {
-    if (requestedProfile || pathProfile) {
+    if (requestedProfile || searchProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no apiKey`);
     }
     throw new Error(`profiles.current ${name} has no apiKey`);
@@ -6804,6 +6807,9 @@ function usageHelpLines(): string[] {
     "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
     "  ccs proxy mode recovery                  # enable continuation recovery mode",
     "  ccs proxy mode intercept                 # enable guard intercept mode",
+    "  ccs proxy search                         # show alpha search forwarding",
+    "  ccs proxy search up|down                 # enable or disable alpha search forwarding",
+    "  ccs proxy search set PROFILE             # select alpha search upstream profile",
     "  ccs proxy config                         # print active proxy policy configuration",
     "  ccs proxy config retry WINDOW BASE MAX   # set status retry window and backoff milliseconds",
     "  ccs proxy config latency off             # disable latency deadlines after confirmation",
@@ -6944,6 +6950,39 @@ function printProxyStatusRetry(value: ProxyStatusRetry): void {
   printKeyValue("backoff_max:", `${value.backoff_max_ms}ms`, 15);
 }
 
+function proxySearchConfig(profiles: ProfilesFile): ProxySearchConfig {
+  return profiles.proxy?.search ?? { enabled: false };
+}
+
+function printProxySearchStatus(profiles: ProfilesFile): void {
+  const search = proxySearchConfig(profiles);
+  printKeyValue("search:", search.enabled ? textGreen("up") : textDim("down"), 8);
+  printKeyValue("profile:", search.profile ? colorName(search.profile) : textDim("none"), 8);
+  printKeyValue("commands:", "up | down | set PROFILE", 8);
+}
+
+function assertSearchProfile(profiles: ProfilesFile, name: string): void {
+  const profile = profiles.profiles?.[name];
+  if (!profile) {
+    throw new Error(`ccs proxy search profile was not found: ${name}`);
+  }
+  const normalized = assertProfile(profile, name);
+  if (!normalized.baseURL.trim() || !normalized.apiKey.trim()) {
+    throw new Error(`ccs proxy search profile ${name} requires baseURL and apiKey`);
+  }
+}
+
+async function applyProxySearchConfig(expectedProfiles: ProfilesFile, nextSearch: ProxySearchConfig): Promise<void> {
+  const currentProfiles = await readProfiles();
+  if (JSON.stringify(currentProfiles) !== JSON.stringify(expectedProfiles)) {
+    throw new Error("profiles.json changed after preview; run ccs proxy search again");
+  }
+  await writeProfiles({
+    ...currentProfiles,
+    proxy: { ...currentProfiles.proxy, search: nextSearch },
+  });
+}
+
 export async function runProxyCommand(args: string[], options: ProxyOptions): Promise<void> {
   if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
     console.log(usageHelpLines().join("\n"));
@@ -6952,7 +6991,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
 
   const command = args[0] ?? "";
   const rest = args.slice(1);
-  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "mode", "config", "restore", "restart", "serve"]);
+  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "mode", "search", "config", "restore", "restart", "serve"]);
   const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
   if (reset) {
     printKeyValue(
@@ -7067,6 +7106,37 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     printKeyValue("mode:", formatProxyModeChange(result), 5);
     printKeyValue("retry:", nextRetryEnabled ? textGreen("enabled") : textDim("disabled"), 5);
     printProxyModeRuntime(result.runtime);
+    return;
+  }
+  if (command === "search") {
+    rejectRemovedYesFlags(rest, "ccs proxy search");
+    const profiles = await readProfiles();
+    if (rest.length === 0) {
+      printProxySearchStatus(profiles);
+      return;
+    }
+    const current = proxySearchConfig(profiles);
+    let next: ProxySearchConfig;
+    if (rest.length === 1 && (rest[0] === "up" || rest[0] === "down")) {
+      if (rest[0] === "up") {
+        if (!current.profile) {
+          throw new Error("ccs proxy search up requires a profile; run ccs proxy search set PROFILE first");
+        }
+        assertSearchProfile(profiles, current.profile);
+      }
+      next = { ...current, enabled: rest[0] === "up" };
+    } else if (rest.length === 2 && rest[0] === "set" && rest[1]) {
+      assertSearchProfile(profiles, rest[1]);
+      next = { ...current, profile: rest[1] };
+    } else {
+      throw new Error("ccs proxy search requires up, down, or set PROFILE");
+    }
+    printKeyValue("search:", `${current.enabled ? "up" : "down"} -> ${next.enabled ? "up" : "down"}`, 8);
+    printKeyValue("profile:", `${current.profile ?? "none"} -> ${next.profile ?? "none"}`, 8);
+    printKeyValue("note:", "no changes are written unless you type yes", 8);
+    if (!(await confirmApply())) return;
+    await applyProxySearchConfig(profiles, next);
+    printProxySearchStatus(await readProfiles());
     return;
   }
   if (command === "config") {
