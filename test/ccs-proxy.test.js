@@ -927,7 +927,17 @@ test("proxy routes alpha search to its mapped profile and preserves explicit pro
       body,
     });
     assert.deepEqual(await mapped.json(), { provider: "search" });
-    assert.deepEqual(searchHits, [{ authorization: "Bearer search-key", url: "/v1/alpha/search?limit=3", body }]);
+
+    const mappedWithoutVersion = await fetch(`http://127.0.0.1:${proxyPort}/alpha/search?limit=4`, {
+      method: "POST",
+      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await mappedWithoutVersion.json(), { provider: "search" });
+    assert.deepEqual(searchHits, [
+      { authorization: "Bearer search-key", url: "/v1/alpha/search?limit=3", body },
+      { authorization: "Bearer search-key", url: "/alpha/search?limit=4", body },
+    ]);
     assert.deepEqual(defaultHits, []);
 
     const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search`, {
@@ -938,8 +948,8 @@ test("proxy routes alpha search to its mapped profile and preserves explicit pro
     assert.deepEqual(await pinned.json(), { provider: "default" });
     assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/alpha/search", body }]);
 
-    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 2);
-    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["default", "search"]);
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 3);
+    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["default", "search", "search"]);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -4601,7 +4611,7 @@ test("proxy status table renders configured columns and compact units", () => {
             response_bytes: 0,
             request_model: null,
             upstream_model: null,
-            path: "/pending",
+            path: "/alpha/search",
           }),
         ],
         status_counts: {},
@@ -4618,7 +4628,7 @@ test("proxy status table renders configured columns and compact units", () => {
             request_model: "gpt-5.5",
             upstream_model: "gpt-5.5",
             reasoning_tokens: 42,
-            path: "/same",
+            path: "/v1/alpha/search",
           }),
           proxyHistoryRecord({
             session: "019f0dfb",
@@ -4656,8 +4666,8 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.doesNotMatch(lines, /\bmethod\b/);
   assert.doesNotMatch(lines, /^\s+\d+\./m);
   assert.match(lines, /019f0df6\s+input\/5\.5\s+stream:R→C\s+0ms\s+2\.00K/);
-  assert.match(lines, /019f0df6\s+input\/-\s+waiting\s+0ms\s+-/);
-  assert.match(lines, /019f0df6\s+input\/5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K/);
+  assert.match(lines, /019f0df6\s+input\/-\s+\[S\]waiting\s+0ms\s+-/);
+  assert.match(lines, /019f0df6\s+input\/5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K\s+\[S\]/);
   assert.match(lines, /019f0dfb\s+input\/5\.5\n\s+\d\d:\d\d:01\s+502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\]/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
 });
@@ -4677,6 +4687,7 @@ test("proxy active rows compact route, state, and retry facts", () => {
           upstream_model: "gpt-5.6-terra",
           protocol_conversion: "responses_to_chat",
           response_bytes: 128 * 1024,
+          path: "/alpha/search",
         }),
         proxyHistoryRecord({
           id: "retrying",
@@ -4707,7 +4718,7 @@ test("proxy active rows compact route, state, and retry facts", () => {
   const active = lines.slice(activeStart, historyStart).join("\n");
 
   assert.match(stripAnsi(active), /session\s+route\s+state\s+age\s+size/);
-  assert.match(stripAnsi(active), /openro\/5\.6-terr\s+stream:R→C\s+10\.0s\s+128K/);
+  assert.match(stripAnsi(active), /openro\/5\.6-terr\s+\[S\]stream:R→C\s+10\.0s\s+128K/);
   assert.match(stripAnsi(active), /openro\/5\.6-terr\s+retry:503 x2\s+15\.0s\s+-/);
   assert.doesNotMatch(stripAnsi(active), /result/);
 });
@@ -4777,13 +4788,13 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
       backup_path: "/tmp/backup.toml",
       metrics: {
         total_requests: 3,
-        active_requests: [record("active-same", "01a01e23", null)],
+        active_requests: [{ ...record("active-same", "01a01e23", null), path: "/alpha/search" }],
         status_counts: { "200": 2 },
         reasoning_token_counts: {},
         upstream_hit_counts: { input: 2 },
         latency_ms: { last: 50, count: 2, sum: 100, min: 50, max: 50 },
         recent_requests: [
-          record("history-same", "01a01e23", "2026-01-01T00:00:02.000Z"),
+          { ...record("history-same", "01a01e23", "2026-01-01T00:00:02.000Z"), path: "/v1/alpha/search" },
           record("history-other", "01a0219e", "2026-01-01T00:00:01.000Z"),
           ...extraSessions,
           record("history-none", null, "2025-12-31T23:59:50.000Z"),
@@ -4821,6 +4832,8 @@ test("proxy status keeps active rows bright and dims history rows in TTY output"
 
   assert.ok(activeRow);
   assert.ok(historyRow);
+  assert.match(activeRow, /\u001b\[38;5;114m\[S\]\u001b\[0m/);
+  assert.match(historyRow, /\u001b\[38;5;114m\[S\]\u001b\[0m/);
   assert.doesNotMatch(activeRow, /^\s*\u001b\[2m/);
   assert.match(historyRow, /^\s*\u001b\[2m/);
   assert.equal(sameSession.length, 2);

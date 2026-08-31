@@ -394,7 +394,7 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
-const SEARCH_PROXY_PATH = "/v1/alpha/search";
+const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
 const PROXY_HEALTH_PROTOCOL = 7;
 const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
@@ -1023,7 +1023,7 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
 }
 
 function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string, requestPath?: string): ProxyUpstream {
-  const searchProfile = requestPath === SEARCH_PROXY_PATH && profiles.proxy?.search?.enabled
+  const searchProfile = requestPath && isProxySearchPath(requestPath) && profiles.proxy?.search?.enabled
     ? profiles.proxy.search.profile
     : undefined;
   const name = requestedProfile || searchProfile || profiles.current;
@@ -1056,6 +1056,10 @@ function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string,
     apiKey: profile.apiKey,
     routeConversion: profile.routeConversion,
   };
+}
+
+function isProxySearchPath(requestPath: string): boolean {
+  return SEARCH_PROXY_PATHS.has(requestPath);
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -1748,20 +1752,22 @@ function formatProxyRoute(record: ProxyRequestRecord): string {
 }
 
 function formatProxyActiveState(record: ProxyRequestRecord): string {
+  const search = isProxySearchPath(record.path) ? textGreen("[S]") : "";
+  const compactSearchState = (value: string): string => search ? value.replace(" x", "x") : value;
   const retryState = proxyActiveRetryState(record);
   if (retryState) {
-    return textYellow(retryState);
+    return `${search}${textYellow(compactSearchState(retryState))}`;
   }
   if (record.status === null) {
     const retries = Math.max(0, record.attempts - 1);
-    return textYellow(`waiting${retries > 0 ? ` x${retries}` : ""}`);
+    return `${search}${textYellow(`waiting${retries > 0 ? `${search ? "x" : " x"}${retries}` : ""}`)}`;
   }
   if (record.status >= 400) {
-    return proxyStatusCountColor(record.status)(`forward:${record.status}`);
+    return `${search}${proxyStatusCountColor(record.status)(`forward:${record.status}`)}`;
   }
   const retries = Math.max(0, record.attempts - 1);
   const conversion = record.protocol_conversion === "responses_to_chat" ? ":R→C" : "";
-  return textGreen(`stream${conversion}${retries > 0 ? ` x${retries}` : ""}`);
+  return `${search}${textGreen(`stream${conversion}${retries > 0 ? `${search ? "x" : " x"}${retries}` : ""}`)}`;
 }
 
 function proxyActiveRetryState(record: ProxyRequestRecord): string | null {
@@ -1903,7 +1909,9 @@ function formatProxyErrorPrefix(record: ProxyRequestRecord): string {
     ...record.guard_actions
       .map((action) => formatProxyGuardActionPrefixValue(action, record.status)),
   ].filter((value) => value.length > 0);
-  return values.length === 0 ? "" : `[${values.join(" ")}]`;
+  const search = isProxySearchPath(record.path) ? textGreen("[S]") : "";
+  const actions = values.length === 0 ? "" : `[${values.join(" ")}]`;
+  return [search, actions].filter((value) => value.length > 0).join(" ");
 }
 
 function formatProxyClientRequestAttemptPrefixValue(attempt: number): string {
