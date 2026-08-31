@@ -1,6 +1,6 @@
 {
   "name": "codex-tools",
-  "version": "0.3.22",
+  "version": "0.3.23",
   "description": "Personal Codex CLI helpers",
   "type": "module",
   "bin": {

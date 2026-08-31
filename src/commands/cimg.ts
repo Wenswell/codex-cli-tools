@@ -36,7 +36,7 @@ export const CIMG_SIZES = {
   "9:21": ["576x1344", "768x1792", "960x2240", "1152x2688", "1344x3136", "1536x3584"],
 } as const;
 
-export type CimgRatio = keyof typeof CIMG_SIZES;
+type CimgRatio = keyof typeof CIMG_SIZES;
 type CimgQuality = "auto" | "low" | "medium" | "high";
 
 export const CIMG_DEFAULT_SIZES: Record<CimgRatio, string> = {
@@ -118,7 +118,7 @@ type RequestEvent = {
   };
 };
 
-export type CimgDependencies = {
+type CimgDependencies = {
   fetch: typeof fetch;
   confirm: () => Promise<boolean>;
   now: () => Date;

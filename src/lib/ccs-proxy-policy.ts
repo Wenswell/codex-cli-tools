@@ -1,27 +1,27 @@
 export type ProxyPolicyAction = "pass_through" | "return_502" | "retry_then_pass_through" | "retry_then_502";
 export type ProxyPolicyTrigger = "timeout" | "capacity" | "http_429" | "http_503" | "reasoning" | "pass_through";
 
-export type ProxyPolicyDecision = {
+type ProxyPolicyDecision = {
   trigger: ProxyPolicyTrigger;
   action: ProxyPolicyAction;
   retry: boolean;
   exhaustedAction: "pass_through" | "return_502";
 };
 
-export type ProxyPolicyFacts = {
+type ProxyPolicyFacts = {
   timeout: boolean;
   capacity: boolean;
   status: number;
   reasoningMatched: boolean;
 };
 
-export type ProxyPolicyActions = {
+type ProxyPolicyActions = {
   timeout: Extract<ProxyPolicyAction, "return_502" | "retry_then_502">;
   capacity: ProxyPolicyAction;
   http429: ProxyPolicyAction;
 };
 
-export type RetryAfterResult =
+type RetryAfterResult =
   | { kind: "missing_or_invalid" }
   | { kind: "valid"; delayMs: number }
   | { kind: "exceeds_limit"; delayMs: number };

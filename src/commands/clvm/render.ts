@@ -18,7 +18,7 @@ import type {
 const closedHistoryDefaultRenderCount = 5;
 const closedHistorySectionFixedLines = 3;
 
-export type MonitorRenderOptions = {
+type MonitorRenderOptions = {
   historyVisible?: boolean;
   interactive?: boolean;
 };

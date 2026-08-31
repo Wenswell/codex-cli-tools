@@ -22,7 +22,7 @@ type ModelPrice = {
   output: number;
 };
 
-export type ModelPriceParts = {
+type ModelPriceParts = {
   input: number | null;
   cacheRead: number | null;
   output: number | null;
@@ -53,7 +53,7 @@ export type ModelPriceOverride = {
   cache_read_input_token_cost?: number;
 };
 
-export type ModelPriceCacheOptions = {
+type ModelPriceCacheOptions = {
   overrides?: Record<string, ModelPriceOverride>;
 };
 
@@ -67,7 +67,7 @@ export type ModelPriceSnapshotPlan = {
   nextCache: ModelPriceCache;
 };
 
-export type RemoteModelPriceCatalog =
+type RemoteModelPriceCatalog =
   | { models: Record<string, RemoteModelPrice>; error: null }
   | { models: null; error: string };
 

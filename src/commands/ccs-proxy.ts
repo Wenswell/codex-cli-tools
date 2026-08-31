@@ -320,7 +320,7 @@ type ProxyHealth = {
   statusRetryEnabled: boolean | null;
 };
 
-export type ProxyOptions = {
+type ProxyOptions = {
   codexConfigPath: string;
   listenHost: string;
   listenPort: number;

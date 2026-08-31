@@ -88,7 +88,7 @@ function mergeTomlDefaults(template: string, existing: string): string {
   return ensureTrailingNewline(next.join("\n"));
 }
 
-export type TomlTemplateSyncResult = {
+type TomlTemplateSyncResult = {
   content: string;
   leafPaths: string[];
   differentPaths: string[];

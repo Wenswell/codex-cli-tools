@@ -1,6 +1,6 @@
 import { truncateVisible, visibleLength } from "./text.js";
 
-export type FitTerminalLineOptions = {
+type FitTerminalLineOptions = {
   stream?: NodeJS.WriteStream;
   columns?: number;
   reserveColumns?: number;

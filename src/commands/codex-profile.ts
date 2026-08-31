@@ -6,7 +6,7 @@ import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, resolveProxyOptions, reso
 
 const profileApiKeyEnv = "CODEX_TOOLS_PROFILE_API_KEY";
 
-export type CodexProfileLaunch = {
+type CodexProfileLaunch = {
   configOverrides: string[];
   env: NodeJS.ProcessEnv;
   profile: Profile;

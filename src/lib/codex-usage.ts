@@ -13,7 +13,7 @@ export type CodexUsageRange = {
   timezone: string;
 };
 
-export type CodexUsageLoadOptions = CodexUsageRange & {
+type CodexUsageLoadOptions = CodexUsageRange & {
   project?: string;
 };
 
