@@ -2888,7 +2888,7 @@ test("proxy passthrough forwards one untouched upstream response without policy"
   }
 });
 
-test("proxy retry mode handles HTTP 429, 503, and 520 with bounded attempts", async () => {
+test("proxy retry mode handles HTTP 429, 503, and 520 until the window expires", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -2923,7 +2923,7 @@ test("proxy retry mode handles HTTP 429, 503, and 520 with bounded attempts", as
     const statePath = join(stateRoot, "proxy.json");
     const configured = JSON.parse(await readFile(statePath, "utf8"));
     configured.mode = "passthrough";
-    configured.status_retry = { enabled: true, total_window_ms: 1000, backoff_base_ms: 5, backoff_max_ms: 10 };
+    configured.status_retry = { enabled: true, total_window_ms: 100, backoff_base_ms: 5, backoff_max_ms: 10 };
     await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
     await listenServer(upstream, upstreamPort);
 
@@ -2957,11 +2957,13 @@ test("proxy retry mode handles HTTP 429, 503, and 520 with bounded attempts", as
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=exhausted`, { method: "POST", body: "{}" });
     assert.equal(exhausted.status, 520);
-    assert.deepEqual(await exhausted.json(), { status: 520, hit: 4 });
+    const exhaustedBody = await exhausted.json();
+    assert.equal(exhaustedBody.status, 520);
+    assert.ok(exhaustedBody.hit > 4);
     state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.status === 520);
     record = state.metrics.recent_requests[0];
-    assert.equal(record.attempts, 4);
-    assert.equal(record.retry_summary.http_503, 3);
+    assert.equal(record.attempts, exhaustedBody.hit);
+    assert.equal(record.retry_summary.http_503, exhaustedBody.hit - 1);
     assert.match(record.failure_summary.message, /server=cloudflare request_id=oneapi-520 cf_ray=ray-520/);
 
     const other = await fetch(`http://127.0.0.1:${proxyPort}/responses?case=other`, { method: "POST", body: "{}" });
