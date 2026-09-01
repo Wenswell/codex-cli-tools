@@ -78,7 +78,6 @@ const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
 const PROXY_REQUEST_SCHEMA_VERSION = 8;
-const STATUS_RETRY_ATTEMPTS = 3;
 const proxyConversionFailures = new WeakMap();
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
@@ -2735,7 +2734,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         const response = fetched.response;
         const status = response.status;
         await callbacks.onResponseStart?.(status, upstream.name);
-        if (statusRetryConfig && statusRetryCount < STATUS_RETRY_ATTEMPTS && isRetryableUpstreamStatus(status)) {
+        if (statusRetryConfig && isRetryableUpstreamStatus(status)) {
             const attempt = currentProxyAttemptRecord(attemptState);
             const trigger = status === 429 ? "http_429" : "http_503";
             const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), statusRetryConfig.total_window_ms);
@@ -2782,7 +2781,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
                     await response.body?.cancel().catch(() => undefined);
                     statusRetryCount += 1;
                     attempt.retry_trigger = trigger;
-                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status, response.headers), remainingRetries: Math.max(0, STATUS_RETRY_ATTEMPTS - statusRetryCount) });
+                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status, response.headers), remainingRetries: null });
                     if (callbacks.resolveRetryUpstream) {
                         upstream = await callbacks.resolveRetryUpstream();
                     }
@@ -3552,7 +3551,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             await callbacks.onResponseStart?.(response.status, upstream.name);
             const attempt = currentProxyAttemptRecord(attemptState);
             const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
-            if (!isRetryableUpstreamStatus(response.status) || retries >= STATUS_RETRY_ATTEMPTS) {
+            if (!isRetryableUpstreamStatus(response.status)) {
                 attempt.client_http_status = response.status;
                 completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
                 return createProxyOutcome({
@@ -3634,7 +3633,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             retries += 1;
             attempt.retry_trigger = trigger;
             attempt.retry_budget_used = retries;
-            completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: Math.max(0, STATUS_RETRY_ATTEMPTS - retries) });
+            completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: null });
         }
         catch (error) {
             if (error instanceof ProxyResponseWriteError)
