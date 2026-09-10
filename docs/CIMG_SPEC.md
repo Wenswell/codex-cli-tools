@@ -13,8 +13,10 @@ This document owns the request, input, output, and runtime-record contracts for
 - `-i` and `--image` are repeatable. Multiple inputs are sent in argument order
   as reference images through the same edits endpoint.
 - Masked editing is outside the command surface.
-- Every request uses `model=gpt-image-2`, `n=1`, `output_format=png`, and the
-  selected size and quality.
+- Every request uses `n=1`, `output_format=png`, and the selected size and
+  quality. The default model is `gpt-image-2`; `--model MODEL` overrides it.
+- Successful responses may provide `data[0].b64_json` or `data[0].url`. URL
+  responses are downloaded and validated as PNG before writing the output.
 
 Generation sends JSON. Editing sends `multipart/form-data`: one input uses an
 `image` part, while multiple inputs use repeated `image[]` parts in argument
@@ -54,8 +56,9 @@ stores structured request and response metadata, including prompt text and
 provider URLs. Input image parts are represented by their names, media types,
 byte counts, and SHA-256 values; image bytes and response `b64_json` values are
 omitted. Response image URLs remain when provided. Authorization values are
-redacted. Network failures write `error.json`. The directory uses mode `0700`
-and files use mode `0600`; cleanup is manual.
+redacted. URL image downloads also write their status and metadata to
+`image-response.json`. Network failures write `error.json`. The directory uses
+mode `0700` and files use mode `0600`; cleanup is manual.
 
 ## Acceptance Criteria
 
