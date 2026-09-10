@@ -50,15 +50,15 @@ editing, each input's SHA-256, byte count, and media type. They exclude input
 paths, image bytes, prompt text, API keys, response bodies, and provider error
 messages.
 
-For every confirmed API request, `cimg` also writes an unbounded private
-diagnostic capture under `~/.cache/codex-tools/cimg/raw/<request_id>/`. It
-stores structured request and response metadata, including prompt text and
-provider URLs. Input image parts are represented by their names, media types,
-byte counts, and SHA-256 values; image bytes and response `b64_json` values are
-omitted. Response image URLs remain when provided. Authorization values are
-redacted. URL image downloads also write their status and metadata to
-`image-response.json`. Network failures write `error.json`. The directory uses
-mode `0700` and files use mode `0600`; cleanup is manual.
+For every confirmed API request, `cimg` writes a private diagnostic capture
+under `~/.cache/codex-tools/cimg/raw/<request_id>/`. `response.json` keeps the
+existing redacted response with large fields such as `b64_json` summarized.
+`response-full.json` additionally stores the complete redacted response,
+including `b64_json`; only the three newest `response-full.json` files are
+retained. Request metadata, `error.json`, and `image-response.json` are not
+removed. Both response files redact authorization, cookie, token, secret,
+password, and API-key fields. The directory uses mode `0700` and files use mode
+`0600`.
 
 ## Acceptance Criteria
 

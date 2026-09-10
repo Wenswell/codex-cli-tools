@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { rejectRemovedYesFlags } from "../lib/confirm.js";
@@ -407,6 +407,43 @@ async function writeCimgRaw(requestId: string, name: string, content: string): P
   const path = join(directory, name);
   await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
   await chmod(path, 0o600);
+  if (name === "response-full.json") {
+    await pruneCimgFullResponses();
+  }
+}
+
+export async function pruneCimgFullResponses(): Promise<void> {
+  const root = resolve(codexToolsCacheDir(), "cimg", "raw");
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  const responses: Array<{ path: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const path = join(root, entry.name, "response-full.json");
+    try {
+      const fileStat = await stat(path);
+      if (fileStat.isFile()) {
+        responses.push({ path, mtimeMs: fileStat.mtimeMs });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  responses.sort((left, right) => right.mtimeMs - left.mtimeMs || right.path.localeCompare(left.path));
+  await Promise.all(responses.slice(3).map((response) => rm(response.path, { force: true })));
 }
 
 async function requestImage(
@@ -465,8 +502,15 @@ async function requestImage(
     version: 1,
     recorded_at: new Date().toISOString(),
     status: response.status,
-    headers: Object.fromEntries(response.headers.entries()),
+    headers: sanitizeResponseHeaders(response.headers),
     body: sanitizeResponseBody(text),
+  }, null, 2));
+  await appendRaw(requestId, "response-full.json", JSON.stringify({
+    version: 1,
+    recorded_at: new Date().toISOString(),
+    status: response.status,
+    headers: sanitizeResponseHeaders(response.headers),
+    body: sanitizeCompleteResponseBody(text),
   }, null, 2));
   let payload: ImageResponse;
   try {
@@ -574,6 +618,38 @@ function sanitizeResponseValue(value: unknown): unknown {
     }
     return [key, sanitizeResponseValue(child)];
   }));
+}
+
+function sanitizeCompleteResponseBody(text: string): unknown {
+  try {
+    return sanitizeCompleteResponseValue(JSON.parse(text) as unknown);
+  } catch {
+    return { format: "text", text };
+  }
+}
+
+function sanitizeCompleteResponseValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeCompleteResponseValue);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    isSensitiveField(key) ? "[redacted]" : sanitizeCompleteResponseValue(child),
+  ]));
+}
+
+function sanitizeResponseHeaders(headers: Headers): Record<string, string> {
+  return Object.fromEntries([...headers.entries()].map(([key, value]) => [
+    key,
+    isSensitiveField(key) ? "[redacted]" : value,
+  ]));
+}
+
+function isSensitiveField(key: string): boolean {
+  return /(?:authorization|cookie|token|secret|password|api[-_]?key)/iu.test(key);
 }
 
 function parseResponse(text: string): ImageResponse {
