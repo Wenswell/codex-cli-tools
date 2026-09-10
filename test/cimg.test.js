@@ -138,6 +138,7 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
   const directory = await mkdtemp(join(tmpdir(), "cimg-success-"));
   const output = join(directory, "generated.png");
   const events = [];
+  const raw = new Map();
   const times = [
     new Date("2026-08-19T09:00:00.000Z"),
     new Date("2026-08-19T09:00:01.000Z"),
@@ -151,6 +152,7 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
         now: () => times.shift() ?? new Date("2026-08-19T09:00:03.500Z"),
         requestId: () => "request-1",
         appendEvent: async (event) => events.push(event),
+        appendRaw: async (requestId, name, content) => raw.set(`${requestId}/${name}`, content),
         fetch: async (url, init) => {
           assert.equal(events.length, 1);
           assert.equal(events[0].event, "started");
@@ -183,6 +185,12 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
     assert.equal(events[1].result.output_height, 1);
     assert.equal(JSON.stringify(events).includes("private scene"), false);
     assert.equal(JSON.stringify(events).includes("secret-key"), false);
+    const requestLog = JSON.parse(raw.get("request-1/request.json"));
+    assert.equal(requestLog.headers.authorization, "[redacted]");
+    assert.equal(requestLog.body.prompt, "private scene");
+    const responseLog = JSON.parse(raw.get("request-1/response.json"));
+    assert.deepEqual(responseLog.body.data[0].b64_json, { omitted: true, encoded_bytes: pngBytes.toString("base64").length });
+    assert.equal(JSON.stringify(responseLog).includes(pngBytes.toString("base64")), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
