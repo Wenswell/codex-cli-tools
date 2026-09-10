@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, readFile, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { rejectRemovedYesFlags } from "../lib/confirm.js";
@@ -54,6 +54,7 @@ const defaultDependencies = {
         trimToBytes: requestLogTrimBytes,
         mode: 0o600,
     }),
+    appendRaw: writeCimgRaw,
 };
 export async function runCimg(argv, overrides = {}) {
     if (printToolVersionIfRequested("cimg", argv)) {
@@ -90,7 +91,7 @@ export async function runCimg(argv, overrides = {}) {
     process.once("SIGINT", cancelRequest);
     let response;
     try {
-        response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args, inputs, abortController.signal);
+        response = await requestImage(dependencies.fetch, endpoint, active.profile.apiKey, args, inputs, requestId, dependencies.appendRaw, abortController.signal);
         await writeFile(args.outputPath, response.bytes, { flag: "wx", mode: 0o600 });
     }
     catch (error) {
@@ -111,6 +112,7 @@ export async function runCimg(argv, overrides = {}) {
                 error: normalized,
             },
         });
+        printCimgValue("raw:", colorPath(formatHomePath(cimgRawDir(requestId))));
         throw error;
     }
     finally {
@@ -138,6 +140,7 @@ export async function runCimg(argv, overrides = {}) {
     printCimgValue("image:", `${response.width}x${response.height} ${formatCompactBytes(response.bytes.length)}`);
     printCimgValue("duration:", formatDurationMs(durationMs));
     printCimgValue("log:", colorPath(formatHomePath(cimgRequestsPath())));
+    printCimgValue("raw:", colorPath(formatHomePath(cimgRawDir(requestId))));
     if (`${response.width}x${response.height}` !== args.size) {
         printCimgValue("warning:", textYellow(`requested ${args.size}, received ${response.width}x${response.height}`));
     }
@@ -272,22 +275,50 @@ function cimgRequestsPath() {
 export function cimgDefaultOutputDir() {
     return join(homeDir(), "Pictures", "cimg");
 }
-async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, cancelSignal) {
+function cimgRawDir(requestId) {
+    return resolve(codexToolsCacheDir(), "cimg", "raw", requestId);
+}
+async function writeCimgRaw(requestId, name, content) {
+    const directory = cimgRawDir(requestId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, name);
+    await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+    await chmod(path, 0o600);
+}
+async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, requestId, appendRaw, cancelSignal) {
     const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+    const editing = inputs.length > 0;
+    const headers = {
+        authorization: "[redacted]",
+        ...(editing ? {} : { "content-type": "application/json" }),
+    };
+    const requestBody = editing ? buildEditRequestBody(args, inputs) : JSON.stringify(buildRequestBody(args));
+    const diagnosticBody = editing ? buildEditRequestSummary(args, inputs) : buildRequestBody(args);
+    await appendRaw(requestId, "request.json", JSON.stringify({
+        version: 1,
+        recorded_at: new Date().toISOString(),
+        method: "POST",
+        url: endpoint,
+        headers,
+        body: diagnosticBody,
+    }, null, 2));
     let response;
     try {
-        const editing = inputs.length > 0;
         response = await fetchImpl(endpoint, {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${apiKey}`,
                 ...(editing ? {} : { "Content-Type": "application/json" }),
             },
-            body: editing ? buildEditRequestBody(args, inputs) : JSON.stringify(buildRequestBody(args)),
+            body: requestBody,
             signal: AbortSignal.any([cancelSignal, timeoutSignal]),
         });
     }
     catch (error) {
+        await appendRaw(requestId, "error.json", JSON.stringify({
+            recorded_at: new Date().toISOString(),
+            error: normalizeError(error),
+        }, null, 2));
         if (cancelSignal.aborted) {
             throw new CimgCanceledError();
         }
@@ -297,6 +328,13 @@ async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, cancelSig
         throw error;
     }
     const text = await response.text();
+    await appendRaw(requestId, "response.json", JSON.stringify({
+        version: 1,
+        recorded_at: new Date().toISOString(),
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: sanitizeResponseBody(text),
+    }, null, 2));
     let payload;
     try {
         payload = parseResponse(text);
@@ -324,6 +362,44 @@ async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, cancelSig
         throw new CimgHttpError(response.status, "invalid_image", "image API response has invalid PNG dimensions");
     }
     return { bytes, httpStatus: response.status, width, height };
+}
+function buildEditRequestSummary(args, inputs) {
+    return {
+        prompt: args.prompt,
+        model: CIMG_MODEL,
+        size: args.size,
+        quality: args.quality,
+        n: 1,
+        output_format: "png",
+        images: inputs.map((input) => ({
+            name: input.name,
+            media_type: input.mediaType,
+            bytes: input.bytes.length,
+            sha256: input.sha256,
+        })),
+    };
+}
+function sanitizeResponseBody(text) {
+    try {
+        return sanitizeResponseValue(JSON.parse(text));
+    }
+    catch {
+        return { format: "text", text };
+    }
+}
+function sanitizeResponseValue(value) {
+    if (Array.isArray(value)) {
+        return value.map(sanitizeResponseValue);
+    }
+    if (!value || typeof value !== "object") {
+        return value;
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+        if (key === "b64_json" && typeof child === "string") {
+            return [key, { omitted: true, encoded_bytes: Buffer.byteLength(child, "utf8") }];
+        }
+        return [key, sanitizeResponseValue(child)];
+    }));
 }
 function parseResponse(text) {
     const parsed = JSON.parse(text);

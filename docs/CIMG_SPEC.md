@@ -48,6 +48,15 @@ editing, each input's SHA-256, byte count, and media type. They exclude input
 paths, image bytes, prompt text, API keys, response bodies, and provider error
 messages.
 
+For every confirmed API request, `cimg` also writes an unbounded private
+diagnostic capture under `~/.cache/codex-tools/cimg/raw/<request_id>/`. It
+stores structured request and response metadata, including prompt text and
+provider URLs. Input image parts are represented by their names, media types,
+byte counts, and SHA-256 values; image bytes and response `b64_json` values are
+omitted. Response image URLs remain when provided. Authorization values are
+redacted. Network failures write `error.json`. The directory uses mode `0700`
+and files use mode `0600`; cleanup is manual.
+
 ## Acceptance Criteria
 
 - No `--image` uses the existing JSON generation request.
