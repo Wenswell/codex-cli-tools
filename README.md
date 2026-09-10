@@ -834,7 +834,7 @@ Every API request writes two schema v2 lifecycle events with the same `request_i
 
 `started` is appended before the HTTP request. `succeeded` or `failed` is appended after completion with duration, HTTP status, output bytes, actual PNG width and height, or normalized error facts. Editing records each input's SHA-256, byte count, and media type. User cancellation is recorded as `failed` with error code `canceled`. The bounded `0600` log stores the prompt SHA-256 and character count, not input paths, image bytes, the API key, prompt text, provider error message, response body, or image base64. See the [cimg specification](docs/CIMG_SPEC.md) for the complete contract.
 
-Confirmed requests also write structured diagnostic files under `~/.cache/codex-tools/cimg/raw/<request_id>/`. They retain request and response fields, prompt text, and provider URLs; input image bytes and response `b64_json` content are omitted, response image URLs are retained, and Authorization values are redacted. Raw diagnostic directories use private permissions and are cleaned up manually.
+Confirmed requests also write structured diagnostic files under `~/.cache/codex-tools/cimg/raw/<request_id>/`. The existing `response.json` remains redacted with large fields summarized; `response-full.json` stores the complete redacted response and rolls over after the three newest files. Request, error, and image-download metadata remain available in older request directories. Raw diagnostic directories use private permissions.
 
 ## clvm
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   buildEditRequestBody,
   buildRequestBody,
   cimgDefaultOutputDir,
+  pruneCimgFullResponses,
   parseArgs,
   runCimg,
 } from "../dist/commands/cimg.js";
@@ -192,8 +193,38 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
     assert.equal(requestLog.body.prompt, "private scene");
     const responseLog = JSON.parse(raw.get("request-1/response.json"));
     assert.deepEqual(responseLog.body.data[0].b64_json, { omitted: true, encoded_bytes: pngBytes.toString("base64").length });
-    assert.equal(JSON.stringify(responseLog).includes(pngBytes.toString("base64")), false);
+    assert.equal(typeof responseLog.headers["content-type"], "string");
+    const completeResponseLog = JSON.parse(raw.get("request-1/response-full.json"));
+    assert.equal(completeResponseLog.body.data[0].b64_json, pngBytes.toString("base64"));
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("cimg retains complete responses for only the three newest requests", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cimg-response-retention-"));
+  const previousCache = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = directory;
+  try {
+    const rawRoot = join(directory, "codex-tools", "cimg", "raw");
+    for (let index = 1; index <= 4; index += 1) {
+      const requestDir = join(rawRoot, `request-${index}`);
+      await mkdir(requestDir, { recursive: true });
+      const responsePath = join(requestDir, "response-full.json");
+      await writeFile(responsePath, JSON.stringify({ index }));
+      await utimes(responsePath, new Date(2026, 7, 19, 9, index), new Date(2026, 7, 19, 9, index));
+    }
+    await pruneCimgFullResponses();
+    assert.equal(await readFile(join(rawRoot, "request-1", "response-full.json")).then(() => true, () => false), false);
+    assert.equal(await readFile(join(rawRoot, "request-2", "response-full.json")).then(() => true, () => false), true);
+    assert.equal(await readFile(join(rawRoot, "request-3", "response-full.json")).then(() => true, () => false), true);
+    assert.equal(await readFile(join(rawRoot, "request-4", "response-full.json")).then(() => true, () => false), true);
+  } finally {
+    if (previousCache === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousCache;
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });
