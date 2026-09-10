@@ -2808,14 +2808,46 @@ function isJsonContentType(contentType: string): boolean {
     || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 
-function isUpstreamCapacityError(status: number, body: Buffer): boolean {
-  if (status < 400 || body.length === 0) {
+function isUpstreamCapacityError(body: Buffer): boolean {
+  if (body.length === 0) {
     return false;
   }
   const text = body.toString("utf8").toLowerCase();
   const exactMessage = UPSTREAM_CAPACITY_ERROR_MESSAGE.toLowerCase();
   return text.includes(exactMessage)
     || (text.includes("selected model is at capacity") && text.includes("try a different model"));
+}
+
+async function isUpstreamCapacityErrorResponse(response: Response): Promise<boolean> {
+  if (isStreamContentType(response.headers.get("content-type") ?? "")) {
+    return false;
+  }
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > PROXY_RESPONSE_INSPECTION_LIMIT_BYTES) return false;
+  try {
+    const reader = response.clone().body?.getReader();
+    if (!reader) return false;
+    const chunks: Buffer[] = [];
+    let length = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        const chunk = Buffer.from(next.value);
+        length += chunk.length;
+        if (length > PROXY_RESPONSE_INSPECTION_LIMIT_BYTES) {
+          await reader.cancel();
+          return false;
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return isUpstreamCapacityError(chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks));
+  } catch {
+    return false;
+  }
 }
 
 function rewriteUpstreamUrl(requestUrl: URL, upstreamBaseUrl: string): string {
@@ -3165,7 +3197,7 @@ type ProxyForwardCallbacks = {
 type ProxyStatusRetryWait = {
   requestId: string;
   upstream: string;
-  status: 429 | 503 | 520;
+  status: number;
   attempt: number;
   waitingSince: string;
   wake: () => void;
@@ -3176,7 +3208,7 @@ type ProxyRerouteRequest = {
   request_id: string;
   session: string | null;
   upstream: string;
-  status: 429 | 503 | 520;
+  status: number;
   attempt: number;
   waiting_since: string;
 };
@@ -3805,7 +3837,7 @@ async function proxyThroughActiveUpstreamWithStats(
       });
     }
 
-    const capacityMatched = isUpstreamCapacityError(status, buffer);
+    const capacityMatched = isUpstreamCapacityError(buffer);
     const policyDecision = decideProxyPolicy(
       {
         timeout: false,
@@ -3868,7 +3900,7 @@ async function proxyThroughActiveUpstreamWithStats(
         });
       }
       attempt.client_http_status = status;
-      completeProxyAttempt(attempt, proxyUpstreamFinalAction(status), { failureSummary, remainingRetries: retryBudget.remaining });
+      completeProxyAttempt(attempt, "upstream_error", { failureSummary, remainingRetries: retryBudget.remaining });
       return createProxyOutcome({
         response: createBufferedResponse(buffer, status, headers, inspectionContentType, stripAutoEncryptedReasoning),
         upstream: upstream.name,
@@ -4442,11 +4474,14 @@ async function proxyThroughActiveUpstreamStatusRetry(
       markProxyAttemptHeaders(attemptState, response.status);
       await callbacks.onResponseStart?.(response.status, upstream.name);
       const attempt = currentProxyAttemptRecord(attemptState)!;
-      const failureSummary = response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
+      const capacityMatched = await isUpstreamCapacityErrorResponse(response);
+      const failureSummary = capacityMatched
+        ? proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE)
+        : response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
 
-      if (!isRetryableUpstreamStatus(response.status)) {
+      if (!capacityMatched && !isRetryableUpstreamStatus(response.status)) {
         attempt.client_http_status = response.status;
-        completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary });
+        completeProxyAttempt(attempt, capacityMatched ? "upstream_error" : proxyUpstreamFinalAction(response.status), { failureSummary });
         return createProxyOutcome({
           response,
           upstream: upstream.name,
@@ -4457,8 +4492,14 @@ async function proxyThroughActiveUpstreamStatusRetry(
         });
       }
 
-      const trigger: ProxyPolicyTrigger = response.status === 429 ? "http_429" : "http_503";
-      const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), config.total_window_ms);
+      const trigger: ProxyPolicyTrigger = capacityMatched
+        ? "capacity"
+        : response.status === 429 ? "http_429" : "http_503";
+      const retryAfter = parseRetryAfter(
+        response.headers.get("retry-after"),
+        Date.now(),
+        capacityMatched ? 60_000 : config.total_window_ms,
+      );
       const retryAfterMs = retryAfter.kind === "missing_or_invalid" ? null : retryAfter.delayMs;
       const delayMs = retryAfter.kind === "missing_or_invalid"
         ? retryDelayMs(retries, config.backoff_base_ms, config.backoff_max_ms)
@@ -4473,7 +4514,7 @@ async function proxyThroughActiveUpstreamStatusRetry(
       const remainingMs = deadlineAtMs - Date.now();
       if (retryAfter.kind === "exceeds_limit" || remainingMs <= 0 || delayMs > remainingMs) {
         attempt.client_http_status = response.status;
-        completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
+        completeProxyAttempt(attempt, capacityMatched ? "upstream_error" : proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
         return createProxyOutcome({
           response,
           upstream: upstream.name,
@@ -4512,7 +4553,7 @@ async function proxyThroughActiveUpstreamStatusRetry(
       }
       if (waitResult === "deadline") {
         attempt.client_http_status = response.status;
-        completeProxyAttempt(attempt, proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
+        completeProxyAttempt(attempt, capacityMatched ? "upstream_error" : proxyUpstreamFinalAction(response.status), { failureSummary, remainingRetries: 0 });
         return createProxyOutcome({
           response,
           upstream: upstream.name,
@@ -4527,7 +4568,7 @@ async function proxyThroughActiveUpstreamStatusRetry(
       retries += 1;
       attempt.retry_trigger = trigger;
       attempt.retry_budget_used = retries;
-      completeProxyAttempt(attempt, "status_retry", { failureSummary, remainingRetries: null });
+      completeProxyAttempt(attempt, capacityMatched ? "upstream_capacity_internal_retry" : "status_retry", { failureSummary, remainingRetries: null });
     } catch (error) {
       if (error instanceof ProxyResponseWriteError) throw error;
       if (isClientAbortError(error, callbacks.signal)) {
@@ -4976,6 +5017,9 @@ function requestFinalAction(input: { status: number | null; error: string | null
   }
   if (input.failureSummary?.code === "upstream_stream_terminated" || input.error?.startsWith("upstream stream terminated:")) {
     return "upstream_stream_terminated";
+  }
+  if (input.failureSummary?.code === "model_at_capacity") {
+    return "upstream_error";
   }
   if (input.error) {
     return "gateway_error";
@@ -5490,12 +5534,14 @@ function formatProxyPolicySummary(records: ProxyRequestRecord[]): string | null 
 
 function formatProxyStatusRetrySummary(records: ProxyRequestRecord[], config: ProxyStatusRetry): string {
   const totals = records.reduce((summary, record) => ({
+    upstream_capacity: summary.upstream_capacity + record.retry_summary.upstream_capacity,
     http_429: summary.http_429 + record.retry_summary.http_429,
     http_503: summary.http_503 + record.retry_summary.http_503,
-  }), { http_429: 0, http_503: 0 });
+  }), { upstream_capacity: 0, http_429: 0, http_503: 0 });
   const retryConfig = `${formatDurationMs(config.total_window_ms, { maxUnit: "h" })}/${formatDurationMs(config.backoff_base_ms)}-${formatDurationMs(config.backoff_max_ms)}`;
   return [
     `policy retry=${colorCount(retryConfig)}`,
+    ...(totals.upstream_capacity > 0 ? [`capacity=${colorCount(String(totals.upstream_capacity))}`] : []),
     ...(totals.http_429 > 0 ? [`429=${colorCount(String(totals.http_429))}`] : []),
     ...(totals.http_503 > 0 ? [`503=${colorCount(String(totals.http_503))}`] : []),
   ].join(" ");
