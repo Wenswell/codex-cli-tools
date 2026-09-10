@@ -807,11 +807,12 @@ Behavior:
 
 ## cimg
 
-`cimg` generates or edits one PNG through the active `ccs` profile. Text-only requests call `{baseURL}/v1/images/generations`; requests with one or more reference images call `{baseURL}/v1/images/edits`. If `baseURL` already ends in `/v1`, `cimg` reuses that version path without duplicating it. Both use `model=gpt-image-2`, `n=1`, and `output_format=png`.
+`cimg` generates or edits one PNG through the active `ccs` profile. Text-only requests call `{baseURL}/v1/images/generations`; requests with one or more reference images call `{baseURL}/v1/images/edits`. If `baseURL` already ends in `/v1`, `cimg` reuses that version path without duplicating it. The default model is `gpt-image-2`; use `--model MODEL` to select another provider model. Requests use `n=1` and `output_format=png`. Responses may return Base64 image data or an image URL; URL responses are downloaded and validated before saving.
 
 ```bash
 cimg
 cimg -p "A red ceramic cup on a white background"
+cimg -p "A red ceramic cup on a white background" --model fal-ai/gpt-image-2
 cimg -p "A wide mountain landscape" --ratio 16:9 --size 2048x1152 --quality high
 cimg -p "A vertical poster without text" --ratio 9:16 -o poster.png
 cimg -p "Put the person in a studio" -i person.png

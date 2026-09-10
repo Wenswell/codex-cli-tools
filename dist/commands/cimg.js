@@ -148,6 +148,7 @@ export async function runCimg(argv, overrides = {}) {
 export function parseArgs(argv, now = new Date()) {
     rejectRemovedYesFlags(argv, "cimg");
     let prompt;
+    let model = CIMG_MODEL;
     let ratio = CIMG_DEFAULT_RATIO;
     let size;
     let quality = CIMG_DEFAULT_QUALITY;
@@ -157,6 +158,14 @@ export function parseArgs(argv, now = new Date()) {
         const arg = argv[index];
         if (arg === "-p" || arg === "--prompt") {
             prompt = requireValue(argv, index);
+            index += 1;
+            continue;
+        }
+        if (arg === "--model") {
+            model = requireValue(argv, index).trim();
+            if (!model) {
+                throw new Error("--model requires a non-empty value");
+            }
             index += 1;
             continue;
         }
@@ -220,12 +229,12 @@ export function parseArgs(argv, now = new Date()) {
     if (inputPaths.length > maxInputImages) {
         throw new Error(`too many input images: ${inputPaths.length}; maximum is ${maxInputImages}`);
     }
-    return { prompt: normalizedPrompt, ratio, size: resolvedSize, quality, outputPath: resolvedOutput, inputPaths };
+    return { prompt: normalizedPrompt, model, ratio, size: resolvedSize, quality, outputPath: resolvedOutput, inputPaths };
 }
 export function buildRequestBody(args) {
     return {
         prompt: args.prompt,
-        model: CIMG_MODEL,
+        model: args.model,
         size: args.size,
         quality: args.quality,
         n: 1,
@@ -239,7 +248,7 @@ export function buildEditRequestBody(args, inputs) {
         body.append(imageField, new Blob([new Uint8Array(input.bytes)], { type: input.mediaType }), input.name);
     }
     body.append("prompt", args.prompt);
-    body.append("model", CIMG_MODEL);
+    body.append("model", args.model);
     body.append("size", args.size);
     body.append("quality", args.quality);
     body.append("n", "1");
@@ -345,11 +354,48 @@ async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, requestId
     if (!response.ok) {
         throw new CimgHttpError(response.status, payload.error?.code ?? `http_${response.status}`, payload.error?.message ?? `image generation failed with HTTP ${response.status}`);
     }
-    const base64 = payload.data?.[0]?.b64_json;
-    if (!base64) {
-        throw new CimgHttpError(response.status, "missing_image", "image API response is missing data[0].b64_json");
+    const image = payload.data?.[0];
+    if (!image) {
+        throw new CimgHttpError(response.status, "missing_image", "image API response is missing data[0]");
     }
-    const bytes = Buffer.from(base64, "base64");
+    let bytes;
+    if (image.b64_json) {
+        bytes = Buffer.from(image.b64_json, "base64");
+    }
+    else if (image.url) {
+        let imageURL;
+        try {
+            imageURL = new URL(image.url);
+        }
+        catch {
+            throw new CimgHttpError(response.status, "invalid_image_url", "image API response contains an invalid image URL");
+        }
+        if (imageURL.protocol !== "https:" && imageURL.protocol !== "http:") {
+            throw new CimgHttpError(response.status, "invalid_image_url", "image API response image URL must use http or https");
+        }
+        let imageResponse;
+        try {
+            imageResponse = await fetchImpl(imageURL, { signal: AbortSignal.any([cancelSignal, timeoutSignal]) });
+        }
+        catch (error) {
+            throw new Error(`image URL download failed: ${normalizeError(error).message}`);
+        }
+        if (!imageResponse.ok) {
+            throw new CimgHttpError(imageResponse.status, "image_download_failed", `image URL download failed with HTTP ${imageResponse.status}`);
+        }
+        bytes = Buffer.from(await imageResponse.arrayBuffer());
+        await appendRaw(requestId, "image-response.json", JSON.stringify({
+            version: 1,
+            recorded_at: new Date().toISOString(),
+            url: image.url,
+            status: imageResponse.status,
+            headers: Object.fromEntries(imageResponse.headers.entries()),
+            bytes: bytes.length,
+        }, null, 2));
+    }
+    else {
+        throw new CimgHttpError(response.status, "missing_image", "image API response has no b64_json or url");
+    }
     if (bytes.length < pngSignature.length || !bytes.subarray(0, pngSignature.length).equals(pngSignature)) {
         throw new CimgHttpError(response.status, "invalid_image", "image API response is not a PNG");
     }
@@ -366,7 +412,7 @@ async function requestImage(fetchImpl, endpoint, apiKey, args, inputs, requestId
 function buildEditRequestSummary(args, inputs) {
     return {
         prompt: args.prompt,
-        model: CIMG_MODEL,
+        model: args.model,
         size: args.size,
         quality: args.quality,
         n: 1,
@@ -439,7 +485,7 @@ function printStatus(profiles) {
 function printPreview(profile, endpoint, args) {
     printCimgValue("profile:", profile);
     printCimgValue("endpoint:", colorUrl(endpoint));
-    printCimgValue("model:", CIMG_MODEL);
+    printCimgValue("model:", args.model);
     printCimgValue("mode:", requestMode(args));
     args.inputPaths.forEach((path, index) => printCimgValue(`image ${index + 1}:`, colorPath(formatHomePath(path))));
     printCimgValue("ratio:", args.ratio);
@@ -453,7 +499,7 @@ function printHelp() {
     console.log([
         "Usage:",
         "  cimg                                                        # show active image generation status",
-        "  cimg -p TEXT [--ratio RATIO] [--size SIZE] [--quality QUALITY] [-o FILE] # preview and generate one PNG",
+        "  cimg -p TEXT [--model MODEL] [--ratio RATIO] [--size SIZE] [--quality QUALITY] [-o FILE] # preview and generate one PNG",
         "  cimg -p TEXT -i FILE [-i FILE ...] [OPTIONS]                # preview and edit from reference images",
         "  cimg version                                                # print package version",
         "  cimg -v                                                     # print package version",
@@ -461,6 +507,7 @@ function printHelp() {
         "",
         "Options:",
         `  --ratio RATIO    ${Object.keys(CIMG_SIZES).join(" | ")} (default: ${CIMG_DEFAULT_RATIO})`,
+        `  --model MODEL    provider model (default: ${CIMG_MODEL})`,
         "  --size SIZE      one fixed size listed for the selected ratio",
         "  --quality VALUE  auto | low | medium | high (default: auto)",
         "  -i, --image FILE input PNG, JPEG, or WebP; repeat for multiple reference images",
@@ -509,7 +556,7 @@ function buildBaseEvent(requestId, recordedAt, profile, baseURL, endpoint, args,
             profile,
             base_url: baseURL,
             endpoint,
-            model: CIMG_MODEL,
+            model: args.model,
             mode: requestMode(args),
             ratio: args.ratio,
             size: args.size,

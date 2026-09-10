@@ -70,6 +70,8 @@ test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {
     /invalid size for 16:9/,
   );
   assert.throws(() => parseArgs(["-p", "scene", "--quality", "ultra"]), /invalid quality/);
+  assert.equal(parseArgs(["-p", "scene", "--model", "fal-ai/gpt-image-2"]).model, "fal-ai/gpt-image-2");
+  assert.throws(() => parseArgs(["-p", "scene", "--model", "-"]), /requires a value/);
 });
 
 test("cimg builds one fixed-model PNG generation request", () => {
@@ -78,7 +80,7 @@ test("cimg builds one fixed-model PNG generation request", () => {
   assert.equal(buildEndpoint("https://images.example.test/api/v1/", "edit"), "https://images.example.test/api/v1/images/edits");
   assert.throws(() => buildEndpoint("https://token@images.example.test"), /must not contain credentials/);
   assert.throws(() => buildEndpoint("https://images.example.test?key=secret"), /must not contain credentials/);
-  assert.deepEqual(buildRequestBody({ prompt: "scene", size: "1024x1024", quality: "low" }), {
+  assert.deepEqual(buildRequestBody({ prompt: "scene", model: CIMG_MODEL, size: "1024x1024", quality: "low" }), {
     prompt: "scene",
     model: CIMG_MODEL,
     size: "1024x1024",
@@ -90,7 +92,7 @@ test("cimg builds one fixed-model PNG generation request", () => {
 
 test("cimg builds the official single-image and multi-image edit forms", () => {
   assert.equal(buildEndpoint("https://images.example.test///", "edit"), "https://images.example.test/v1/images/edits");
-  const args = { prompt: "combine", size: "1024x1024", quality: "high" };
+  const args = { prompt: "combine", model: CIMG_MODEL, size: "1024x1024", quality: "high" };
   const first = { name: "first.png", mediaType: "image/png", bytes: Buffer.from("first") };
   const second = { name: "second.jpg", mediaType: "image/jpeg", bytes: Buffer.from("second") };
 
@@ -191,6 +193,37 @@ test("cimg logs started before fetch and succeeded after writing one PNG", async
     const responseLog = JSON.parse(raw.get("request-1/response.json"));
     assert.deepEqual(responseLog.body.data[0].b64_json, { omitted: true, encoded_bytes: pngBytes.toString("base64").length });
     assert.equal(JSON.stringify(responseLog).includes(pngBytes.toString("base64")), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("cimg downloads and validates URL image responses", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cimg-url-response-"));
+  const output = join(directory, "generated.png");
+  const raw = new Map();
+  let calls = 0;
+  try {
+    await runCimg(["-p", "url response", "--model", "fal-ai/gpt-image-2", "-o", output], {
+      profiles,
+      confirm: async () => true,
+      requestId: () => "request-url",
+      appendRaw: async (requestId, name, content) => raw.set(`${requestId}/${name}`, content),
+      fetch: async (url, init) => {
+        calls += 1;
+        if (calls === 1) {
+          assert.equal(url, "https://images.example.test/v1/images/generations");
+          assert.equal(JSON.parse(init.body).model, "fal-ai/gpt-image-2");
+          return new Response(JSON.stringify({ data: [{ url: "https://cdn.example.test/result.png" }] }), { status: 200 });
+        }
+        assert.equal(url.toString(), "https://cdn.example.test/result.png");
+        return new Response(pngBytes, { status: 200, headers: { "content-type": "image/png" } });
+      },
+    });
+    assert.equal(calls, 2);
+    assert.deepEqual(await readFile(output), pngBytes);
+    assert.equal(JSON.parse(raw.get("request-url/response.json")).body.data[0].url, "https://cdn.example.test/result.png");
+    assert.equal(JSON.parse(raw.get("request-url/image-response.json")).url, "https://cdn.example.test/result.png");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
