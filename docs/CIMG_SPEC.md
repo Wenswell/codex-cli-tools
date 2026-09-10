@@ -7,6 +7,9 @@ This document owns the request, input, output, and runtime-record contracts for
 
 - `cimg -p TEXT` generates one PNG through `POST {baseURL}/v1/images/generations`.
 - `cimg -p TEXT -i FILE` edits one image through `POST {baseURL}/v1/images/edits`.
+- Endpoint construction preserves any path prefix in `baseURL` and ensures the
+  path contains exactly one `/v1` before `images`. A `baseURL` that already
+  ends in `/v1` is not given a second `/v1` segment.
 - `-i` and `--image` are repeatable. Multiple inputs are sent in argument order
   as reference images through the same edits endpoint.
 - Masked editing is outside the command surface.

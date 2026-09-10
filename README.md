@@ -807,7 +807,7 @@ Behavior:
 
 ## cimg
 
-`cimg` generates or edits one PNG through the active `ccs` profile. Text-only requests call `{baseURL}/v1/images/generations`; requests with one or more reference images call `{baseURL}/v1/images/edits`. Both use `model=gpt-image-2`, `n=1`, and `output_format=png`.
+`cimg` generates or edits one PNG through the active `ccs` profile. Text-only requests call `{baseURL}/v1/images/generations`; requests with one or more reference images call `{baseURL}/v1/images/edits`. If `baseURL` already ends in `/v1`, `cimg` reuses that version path without duplicating it. Both use `model=gpt-image-2`, `n=1`, and `output_format=png`.
 
 ```bash
 cimg

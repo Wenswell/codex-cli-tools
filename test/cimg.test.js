@@ -74,6 +74,8 @@ test("cimg keeps the PixAI ratio, standard-size, and quality contract", () => {
 
 test("cimg builds one fixed-model PNG generation request", () => {
   assert.equal(buildEndpoint("https://images.example.test///"), "https://images.example.test/v1/images/generations");
+  assert.equal(buildEndpoint("https://images.example.test/v1"), "https://images.example.test/v1/images/generations");
+  assert.equal(buildEndpoint("https://images.example.test/api/v1/", "edit"), "https://images.example.test/api/v1/images/edits");
   assert.throws(() => buildEndpoint("https://token@images.example.test"), /must not contain credentials/);
   assert.throws(() => buildEndpoint("https://images.example.test?key=secret"), /must not contain credentials/);
   assert.deepEqual(buildRequestBody({ prompt: "scene", size: "1024x1024", quality: "low" }), {
