@@ -3046,6 +3046,72 @@ test("proxy passthrough status retry forwards the final response without inspect
   }
 });
 
+test("proxy passthrough retry recognizes capacity responses", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-passthrough-capacity-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let hits = 0;
+  const upstream = createServer((_req, res) => {
+    hits += 1;
+    if (hits <= 2) {
+      res.writeHead(200, { "content-type": "application/json", "retry-after": "0" });
+      res.end(JSON.stringify({ error: { code: "model_at_capacity", message: "Selected model is at capacity. Please try a different model." } }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, hits }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    state.mode = "passthrough";
+    state.status_retry = { enabled: true, total_window_ms: 1000, backoff_base_ms: 5, backoff_max_ms: 10 };
+    await writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+    await ensureProxyRunning(options);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body: "{}" });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, hits: 3 });
+
+    const completed = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.attempts === 3);
+    const record = completed.metrics.recent_requests[0];
+    assert.equal(hits, 3);
+    assert.equal(record.mode, "passthrough");
+    assert.deepEqual(record.guard_actions, []);
+    assert.deepEqual(record.retry_summary, {
+      total: 2,
+      reasoning_guard: 0,
+      upstream_capacity: 2,
+      http_429: 0,
+      http_503: 0,
+      timeout: 0,
+      transport: 0,
+    });
+    assert.equal(record.failure_summary, null);
+    const [fullRecord] = (await readFile(join(stateRoot, "proxy-requests.jsonl"), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(fullRecord.attempt_records[0].policy_trigger, "capacity");
+    assert.equal(fullRecord.attempt_records[0].final_action, "upstream_capacity_internal_retry");
+  } finally {
+    await shutdownProxyRuntime({ codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot: join(home, ".config", "codex-tools") }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy reroute moves waiting default-profile requests to the current provider", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-reroute-"));
   const previousHome = process.env.HOME;
