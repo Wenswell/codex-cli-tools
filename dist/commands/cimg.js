@@ -262,7 +262,9 @@ export function buildEndpoint(baseURL, mode = "generate") {
         throw new Error("active profile baseURL must not contain credentials, a query, or a fragment");
     }
     const resource = mode === "edit" ? "edits" : "generations";
-    return `${url.toString().replace(/\/+$/u, "")}/v1/images/${resource}`;
+    const pathWithoutVersion = url.pathname.replace(/\/+$/u, "").replace(/(?:\/v1)+$/u, "");
+    url.pathname = `${pathWithoutVersion}/v1/images/${resource}`;
+    return url.toString();
 }
 function cimgRequestsPath() {
     return resolve(codexToolsCacheDir(), "cimg", "requests.jsonl");
