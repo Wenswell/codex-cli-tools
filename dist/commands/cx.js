@@ -17,7 +17,7 @@ function runCodexSearch(args, options = {}) {
     const local = options.forceLocal || args[0] === "local";
     const forwardedArgs = !options.forceLocal && args[0] === "local" ? args.slice(1) : args;
     const codexArgs = ["--search"];
-    if (options.bypassSandbox) {
+    if (options.bypassSandbox && (!options.resume || local)) {
         codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
     }
     for (const override of options.configOverrides ?? []) {

@@ -94,7 +94,7 @@ test("Codex wrappers default to remote mode and support leading local", async ()
       "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "hello",
     ]);
     assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cxxs.js"), "thread"], { cwd, env })), [
-      "--search", "--dangerously-bypass-approvals-and-sandbox", "--remote", "unix://", "-C", cwd, "resume", "thread",
+      "--search", "--remote", "unix://", "-C", cwd, "resume", "thread",
     ]);
     assert.deepEqual(JSON.parse(await execNodeStdout([join(repoRoot, "dist/bin/cx.js"), "local", "hello"], { cwd, env })), [
       "--search", "hello",
