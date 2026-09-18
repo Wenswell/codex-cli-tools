@@ -257,7 +257,7 @@ ccs pricing refresh
 ccs proxy [--history N] [--view overview|tokens|cost]
 ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
-ccs proxy cancel SESSION_OR_REQUEST
+ccs proxy cancel SESSION_OR_REQUEST|all
 ccs proxy capture SESSION_PREFIX COUNT
 ccs proxy capture
 ccs proxy capture cancel
@@ -712,7 +712,7 @@ ccs proxy watch
 ccs proxy watch --history N
 ccs proxy watch --view overview|tokens|cost
 ccs proxy reroute
-ccs proxy cancel SESSION_OR_REQUEST
+ccs proxy cancel SESSION_OR_REQUEST|all
 ccs proxy capture SESSION_PREFIX COUNT
 ccs proxy capture
 ccs proxy capture cancel

@@ -3318,6 +3318,9 @@ test("proxy cancel stops a pinned session retry wait without another upstream re
     assert.match(preview, /eligible:\s+1/);
     assert.match(preview, /no requests are cancelled unless you type yes/);
 
+    const allStatus = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel?target=all").then((response) => response.json());
+    assert.equal(allStatus.requests.length, 1);
+
     const applied = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3325,7 +3328,10 @@ test("proxy cancel stops a pinned session retry wait without another upstream re
     }).then((response) => response.json());
     assert.deepEqual(applied.cancelled, [cancelStatus.requests[0].request_id]);
     assert.deepEqual(applied.skipped, []);
-    await assert.rejects(pending);
+    const pendingResponse = await pending;
+    assert.equal(pendingResponse.status, 499);
+    const pendingJson = await pendingResponse.json();
+    assert.deepEqual(pendingJson, { error: { message: "retry cancelled by ccs proxy" } });
     await delay(100);
     assert.equal(hits, 1);
 
