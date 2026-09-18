@@ -6311,10 +6311,11 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
             if (route.endpoint === "cancel") {
               if (method === "GET") {
                 const selector = new URL(req.url || "/", "http://localhost").searchParams.get("target") ?? "";
-                const matches = [...statusRetryWaits.values()].filter((wait) => selector.length > 0
-                  && (wait.request_id === selector || (wait.session_id !== null && wait.session_id.startsWith(selector))));
+                const isAll = selector === "all" || selector === "--all";
+                const matches = [...statusRetryWaits.values()].filter((wait) => isAll || (selector.length > 0
+                  && (wait.request_id === selector || (wait.session_id !== null && wait.session_id.startsWith(selector)))));
                 const sessionIds = new Set(matches.map((wait) => wait.session_id).filter((value): value is string => value !== null));
-                if (selector.length > 0 && !matches.some((wait) => wait.request_id === selector) && sessionIds.size > 1) {
+                if (!isAll && selector.length > 0 && !matches.some((wait) => wait.request_id === selector) && sessionIds.size > 1) {
                   res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
                   res.end(JSON.stringify({ error: "proxy cancel target is ambiguous; use a full request ID" }));
                   return;
@@ -6947,10 +6948,7 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
           attempts = activeRecord.attempts;
           if (conversionAfterForward) {
             res.destroy(error instanceof Error ? error : undefined);
-          }
-          if (status === 499 && errorText === "retry cancelled by ccs proxy") {
-            res.destroy();
-          } else if (status !== 499 && !conversionAfterForward) {
+          } else {
             if (writeProxyJsonErrorResponse(res, status ?? 500, errorText, recordClientTtfb, captureResponseObserver)) {
               responseBytes = Buffer.byteLength(JSON.stringify({ error: { message: errorText } }));
             }
