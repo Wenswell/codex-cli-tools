@@ -6,15 +6,15 @@ import { rejectRemovedYesFlags } from "../lib/confirm.js";
 import { ensureDir } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorPath, colorUrl, printKeyValue } from "../lib/output.js";
-import { codexToolsCacheDir, formatHomePath, homeDir } from "../lib/paths.js";
-import { assertProfile, readProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
+import { codexToolsCacheDir, formatHomePath, homeDir, profilesPath } from "../lib/paths.js";
+import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { textDim, textGreen, textRed, textYellow } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
 
 export const CIMG_MODEL = "gpt-image-2";
-const CIMG_DEFAULT_RATIO = "1:1";
-const CIMG_DEFAULT_QUALITY = "auto";
+export const CIMG_DEFAULT_RATIO = "1:1";
+export const CIMG_DEFAULT_QUALITY = "auto";
 
 const requestTimeoutMs = 300_000;
 const CIMG_PROGRESS_INTERVAL_MS = 10_000;
@@ -53,6 +53,7 @@ export const CIMG_DEFAULT_SIZES: Record<CimgRatio, string> = {
 
 type CimgArgs = {
   prompt: string;
+  profile?: string;
   model: string;
   ratio: CimgRatio;
   size: string;
@@ -60,6 +61,30 @@ type CimgArgs = {
   outputPath: string;
   inputPaths: string[];
 };
+
+export type CimgResolvedDefaults = {
+  profile?: string;
+  model: string;
+  ratio: CimgRatio;
+  size: string;
+  quality: CimgQuality;
+  outputDir: string;
+};
+
+export function resolveCimgDefaults(profiles: ProfilesFile): CimgResolvedDefaults {
+  const config = profiles.cimg ?? {};
+  const ratio = (config.ratio && isRatio(config.ratio)) ? config.ratio : CIMG_DEFAULT_RATIO;
+  const defaultSizeForRatio = CIMG_DEFAULT_SIZES[ratio];
+  const size = (config.size && (CIMG_SIZES[ratio] as readonly string[]).includes(config.size))
+    ? config.size
+    : defaultSizeForRatio;
+  const quality = (config.quality && isQuality(config.quality)) ? config.quality : CIMG_DEFAULT_QUALITY;
+  const model = config.model?.trim() || CIMG_MODEL;
+  const outputDir = config.outputDir?.trim() ? resolve(config.outputDir.trim()) : cimgDefaultOutputDir();
+  const profile = config.profile?.trim() || undefined;
+
+  return { profile, model, ratio, size, quality, outputDir };
+}
 
 type CimgMode = "generate" | "edit";
 
@@ -158,8 +183,15 @@ export async function runCimg(argv: string[], overrides: Partial<CimgDependencie
     return;
   }
 
-  const args = parseArgs(argv, dependencies.now());
-  const active = resolveActiveProfile(await dependencies.profiles());
+  if (argv.length === 1 && argv[0] === "config") {
+    await runCimgConfig(await dependencies.profiles());
+    return;
+  }
+
+  const profilesData = await dependencies.profiles();
+  const cimgDefaults = resolveCimgDefaults(profilesData);
+  const args = parseArgs(argv, dependencies.now(), cimgDefaults);
+  const active = resolveActiveProfile(profilesData, args.profile);
   const mode = requestMode(args);
   const endpoint = buildEndpoint(active.profile.baseURL, mode);
   const previewInputs = await readImageInputs(args.inputPaths);
@@ -246,13 +278,18 @@ export async function runCimg(argv: string[], overrides: Partial<CimgDependencie
   }
 }
 
-export function parseArgs(argv: string[], now = new Date()): CimgArgs {
+export function parseArgs(
+  argv: string[],
+  now = new Date(),
+  defaults?: Partial<CimgResolvedDefaults>,
+): CimgArgs {
   rejectRemovedYesFlags(argv, "cimg");
   let prompt: string | undefined;
-  let model = CIMG_MODEL;
-  let ratio: CimgRatio = CIMG_DEFAULT_RATIO;
-  let size: string | undefined;
-  let quality: CimgQuality = CIMG_DEFAULT_QUALITY;
+  let profile = defaults?.profile;
+  let model = defaults?.model ?? CIMG_MODEL;
+  let ratio: CimgRatio = (defaults?.ratio && isRatio(defaults.ratio)) ? defaults.ratio : CIMG_DEFAULT_RATIO;
+  let size: string | undefined = defaults?.size;
+  let quality: CimgQuality = (defaults?.quality && isQuality(defaults.quality)) ? defaults.quality : CIMG_DEFAULT_QUALITY;
   let outputPath: string | undefined;
   const inputPaths: string[] = [];
 
@@ -260,6 +297,14 @@ export function parseArgs(argv: string[], now = new Date()): CimgArgs {
     const arg = argv[index];
     if (arg === "-p" || arg === "--prompt") {
       prompt = requireValue(argv, index);
+      index += 1;
+      continue;
+    }
+    if (arg === "--profile") {
+      profile = requireValue(argv, index).trim();
+      if (!profile) {
+        throw new Error("--profile requires a non-empty value");
+      }
       index += 1;
       continue;
     }
@@ -277,6 +322,8 @@ export function parseArgs(argv: string[], now = new Date()): CimgArgs {
         throw new Error(`invalid ratio: ${value}; expected ${Object.keys(CIMG_SIZES).join(" | ")}`);
       }
       ratio = value;
+      // If size was not explicitly passed via CLI, reset to defaults or default size for this ratio
+      size = undefined;
       index += 1;
       continue;
     }
@@ -318,9 +365,10 @@ export function parseArgs(argv: string[], now = new Date()): CimgArgs {
   if (!(CIMG_SIZES[ratio] as readonly string[]).includes(resolvedSize)) {
     throw new Error(`invalid size for ${ratio}: ${resolvedSize}; expected ${CIMG_SIZES[ratio].join(" | ")}`);
   }
+  const baseOutputDir = defaults?.outputDir ?? cimgDefaultOutputDir();
   const resolvedOutput = outputPath
     ? resolve(outputPath)
-    : join(cimgDefaultOutputDir(), defaultOutputName(now));
+    : join(baseOutputDir, defaultOutputName(now));
   if (!resolvedOutput.toLowerCase().endsWith(".png")) {
     throw new Error("output path must end with .png");
   }
@@ -334,7 +382,7 @@ export function parseArgs(argv: string[], now = new Date()): CimgArgs {
     throw new Error(`too many input images: ${inputPaths.length}; maximum is ${maxInputImages}`);
   }
 
-  return { prompt: normalizedPrompt, model, ratio, size: resolvedSize, quality, outputPath: resolvedOutput, inputPaths };
+  return { prompt: normalizedPrompt, profile, model, ratio, size: resolvedSize, quality, outputPath: resolvedOutput, inputPaths };
 }
 
 export function buildRequestBody(args: Pick<CimgArgs, "prompt" | "model" | "size" | "quality">): Record<string, unknown> {
@@ -660,8 +708,8 @@ function parseResponse(text: string): ImageResponse {
   return parsed as ImageResponse;
 }
 
-function resolveActiveProfile(profiles: ProfilesFile): { name: string; profile: Profile } {
-  const name = profiles.current?.trim();
+function resolveActiveProfile(profiles: ProfilesFile, explicitName?: string): { name: string; profile: Profile } {
+  const name = explicitName?.trim() || profiles.cimg?.profile?.trim() || profiles.current?.trim();
   if (!name) {
     throw new Error("profiles.json has no current profile");
   }
@@ -676,18 +724,27 @@ function resolveActiveProfile(profiles: ProfilesFile): { name: string; profile: 
 }
 
 function printStatus(profiles: ProfilesFile): void {
-  const name = profiles.current?.trim() || "-";
+  const defaults = resolveCimgDefaults(profiles);
+  const active = (() => {
+    try {
+      return resolveActiveProfile(profiles);
+    } catch {
+      return undefined;
+    }
+  })();
+  const name = active?.name ?? profiles.current?.trim() ?? "-";
   const candidate = name === "-" ? undefined : profiles.profiles?.[name];
   const baseURL = candidate && typeof candidate.baseURL === "string" && candidate.baseURL.trim() ? candidate.baseURL : "-";
   const apiKey = candidate && typeof candidate.apiKey === "string" && candidate.apiKey.trim() ? textGreen("set") : textRed("missing");
-  printCimgValue("profile:", name);
+  const profileDisplay = profiles.cimg?.profile ? `${name} (cimg default)` : name;
+  printCimgValue("profile:", profileDisplay);
   printCimgValue("api:", baseURL === "-" ? textYellow(baseURL) : colorUrl(baseURL));
   printCimgValue("key:", apiKey);
-  printCimgValue("model:", CIMG_MODEL);
-  printCimgValue("defaults:", `${CIMG_DEFAULT_RATIO} ${CIMG_DEFAULT_SIZES[CIMG_DEFAULT_RATIO]} ${CIMG_DEFAULT_QUALITY}`);
-  printCimgValue("output:", colorPath(formatHomePath(cimgDefaultOutputDir())));
+  printCimgValue("model:", defaults.model);
+  printCimgValue("defaults:", `${defaults.ratio} ${defaults.size} ${defaults.quality}`);
+  printCimgValue("output:", colorPath(formatHomePath(defaults.outputDir)));
   printCimgValue("log:", colorPath(formatHomePath(cimgRequestsPath())));
-  console.log("commands: cimg -p TEXT [-i FILE ...] | version|-v | --help");
+  console.log("commands: cimg -p TEXT [-i FILE ...] | config | version|-v | --help");
 }
 
 function printPreview(profile: string, endpoint: string, args: CimgArgs): void {
@@ -708,13 +765,15 @@ function printHelp(): void {
   console.log([
     "Usage:",
     "  cimg                                                        # show active image generation status",
-    "  cimg -p TEXT [--model MODEL] [--ratio RATIO] [--size SIZE] [--quality QUALITY] [-o FILE] # preview and generate one PNG",
+    "  cimg -p TEXT [--profile PROFILE] [--model MODEL] [--ratio RATIO] [--size SIZE] [--quality QUALITY] [-o FILE] # preview and generate one PNG",
     "  cimg -p TEXT -i FILE [-i FILE ...] [OPTIONS]                # preview and edit from reference images",
+    "  cimg config                                                 # interactively view and configure default values",
     "  cimg version                                                # print package version",
     "  cimg -v                                                     # print package version",
     "  cimg help | -h | --help                                     # show this help",
     "",
     "Options:",
+    "  --profile PROFILE provider profile (default: cimg config or current ccs profile)",
     `  --ratio RATIO    ${Object.keys(CIMG_SIZES).join(" | ")} (default: ${CIMG_DEFAULT_RATIO})`,
     `  --model MODEL    provider model (default: ${CIMG_MODEL})`,
     "  --size SIZE      one fixed size listed for the selected ratio",
@@ -754,6 +813,150 @@ async function confirmGeneration(): Promise<boolean> {
   } finally {
     input.close();
   }
+}
+
+type Prompt = {
+  question(prompt: string): Promise<string>;
+  close(): void;
+};
+
+function createPrompt(): Prompt {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY,
+  });
+  const iterator = rl[Symbol.asyncIterator]();
+
+  return {
+    async question(prompt: string): Promise<string> {
+      process.stdout.write(prompt);
+      const next = await iterator.next();
+      return next.done ? "" : next.value;
+    },
+    close(): void {
+      rl.close();
+    },
+  };
+}
+
+async function askOptional(
+  input: Prompt,
+  label: string,
+  current?: string,
+): Promise<string> {
+  const suffix = current ? ` [${current}]` : "";
+  const value = await input.question(`${label}${suffix}: `);
+  return value.trim() || current || "";
+}
+
+export async function runCimgConfig(
+  profilesData?: ProfilesFile,
+  promptImpl: () => Prompt = createPrompt,
+  writeProfilesImpl: (profiles: ProfilesFile) => Promise<void> = writeProfiles,
+): Promise<void> {
+  const data = profilesData ?? await readProfiles();
+  const availableProfiles = Object.keys(data.profiles ?? {});
+  const currentConfig = data.cimg ?? {};
+  const effectiveDefaults = resolveCimgDefaults(data);
+
+  console.log("Configure cimg default settings (press Enter to keep current value):\n");
+  if (availableProfiles.length > 0) {
+    console.log(`available profiles: ${availableProfiles.join(", ")}`);
+  }
+
+  const prompt = promptImpl();
+  let nextProfile: string | undefined;
+  let nextModel: string | undefined;
+  let nextRatio: string | undefined;
+  let nextSize: string | undefined;
+  let nextQuality: string | undefined;
+  let nextOutputDir: string | undefined;
+
+  try {
+    const rawProfile = await askOptional(
+      prompt,
+      "1. default profile (leave empty or '-' to follow current ccs profile)",
+      currentConfig.profile ?? "-",
+    );
+    if (rawProfile && rawProfile !== "-") {
+      if (!data.profiles?.[rawProfile]) {
+        throw new Error(`profile not found: ${rawProfile}; available: ${availableProfiles.join(", ")}`);
+      }
+      nextProfile = rawProfile;
+    } else {
+      nextProfile = undefined;
+    }
+
+    const rawModel = await askOptional(
+      prompt,
+      "2. default model",
+      currentConfig.model ?? CIMG_MODEL,
+    );
+    nextModel = rawModel.trim() || CIMG_MODEL;
+
+    const rawRatio = await askOptional(
+      prompt,
+      `3. default ratio (${Object.keys(CIMG_SIZES).join(" | ")})`,
+      currentConfig.ratio ?? CIMG_DEFAULT_RATIO,
+    );
+    if (!isRatio(rawRatio)) {
+      throw new Error(`invalid ratio: ${rawRatio}; expected ${Object.keys(CIMG_SIZES).join(" | ")}`);
+    }
+    nextRatio = rawRatio;
+
+    const availableSizes = CIMG_SIZES[nextRatio as CimgRatio] as readonly string[];
+    const defaultSizeForRatio = CIMG_DEFAULT_SIZES[nextRatio as CimgRatio];
+    const sizeCurrent = (currentConfig.size && availableSizes.includes(currentConfig.size))
+      ? currentConfig.size
+      : defaultSizeForRatio;
+
+    const rawSize = await askOptional(
+      prompt,
+      `4. default size for ${nextRatio} (${availableSizes.join(" | ")})`,
+      sizeCurrent,
+    );
+    if (!availableSizes.includes(rawSize)) {
+      throw new Error(`invalid size for ${nextRatio}: ${rawSize}; expected ${availableSizes.join(" | ")}`);
+    }
+    nextSize = rawSize;
+
+    const rawQuality = await askOptional(
+      prompt,
+      "5. default quality (auto | low | medium | high)",
+      currentConfig.quality ?? CIMG_DEFAULT_QUALITY,
+    );
+    if (!isQuality(rawQuality)) {
+      throw new Error(`invalid quality: ${rawQuality}; expected auto | low | medium | high`);
+    }
+    nextQuality = rawQuality;
+
+    const rawOutputDir = await askOptional(
+      prompt,
+      "6. default output directory",
+      currentConfig.outputDir ?? cimgDefaultOutputDir(),
+    );
+    nextOutputDir = rawOutputDir.trim() || cimgDefaultOutputDir();
+  } finally {
+    prompt.close();
+  }
+
+  const updatedCimgConfig: Record<string, string> = {};
+  if (nextProfile) updatedCimgConfig.profile = nextProfile;
+  if (nextModel) updatedCimgConfig.model = nextModel;
+  if (nextRatio) updatedCimgConfig.ratio = nextRatio;
+  if (nextSize) updatedCimgConfig.size = nextSize;
+  if (nextQuality) updatedCimgConfig.quality = nextQuality;
+  if (nextOutputDir) updatedCimgConfig.outputDir = nextOutputDir;
+
+  const nextProfilesData: ProfilesFile = {
+    ...data,
+    cimg: Object.keys(updatedCimgConfig).length > 0 ? updatedCimgConfig : undefined,
+  };
+
+  await writeProfilesImpl(nextProfilesData);
+  console.log(`\ncimg configuration saved: ${textGreen(profilesPath())}`);
+  printStatus(nextProfilesData);
 }
 
 function buildBaseEvent(

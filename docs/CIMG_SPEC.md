@@ -14,7 +14,11 @@ This document owns the request, input, output, and runtime-record contracts for
   as reference images through the same edits endpoint.
 - Masked editing is outside the command surface.
 - Every request uses `n=1`, `output_format=png`, and the selected size and
-  quality. The default model is `gpt-image-2`; `--model MODEL` overrides it.
+  quality. Defaults for model, ratio, size, quality, and profile can be configured
+  in `profiles.json` under `cimg` or overridden via CLI flags (`--model`, `--ratio`,
+  `--size`, `--quality`, `--profile`). The base fallback model is `gpt-image-2`.
+- `cimg config` provides interactive configuration of default settings stored
+  under `profiles.json.cimg`.
 - Successful responses may provide `data[0].b64_json` or `data[0].url`. URL
   responses are downloaded and validated as PNG before writing the output.
 

@@ -18,12 +18,22 @@ export type ProxySearchConfig = {
   profile?: string;
 };
 
+export type CimgConfig = {
+  profile?: string;
+  model?: string;
+  ratio?: string;
+  size?: string;
+  quality?: string;
+  outputDir?: string;
+};
+
 export type ProfilesFile = {
   profiles?: Record<string, Profile>;
   proxy?: {
     /** Route Codex alpha search requests to this profile when enabled. */
     search?: ProxySearchConfig;
   };
+  cimg?: CimgConfig;
   usage?: Record<string, Profile>;
   current?: string;
   toggle?: string[];
@@ -74,6 +84,7 @@ export async function readProfiles(): Promise<ProfilesFile> {
   try {
     const profiles = parseJsonObject(text) as ProfilesFile;
     assertProxySearch(profiles.proxy?.search);
+    assertCimgConfig(profiles.cimg);
     return profiles;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -97,6 +108,25 @@ function assertProxySearch(value: unknown): void {
   }
   if (search.enabled && !search.profile) {
     throw new Error("invalid profiles.json: proxy.search.profile is required when search is enabled");
+  }
+}
+
+function assertCimgConfig(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid profiles.json: cimg must be an object");
+  }
+  const config = value as Record<string, unknown>;
+  const allowedKeys = new Set(["profile", "model", "ratio", "size", "quality", "outputDir"]);
+  for (const [key, val] of Object.entries(config)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`invalid profiles.json: cimg has unknown key: ${key}`);
+    }
+    if (val !== undefined && (typeof val !== "string" || !val.trim())) {
+      throw new Error(`invalid profiles.json: cimg.${key} must be a non-empty string`);
+    }
   }
 }
 

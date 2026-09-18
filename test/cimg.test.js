@@ -14,7 +14,9 @@ import {
   cimgDefaultOutputDir,
   pruneCimgFullResponses,
   parseArgs,
+  resolveCimgDefaults,
   runCimg,
+  runCimgConfig,
 } from "../dist/commands/cimg.js";
 import { captureStdout } from "./helpers/terminal.js";
 
@@ -33,7 +35,7 @@ test("cimg no-argument output shows active state and compact commands", async ()
   assert.match(output, /^model:\s+gpt-image-2$/m);
   assert.match(output, /^defaults:\s+1:1 1024x1024 auto$/m);
   assert.match(output, /^output:\s+~\/Pictures\/cimg$/m);
-  assert.match(output, /^commands: cimg -p TEXT \[-i FILE \.\.\.\] \| version\|-v \| --help$/m);
+  assert.match(output, /^commands: cimg -p TEXT \[-i FILE \.\.\.\] \| config \| version\|-v \| --help$/m);
 });
 
 test("cimg defaults images to the user Pictures directory and keeps explicit output paths", () => {
@@ -399,4 +401,86 @@ test("cimg Ctrl-C aborts the request and logs a canceled terminal event", async 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("cimg respects configured defaults from profiles.json", () => {
+  const configuredProfiles = {
+    current: "input",
+    profiles: {
+      input: { baseURL: "https://ai.example.test", apiKey: "key1" },
+      fal: { baseURL: "https://fal.example.test", apiKey: "key2" },
+    },
+    cimg: {
+      profile: "fal",
+      model: "fal-ai/gpt-image-2",
+      ratio: "16:9",
+      size: "2048x1152",
+      quality: "high",
+      outputDir: "/custom/pics",
+    },
+  };
+
+  const defaults = resolveCimgDefaults(configuredProfiles);
+  assert.equal(defaults.profile, "fal");
+  assert.equal(defaults.model, "fal-ai/gpt-image-2");
+  assert.equal(defaults.ratio, "16:9");
+  assert.equal(defaults.size, "2048x1152");
+  assert.equal(defaults.quality, "high");
+  assert.equal(defaults.outputDir, "/custom/pics");
+
+  const parsed = parseArgs(["-p", "test prompt"], new Date(), defaults);
+  assert.equal(parsed.profile, "fal");
+  assert.equal(parsed.model, "fal-ai/gpt-image-2");
+  assert.equal(parsed.ratio, "16:9");
+  assert.equal(parsed.size, "2048x1152");
+  assert.equal(parsed.quality, "high");
+  assert.match(parsed.outputPath, /^\/custom\/pics\/image-/);
+
+  // CLI flags override configured defaults
+  const overridden = parseArgs(["-p", "test prompt", "--profile", "input", "--model", "custom-model", "--ratio", "1:1", "--quality", "low"], new Date(), defaults);
+  assert.equal(overridden.profile, "input");
+  assert.equal(overridden.model, "custom-model");
+  assert.equal(overridden.ratio, "1:1");
+  assert.equal(overridden.size, "1024x1024");
+  assert.equal(overridden.quality, "low");
+});
+
+test("cimg config interactive setup updates cimg defaults in profiles.json", async () => {
+  let savedProfiles;
+  const initialProfiles = {
+    current: "input",
+    profiles: {
+      input: { baseURL: "https://ai.example.test", apiKey: "key1" },
+      fal: { baseURL: "https://fal.example.test", apiKey: "key2" },
+    },
+  };
+
+  // Mock interactive answers: fal, fal-ai/gpt-image-2, 16:9, 1792x1008, high, /tmp/my-images
+  const answers = ["fal", "fal-ai/gpt-image-2", "16:9", "1792x1008", "high", "/tmp/my-images"];
+  let answerIndex = 0;
+  const mockPrompt = () => ({
+    async question(label) {
+      const val = answers[answerIndex++];
+      return val ?? "";
+    },
+    close() {},
+  });
+
+  const output = await captureStdout(() => runCimgConfig(
+    initialProfiles,
+    mockPrompt,
+    async (next) => {
+      savedProfiles = next;
+    },
+  ));
+
+  assert.match(output, /cimg configuration saved/);
+  assert.deepEqual(savedProfiles.cimg, {
+    profile: "fal",
+    model: "fal-ai/gpt-image-2",
+    ratio: "16:9",
+    size: "1792x1008",
+    quality: "high",
+    outputDir: "/tmp/my-images",
+  });
 });
