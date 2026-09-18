@@ -32,6 +32,7 @@ export async function readProfiles() {
     try {
         const profiles = parseJsonObject(text);
         assertProxySearch(profiles.proxy?.search);
+        assertCimgConfig(profiles.cimg);
         return profiles;
     }
     catch (error) {
@@ -55,6 +56,24 @@ function assertProxySearch(value) {
     }
     if (search.enabled && !search.profile) {
         throw new Error("invalid profiles.json: proxy.search.profile is required when search is enabled");
+    }
+}
+function assertCimgConfig(value) {
+    if (value === undefined) {
+        return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("invalid profiles.json: cimg must be an object");
+    }
+    const config = value;
+    const allowedKeys = new Set(["profile", "model", "ratio", "size", "quality", "outputDir"]);
+    for (const [key, val] of Object.entries(config)) {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`invalid profiles.json: cimg has unknown key: ${key}`);
+        }
+        if (val !== undefined && (typeof val !== "string" || !val.trim())) {
+            throw new Error(`invalid profiles.json: cimg.${key} must be a non-empty string`);
+        }
     }
 }
 export async function writeProfiles(profiles) {
