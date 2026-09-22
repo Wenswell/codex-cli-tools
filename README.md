@@ -53,12 +53,9 @@ Running foreground commands keep the code loaded when they start. Stop them befo
 
 | Command | Stop | Restart after update | Verify |
 | --- | --- | --- | --- |
-| `ccs s server [PORT]` | `Ctrl-C` | rerun with the same port | `curl http://127.0.0.1:8765/health` for the default port |
-| `ccs s agent` | `Ctrl-C` | `ccs s agent` | confirm `~/.cache/codex-tools/ccs-top-status.txt` keeps updating |
-| `ccs top` | `q` or `Ctrl-C` | rerun `ccs top` | confirm the live line refreshes |
 | `clvm monitor` | `q` or `Ctrl-C` | rerun `clvm monitor` | confirm the monitor refreshes successfully |
 
-An installed `ccs proxy` runs in the background. Update the package first, then run `ccs proxy restart`, confirm with exact `yes`, and verify with `ccs proxy`. If the WezTerm managed status block changed in an update, rerun `ccs s wezterm` and confirm the preview to replace it.
+An installed `ccs proxy` runs in the background. Update the package first, then run `ccs proxy restart`, confirm with exact `yes`, and verify with `ccs proxy`.
 
 ## Commands
 
@@ -83,29 +80,10 @@ standards and detailed data contracts are listed in the
 
 ## cx / cxx / cxxs
 
-`cx`, `cxx`, and `cxxs` use the Codex CLI local app-server daemon through its Unix socket by default. Codex CLI owns this daemon. Bootstrap it once, then verify it before first use:
-
-```bash
-codex app-server daemon bootstrap
-codex app-server daemon version
-```
-
-Manage it directly through Codex CLI:
-
-```bash
-codex app-server daemon start
-codex app-server daemon restart
-codex app-server daemon stop
-codex app-server daemon version
-```
-
-After updating Codex CLI, run `codex app-server daemon restart`, then verify that `version` reports `running` and the expected app-server version. `ccs r` prints the same daemon status and running version in compact form.
-
 `cx` runs Codex in search mode and forwards stdin, stdout, stderr, arguments, and exit code.
 
 ```bash
 cx ARGS...
-cx local ARGS...
 cx run PROFILE [CODEX_ARGS...]
 cx version
 cx -v
@@ -114,16 +92,13 @@ cx -v
 Equivalent to:
 
 ```bash
-codex --search --remote unix:// -C "$PWD" ARGS...
+codex --search ARGS...
 ```
-
-`cx local ARGS...` runs the original local-session command without `--remote`.
 
 `cxx` also bypasses approvals and sandboxing.
 
 ```bash
 cxx ARGS...
-cxx local ARGS...
 cxx run PROFILE [CODEX_ARGS...]
 cxx version
 cxx -v
@@ -132,17 +107,13 @@ cxx -v
 Equivalent to:
 
 ```bash
-codex --search --dangerously-bypass-approvals-and-sandbox --remote unix:// -C "$PWD" ARGS...
+codex --search --dangerously-bypass-approvals-and-sandbox ARGS...
 ```
 
-`cxx local ARGS...` runs the original local-session command without `--remote`.
-
-`cxxs` resumes a Codex session. Remote resume does not pass permission overrides,
-which the Codex app-server rejects; local resume keeps the `cxx` bypass flag.
+`cxxs` resumes a Codex session with approvals and sandboxing bypassed.
 
 ```bash
 cxxs ARGS...
-cxxs local ARGS...
 cxxs run PROFILE [RESUME_ARGS...]
 cxxs version
 cxxs -v
@@ -151,13 +122,8 @@ cxxs -v
 Equivalent to:
 
 ```bash
-codex --search --remote unix:// -C "$PWD" resume ARGS...
+codex --search --dangerously-bypass-approvals-and-sandbox resume ARGS...
 ```
-
-`cxxs local ARGS...` resumes the original local-session command without `--remote`
-and keeps `--dangerously-bypass-approvals-and-sandbox`.
-
-In default mode, all three commands pass the caller's absolute current directory through `-C`, so the daemon creates and resumes sessions in the directory where the wrapper was invoked instead of the daemon process's startup directory. `local` is only recognized as the first argument and is not forwarded to Codex.
 
 All three wrappers can launch one local Codex process with a profile without changing the stored current profile:
 
@@ -229,11 +195,11 @@ Profile config lives at:
 ~/.codex/auth.json
 ```
 
-Run `ccs` without arguments to print the current profile, `user@host`, usage, and a compact two-level command footer:
+Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | r | PROFILE | models | toggle | top | list | init | sync | add | remove
-namespaces: pricing | proxy | cost | config | s | usage | --help
+commands:   version | PROFILE | toggle | list | init | sync | add | remove
+namespaces: proxy | config | --help
 ```
 
 Supported commands:
@@ -242,18 +208,7 @@ Supported commands:
 ccs
 ccs version
 ccs -v
-ccs r
 ccs PROFILE
-ccs models [--json]
-ccs pricing
-ccs pricing list [--remote]
-ccs pricing pattern
-ccs pricing pattern watch PATTERN...
-ccs pricing pattern unwatch PATTERN...
-ccs pricing provider
-ccs pricing provider add PROVIDER...
-ccs pricing provider remove PROVIDER...
-ccs pricing refresh
 ccs proxy [--history N] [--view overview|tokens|cost]
 ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
@@ -264,39 +219,9 @@ ccs proxy capture cancel
 ccs proxy mode [passthrough [retry]|retry [on|off]|recovery|intercept]
 ccs proxy config
 ccs proxy install|restore|serve
-ccs cost
-ccs cost daily
-ccs cost weekly
-ccs cost monthly
-ccs cost projects
-ccs cost project PROJECT
-ccs cost models
-ccs cost day YYYY-MM-DD
-ccs cost push
-ccs cost central
-ccs cost central daily
-ccs cost central weekly
-ccs cost central monthly
-ccs cost central projects
-ccs cost central project PROJECT
-ccs cost central models
-ccs cost central day YYYY-MM-DD
 ccs toggle [PROFILE]
-ccs top [--once] [--mark DURATION]
 ccs config [push|pull]
-ccs s [line]
-ccs s agent
-ccs s server [PORT]
-ccs s history [PROFILE]
-ccs s pause
-ccs s resume
-ccs s reset
-ccs s wezterm
-ccs s wezterm remove
-ccs list | l [-u|--usage]
-ccs usage
-ccs usage add [PROFILE]
-ccs usage remove | rm | delete PROFILE
+ccs list | l
 ccs init
 ccs sync
 ccs sync --replace TOML_PATH [--replace TOML_PATH ...]
@@ -305,246 +230,7 @@ ccs add [PROFILE]
 ccs remove | rm | delete PROFILE
 ```
 
-`ccs r` runs `codex app-server daemon version` and prints the daemon status and running app-server version. Status and version values use semantic TTY colors.
-
-`ccs models` requests `GET BASE_URL/v1/models` for every configured switching profile in `profiles.profiles`, using each profile API key as a Bearer token. Default output is a horizontal table with one provider column and one adjacent `price` column per provider. Price status is `ok` when input, output, and cache-read pricing are present, `partial` when input/output pricing exists without cache-read pricing, and `missing` when base pricing is unavailable. A provider request failure is shown in that provider column, and successful provider columns still show their model ids. `ccs models --json` prints stable JSON with each profile's `name`, `models`, `pricing`, and `error`, plus top-level pricing cache metadata.
-
-`ccs cost` without arguments prints the local cost data source, pricing cache, central status URL, SSH upload target, timezone, pricing speed, and its immediate commands. Use `ccs cost --help` for complete report syntax and options.
-
-```text
-commands: daily | weekly | monthly | projects | project | models | day | push | central | --help
-```
-
-The options apply to local and central report forms. `ccs cost push` accepts no additional arguments and always uploads the complete machine snapshot.
-
-`ccs cost daily`, `weekly`, `monthly`, `projects`, `project`, `models`, and `day` report local Codex session usage from `~/.codex`. They read the newest `~/.codex/state*.sqlite` for `threads.cwd` project attribution and stream each selected session JSONL file line by line for current-thread `token_count` usage events. Forked rollout files can contain copied parent history; `ccs cost` starts counting at the rollout thread's own `task_started` boundary and keeps subagent fork usage when it belongs to the current rollout. Terminal tables use `input`, `output`, `cached`, `input$`, `output$`, `cached$`, and `total$`. `input` is uncached input. A `pricing` column appears when any required price is missing.
-
-```bash
-ccs cost daily --since 2026-05-01 --until 2026-05-30
-ccs cost weekly --since 2026-05-01 --until 2026-05-30
-ccs cost monthly --since 2026-01-01
-ccs cost projects --since 2026-05-01 --until 2026-05-30
-ccs cost project /home/ilove/Documents/repos/codex-cli-tools --since 2026-05-01 --until 2026-05-30
-ccs cost models --since 2026-05-01 --until 2026-05-30
-ccs cost day 2026-05-29 --bucket 1h
-ccs cost day 2026-05-29 --json
-```
-
-`ccs cost push` uploads this machine's normalized token-event facts to the LAN server over SSH:
-
-```bash
-ccs cost push
-```
-
-The fixed upload target is:
-
-```text
-ravvss@10.126.126.1:/home/ravvss/.cache/codex-tools/ccs-cost
-```
-
-The snapshot contains timestamp, project path, model name, and token counts. It does not contain prompt or response text. Re-running `ccs cost push` atomically replaces this machine's latest snapshot on the server. This command is intended for timers; it writes machine-generated cache data directly, triggers a debounced central cost refresh, and prints the remote file, machine name, event count, uncached input, output, cached input totals, and refresh URL.
-
-Install or update every reporting machine from the GitHub source before adding timers:
-
-```bash
-pnpm add -g github:Wenswell/codex-cli-tools
-```
-
-Linux user timers should run the global `ccs cost push` command with a PATH that includes the pnpm bin directory. Use `OnCalendar=*-*-* *:00:00` for one upload at every hourly boundary. macOS LaunchAgents should use the absolute pnpm shim path, for example `/Users/wswensw/Library/pnpm/ccs`, with 24 `StartCalendarInterval` entries at minute `0`. The job's environment should include Homebrew and pnpm bins:
-
-```text
-/opt/homebrew/bin:/Users/wswensw/Library/pnpm:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-```
-
-`ccs cost central` reads the first reachable configured `top.stateUrls` server and prints uploaded machine status. `ccs cost central daily`, `weekly`, `monthly`, `projects`, `project`, `models`, and `day` render server-side aggregate reports from all uploaded machine snapshots:
-
-```bash
-ccs cost central
-ccs cost central daily --since 2026-05-01 --until 2026-05-30
-ccs cost central projects --since 2026-05-01 --until 2026-05-30
-ccs cost central models --since 2026-05-01 --until 2026-05-30
-ccs cost central day 2026-05-29 --bucket 1h
-```
-
-The central report endpoints are served by `ccs s server`:
-
-```text
-GET /ccs/cost/status
-GET /ccs/cost/report
-POST /ccs/cost/refresh
-```
-
-`POST /ccs/cost/refresh` schedules central derived-data generation after a five-minute debounce. Multiple uploads inside the debounce window push the refresh later, so a group of hourly uploads causes one snapshot scan and one derived-data write. The server writes derived aggregates to `~/.cache/codex-tools/ccs-cost-derived.json`; report requests read that file and do not parse raw snapshot events on the query path. During the debounce window, reports keep serving the previous derived version until the next derived file is written.
-
-Central reports use the server's pricing cache. With `--speed auto`, each uploaded machine snapshot uses the speed resolved on that machine at upload time; explicit `--speed standard` or `--speed fast` applies one speed to the whole central report. Central status and report payloads use schema version `2`. JSON includes `missingPricingModels` when uploaded usage contains models without complete pricing.
-
-Options:
-
-```text
---since YYYY-MM-DD      inclusive start date
---until YYYY-MM-DD      inclusive end date
---timezone IANA_NAME    date grouping timezone; defaults to the system timezone
---bucket 15m|30m|1h|2h  time bucket for ccs cost day; default 1h
---json                  print stable JSON
---raw                   print full token counts and decimal costs
---speed auto|standard|fast
-```
-
-Daily, weekly, monthly, project, one-project, and model reports include a `total` row. Weeks start on Monday. `ccs cost projects` and `ccs cost models` sort by unrounded complete cost from highest to lowest, followed by incomplete-price rows sorted by name. `ccs cost day YYYY-MM-DD` prints a total line, time buckets, and projects for that day; time buckets sort by time and day projects use the same cost ordering.
-
-Terminal tables compact token counts by default with `K`, `M`, and `B` suffixes and round complete costs to whole dollars. Headers and total rows use simple emphasis, and total rows are separated from body rows. Set `NO_COLOR=1` to disable color. Use `--raw` to print full token counts with thousands separators and decimal costs. JSON metric records contain `inputTokens`, `outputTokens`, `cachedInputTokens`, `inputCostUSD`, `outputCostUSD`, `cachedCostUSD`, `costUSD`, and `missingPricingModels`. A missing required component price makes that component and total `null`; terminal output renders it as `-`.
-
-Costs use LiteLLM model pricing cached at `~/.config/codex-tools/model-prices.json`. Its `patterns`, `providers`, and `models` fields form one selection snapshot: `patterns` stores normalized model patterns, `providers` stores normalized LiteLLM `litellm_provider` names, and `models` maps exact selected model names to their price records. Remote selection first keeps watched providers and then applies the pattern union, so saved models always meet both filters. Entries without a string `litellm_provider` never enter the snapshot. `ccs cost`, `ccs cost central`, and `ccs models` read the local cache, built-in supplemental prices, and manual overrides. `ccs pricing` prints local selection state. `ccs pricing list` reads and prints selected local prices without a network request. `ccs pricing list --remote` fetches LiteLLM and prints every model from watched providers. Both modes use `model`, `status`, `input/M`, `cache/M`, and `output/M` columns. `ccs pricing pattern` prints watched patterns and local matched-model counts. `ccs pricing pattern watch PATTERN...` and `unwatch PATTERN...` rebuild the complete remote snapshot after exact `yes`. `ccs pricing provider` prints watched providers; `add PROVIDER...` and `remove PROVIDER...` modify only local cache state after exact `yes`, with removal pruning local models that no longer satisfy provider and pattern filters. `ccs pricing refresh` rebuilds the complete snapshot from watched patterns and providers after exact `yes`. Remote request failures render `unavailable` and write nothing. The built-in supplemental table covers GLM-5.2 names. Manual pricing overrides remain under `pricing.overrides` in `profiles.json` with `inputCostPerToken`, `outputCostPerToken`, and `cacheReadInputTokenCost` fields. Missing model prices are reported through terminal `pricing` status and JSON `missingPricingModels`. Cost speed resolution uses top-level `service_tier` from `~/.codex/config.toml`; `fast` or `priority` uses priority pricing, and `standard` or `default` uses standard pricing. JSON output keeps project paths absolute; terminal output shortens paths under `$HOME` to `~/...`.
-
-The no-argument pricing status ends with its immediate commands:
-
-```text
-commands: list | pattern | provider | refresh | --help
-```
-
-```bash
-ccs pricing provider add openai
-ccs pricing pattern watch 'gpt-5.*'
-ccs pricing list
-ccs pricing list --remote
-ccs pricing refresh
-ccs pricing provider remove openai
-```
-
-`ccs list` marks the current profile with `*`. `ccs l -u` also shows `usage` entries from the same config file. Usage-only entries are never written to `~/.codex/config.toml` or `~/.codex/auth.json`, so they are safe for Claude or other app-specific keys you only want to monitor.
-
-`ccs usage` prints the usage-only profiles followed by its immediate commands:
-
-```text
-commands: add | remove | --help
-```
-
-`ccs top` prints all `profiles` and `usage` costs in one terminal line. Each profile refreshes independently: it starts at 25 seconds, backs off by 30 seconds when the cost does not change, caps at 300 seconds, and resets to 25 seconds when the cost changes or a failed refresh leaves a previously available value `stale`.
-
-```text
-14:09:12 | input $ 31.0 (+$9.9  9s ago, r 25s) | claude $123.0 (r 55s)      | gemini $  4.2 (+$0.1  3m ago, r 25s)
-```
-
-By default, `ccs top` prints a checkpoint line on 5-minute wall-clock boundaries, then continues refreshing the live line below it:
-
-```text
-14:15:00 | input $ 32.3 +$1.3 | claude $123.0 - | gemini $  4.3 +$0.1
-```
-
-Use `--mark 15m` to change the checkpoint interval; checkpoints align to that wall-clock interval. Supported duration suffixes are `s`, `m`, and `h`.
-
-Countdowns use fixed-width labels such as `r  5s`, `r 55s`, or `r123s`. Provider names are shown as background-color labels when color is enabled. Each `ccs top` cost is formatted with one decimal and a 3-digit integer slot. Change display is bounded to one digit: when a movement reaches `9.9`, that event is shown as `+$9.9` or `-$9.9`, and subsequent changes are measured again from the current cost. Recent changes are red or green for 1 minute, then dimmed while the timestamp remains visible. The relative time is when this running `ccs top` process first observed the cost change. Change markers expire after 1 hour. If a later refresh fails after a successful read, `ccs top` keeps the last cost and marks it `stale`. When every provider reaches the `300s` interval and then has 3 more unchanged refreshes, `ccs top` marks them `done` and stops requesting. Press `r` to refresh all providers and resume from 25 seconds; press `q` or `Ctrl-C` to exit. Use `ccs top --once` to print one line and exit.
-
-Run `ccs s` to print the same compact status plus one compact command line:
-
-```text
-22:52:22 r7s | *input 181.9 | ciii 161.3 | oops ? | input-cc 0
-commands: line | agent | server | history | pause | resume | reset | wezterm | --help
-```
-
-Use `ccs s line` from terminal status bars or shell prompts. It reads configured top state, prints one compact line, and exits:
-
-```text
-14:09:12 r18s | *input 6.6 | ciii 22.6 +0.3 | input-cc 0
-```
-
-Run `ccs top` locally to produce a local snapshot. The status line does not request usage APIs directly; it renders configured state URLs first, then falls back to the latest active local `ccs top` state from `~/.cache/codex-tools/ccs-top-state.json`. A leading `*` marks the local switching profile from `profiles.current`; usage-only entries remain unmarked. The clock updates on every status-line call, while usage refresh cadence, deltas, stale state, and done state come from the running collector. Deltas such as `+0.3` stay visible for 1 minute after the collector observes the change. If no active state exists, the status line prints `ccs top inactive`.
-
-Use `ccs s server [PORT]` to run the same collector without an interactive terminal and expose the current snapshot over HTTP. It listens on `0.0.0.0` and defaults to port `8765`:
-
-```bash
-ccs s server
-ccs s server 8765
-```
-
-The server runs in the foreground. Stop it with `Ctrl-C`; after updating, rerun it with the same port and verify the new process through its local health endpoint:
-
-```bash
-curl http://127.0.0.1:8765/health
-```
-
-The server uses a longer unattended backoff: `25s`, `1m`, `2m`, `5m`, `10m`, then `15m`. Providers never become `done`; unchanged providers keep refreshing every 15 minutes after reaching the maximum interval, and any observed usage change or failed refresh that leaves a value `stale` resets that provider to `25s`. The server only requests usage when a provider is due; `/ccs/top/state` serves the current status view, `/ccs/top/history` serves compact aggregated history for a requested window, `/ccs/cost/status` serves uploaded cost snapshot status, `/ccs/cost/report` serves central cost reports from uploaded snapshots, `/health` returns a compact health JSON, and `POST /ccs/top/pause` / `POST /ccs/top/resume` pause or resume polling. Startup publishes the top HTTP endpoints before refreshing central cost derived data; cost refresh failures are logged and the top endpoints stay available. `POST /ccs/top/reset` accepts the request immediately, refreshes in the server task queue, and resets top polling to `25s`. Control and status HTTP clients use at least a five-second timeout. Run `ccs s pause`, `ccs s resume`, or `ccs s reset` from any client machine with `top.stateUrls`; the command posts to the first reachable configured server, so it does not need to be run on the cloud server itself. Point status-line and central cost clients at LAN servers with `top.stateUrls` in `~/.config/codex-tools/profiles.json`, for example:
-
-`ccs s server` listens on `0.0.0.0`; expose it only on a trusted network or behind an access-controlled proxy.
-
-```json
-{
-  "top": {
-    "stateUrls": [
-      "http://10.126.126.1:8765/ccs/top/state",
-      "http://127.0.0.1:8765/ccs/top/state"
-    ]
-  }
-}
-```
-
-If the first server is unavailable, `ccs s line` tries the next configured URL, then reads the local snapshot.
-
-Run `ccs s history` to render today's usage from the first reachable configured top server. Usage counters reset at midnight, so the default report starts at local `00:00` instead of mixing two daily accounting windows. In history output, `reset` means a usage counter decreased inside that displayed window; the `5h delta` cell uses only the trailing five-hour window. History is collected by `ccs s server`; `ccs top --once` also appends one local snapshot. Restart the server after updating so it serves the compact `/ccs/top/history` API. The client requires the version 2 `series` payload from `/ccs/top/history`. The server appends snapshot records to `~/.cache/codex-tools/ccs-top-history.jsonl`, caps the file at 64M, and readers load only the recent window from the JSONL tail. HTTP clients request only display data for the needed window: stacked trend with summary, and 30-minute bucket changes. The stacked trend shows the first two providers by current history order and combines any remaining providers as `other`. Bucket changes print two consecutive buckets per row. The endpoint accepts `since`, `until`, `bucketMinutes`, and `profile` query parameters, and rejects windows longer than 24h30m. Use `ccs s history PROFILE` to focus the same report on one provider:
-
-```bash
-ccs s history
-ccs s history input
-```
-
-Example output:
-
-```text
-ccs usage history  today  bucket 30m
-source: http://10.126.126.1:8765/ccs/top/history?since=...&bucketMinutes=30
-
-stacked trend                                                        summary
-stack: input / ciii                                                  provider    now  5h delta   last  change
-    $25  ┼                                                           input     $22.4    +$10.0  14:32   +$0.2
-    $20  ┤                          ╭────────────────────────        ciii       $4.2     +$1.1  13:58   +$0.4
-    $15  ┤                          │
-    $10  ┤             ╭────────────╯
-     $5  ┤      ╭──────╯
-     $0  ┼──────╯────────────────────┬────────────┬─────────────┬
-         00:00       06:00         12:00        18:00       24:00
-
-bucket changes
-time          total  input  ciii  |  time          total  input  ciii
-19:00-19:30  +$4.1  +$3.7  +$0.4  |  19:30-20:00  +$2.3  +$2.3  $0
-20:00-20:30  +$0.2  +$0.2    $0  |
-```
-
-For WezTerm, keep `ccs s agent` running in one terminal. It runs in the foreground; stop it with `Ctrl-C` and rerun `ccs s agent` after updating. It writes a timestamped status suffix to `~/.cache/codex-tools/ccs-top-status.txt` on wall-clock second boundaries and reloads `profiles.json` so the `*` marker follows profile switches. Verify it by confirming that file keeps updating. The WezTerm integration renders the clock locally and reads only the suffix from that file, so the GUI callback stays lightweight and the clock stays aligned with the actual clock. If the cached status file goes stale, WezTerm shows `ccs top unavailable`.
-
-Install the WezTerm status bar integration with the project command:
-
-```bash
-ccs s wezterm
-ccs s wezterm remove
-```
-
-`ccs s wezterm` previews the `~/.wezterm.lua` change, then writes after you type exact `yes`; it backs up the existing file under `~/.config/codex-tools/backups/` and inserts a managed status block before `return config`. `ccs s wezterm remove` previews removing that managed block, then removes it after the same confirmation. The installed block reads `~/.cache/codex-tools/ccs-top-status.txt`, renders the clock locally, and hides stale status after a short freshness window; override the file path with `CCS_WEZTERM_STATUS_FILE`.
-
-Rerun `ccs s wezterm` after an update when the managed block needs refreshing. The command replaces the existing managed block after showing the exact preview and receiving `yes`.
-
-Example:
-
-```json
-{
-  "profiles": {
-    "input": {
-      "baseURL": "https://ai.input.im",
-      "apiKey": "codex-key",
-      "routeConversion": {
-        "enabled": false
-      }
-    }
-  },
-  "usage": {
-    "claude": {
-      "baseURL": "https://ai.input.im",
-      "apiKey": "claude-key"
-    }
-  },
-  "current": "input",
-  "toggle": ["input"]
-}
-```
+`ccs list` marks the current profile with `*`.
 
 Initial profile defaults are stored in this repository:
 
@@ -804,7 +490,6 @@ Behavior:
 - Proxy metrics are recomputed from `proxy.json.metrics.recent_requests`. Exact status-code events appear on the status line. Policy summaries aggregate `retry_summary` across the complete recent-request window, independent of rendered rows and `--history`, and omit zero categories. Enabled deadlines and retry configuration remain visible. Reasoning groups and last/average latency use the same state window. `ccs proxy restore` removes the state file, and the next install starts a new statistics window.
 - `ccs proxy help` prints the proxy command summary.
 - Does not print API keys directly; status output masks keys and includes `user@host`.
-- `ccs`, `ccs toggle`, and `ccs PROFILE` print a `usage:` line with local time. `ccs list --usage` fetches usage for all profiles in parallel and prints cost, input, output, cache, and request counts as aligned columns. `ccs top` fetches all profiles and usage-only profiles in parallel and keeps the display to one refreshing line. Usage is fetched from `BASE_URL/v1/usage` with the profile API key; failures print `usage: HH:MM:SS unavailable` or `unavailable`, and missing keys print `usage: HH:MM:SS skipped` or `skipped`.
 - Fails if the profile or API key is missing.
 
 ## cimg

@@ -14,22 +14,17 @@ function runCodexSearch(args, options = {}) {
         printToolVersion(toolName);
         return;
     }
-    const local = options.forceLocal || args[0] === "local";
-    const forwardedArgs = !options.forceLocal && args[0] === "local" ? args.slice(1) : args;
     const codexArgs = ["--search"];
-    if (options.bypassSandbox && (!options.resume || local)) {
+    if (options.bypassSandbox) {
         codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
     }
     for (const override of options.configOverrides ?? []) {
         codexArgs.push("-c", override);
     }
-    if (!local) {
-        codexArgs.push("--remote", "unix://", "-C", process.cwd());
-    }
     if (options.resume) {
         codexArgs.push("resume");
     }
-    codexArgs.push(...forwardedArgs);
+    codexArgs.push(...args);
     const child = spawn("codex", codexArgs, {
         stdio: "inherit",
         env: options.env,
@@ -56,9 +51,8 @@ function isHelpArgument(value) {
 function printHelp(toolName, resume) {
     const argumentName = resume ? "RESUME_ARGS" : "CODEX_ARGS";
     const commands = [
-        [`${toolName} [ARGS...]`, "launch through the local app-server daemon"],
-        [`${toolName} local [ARGS...]`, "launch a local Codex process"],
-        [`${toolName} run PROFILE [${argumentName}...]`, "launch locally with one profile"],
+        [`${toolName} [ARGS...]`, "launch codex search"],
+        [`${toolName} run PROFILE [${argumentName}...]`, "launch with one profile"],
         [`${toolName} version`, "print package version"],
         [`${toolName} -v`, "print package version"],
     ];
@@ -84,10 +78,9 @@ export async function runCodexCommand(args, options = {}) {
     }
     const launch = await resolveCodexProfileLaunch(name);
     printKeyValue("profile:", `${colorName(name)}  ${colorUrl(launch.profile.baseURL)}  ${textDim(maskSecret(launch.profile.apiKey))}`);
-    printKeyValue("mode:", "temporary local codex launch; no files changed");
+    printKeyValue("mode:", "temporary codex launch; no files changed");
     runCodexSearch(args.slice(2), {
         ...options,
-        forceLocal: true,
         configOverrides: launch.configOverrides,
         env: launch.env,
     });
