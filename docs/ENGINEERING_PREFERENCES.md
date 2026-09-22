@@ -55,12 +55,6 @@ in the command-specific specifications.
 - Watch-mode repaint cadence is a display concern. State writes and history appends happen only when runtime facts change.
 - Raw TTY monitors handle `Ctrl-C` as the ETX input byte and route it through the same cleanup path as command-specific exit keys, restoring raw mode, cursor visibility, screen state, and input listeners.
 
-## Cost And Pricing
-
-- Cost reports separate uncached input, output, and cached input tokens and costs. Each cost component requires complete pricing for every model with usage in that category; incomplete components and totals remain `null`, while `missingPricingModels` provides structured diagnosis. A missing price does not fail unrelated rows, central status, or central reports.
-- Pricing lookup reads the shared local cache, built-in supplemental prices, and explicit config overrides. Missing models remain in `missingPricingModels` and terminal pricing status. Remote cache writes belong to explicit `ccs pricing` commands.
-- Model inventory commands that list available models should show whether each model has pricing with `ok`, `partial`, or `missing` status.
-
 ## Test Value
 
 - Prefer tests that protect behavior, data contracts, safety/privacy boundaries, parser behavior, retention limits, and calculations.
