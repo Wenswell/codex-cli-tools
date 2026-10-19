@@ -16,6 +16,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
   assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|mode\|config\|install\|restart\|restore\|serve\]/);
+  assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
   assert.doesNotMatch(output, /ccs run/);
 });
@@ -68,6 +69,118 @@ test("ccs namespaces use compact footers and local help", async () => {
     const configOutput = await runCcs(["dist/bin/ccs.js", "config"], home, env);
     assert.match(configOutput, /--help/);
     assert.match(await runCcs(["dist/bin/ccs.js", "config", "--help"], home, env), /ccs config push/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs models reads the selected profile v1/models endpoint", async () => {
+  const requests = [];
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    requests.push({ url: request.url, authorization: request.headers.authorization });
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      object: "list",
+      data: [
+        { id: "gpt-5-sol", object: "model", created: 1735689600, owned_by: "openai" },
+        { id: "gpt-5-mini", object: "model", created: 1735689600, owned_by: "openai" },
+      ],
+    }));
+  });
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "https://input.example.test", apiKey: "input-key" },
+      ciii: { baseURL: `${baseUrl}/api/v1`, apiKey: "ciii-key" },
+    },
+    current: "ciii",
+  });
+  try {
+    const output = await runCcsDirect(["models"], home);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "/api/v1/models");
+    assert.equal(requests[0].authorization, "Bearer ciii-key");
+    assert.match(output, /^profile:\s+ciii\s+http:\/\/127\.0\.0\.1:\d+\/api\/v1\/models$/m);
+    assert.match(output, /^model\s+owned_by\s+created$/m);
+    assert.match(output, /gpt-5-sol\s+openai\s+2025-01-01/);
+    assert.match(output, /gpt-5-mini\s+openai\s+2025-01-01/);
+  } finally {
+    await closeServer(server);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs models builds the default v1 endpoint and prints JSON", async () => {
+  const requests = [];
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    requests.push(request.url);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      object: "list",
+      data: [{ id: "gpt-5-sol", object: "model", created: 1735689600, owned_by: "openai" }],
+    }));
+  });
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "https://input.example.test", apiKey: "input-key" },
+      ciii: { baseURL: baseUrl, apiKey: "ciii-key" },
+    },
+    current: "input",
+  });
+  try {
+    const output = await runCcsDirect(["models", "ciii", "--json"], home);
+    assert.deepEqual(requests, ["/v1/models"]);
+    assert.deepEqual(JSON.parse(output), {
+      version: 1,
+      profile: "ciii",
+      url: `${baseUrl}/v1/models`,
+      models: [{ id: "gpt-5-sol", owned_by: "openai", created: 1735689600 }],
+    });
+  } finally {
+    await closeServer(server);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs models fails with explicit errors instead of partial output", async () => {
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    if (request.url === "/bad/v1/models") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ data: [{ object: "model" }] }));
+      return;
+    }
+    response.statusCode = 503;
+    response.end("unavailable");
+  });
+  const home = await writeProfiles({
+    profiles: {
+      input: { baseURL: "https://input.example.test", apiKey: "" },
+      down: { baseURL: `${baseUrl}/v1`, apiKey: "down-key" },
+      bad: { baseURL: `${baseUrl}/bad`, apiKey: "bad-key" },
+      broken: { baseURL: "not a url", apiKey: "broken-key" },
+    },
+    current: "down",
+  });
+  try {
+    await assert.rejects(runCcsDirect(["models", "input"], home), /profile input has no apiKey/);
+    await assert.rejects(runCcsDirect(["models", "down"], home), /GET http:\/\/[^ ]+\/v1\/models failed: HTTP 503/);
+    await assert.rejects(runCcsDirect(["models", "bad"], home), /returned an invalid model list/);
+    await assert.rejects(runCcsDirect(["models", "broken"], home), /profile broken has an invalid baseURL: not a url/);
+    await assert.rejects(runCcsDirect(["models", "missing"], home), /profile not found: missing/);
+    await assert.rejects(runCcsDirect(["models", "--bogus"], home), /unknown argument for ccs models: --bogus/);
+  } finally {
+    await closeServer(server);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs models help documents the local surface", async () => {
+  const home = await writeProfiles({
+    profiles: { input: { baseURL: "https://example.invalid", apiKey: "" } },
+    current: "input",
+  });
+  try {
+    const output = await runCcsDirect(["models", "--help"], home);
+    assert.match(output, /ccs models PROFILE --json/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

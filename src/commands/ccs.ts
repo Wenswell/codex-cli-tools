@@ -96,7 +96,19 @@ type Prompt = {
   close(): void;
 };
 
+type ModelEntry = {
+  id: string;
+  ownedBy: string | null;
+  created: number | null;
+};
+
+type ModelsOptions = {
+  profile?: string;
+  json: boolean;
+};
+
 const execFile = promisify(execFileCallback);
+const modelsHttpTimeoutMs = 5_000;
 const configSyncUser = "ravvss";
 const configSyncHost = "10.126.126.1";
 const configSyncPort = "32753";
@@ -1112,12 +1124,183 @@ async function printProfileList(profiles: ProfilesFile): Promise<void> {
   })));
 }
 
+function buildModelsUrl(baseURL: string): string | null {
+  const value = baseURL.trim();
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, "");
+    url.pathname = path === "" ? "/v1/models" : path.endsWith("/v1") ? `${path}/models` : `${path}/v1/models`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function parseModelsResponse(value: unknown): ModelEntry[] | null {
+  const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  if (!Array.isArray(root.data)) {
+    return null;
+  }
+
+  const models: ModelEntry[] = [];
+  for (const item of root.data) {
+    const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    const id = record.id;
+    if (typeof id !== "string" || !id.trim()) {
+      return null;
+    }
+    models.push({
+      id: id.trim(),
+      ownedBy: typeof record.owned_by === "string" && record.owned_by.trim() ? record.owned_by.trim() : null,
+      created: typeof record.created === "number" && Number.isFinite(record.created) ? record.created : null,
+    });
+  }
+  return models;
+}
+
+async function fetchModels(name: string, profile: Profile): Promise<{ url: string; models: ModelEntry[] }> {
+  if (!profile.apiKey) {
+    throw new Error(`profile ${name} has no apiKey`);
+  }
+  const url = buildModelsUrl(profile.baseURL);
+  if (!url) {
+    throw new Error(`profile ${name} has an invalid baseURL: ${profile.baseURL || "(empty)"}`);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), modelsHttpTimeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${profile.apiKey}` },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`GET ${url} timed out after ${modelsHttpTimeoutMs / 1000}s`);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`GET ${url} failed: ${message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    throw new Error(`GET ${url} failed: HTTP ${response.status}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(`GET ${url} returned invalid JSON`);
+  }
+
+  const models = parseModelsResponse(payload);
+  if (!models) {
+    throw new Error(`GET ${url} returned an invalid model list`);
+  }
+  return { url, models };
+}
+
+function formatModelCreated(value: number | null): string {
+  if (value === null) {
+    return "-";
+  }
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? "-" : date.toISOString().slice(0, 10);
+}
+
+function parseModelsArgs(args: string[]): ModelsOptions {
+  let profile: string | undefined;
+  let json = false;
+  for (const arg of args) {
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      throw new Error(`unknown argument for ccs models: ${arg}`);
+    }
+    if (profile !== undefined) {
+      throw new Error("usage: ccs models [PROFILE] [--json]");
+    }
+    profile = arg;
+  }
+  return { profile, json };
+}
+
+async function printModels(profiles: ProfilesFile, args: string[]): Promise<void> {
+  if (isHelpArgument(args[0])) {
+    assertExactArgs(args.slice(1), "models help", 0);
+    printModelsHelp();
+    return;
+  }
+
+  const options = parseModelsArgs(args);
+  const name = options.profile ?? profiles.current ?? "input";
+  const profile = profiles.profiles?.[name];
+  if (!profile) {
+    throw new Error(`profile not found: ${name}`);
+  }
+
+  const { url, models } = await fetchModels(name, assertProfile(profile, name));
+
+  if (options.json) {
+    console.log(stringifyJson({
+      version: 1,
+      profile: name,
+      url,
+      models: models.map((model) => ({
+        id: model.id,
+        owned_by: model.ownedBy,
+        created: model.created,
+      })),
+    }).trimEnd());
+    return;
+  }
+
+  printKeyValue("profile:", `${colorName(name)}  ${colorUrl(url)}`);
+  if (models.length === 0) {
+    console.log(textDim("no models reported"));
+    return;
+  }
+
+  const columns: TableColumn[] = [
+    { key: "id", title: "model" },
+    { key: "ownedBy", title: "owned_by" },
+    { key: "created", title: "created" },
+  ];
+  printTable(columns, models.map((model) => ({
+    id: colorName(model.id),
+    ownedBy: model.ownedBy ? textDim(model.ownedBy) : textDim("-"),
+    created: textDim(formatModelCreated(model.created)),
+  })));
+}
+
+function printModelsHelp(): void {
+  console.log([
+    textBold("Usage:"),
+    "  ccs models                 # list models for the current profile",
+    "  ccs models PROFILE         # list models for one profile",
+    "  ccs models PROFILE --json  # print the model list as JSON",
+  ].join("\n"));
+}
+
 function usageLines(): string[] {
   return [
     "  ccs                                  # show current profile",
     "  ccs version                          # print package version",
     "  ccs -v                               # print package version",
     "  ccs PROFILE                          # show profile details",
+    "  ccs models [PROFILE] [--json]        # list models from the profile v1/models endpoint",
     "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
     "  ccs proxy [watch|reroute|cancel|mode|config|install|restart|restore|serve] # manage proxy state and runtime",
     "  ccs toggle [PROFILE]                 # switch profile",
@@ -1151,7 +1334,7 @@ function printUsageHelp(): void {
   printCommandFooter([
     {
       label: "commands:",
-      commands: ["version", "PROFILE", "toggle", "list", "init", "sync", "add", "remove"],
+      commands: ["version", "PROFILE", "models", "toggle", "list", "init", "sync", "add", "remove"],
     },
     {
       label: "namespaces:",
@@ -1250,6 +1433,11 @@ export async function runCcs(argv: string[]): Promise<void> {
   if (command === "list" || command === "l") {
     assertExactArgs(args, "list", 0);
     await printProfileList(profiles);
+    return;
+  }
+
+  if (command === "models") {
+    await printModels(profiles, args);
     return;
   }
 

@@ -198,7 +198,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | PROFILE | toggle | list | init | sync | add | remove
+commands:   version | PROFILE | models | toggle | list | init | sync | add | remove
 namespaces: proxy | config | --help
 ```
 
@@ -209,6 +209,7 @@ ccs
 ccs version
 ccs -v
 ccs PROFILE
+ccs models [PROFILE] [--json]
 ccs proxy [--history N] [--view overview|tokens|cost]
 ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
@@ -231,6 +232,13 @@ ccs remove | rm | delete PROFILE
 ```
 
 `ccs list` marks the current profile with `*`.
+
+`ccs models [PROFILE]` reads the model list from the selected profile's `v1/models` endpoint and prints `model`, `owned_by`, and `created` columns. It uses the current profile unless `PROFILE` is given, sends the profile API key as `Authorization: Bearer`, and resolves the endpoint from the profile `baseURL`:
+
+- `https://ai.input.im` and `https://ai.input.im/v1` become `https://ai.input.im/v1/models`.
+- `https://ai.input.im/api/v1` becomes `https://ai.input.im/api/v1/models`.
+
+`ccs models PROFILE --json` prints `version`, `profile`, `url`, and a `models` array with `id`, `owned_by`, and `created` fields. Network, HTTP, and response-shape failures exit with a nonzero status and a short `GET <url> ...` error instead of a partial list.
 
 Initial profile defaults are stored in this repository:
 
@@ -409,7 +417,8 @@ ccs proxy mode retry [on|off]
 ccs proxy mode recovery
 ccs proxy mode intercept
 ccs proxy config
-ccs proxy config retry WINDOW BASE MAX
+ccs proxy config retry WINDOW BASE MAX [STATUSES]
+ccs proxy config retry statuses STATUSES
 ccs proxy config latency off
 ccs proxy config latency FIRST TOTAL [return_502|retry_then_502]
 ccs proxy install
