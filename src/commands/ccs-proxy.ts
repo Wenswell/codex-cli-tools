@@ -1913,22 +1913,22 @@ function formatProxyRoute(record: ProxyRequestRecord): string {
 }
 
 function formatProxyActiveState(record: ProxyRequestRecord): string {
-  const search = isProxySearchPath(record.path) ? textGreen("[S]") : "";
-  const compactSearchState = (value: string): string => search ? value.replace(" x", "x") : value;
+  const marker = formatProxyRequestMarker(record);
+  const compactMarkedState = (value: string): string => marker ? value.replace(" x", "x") : value;
   const retryState = proxyActiveRetryState(record);
   if (retryState) {
-    return `${search}${textYellow(compactSearchState(retryState))}`;
+    return `${marker}${textYellow(compactMarkedState(retryState))}`;
   }
   if (record.status === null) {
     const retries = Math.max(0, record.attempts - 1);
-    return `${search}${textYellow(`waiting${retries > 0 ? `${search ? "x" : " x"}${retries}` : ""}`)}`;
+    return `${marker}${textYellow(`waiting${retries > 0 ? `${marker ? "x" : " x"}${retries}` : ""}`)}`;
   }
   if (record.status >= 400) {
-    return `${search}${proxyStatusCountColor(record.status)(`forward:${record.status}`)}`;
+    return `${marker}${proxyStatusCountColor(record.status)(`forward:${record.status}`)}`;
   }
   const retries = Math.max(0, record.attempts - 1);
   const conversion = record.protocol_conversion === "responses_to_chat" ? ":R→C" : "";
-  return `${search}${textGreen(`stream${conversion}${retries > 0 ? `${search ? "x" : " x"}${retries}` : ""}`)}`;
+  return `${marker}${textGreen(`stream${conversion}${retries > 0 ? `${marker ? "x" : " x"}${retries}` : ""}`)}`;
 }
 
 function proxyActiveRetryState(record: ProxyRequestRecord): string | null {
@@ -1941,6 +1941,11 @@ function proxyActiveRetryState(record: ProxyRequestRecord): string | null {
   }
   if ((record.status === 429 || record.status === 503) && record.response_bytes === 0) {
     return `retry:${record.status} x${Math.max(1, record.attempts)}`;
+function formatProxyRequestMarker(record: ProxyRequestRecord): string {
+  if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION) return textGreen("[C]");
+  return isProxySearchPath(record.path) ? textGreen("[S]") : "";
+}
+
   }
   return null;
 }
@@ -2070,9 +2075,9 @@ function formatProxyErrorPrefix(record: ProxyRequestRecord): string {
     ...record.guard_actions
       .map((action) => formatProxyGuardActionPrefixValue(action, record.status)),
   ].filter((value) => value.length > 0);
-  const search = isProxySearchPath(record.path) ? textGreen("[S]") : "";
+  const marker = formatProxyRequestMarker(record);
   const actions = values.length === 0 ? "" : `[${values.join(" ")}]`;
-  return [search, actions].filter((value) => value.length > 0).join(" ");
+  return [marker, actions].filter((value) => value.length > 0).join(" ");
 }
 
 function formatProxyClientRequestAttemptPrefixValue(attempt: number): string {
