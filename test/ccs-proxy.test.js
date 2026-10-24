@@ -354,7 +354,7 @@ test("proxy config prints latency state and writes only after exact confirmation
     await writeFile(statePath, JSON.stringify(proxyStateFixture(), null, 2), "utf8");
 
     const status = stripAnsi(await captureStdout(() => runProxyCommand(["config"], options)));
-    assert.match(status, /retry_statuses:\s+429,503/);
+    assert.match(status, /retry_statuses:\s+429,503,520/);
     assert.match(status, /retry_window:\s+3600000ms/);
     assert.match(status, /backoff_base:\s+1000ms/);
     assert.match(status, /backoff_max:\s+30000ms/);
@@ -407,11 +407,74 @@ test("proxy config prints latency state and writes only after exact confirmation
       ["config", "retry", "5400000", "2000", "45000"],
       options,
     )));
+    assert.match(retryPreview, /retry_statuses:\s+429,503,520/);
     assert.match(retryPreview, /retry_window:\s+5400000ms/);
     assert.match(retryPreview, /backoff_base:\s+2000ms/);
     assert.match(retryPreview, /backoff_max:\s+45000ms/);
     assert.match(retryPreview, /no changes are written unless you type yes/);
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
+
+    const statusPreview = stripAnsi(await captureStdout(() => runProxyCommand(
+      ["config", "retry", "statuses", "400,429,502,503"],
+      options,
+    )));
+    assert.match(statusPreview, /retry_statuses:\s+400,429,502,503/);
+    assert.match(statusPreview, /no changes are written unless you type yes/);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
+
+    const applyCommand = async (args) => {
+      const currentStdin = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      let didAnswer = false;
+      try {
+        await captureStdout(
+          () => runProxyCommand(args, options),
+          {
+            isTTY: true,
+            onWrite(output) {
+              if (!didAnswer && output.includes("Apply changes?")) {
+                didAnswer = true;
+                process.stdin.emit("data", Buffer.from("yes\n"));
+              }
+            },
+          },
+        );
+      } finally {
+        if (currentStdin) {
+          Object.defineProperty(process.stdin, "isTTY", currentStdin);
+        } else {
+          delete process.stdin.isTTY;
+        }
+      }
+      assert.equal(didAnswer, true);
+    };
+
+    await applyCommand(["config", "retry", "statuses", "400,502,503,429"]);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, {
+      ...defaultStatusRetry(),
+      statuses: [400, 429, 502, 503],
+    });
+
+    await applyCommand(["config", "retry", "statuses", "default"]);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
+
+    await applyCommand(["config", "retry", "5400000", "2000", "45000", "400,503"]);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, {
+      enabled: false,
+      statuses: [400, 503],
+      total_window_ms: 5400000,
+      backoff_base_ms: 2000,
+      backoff_max_ms: 45000,
+    });
+
+    await assert.rejects(
+      () => runProxyCommand(["config", "retry", "statuses", "200"], options),
+      /invalid HTTP status code 200, expected integer between 400 and 599/,
+    );
+    await assert.rejects(
+      () => runProxyCommand(["config", "retry", "statuses", ""], options),
+      /at least one status code is required/,
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -486,69 +549,6 @@ test("proxy search config selects and enables an alpha search profile", async ()
   }
 });
 
-test("proxy records active and history request lifecycle", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const proxyPort = await reservePort();
-  const upstreamPort = await reservePort();
-  let streamStartedResolve;
-  const streamStarted = new Promise((resolve) => {
-    streamStartedResolve = resolve;
-  });
-  let finishStream;
-  let writeStreamBurst;
-  const streamRelease = new Promise((resolve) => {
-    finishStream = resolve;
-  });
-  const upstream = createServer((req, res) => {
-    if (req.url?.startsWith("/responses?case=slow")) {
-      setTimeout(() => {
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, path: req.url }));
-      }, 60);
-      return;
-    }
-    if (req.url === "/responses?case=stream") {
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write("data: one\n\n");
-      streamStartedResolve();
-      writeStreamBurst = () => res.write("data: burst\n\n");
-      void streamRelease.then(() => {
-        res.end("data: two\n\n");
-      });
-      return;
-    }
-    if (req.url === "/responses?case=client-error") {
-      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ error: "missing" }));
-      return;
-    }
-    if (req.url === "/responses?case=server-error") {
-      res.writeHead(503, { "content-type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ error: "down" }));
-      return;
-    }
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true }));
-  });
-
-  try {
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await mkdir(stateRoot, { recursive: true });
-    await writeFile(
-      join(stateRoot, "profiles.json"),
-      JSON.stringify(
-        {
-          profiles: {
-            input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "input-key" },
-          },
-          current: "input",
-          toggle: ["input"],
-        },
-        null,
 test("proxy compact config selects and enables a compact profile", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-compact-config-"));
   const previousHome = process.env.HOME;
@@ -618,6 +618,69 @@ test("proxy compact config selects and enables a compact profile", async () => {
   }
 });
 
+test("proxy records active and history request lifecycle", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let streamStartedResolve;
+  const streamStarted = new Promise((resolve) => {
+    streamStartedResolve = resolve;
+  });
+  let finishStream;
+  let writeStreamBurst;
+  const streamRelease = new Promise((resolve) => {
+    finishStream = resolve;
+  });
+  const upstream = createServer((req, res) => {
+    if (req.url?.startsWith("/responses?case=slow")) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, path: req.url }));
+      }, 60);
+      return;
+    }
+    if (req.url === "/responses?case=stream") {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: one\n\n");
+      streamStartedResolve();
+      writeStreamBurst = () => res.write("data: burst\n\n");
+      void streamRelease.then(() => {
+        res.end("data: two\n\n");
+      });
+      return;
+    }
+    if (req.url === "/responses?case=client-error") {
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "missing" }));
+      return;
+    }
+    if (req.url === "/responses?case=server-error") {
+      res.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "down" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(
+      join(stateRoot, "profiles.json"),
+      JSON.stringify(
+        {
+          profiles: {
+            input: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "input-key" },
+          },
+          current: "input",
+          toggle: ["input"],
+        },
+        null,
         2,
       ),
       "utf8",
@@ -1036,69 +1099,6 @@ test("proxy routes alpha search to its mapped profile and preserves explicit pro
   }
 });
 
-test("proxy captures a bounded session at the client HTTP boundary", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-capture-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const proxyPort = await reservePort();
-  const upstreamPort = await reservePort();
-  const upstream = createServer(async (req, res) => {
-    const body = await readServerRequestBody(req);
-    res.writeHead(200, {
-      "content-type": "application/json; charset=utf-8",
-      "set-cookie": "upstream-secret=1",
-      "x-capture-response": "kept",
-    });
-    res.end(JSON.stringify({ echoed: body }));
-  });
-
-  try {
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
-    await listenServer(upstream, upstreamPort);
-    const proxyOptions = {
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot,
-    };
-    await ensureProxyRunning(proxyOptions);
-    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
-
-    const output = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
-    assert.match(output, /capture:\s+active/);
-    assert.match(output, /count:\s+2/);
-    const cancelled = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "cancel"], proxyOptions)));
-    assert.match(cancelled, /capture:\s+inactive/);
-    assert.match(cancelled, /cancelled:\s+yes/);
-    const restarted = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
-    assert.match(restarted, /capture:\s+active/);
-
-    async function send(sessionId, index) {
-      const body = JSON.stringify({ session_id: sessionId, input: `secret prompt ${index}` });
-      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?turn=${index}`, {
-        method: "POST",
-        headers: {
-          authorization: "Bearer client-secret",
-          cookie: "client-secret=1",
-          "content-type": "application/json",
-          "x-capture-request": "kept",
-        },
-        body,
-      });
-      return { body, responseBody: await response.text() };
-    }
-
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
-    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
 test("proxy routes compaction to its mapped profile and preserves explicit profile priority", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
   const previousHome = process.env.HOME;
@@ -1203,6 +1203,69 @@ test("proxy routes compaction to its mapped profile and preserves explicit profi
       stateRoot: join(home, ".config", "codex-tools"),
     }).catch(() => null);
     await Promise.all([closeServer(defaultUpstream), closeServer(compactUpstream)]);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy captures a bounded session at the client HTTP boundary", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-capture-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const upstream = createServer(async (req, res) => {
+    const body = await readServerRequestBody(req);
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "set-cookie": "upstream-secret=1",
+      "x-capture-response": "kept",
+    });
+    res.end(JSON.stringify({ echoed: body }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const output = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
+    assert.match(output, /capture:\s+active/);
+    assert.match(output, /count:\s+2/);
+    const cancelled = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "cancel"], proxyOptions)));
+    assert.match(cancelled, /capture:\s+inactive/);
+    assert.match(cancelled, /cancelled:\s+yes/);
+    const restarted = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
+    assert.match(restarted, /capture:\s+active/);
+
+    async function send(sessionId, index) {
+      const body = JSON.stringify({ session_id: sessionId, input: `secret prompt ${index}` });
+      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?turn=${index}`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer client-secret",
+          cookie: "client-secret=1",
+          "content-type": "application/json",
+          "x-capture-request": "kept",
+        },
+        body,
+      });
+      return { body, responseBody: await response.text() };
+    }
+
     await send("other-session", 0);
     const first = await send("session-alpha-full", 1);
     const second = await send("session-alpha-full", 2);
@@ -3227,6 +3290,60 @@ test("proxy passthrough status retry forwards the final response without inspect
   }
 });
 
+test("proxy passthrough status retry retries configured 400 status", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-passthrough-retry-400-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  let hits = 0;
+  const upstream = createServer((_req, res) => {
+    hits += 1;
+    const status = hits === 1 ? 400 : 200;
+    res.writeHead(status, { "content-type": "application/json", "retry-after": "0" });
+    res.end(JSON.stringify({ status, hit: hits }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    const statePath = join(stateRoot, "proxy.json");
+    const configured = JSON.parse(await readFile(statePath, "utf8"));
+    configured.mode = "passthrough";
+    configured.status_retry = {
+      enabled: true,
+      statuses: [400, 429, 503, 520],
+      total_window_ms: 1000,
+      backoff_base_ms: 5,
+      backoff_max_ms: 10,
+    };
+    await writeFile(statePath, JSON.stringify(configured, null, 2), "utf8");
+    await listenServer(upstream, upstreamPort);
+    const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+    await ensureProxyRunning(options);
+
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body: "{}" });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 200, hit: 2 });
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.attempts === 2);
+    const record = state.metrics.recent_requests[0];
+    assert.equal(hits, 2);
+    assert.equal(record.mode, "passthrough");
+    assert.equal(record.attempts, 2);
+    assert.equal(record.status, 200);
+  } finally {
+    await shutdownProxyRuntime({ codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot: join(home, ".config", "codex-tools") }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy passthrough retry recognizes capacity responses", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-passthrough-capacity-"));
   const previousHome = process.env.HOME;
@@ -4942,7 +5059,7 @@ test("proxy status table renders configured columns and compact units", () => {
       original_base_url: "https://proxy.example.com",
       proxy_base_url: "http://127.0.0.1:4610",
       mode: "recovery",
-      status_retry: { enabled: false, total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
+      status_retry: { enabled: false, statuses: [429, 503, 520], total_window_ms: 3_600_000, backoff_base_ms: 1000, backoff_max_ms: 30_000 },
       latency_guard: {
         enabled: false,
         first_progress_timeout_ms: 0,
@@ -5039,6 +5156,33 @@ test("proxy status table renders configured columns and compact units", () => {
   assert.match(lines, /019f0df6\s+input\/5\.5\n\s+\d\d:\d\d:05\s+200\s+56ms\s+32\.0K\s+\[S\]/);
   assert.match(lines, /019f0dfb\s+input\/5\.5\n\s+\d\d:\d\d:01\s+502\s+300ms\s+2\.00K\s+\[err:502 err:502 guard:506\]/);
   assert.doesNotMatch(lines, /gpt-5\.5/);
+});
+
+test("proxy marks compaction in active state and history result", () => {
+  const records = ["/responses/compact", "/responses"].map((path, index) => proxyHistoryRecord({
+    id: `compact-${index}`,
+    path,
+    request_kind: "context_compaction",
+    status: 200,
+    response_bytes: 128,
+  }));
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:20.000Z"),
+    proxyStateFixture({
+      active_requests: records.map((record) => ({ ...record, completed_at: null })),
+      recent_requests: records,
+    }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.4.4", protocol: 8 },
+    { codexConfigPath: "/tmp/config.toml", listenHost: "127.0.0.1", listenPort: 4610, stateRoot: "/tmp/codex-tools" },
+  ).map(stripAnsi);
+  const historyStart = lines.indexOf("history 2");
+  assert.ok(historyStart > 0);
+  const active = lines.slice(0, historyStart).join("\n");
+  const history = lines.slice(historyStart).join("\n");
+  assert.equal((active.match(/\[C\]stream/g) ?? []).length, 2);
+  assert.equal((history.match(/\[C\]/g) ?? []).length, 2);
+  assert.doesNotMatch(lines.join("\n"), /\[S\]/);
 });
 
 test("proxy active rows compact route, state, and retry facts", () => {
@@ -5158,33 +5302,6 @@ test("proxy status result column stays single-line and expands with terminal wid
       active_requests: [],
       status_counts: { 502: 1 },
       reasoning_token_counts: {},
-test("proxy marks compaction in active state and history result", () => {
-  const records = ["/responses/compact", "/responses"].map((path, index) => proxyHistoryRecord({
-    id: `compact-${index}`,
-    path,
-    request_kind: "context_compaction",
-    status: 200,
-    response_bytes: 128,
-  }));
-  const lines = buildProxyStatusLines(
-    new Date("2026-01-01T00:00:20.000Z"),
-    proxyStateFixture({
-      active_requests: records.map((record) => ({ ...record, completed_at: null })),
-      recent_requests: records,
-    }),
-    ["input"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.4.4", protocol: 8 },
-    { codexConfigPath: "/tmp/config.toml", listenHost: "127.0.0.1", listenPort: 4610, stateRoot: "/tmp/codex-tools" },
-  ).map(stripAnsi);
-  const historyStart = lines.indexOf("history 2");
-  assert.ok(historyStart > 0);
-  const active = lines.slice(0, historyStart).join("\n");
-  const history = lines.slice(historyStart).join("\n");
-  assert.equal((active.match(/\[C\]stream/g) ?? []).length, 2);
-  assert.equal((history.match(/\[C\]/g) ?? []).length, 2);
-  assert.doesNotMatch(lines.join("\n"), /\[S\]/);
-});
-
       upstream_hit_counts: { input: 1 },
       latency_ms: { last: 100, count: 1, sum: 100, min: 100, max: 100 },
       recent_requests: [
@@ -7057,6 +7174,7 @@ function disabledLatencyGuard() {
 function defaultStatusRetry() {
   return {
     enabled: false,
+    statuses: [429, 503, 520],
     total_window_ms: 3_600_000,
     backoff_base_ms: 1000,
     backoff_max_ms: 30_000,

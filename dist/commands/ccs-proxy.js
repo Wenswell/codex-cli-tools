@@ -43,8 +43,10 @@ const PROXY_MODE_INTERCEPT = "intercept";
 const PROXY_MODE_RECOVERY = "recovery";
 const PROXY_DEFAULT_MODE = PROXY_MODE_RECOVERY;
 const PROXY_INSTALL_MODE = PROXY_MODE_PASSTHROUGH;
+const PROXY_DEFAULT_STATUS_RETRY_STATUSES = [429, 503, 520];
 const PROXY_DEFAULT_STATUS_RETRY = {
     enabled: false,
+    statuses: [...PROXY_DEFAULT_STATUS_RETRY_STATUSES],
     total_window_ms: 60 * 60 * 1000,
     backoff_base_ms: 1000,
     backoff_max_ms: 30_000,
@@ -962,6 +964,29 @@ function normalizeProxyState(state) {
         metrics: parseProxyMetrics(state.metrics),
     };
 }
+function parseProxyRetryStatuses(value, source) {
+    let list;
+    if (typeof value === "string") {
+        list = value.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+    }
+    else if (Array.isArray(value)) {
+        list = value;
+    }
+    else {
+        throw new Error(`invalid proxy request data at ${source}: expected comma-separated string or array of HTTP status codes`);
+    }
+    if (list.length === 0) {
+        throw new Error(`invalid proxy request data at ${source}: at least one status code is required`);
+    }
+    const statuses = list.map((item) => {
+        const num = Number(item);
+        if (!Number.isInteger(num) || num < 400 || num > 599) {
+            throw new Error(`invalid proxy request data at ${source}: invalid HTTP status code ${String(item)}, expected integer between 400 and 599`);
+        }
+        return num;
+    });
+    return [...new Set(statuses)].sort((a, b) => a - b);
+}
 function parseProxyStatusRetry(value, source) {
     const raw = requireProxyObject(value, source);
     const enabled = requireProxyField(raw, "enabled", source, (field) => typeof field === "boolean", "boolean");
@@ -974,8 +999,12 @@ function parseProxyStatusRetry(value, source) {
     if (backoffMaxMs > totalWindowMs) {
         throw new Error(`invalid proxy request data at ${source}: backoff_max_ms must not exceed total_window_ms`);
     }
+    const statuses = raw.statuses !== undefined
+        ? parseProxyRetryStatuses(raw.statuses, `${source}.statuses`)
+        : [...PROXY_DEFAULT_STATUS_RETRY_STATUSES];
     return {
         enabled,
+        statuses,
         total_window_ms: totalWindowMs,
         backoff_base_ms: backoffBaseMs,
         backoff_max_ms: backoffMaxMs,
@@ -1328,6 +1357,11 @@ function formatProxyProvider(upstream) {
 function formatProxyRoute(record) {
     return `${formatProxyProvider(record.upstream)}${textDim("/")}${formatProxyModel(record.request_model, record.upstream_model)}`;
 }
+function formatProxyRequestMarker(record) {
+    if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION)
+        return textGreen("[C]");
+    return isProxySearchPath(record.path) ? textGreen("[S]") : "";
+}
 function formatProxyActiveState(record) {
     const marker = formatProxyRequestMarker(record);
     const compactMarkedState = (value) => marker ? value.replace(" x", "x") : value;
@@ -1354,14 +1388,9 @@ function proxyActiveRetryState(record) {
     if (record.response_bytes === 0 && lastAction?.action === "internal_retry") {
         return `retry:${lastAction.reasoning_tokens === null ? record.status ?? "upstream" : "guard"} x${Math.max(1, record.attempts)}`;
     }
-    if ((record.status === 429 || record.status === 503) && record.response_bytes === 0) {
+    if (record.status !== null && record.status >= 400 && record.response_bytes === 0) {
         return `retry:${record.status} x${Math.max(1, record.attempts)}`;
     }
-function formatProxyRequestMarker(record) {
-    if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION)
-        return textGreen("[C]");
-    return isProxySearchPath(record.path) ? textGreen("[S]") : "";
-}
     return null;
 }
 export function formatProxyAttemptTokens(attempts, field) {
@@ -2778,7 +2807,7 @@ async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endp
         const response = fetched.response;
         const status = response.status;
         await callbacks.onResponseStart?.(status, upstream.name);
-        if (statusRetryConfig && isRetryableUpstreamStatus(status)) {
+        if (statusRetryConfig && isRetryableUpstreamStatus(status, statusRetryConfig)) {
             const attempt = currentProxyAttemptRecord(attemptState);
             const trigger = status === 429 ? "http_429" : "http_503";
             const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), statusRetryConfig.total_window_ms);
@@ -3561,7 +3590,10 @@ async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, ga
         });
     }
 }
-function isRetryableUpstreamStatus(status) {
+function isRetryableUpstreamStatus(status, config) {
+    if (config?.statuses) {
+        return config.statuses.includes(status);
+    }
     return status === 429 || status === 503 || status === 520;
 }
 async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, body, gatewayRequestId, attemptRecords, config, callbacks) {
@@ -3598,7 +3630,7 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             const failureSummary = capacityMatched
                 ? proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE)
                 : response.status >= 400 ? proxyHttpFailureSummary(response.status, response.headers) : null;
-            if (!capacityMatched && !isRetryableUpstreamStatus(response.status)) {
+            if (!capacityMatched && !isRetryableUpstreamStatus(response.status, config)) {
                 attempt.client_http_status = response.status;
                 completeProxyAttempt(attempt, capacityMatched ? "upstream_error" : proxyUpstreamFinalAction(response.status), { failureSummary });
                 return createProxyOutcome({
@@ -5977,11 +6009,15 @@ function usageHelpLines() {
         "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
         "  ccs proxy mode recovery                  # enable continuation recovery mode",
         "  ccs proxy mode intercept                 # enable guard intercept mode",
+        "  ccs proxy compact                        # show compaction forwarding",
+        "  ccs proxy compact up|down                # enable or disable compaction forwarding",
+        "  ccs proxy compact set PROFILE            # select compaction upstream profile",
         "  ccs proxy search                         # show alpha search forwarding",
         "  ccs proxy search up|down                 # enable or disable alpha search forwarding",
         "  ccs proxy search set PROFILE             # select alpha search upstream profile",
         "  ccs proxy config                         # print active proxy policy configuration",
-        "  ccs proxy config retry WINDOW BASE MAX   # set status retry window and backoff milliseconds",
+        "  ccs proxy config retry WINDOW BASE MAX [STATUSES] # set status retry window, backoff, and optional statuses",
+        "  ccs proxy config retry statuses STATUSES # set status retry HTTP status codes (e.g. 400,429,502,503 or default)",
         "  ccs proxy config latency off             # disable latency deadlines after confirmation",
         "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
@@ -6009,9 +6045,6 @@ export function parseProxyStatusArgs(args, commandName) {
     let view;
     for (let index = 0; index < args.length; index += 2) {
         const flag = args[index];
-        "  ccs proxy compact                        # show compaction forwarding",
-        "  ccs proxy compact up|down                # enable or disable compaction forwarding",
-        "  ccs proxy compact set PROFILE            # select compaction upstream profile",
         if (flag === "--history" && historyCount === undefined) {
             historyCount = parseProxyHistoryCount(args[index + 1]);
         }
@@ -6089,18 +6122,36 @@ function printProxyLatencyGuard(value) {
     printKeyValue("first_action:", value.first_progress_action, 15);
     printKeyValue("total:", `${value.total_timeout_ms}ms`, 15);
 }
-function parseProxyStatusRetryConfig(args, enabled) {
-    if (args.length !== 3) {
-        throw new Error("ccs proxy config retry requires WINDOW BASE MAX milliseconds");
+function parseProxyStatusRetryConfig(args, enabled, currentRetry) {
+    if (args[0] === "statuses" || args[0] === "status") {
+        if (args.length !== 2) {
+            throw new Error("ccs proxy config retry statuses requires comma-separated HTTP status codes (e.g. 400,429,502,503) or default");
+        }
+        const statuses = args[1] === "default"
+            ? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES]
+            : parseProxyRetryStatuses(args[1], "retry config statuses");
+        const base = currentRetry ?? PROXY_DEFAULT_STATUS_RETRY;
+        return {
+            ...base,
+            enabled,
+            statuses,
+        };
     }
-    const [totalWindowMs, backoffBaseMs, backoffMaxMs] = args.map((value) => {
+    if (args.length !== 3 && args.length !== 4) {
+        throw new Error("ccs proxy config retry requires WINDOW BASE MAX [STATUSES] milliseconds or statuses STATUSES");
+    }
+    const [totalWindowMs, backoffBaseMs, backoffMaxMs] = args.slice(0, 3).map((value) => {
         if (!value || !/^\d+$/.test(value) || !isPositiveProxyTimerMs(Number(value))) {
             throw new Error("ccs proxy config retry requires positive timer-range integers");
         }
         return Number(value);
     });
+    const statuses = args[3] !== undefined
+        ? (args[3] === "default" ? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES] : parseProxyRetryStatuses(args[3], "retry config statuses"))
+        : (currentRetry?.statuses ?? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES]);
     return parseProxyStatusRetry({
         enabled,
+        statuses,
         total_window_ms: totalWindowMs,
         backoff_base_ms: backoffBaseMs,
         backoff_max_ms: backoffMaxMs,
@@ -6108,7 +6159,7 @@ function parseProxyStatusRetryConfig(args, enabled) {
 }
 function printProxyStatusRetry(value) {
     printKeyValue("retry:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
-    printKeyValue("retry_statuses:", "429,503", 15);
+    printKeyValue("retry_statuses:", value.statuses.join(","), 15);
     printKeyValue("retry_window:", `${value.total_window_ms}ms`, 15);
     printKeyValue("backoff_base:", `${value.backoff_base_ms}ms`, 15);
     printKeyValue("backoff_max:", `${value.backoff_max_ms}ms`, 15);
@@ -6350,7 +6401,7 @@ export async function runProxyCommand(args, options) {
         if (rest[0] !== "latency" && rest[0] !== "retry") {
             throw new Error(`unknown argument for ccs proxy config: ${rest[0]}`);
         }
-        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1), state.status_retry.enabled) : state.status_retry;
+        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1), state.status_retry.enabled, state.status_retry) : state.status_retry;
         const latencyGuard = rest[0] === "latency" ? parseProxyLatencyConfig(rest.slice(1)) : state.latency_guard;
         if (rest[0] === "retry")
             printProxyStatusRetry(statusRetry);
