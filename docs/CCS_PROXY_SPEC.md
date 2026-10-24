@@ -347,7 +347,7 @@ Token and cost columns aggregate all `usage_attempts`; the route model remains c
 
 Cost lookup reads the local model price cache once per frame, applies `profiles.json` overrides, and performs no network refresh. Each attempt uses its stored exact pricing model and normalized tier: `default|standard` selects standard pricing and `fast|priority` selects fast pricing. Input cost subtracts cached input before applying input price; cached and output components use their own prices. Components sum unrounded attempt values and format once. Missing usage, unsupported tiers, or missing prices render the affected component and total as `-`. Cached input above input tokens renders input and total as `invalid`. USD values render as `$0`, `<$0.0001`, up to four decimals below `$0.01`, and two decimals from `$0.01`.
 
-Active overview `age` is total request time so far and `size` is known client-forwarded bytes. Search requests for `/alpha/search` and `/v1/alpha/search` display a green `[S]` in active `state` and history `result`. History `dur.` is total request time. The history `result` column retains search, client, and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
+Active overview `age` is total request time so far and `size` is known client-forwarded bytes. Search requests for `/alpha/search` and `/v1/alpha/search` display a green `[S]` in active `state` and history `result`. Compaction requests (`request_kind=context_compaction`) display a green `[C]` in those same columns, including standalone compact paths and explicitly marked requests. History `dur.` is total request time. The history `result` column retains search, compaction, client, and policy prefixes plus stored failure details, truncated only for the current terminal width. Time, duration, and size retain compact three-significant-digit units.
 
 ## Implementation notes
 
@@ -465,12 +465,12 @@ history cost     time status input$ output$ cached$ total$ result
 
 - `route`: provider/model with six direct-truncated provider cells and eight normalized direct-truncated model cells. It is a single active column and a history context value.
 - `session`: equal visible session ids use the same color across active and history rows. The first 11 distinct visible ids use different ANSI 256 colors from `39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214`; allocation is deterministic for the visible id set.
-- `state`: active `waiting` and `retry:*` values are yellow, `stream` is green, and `forward:<status>` uses the status color. Search requests start with `[S]`; `R→C` and retry count stay in this column.
+- `state`: active `waiting` and `retry:*` values are yellow, `stream` is green, and `forward:<status>` uses the status color. Search requests start with `[S]` and compaction requests with `[C]`; `R→C` and retry count stay in this column.
 - `age`: elapsed time for the full active client request. `dur.` is completed request duration in history rows.
 - Token columns require the field from every attempt and sum all attempt values.
 - Cost columns calculate each attempt with its own model and tier, sum full-precision values, and format once.
 - Active rows update route and state after each upstream attempt; active rows never show a terminal result.
-- History `result`: optional bracketed search and local-action prefix, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
+- History `result`: optional bracketed search/compaction and local-action prefix, then request result or failure text, left-aligned in the final remaining-width column and rendered as one current-width line.
 
 ### Tests
 

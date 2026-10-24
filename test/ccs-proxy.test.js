@@ -5158,6 +5158,33 @@ test("proxy status result column stays single-line and expands with terminal wid
       active_requests: [],
       status_counts: { 502: 1 },
       reasoning_token_counts: {},
+test("proxy marks compaction in active state and history result", () => {
+  const records = ["/responses/compact", "/responses"].map((path, index) => proxyHistoryRecord({
+    id: `compact-${index}`,
+    path,
+    request_kind: "context_compaction",
+    status: 200,
+    response_bytes: 128,
+  }));
+  const lines = buildProxyStatusLines(
+    new Date("2026-01-01T00:00:20.000Z"),
+    proxyStateFixture({
+      active_requests: records.map((record) => ({ ...record, completed_at: null })),
+      recent_requests: records,
+    }),
+    ["input"],
+    { healthy: true, started: false, pid: 1234, state: null, version: "0.4.4", protocol: 8 },
+    { codexConfigPath: "/tmp/config.toml", listenHost: "127.0.0.1", listenPort: 4610, stateRoot: "/tmp/codex-tools" },
+  ).map(stripAnsi);
+  const historyStart = lines.indexOf("history 2");
+  assert.ok(historyStart > 0);
+  const active = lines.slice(0, historyStart).join("\n");
+  const history = lines.slice(historyStart).join("\n");
+  assert.equal((active.match(/\[C\]stream/g) ?? []).length, 2);
+  assert.equal((history.match(/\[C\]/g) ?? []).length, 2);
+  assert.doesNotMatch(lines.join("\n"), /\[S\]/);
+});
+
       upstream_hit_counts: { input: 1 },
       latency_ms: { last: 100, count: 1, sum: 100, min: 100, max: 100 },
       recent_requests: [
