@@ -549,6 +549,75 @@ test("proxy records active and history request lifecycle", async () => {
           toggle: ["input"],
         },
         null,
+test("proxy compact config selects and enables a compact profile", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-compact-config-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const stateRoot = join(home, ".config", "codex-tools");
+  const options = {
+    codexConfigPath: join(home, ".codex", "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: 4610,
+    stateRoot,
+  };
+  const apply = async (args) => {
+    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    let answered = false;
+    try {
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      await captureStdout(() => runProxyCommand(args, options), {
+        isTTY: true,
+        onWrite(output) {
+          if (!answered && output.includes("Apply changes?")) {
+            answered = true;
+            process.stdin.emit("data", Buffer.from("yes\n"));
+          }
+        },
+      });
+    } finally {
+      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
+      else delete process.stdin.isTTY;
+    }
+    assert.equal(answered, true);
+  };
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      4610,
+      { compact: { baseURL: "https://compact.example.test", apiKey: "compact-key" } },
+      "compact",
+    );
+
+    const status = stripAnsi(await captureStdout(() => runProxyCommand(["compact"], options)));
+    assert.match(status, /compact:\s+down/);
+    assert.match(status, /profile:\s+none/);
+    assert.match(status, /commands:\s+up \| down \| set PROFILE/);
+    await assert.rejects(() => runProxyCommand(["compact", "up"], options), /requires a profile/);
+
+    await apply(["compact", "set", "compact"]);
+    let profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.compact, { enabled: false, profile: "compact" });
+
+    await apply(["compact", "up"]);
+    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.compact, { enabled: true, profile: "compact" });
+
+    await apply(["compact", "down"]);
+    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
+    assert.deepEqual(profiles.proxy.compact, { enabled: false, profile: "compact" });
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
         2,
       ),
       "utf8",
@@ -1022,6 +1091,118 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
       return { body, responseBody: await response.text() };
     }
 
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy routes compaction to its mapped profile and preserves explicit profile priority", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const defaultPort = await reservePort();
+  const compactPort = await reservePort();
+  const defaultHits = [];
+  const compactHits = [];
+  const defaultUpstream = createServer(async (req, res) => {
+    defaultHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "default" }));
+  });
+  const compactUpstream = createServer(async (req, res) => {
+    compactHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "compact" }));
+  });
+
+  try {
+    process.env.HOME = home;
+    const stateRoot = join(home, ".config", "codex-tools");
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      proxyPort,
+      {
+        default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
+        compact: { baseURL: `http://127.0.0.1:${compactPort}`, apiKey: "compact-key" },
+      },
+      "default",
+      ["default", "compact"],
+      { compact: { enabled: true, profile: "compact" } },
+    );
+    await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(compactUpstream, compactPort)]);
+    const proxyOptions = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot,
+    };
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const body = JSON.stringify({ query: "codex proxy" });
+    const mapped = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses/compact?limit=3`, {
+      method: "POST",
+      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await mapped.json(), { provider: "compact" });
+
+    const mappedWithoutVersion = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact?limit=4`, {
+      method: "POST",
+      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await mappedWithoutVersion.json(), { provider: "compact" });
+    assert.deepEqual(compactHits, [
+      { authorization: "Bearer compact-key", url: "/v1/responses/compact?limit=3", body },
+      { authorization: "Bearer compact-key", url: "/responses/compact?limit=4", body },
+    ]);
+    assert.deepEqual(defaultHits, []);
+
+    const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses/compact`, {
+      method: "POST",
+      headers: { "x-ccs-profile": "default", "content-type": "application/json" },
+      body,
+    });
+    assert.deepEqual(await pinned.json(), { provider: "default" });
+    assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/responses/compact", body }]);
+
+    const marked = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+      method: "POST", headers: { "x-codex-purpose": "remote_compaction" }, body,
+    });
+    assert.deepEqual(await marked.json(), { provider: "compact" });
+
+    const profilesPath = join(stateRoot, "profiles.json");
+    const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
+    profiles.proxy.compact.enabled = false;
+    await writeFile(profilesPath, JSON.stringify(profiles));
+    const disabled = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
+    assert.deepEqual(await disabled.json(), { provider: "default" });
+    profiles.proxy.compact.enabled = true;
+    await writeFile(profilesPath, JSON.stringify(profiles));
+    const normal = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body });
+    assert.deepEqual(await normal.json(), { provider: "default" });
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 6);
+    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["compact", "compact", "compact", "default", "default", "default"]);
+    assert.equal(state.metrics.recent_requests.filter((record) => record.request_kind === "context_compaction").length, 5);
+    profiles.proxy.compact.profile = "missing";
+    await writeFile(profilesPath, JSON.stringify(profiles));
+    const invalid = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await shutdownProxyRuntime({
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: proxyPort,
+      stateRoot: join(home, ".config", "codex-tools"),
+    }).catch(() => null);
+    await Promise.all([closeServer(defaultUpstream), closeServer(compactUpstream)]);
     await send("other-session", 0);
     const first = await send("session-alpha-full", 1);
     const second = await send("session-alpha-full", 2);

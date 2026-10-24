@@ -711,30 +711,30 @@ function currentProviderBaseUrl(content) {
 function buildProfileOrder(profiles) {
     return profiles.current ? [profiles.current] : [];
 }
-function resolveProxyUpstream(profiles, requestedProfile, requestPath) {
-    const searchProfile = requestPath && isProxySearchPath(requestPath) && profiles.proxy?.search?.enabled
-        ? profiles.proxy.search.profile
-        : undefined;
-    const name = requestedProfile || searchProfile || profiles.current;
+function resolveProxyUpstream(profiles, requestedProfile, requestPath, requestKind) {
+    const route = requestKind === REQUEST_KIND_CONTEXT_COMPACTION ? "compact"
+        : requestPath && isProxySearchPath(requestPath) ? "search" : undefined;
+    const routeProfile = route && profiles.proxy?.[route]?.enabled ? profiles.proxy[route].profile : undefined;
+    const name = requestedProfile || routeProfile || profiles.current;
     if (!name) {
         throw new Error("profiles.current was not found");
     }
     const profile = profiles.profiles?.[name];
     if (!profile) {
-        if (requestedProfile || searchProfile) {
+        if (requestedProfile || routeProfile) {
             throw new ProxyProfileSelectionError(`proxy profile ${name} was not found`);
         }
         throw new Error(`profiles.current ${name} was not found in profiles`);
     }
     const baseURL = profile?.baseURL;
     if (!baseURL) {
-        if (requestedProfile || searchProfile) {
+        if (requestedProfile || routeProfile) {
             throw new ProxyProfileSelectionError(`proxy profile ${name} has no baseURL`);
         }
         throw new Error(`profiles.current ${name} has no baseURL`);
     }
     if (!profile.apiKey) {
-        if (requestedProfile || searchProfile) {
+        if (requestedProfile || routeProfile) {
             throw new ProxyProfileSelectionError(`proxy profile ${name} has no apiKey`);
         }
         throw new Error(`profiles.current ${name} has no apiKey`);
@@ -2293,7 +2293,10 @@ function sanitizeWhitelistedRequestHeaders(headers) {
     }
     return sanitized;
 }
-function detectProxyRequestKind(headers, requestJson) {
+function detectProxyRequestKind(headers, requestJson, requestPath) {
+    if (requestPath === "/responses/compact" || requestPath === "/v1/responses/compact") {
+        return REQUEST_KIND_CONTEXT_COMPACTION;
+    }
     const headerSignals = [
         headerSignal(headers, "x-codex-request-kind"),
         headerSignal(headers, "x-codex-purpose"),
@@ -5480,14 +5483,15 @@ async function serveProxy(options) {
                     }
                     const profiles = await readProfiles();
                     const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
-                    const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname);
+                    const requestKind = detectProxyRequestKind(req.headers, requestJson, url.pathname);
+                    const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname, requestKind);
                     requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
                     activeRecord.session = sessionId ? shortSessionId(sessionId) : null;
                     activeRecord.client_turn_id = nullableStringField(turnMetadata?.turn_id);
-                    activeRecord.request_kind = detectProxyRequestKind(req.headers, requestJson);
+                    activeRecord.request_kind = requestKind;
                     activeRecord.request_model = extractRequestModelFromJson(requestJson, endpointClass);
                     activeRecord.request_reasoning_effort = extractRequestReasoningEffortFromJson(requestJson);
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
@@ -5495,7 +5499,7 @@ async function serveProxy(options) {
                         signal: downstreamAbort.signal,
                         resolveRetryUpstream: requestedProfile
                             ? undefined
-                            : async () => resolveProxyUpstream(await readProfiles(), undefined, url.pathname),
+                            : async () => resolveProxyUpstream(await readProfiles(), undefined, url.pathname, requestKind),
                         onStatusRetryWait: (wait) => {
                             const entry = {
                                 request_id: wait.requestId,
@@ -6000,6 +6004,9 @@ export function parseProxyStatusArgs(args, commandName) {
     let view;
     for (let index = 0; index < args.length; index += 2) {
         const flag = args[index];
+        "  ccs proxy compact                        # show compaction forwarding",
+        "  ccs proxy compact up|down                # enable or disable compaction forwarding",
+        "  ccs proxy compact set PROFILE            # select compaction upstream profile",
         if (flag === "--history" && historyCount === undefined) {
             historyCount = parseProxyHistoryCount(args[index + 1]);
         }
@@ -6101,33 +6108,33 @@ function printProxyStatusRetry(value) {
     printKeyValue("backoff_base:", `${value.backoff_base_ms}ms`, 15);
     printKeyValue("backoff_max:", `${value.backoff_max_ms}ms`, 15);
 }
-function proxySearchConfig(profiles) {
-    return profiles.proxy?.search ?? { enabled: false };
+function proxyRouteConfig(profiles, route) {
+    return profiles.proxy?.[route] ?? { enabled: false };
 }
-function printProxySearchStatus(profiles) {
-    const search = proxySearchConfig(profiles);
-    printKeyValue("search:", search.enabled ? textGreen("up") : textDim("down"), 8);
-    printKeyValue("profile:", search.profile ? colorName(search.profile) : textDim("none"), 8);
+function printProxyRouteStatus(profiles, route) {
+    const config = proxyRouteConfig(profiles, route);
+    printKeyValue(`${route}:`, config.enabled ? textGreen("up") : textDim("down"), 8);
+    printKeyValue("profile:", config.profile ? colorName(config.profile) : textDim("none"), 8);
     printKeyValue("commands:", "up | down | set PROFILE", 8);
 }
-function assertSearchProfile(profiles, name) {
+function assertRouteProfile(profiles, name, route) {
     const profile = profiles.profiles?.[name];
     if (!profile) {
-        throw new Error(`ccs proxy search profile was not found: ${name}`);
+        throw new Error(`ccs proxy ${route} profile was not found: ${name}`);
     }
     const normalized = assertProfile(profile, name);
     if (!normalized.baseURL.trim() || !normalized.apiKey.trim()) {
-        throw new Error(`ccs proxy search profile ${name} requires baseURL and apiKey`);
+        throw new Error(`ccs proxy ${route} profile ${name} requires baseURL and apiKey`);
     }
 }
-async function applyProxySearchConfig(expectedProfiles, nextSearch) {
+async function applyProxyRouteConfig(expectedProfiles, nextConfig, route) {
     const currentProfiles = await readProfiles();
     if (JSON.stringify(currentProfiles) !== JSON.stringify(expectedProfiles)) {
-        throw new Error("profiles.json changed after preview; run ccs proxy search again");
+        throw new Error(`profiles.json changed after preview; run ccs proxy ${route} again`);
     }
     await writeProfiles({
         ...currentProfiles,
-        proxy: { ...currentProfiles.proxy, search: nextSearch },
+        proxy: { ...currentProfiles.proxy, [route]: nextConfig },
     });
 }
 export async function runProxyCommand(args, options) {
@@ -6137,7 +6144,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
@@ -6290,38 +6297,38 @@ export async function runProxyCommand(args, options) {
         printProxyModeRuntime(result.runtime);
         return;
     }
-    if (command === "search") {
-        rejectRemovedYesFlags(rest, "ccs proxy search");
+    if (command === "search" || command === "compact") {
+        rejectRemovedYesFlags(rest, `ccs proxy ${command}`);
         const profiles = await readProfiles();
         if (rest.length === 0) {
-            printProxySearchStatus(profiles);
+            printProxyRouteStatus(profiles, command);
             return;
         }
-        const current = proxySearchConfig(profiles);
+        const current = proxyRouteConfig(profiles, command);
         let next;
         if (rest.length === 1 && (rest[0] === "up" || rest[0] === "down")) {
             if (rest[0] === "up") {
                 if (!current.profile) {
-                    throw new Error("ccs proxy search up requires a profile; run ccs proxy search set PROFILE first");
+                    throw new Error(`ccs proxy ${command} up requires a profile; run ccs proxy ${command} set PROFILE first`);
                 }
-                assertSearchProfile(profiles, current.profile);
+                assertRouteProfile(profiles, current.profile, command);
             }
             next = { ...current, enabled: rest[0] === "up" };
         }
         else if (rest.length === 2 && rest[0] === "set" && rest[1]) {
-            assertSearchProfile(profiles, rest[1]);
+            assertRouteProfile(profiles, rest[1], command);
             next = { ...current, profile: rest[1] };
         }
         else {
-            throw new Error("ccs proxy search requires up, down, or set PROFILE");
+            throw new Error(`ccs proxy ${command} requires up, down, or set PROFILE`);
         }
-        printKeyValue("search:", `${current.enabled ? "up" : "down"} -> ${next.enabled ? "up" : "down"}`, 8);
+        printKeyValue(`${command}:`, `${current.enabled ? "up" : "down"} -> ${next.enabled ? "up" : "down"}`, 8);
         printKeyValue("profile:", `${current.profile ?? "none"} -> ${next.profile ?? "none"}`, 8);
         printKeyValue("note:", "no changes are written unless you type yes", 8);
         if (!(await confirmApply()))
             return;
-        await applyProxySearchConfig(profiles, next);
-        printProxySearchStatus(await readProfiles());
+        await applyProxyRouteConfig(profiles, next, command);
+        printProxyRouteStatus(await readProfiles(), command);
         return;
     }
     if (command === "config") {

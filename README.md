@@ -287,6 +287,9 @@ Set `routeConversion.enabled` to `true` for a provider that only accepts Chat Co
 
 When proxy mode is installed, use `ccs proxy search` to inspect alpha-search forwarding, `ccs proxy search set PROFILE` to select its provider, and `ccs proxy search up|down` to enable or disable it. The example above sends `/alpha/search` and `/v1/alpha/search` to `ciii`; an explicit `cx run PROFILE` (or equivalent) profile remains higher priority.
 
+Use `ccs proxy compact set PROFILE` followed by `ccs proxy compact up` to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider. `ccs proxy compact` shows the setting; `down` disables it. Explicit `run PROFILE` selection takes priority. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
+
+
 `ccs init` first reads the current Codex API settings from:
 
 ```text

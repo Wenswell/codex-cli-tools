@@ -31,7 +31,8 @@ export async function readProfiles() {
     }
     try {
         const profiles = parseJsonObject(text);
-        assertProxySearch(profiles.proxy?.search);
+        assertProxyRoute(profiles.proxy?.search, "search");
+        assertProxyRoute(profiles.proxy?.compact, "compact");
         assertCimgConfig(profiles.cimg);
         return profiles;
     }
@@ -40,22 +41,22 @@ export async function readProfiles() {
         throw new Error(`invalid profiles.json: ${message}`);
     }
 }
-function assertProxySearch(value) {
+function assertProxyRoute(value, route) {
     if (value === undefined) {
         return;
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error("invalid profiles.json: proxy.search must be an object");
+        throw new Error(`invalid profiles.json: proxy.${route} must be an object`);
     }
     const search = value;
     if (typeof search.enabled !== "boolean") {
-        throw new Error("invalid profiles.json: proxy.search.enabled must be boolean");
+        throw new Error(`invalid profiles.json: proxy.${route}.enabled must be boolean`);
     }
     if (search.profile !== undefined && (typeof search.profile !== "string" || !search.profile.trim())) {
-        throw new Error("invalid profiles.json: proxy.search.profile must be a non-empty profile name");
+        throw new Error(`invalid profiles.json: proxy.${route}.profile must be a non-empty profile name`);
     }
     if (search.enabled && !search.profile) {
-        throw new Error("invalid profiles.json: proxy.search.profile is required when search is enabled");
+        throw new Error(`invalid profiles.json: proxy.${route}.profile is required when ${route} is enabled`);
     }
 }
 function assertCimgConfig(value) {

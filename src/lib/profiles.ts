@@ -13,7 +13,7 @@ export type Profile = {
   };
 };
 
-export type ProxySearchConfig = {
+export type ProxyRouteConfig = {
   enabled: boolean;
   profile?: string;
 };
@@ -31,7 +31,9 @@ export type ProfilesFile = {
   profiles?: Record<string, Profile>;
   proxy?: {
     /** Route Codex alpha search requests to this profile when enabled. */
-    search?: ProxySearchConfig;
+    search?: ProxyRouteConfig;
+    /** Route standalone and explicitly marked compaction requests. */
+    compact?: ProxyRouteConfig;
   };
   cimg?: CimgConfig;
   usage?: Record<string, Profile>;
@@ -83,7 +85,8 @@ export async function readProfiles(): Promise<ProfilesFile> {
 
   try {
     const profiles = parseJsonObject(text) as ProfilesFile;
-    assertProxySearch(profiles.proxy?.search);
+    assertProxyRoute(profiles.proxy?.search, "search");
+    assertProxyRoute(profiles.proxy?.compact, "compact");
     assertCimgConfig(profiles.cimg);
     return profiles;
   } catch (error) {
@@ -92,22 +95,22 @@ export async function readProfiles(): Promise<ProfilesFile> {
   }
 }
 
-function assertProxySearch(value: unknown): void {
+function assertProxyRoute(value: unknown, route: "search" | "compact"): void {
   if (value === undefined) {
     return;
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("invalid profiles.json: proxy.search must be an object");
+    throw new Error(`invalid profiles.json: proxy.${route} must be an object`);
   }
-  const search = value as Partial<ProxySearchConfig>;
+  const search = value as Partial<ProxyRouteConfig>;
   if (typeof search.enabled !== "boolean") {
-    throw new Error("invalid profiles.json: proxy.search.enabled must be boolean");
+    throw new Error(`invalid profiles.json: proxy.${route}.enabled must be boolean`);
   }
   if (search.profile !== undefined && (typeof search.profile !== "string" || !search.profile.trim())) {
-    throw new Error("invalid profiles.json: proxy.search.profile must be a non-empty profile name");
+    throw new Error(`invalid profiles.json: proxy.${route}.profile must be a non-empty profile name`);
   }
   if (search.enabled && !search.profile) {
-    throw new Error("invalid profiles.json: proxy.search.profile is required when search is enabled");
+    throw new Error(`invalid profiles.json: proxy.${route}.profile is required when ${route} is enabled`);
   }
 }
 
