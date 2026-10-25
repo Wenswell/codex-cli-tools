@@ -1174,9 +1174,10 @@ test("proxy routes compaction to its mapped profile and preserves explicit profi
     assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/responses/compact", body }]);
 
     const marked = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
-      method: "POST", headers: { "x-codex-purpose": "remote_compaction" }, body,
+      method: "POST", body: JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }),
     });
     assert.deepEqual(await marked.json(), { provider: "compact" });
+    assert.equal(compactHits.at(-1).body, JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }));
 
     const profilesPath = join(stateRoot, "profiles.json");
     const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
@@ -3812,6 +3813,25 @@ test("proxy records request kind from Codex headers and request fields", async (
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
     const specs = [
+      ...["/responses", "/v1/responses", "/openai/v1/responses", "/backend-api/codex/responses"].map((path, index) => ({
+        model: `kind-compaction-trigger-${index}`,
+        path,
+        headers: {},
+        body: { stream: true, input: [{ type: "message", role: "user", content: "hello" }, { type: "compaction_trigger" }] },
+        expected: "context_compaction",
+      })),
+      ...[false, "true", undefined].map((stream, index) => ({
+        model: `kind-invalid-compaction-stream-${index}`,
+        headers: {},
+        body: { stream, input: [{ type: "compaction_trigger" }] },
+        expected: "normal",
+      })),
+      {
+        model: "kind-compaction-capability-only",
+        headers: { "x-codex-beta-features": "remote_compaction_v2" },
+        body: { stream: true, input: [{ type: "compaction" }] },
+        expected: "normal",
+      },
       {
         model: "kind-header-request-kind",
         headers: { "x-codex-request-kind": "context_compaction" },
@@ -3863,7 +3883,7 @@ test("proxy records request kind from Codex headers and request fields", async (
     ];
 
     for (const spec of specs) {
-      const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=${spec.model}`, {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}${spec.path ?? "/v1/responses"}?case=${spec.model}`, {
         method: "POST",
         headers: { "content-type": "application/json", ...spec.headers },
         body: JSON.stringify({ model: spec.model, ...spec.body }),

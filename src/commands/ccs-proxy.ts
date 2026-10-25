@@ -3026,6 +3026,12 @@ function detectProxyRequestKind(headers: IncomingMessage["headers"], requestJson
   const raw = requestJson && typeof requestJson === "object" && !Array.isArray(requestJson)
     ? requestJson as Record<string, unknown>
     : {};
+  if (["/responses", "/v1/responses", "/openai/v1/responses", "/backend-api/codex/responses"].includes(requestPath)
+    && raw.stream === true
+    && Array.isArray(raw.input)
+    && raw.input.some((item) => item !== null && typeof item === "object" && item.type === "compaction_trigger")) {
+    return REQUEST_KIND_CONTEXT_COMPACTION;
+  }
   const metadataSignals = [
     raw.metadata,
     raw.codex_request_kind,
