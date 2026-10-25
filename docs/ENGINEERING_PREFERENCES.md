@@ -65,10 +65,10 @@ in the command-specific specifications.
 
 ## Documentation
 
-- Keep `README.md` focused on user setup and command behavior. Put reusable
-  contributor rules and detailed data contracts under `docs/`.
-- Update the README, owning specification, tests, and built `dist` output together
-  when CLI behavior changes.
+- Keep `README.md` focused on introduction, quick start, and documentation links.
+  Root `AGENTS.md` owns development workflow, verification, and commit requirements.
+  Put detailed operation guides, engineering conventions, and data contracts under `docs/`.
+- Follow root `AGENTS.md` for required documentation updates and verification.
 - Keep current contracts, not completed implementation plans, audits, or review
   logs. Git history owns historical implementation detail.
 - Convert repeated review feedback into a reusable rule in the owning document.
@@ -81,9 +81,3 @@ in the command-specific specifications.
 - File-changing previews should retain the exact source and target content. Apply verifies that the source remains current, writes the previewed target, and reads it back before reporting success.
 - Multi-attempt runtime records should project one compact attribution entry per owned attempt at request completion. Aggregate views require complete facts for each displayed component and preserve missing or invalid states explicitly.
 - Multi-view terminal tables should keep shared identity columns stable, derive every view from the same normalized records, and load local pricing or other frame dependencies once per rendered frame.
-
-## Release
-
-- Increment the shared `package.json` version in every commit. Use a patch
-  increment unless the release explicitly requires another semantic-version level.
-- Rebuild `dist` whenever source behavior or public help changes.

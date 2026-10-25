@@ -1,7 +1,22 @@
 # Documentation
 
-The root [README](../README.md) is the user guide and public command reference.
-The files below are contributor standards and detailed implementation contracts.
+The root [README](../README.md) introduces the project and provides a quick start.
+[AGENTS.md](../AGENTS.md) owns development workflow, verification, and commit requirements.
+This directory owns detailed operation guides and implementation contracts.
+
+## Operation guides
+
+| Guide | Covers |
+| --- | --- |
+| [Installation](./INSTALL.md) | Requirements, installation, updates, and runtime restart |
+| [Wrappers](./WRAPPERS.md) | cx, cxx, cxxs, ccx, and ccxs |
+| [CCS](./CCS.md) | Provider profiles, configuration sync, proxy setup and operation |
+| [Images](./CIMG.md) | cimg usage |
+| [Network](./CLVM.md) | clvm setup, sync, and monitoring |
+| [Environment](./SENV.md) | senv configuration |
+| [Sessions](./CODEX_RENAME.md) | Session titles and working directory maintenance |
+
+## Standards and specifications
 
 | Document | Owns |
 | --- | --- |
@@ -14,7 +29,8 @@ The files below are contributor standards and detailed implementation contracts.
 
 ## Ownership
 
-- Document user-visible setup and command syntax in `README.md`.
+- Keep the root README focused on introduction, quick start, and documentation links.
+- Document detailed setup and command syntax in the operation guides above.
 - Document reusable engineering rules once in the relevant standard above.
 - Document command-specific behavior and schemas in the owning specification.
 - Use tests and Git history for completed implementation details; do not retain
