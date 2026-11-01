@@ -1,5 +1,5 @@
 import stripAnsi from "strip-ansi";
-import { maskSecret, textBold, textCyan, textDim, textGreen, textRed, truncateVisible, visibleLength } from "./text.js";
+import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, truncateVisible, visibleLength } from "./text.js";
 export class PromptCancelledError extends Error {
     interrupted;
     constructor(interrupted) {
@@ -163,12 +163,14 @@ function promptHeader(message, keys) {
 }
 function choiceLines(choices, focus, offset, size, marker) {
     const lines = [];
+    const labelWidth = Math.max(...choices.map((choice) => visibleLength(choice.label)));
     if (offset > 0)
         lines.push(textDim(`  ↑ ${offset} more`));
     for (let index = offset; index < Math.min(choices.length, offset + size); index += 1) {
         const choice = choices[index];
         const focused = index === focus;
-        const label = choice.disabled ? textDim(choice.label) : focused ? textCyan(choice.label) : choice.label;
+        const padded = padVisibleRight(choice.label, labelWidth);
+        const label = choice.disabled ? textDim(padded) : focused ? textCyan(padded) : padded;
         const detail = choice.disabled ? `(${choice.disabled})` : choice.hint;
         lines.push(`${focused ? textCyan("❯") : " "} ${marker(choice, index)}${label}${detail ? `  ${textDim(detail)}` : ""}`);
     }

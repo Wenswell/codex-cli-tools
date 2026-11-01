@@ -38,9 +38,11 @@ ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
 ccs proxy cancel
 ccs proxy capture
-ccs proxy mode [passthrough [retry]|retry [on|off]|recovery|intercept]
+ccs proxy mode
+ccs proxy search
+ccs proxy compact
 ccs proxy config
-ccs proxy install|restore|serve
+ccs proxy install|restart|restore|serve
 ccs toggle [PROFILE]
 ccs config [push|pull]
 ccs list | l
@@ -106,9 +108,9 @@ config/ccs-profiles.json
 
 Set `routeConversion.enabled` to `true` for a provider that only accepts Chat Completions. The proxy keeps Codex on the Responses API and translates both directions. `ccs`, `ccs list`, and `ccs PROFILE` show the active value. Fill in the API keys manually. The file is written with `0600` permissions.
 
-When proxy mode is installed, use `ccs proxy search` to inspect alpha-search forwarding, `ccs proxy search set PROFILE` to select its provider, and `ccs proxy search up|down` to enable or disable it. The example above sends `/alpha/search` and `/v1/alpha/search` to `test002`; an explicit `cx run PROFILE` (or equivalent) profile remains higher priority.
+When proxy mode is installed, run `ccs proxy search` to show alpha-search forwarding and pick its provider, or `off`, from a list. Profiles without a `baseURL` or `apiKey` are shown but cannot be selected. Picking a profile selects and enables it in one step; `off` disables forwarding and keeps the stored profile. The change is previewed and written after exact `yes`. The example above sends `/alpha/search` and `/v1/alpha/search` to `test002`; an explicit `cx run PROFILE` (or equivalent) profile remains higher priority.
 
-Use `ccs proxy compact set PROFILE` followed by `ccs proxy compact up` to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider. `ccs proxy compact` shows the setting; `down` disables it. Explicit `run PROFILE` selection takes priority. Native remote-compaction v2 requests with boolean stream: true and a compaction_trigger item anywhere in input[] are also routed and marked [C]. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
+Run `ccs proxy compact` and pick a profile to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider; it works like `ccs proxy search`, and `off` disables it. Explicit `run PROFILE` selection takes priority. Native remote-compaction v2 requests with boolean stream: true and a compaction_trigger item anywhere in input[] are also routed and marked [C]. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
 
 
 `ccs init` first reads the current Codex API settings from:
@@ -233,16 +235,9 @@ ccs proxy reroute
 ccs proxy cancel
 ccs proxy capture
 ccs proxy mode
-ccs proxy mode passthrough
-ccs proxy mode passthrough retry
-ccs proxy mode retry [on|off]
-ccs proxy mode recovery
-ccs proxy mode intercept
+ccs proxy search
+ccs proxy compact
 ccs proxy config
-ccs proxy config retry WINDOW BASE MAX [STATUSES]
-ccs proxy config retry statuses STATUSES
-ccs proxy config latency off
-ccs proxy config latency FIRST TOTAL [return_502|retry_then_502]
 ccs proxy install
 ccs proxy restart
 ccs proxy restore
@@ -261,7 +256,7 @@ ccs proxy install
 ccs proxy
 ```
 
-`install` previews the config change and writes only after exact `yes` confirmation. A successful install starts with `passthrough` forwarding and status retry disabled. The final `ccs proxy` verifies the active URL, PID, version, protocol, response mode, and retry state. Use `ccs proxy mode passthrough retry` for transparent forwarding with bounded transient-status retry; use `recovery` or `intercept` only when response inspection is needed.
+`install` previews the config change and writes only after exact `yes` confirmation. A successful install starts with `passthrough` forwarding and status retry disabled. The final `ccs proxy` verifies the active URL, PID, version, protocol, response mode, and retry state. Run `ccs proxy mode` and pick `passthrough` with status retry `on` for transparent forwarding with bounded transient-status retry; pick `recovery` or `intercept` only when response inspection is needed.
 
 For a normal tool update, leave the installed routing and state in place:
 
@@ -273,7 +268,7 @@ For a normal tool update, leave the installed routing and state in place:
 
 `proxy.json` has an explicit state schema version. When an update changes that schema, the next installed proxy command automatically stops the old runtime, preserves local routing and installation metadata, resets policy to safe `passthrough` defaults, clears incompatible request metrics/history, and starts the current runtime when needed. Current-schema corruption remains an explicit error; manual cache-file deletion is not part of the update flow.
 
-Use `ccs proxy restore` when removing the proxy or before a clean reinstall. It restores the active profile URL, stops the runtime, and removes `proxy.json`. `ccs proxy mode passthrough` instead keeps the local proxy URL and runtime while selecting transparent response forwarding; use `ccs proxy mode retry off` to disable the independent status-retry policy. When the state file is absent, inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
+Use `ccs proxy restore` when removing the proxy or before a clean reinstall. It restores the active profile URL, stops the runtime, and removes `proxy.json`. Selecting `passthrough` in `ccs proxy mode` instead keeps the local proxy URL and runtime while forwarding responses transparently; status retry `off` disables the independent status-retry policy. When the state file is absent, inspect `~/.codex/config.toml` and restore its provider URL from a known profile or backup before installing again.
 
 Behavior:
 
@@ -281,9 +276,10 @@ Behavior:
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - `cx run`, `cxx run`, and `cxxs run` set `CODEX_TOOLS_PROFILE_API_KEY` only for the launched `codex` process and pass temporary provider `base_url` and `env_key` overrides. When proxy state exists, they also pass `http_headers.x-ccs-profile=PROFILE`; the proxy validates and uses that profile for the request, then strips the header before forwarding. The commands do not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` requires explicit `model_provider`, its existing `base_url`, a current profile, and absent proxy state. It previews the current and proxy URLs plus backup path, backs up the current config, starts and health-checks the proxy, then changes and verifies that provider's `base_url` is the local proxy URL. If apply fails after routing is written, it restores the preview source, removes proxy state, and keeps the backup. It starts in `passthrough` with status retry disabled.
-- `ccs proxy mode` prints the active response mode and independent status-retry state. Every change previews and requires exact `yes`. `passthrough` forwards responses without inspection. `ccs proxy mode retry [on|off]` controls retry for configured HTTP statuses (default: 429, 503, and transient gateway 520) without changing the response mode; `ccs proxy mode passthrough retry` selects the transparent-plus-retry combination. Retries continue while the configured total window allows another wait and dispatch. `recovery` enables continuation recovery for eligible streaming Responses guard hits; `intercept` uses ordinary guard retry.
-- `ccs proxy config` prints the active status-retry and latency settings. `ccs proxy config retry WINDOW BASE MAX [STATUSES]` configures an enabled retry policy's total window, base backoff, and maximum backoff in milliseconds; defaults are `3600000`, `1000`, and `30000`. The values are positive timer-range integers with `BASE <= MAX <= WINDOW`. Use `ccs proxy config retry statuses 400,429,502,503` to select retryable statuses, or `statuses default` to reset to `429,503,520`; status codes must be integers from 400 through 599 and are sorted and deduplicated. Configuration writes require exact `yes`.
-- Latency deadlines are disabled by default. `ccs proxy config latency FIRST TOTAL [ACTION]` enables them after exact `yes`; `ccs proxy config latency off` disables them.
+- `ccs proxy mode` prints the active response mode and independent status-retry state, then asks for the response mode and for status retry `on` or `off`, with the current values selected. Changes are previewed together and require one exact `yes`. `passthrough` forwards responses without inspection. Status retry applies to configured HTTP statuses (default: 429, 503, and transient gateway 520) without changing the response mode; `passthrough` with retry `on` is the transparent-plus-retry combination. Retries continue while the configured total window allows another wait and dispatch. `recovery` enables continuation recovery for eligible streaming Responses guard hits; `intercept` uses ordinary guard retry.
+- `ccs proxy config` prints the active status-retry and latency settings, then asks which one to edit. Each value prompt shows the current value; press Enter to keep it. Invalid values are rejected at the prompt. Changes are previewed and written after exact `yes`.
+- The status retry policy prompts for the total window, base backoff, and maximum backoff in milliseconds (defaults `3600000`, `1000`, and `30000`; positive timer-range integers with `BASE <= MAX <= WINDOW`), then retryable statuses such as `400,429,502,503`, or `default` for `429,503,520`. Status codes must be integers from 400 through 599 and are sorted and deduplicated.
+- Latency deadlines are disabled by default. Choosing `on` prompts for the first-progress timeout, its action (`return_502` or `retry_then_502`, skipped when that timeout is `0`), and the total timeout; at least one timeout must be positive. Choosing `off` disables them.
 - `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
 - `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while explicit profile launches remain pinned to their requested profile.
 - A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.

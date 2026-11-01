@@ -6014,22 +6014,10 @@ function usageHelpLines() {
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
         "  ccs proxy cancel                         # choose waiting retry requests to cancel",
         "  ccs proxy capture                        # choose a session to capture, then watch or cancel it",
-        "  ccs proxy mode                           # print response mode and status retry state",
-        "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
-        "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
-        "  ccs proxy mode recovery                  # enable continuation recovery mode",
-        "  ccs proxy mode intercept                 # enable guard intercept mode",
-        "  ccs proxy compact                        # show compaction forwarding",
-        "  ccs proxy compact up|down                # enable or disable compaction forwarding",
-        "  ccs proxy compact set PROFILE            # select compaction upstream profile",
-        "  ccs proxy search                         # show alpha search forwarding",
-        "  ccs proxy search up|down                 # enable or disable alpha search forwarding",
-        "  ccs proxy search set PROFILE             # select alpha search upstream profile",
-        "  ccs proxy config                         # print active proxy policy configuration",
-        "  ccs proxy config retry WINDOW BASE MAX [STATUSES] # set status retry window, backoff, and optional statuses",
-        "  ccs proxy config retry statuses STATUSES # set status retry HTTP status codes (e.g. 400,429,502,503 or default)",
-        "  ccs proxy config latency off             # disable latency deadlines after confirmation",
-        "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
+        "  ccs proxy mode                           # show, then choose response mode and status retry",
+        "  ccs proxy compact                        # show, then choose the compaction profile or off",
+        "  ccs proxy search                         # show, then choose the alpha search profile or off",
+        "  ccs proxy config                         # show, then edit the status retry policy or latency deadlines",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
         "  ccs proxy restart                        # restart; asks before terminating active requests",
         "  ccs proxy restore                        # restore active profile routing and remove proxy state",
@@ -6072,21 +6060,6 @@ function rejectProxyCommandArgs(args, commandName) {
         throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
     }
 }
-function parseProxyUserMode(value) {
-    if (value === PROXY_MODE_PASSTHROUGH) {
-        return PROXY_MODE_PASSTHROUGH;
-    }
-    if (value === PROXY_MODE_INTERCEPT) {
-        return PROXY_MODE_INTERCEPT;
-    }
-    if (value === PROXY_MODE_RECOVERY) {
-        return PROXY_MODE_RECOVERY;
-    }
-    if (value === "retry") {
-        return "retry";
-    }
-    throw new Error("ccs proxy mode requires passthrough, retry, recovery, or intercept");
-}
 function formatProxyModeChange(result) {
     return result.previousMode === result.mode
         ? textGreen(result.mode)
@@ -6096,76 +6069,11 @@ function printProxyModeRuntime(runtime) {
     printKeyValue("runtime:", runtime?.started ? textGreen("started") : runtime?.healthy ? textGreen("healthy") : textDim("none"), 8);
     printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
 }
-function parseProxyLatencyTimeout(value, name) {
-    if (!value || !/^\d+$/.test(value)) {
-        throw new Error(`ccs proxy config latency ${name} requires a timer-range integer`);
-    }
-    const parsed = Number(value);
-    if (!isProxyTimeoutMs(parsed)) {
-        throw new Error(`ccs proxy config latency ${name} requires a timer-range integer`);
-    }
-    return parsed;
-}
-function parseProxyLatencyConfig(args) {
-    if (args[0] === "off" && args.length === 1) {
-        return { ...PROXY_DEFAULT_LATENCY_GUARD };
-    }
-    const firstProgressTimeoutMs = parseProxyLatencyTimeout(args[0], "FIRST");
-    const totalTimeoutMs = parseProxyLatencyTimeout(args[1], "TOTAL");
-    const firstProgressAction = args[2] ?? "return_502";
-    if (args.length > 3 || (firstProgressAction !== "return_502" && firstProgressAction !== "retry_then_502")) {
-        throw new Error("ccs proxy config latency ACTION requires return_502 or retry_then_502");
-    }
-    if (firstProgressTimeoutMs === 0 && totalTimeoutMs === 0) {
-        throw new Error("ccs proxy config latency requires at least one positive timeout");
-    }
-    return {
-        enabled: true,
-        first_progress_timeout_ms: firstProgressTimeoutMs,
-        first_progress_action: firstProgressAction,
-        total_timeout_ms: totalTimeoutMs,
-    };
-}
 function printProxyLatencyGuard(value) {
     printKeyValue("latency:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
     printKeyValue("first_progress:", `${value.first_progress_timeout_ms}ms`, 15);
     printKeyValue("first_action:", value.first_progress_action, 15);
     printKeyValue("total:", `${value.total_timeout_ms}ms`, 15);
-}
-function parseProxyStatusRetryConfig(args, enabled, currentRetry) {
-    if (args[0] === "statuses" || args[0] === "status") {
-        if (args.length !== 2) {
-            throw new Error("ccs proxy config retry statuses requires comma-separated HTTP status codes (e.g. 400,429,502,503) or default");
-        }
-        const statuses = args[1] === "default"
-            ? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES]
-            : parseProxyRetryStatuses(args[1], "retry config statuses");
-        const base = currentRetry ?? PROXY_DEFAULT_STATUS_RETRY;
-        return {
-            ...base,
-            enabled,
-            statuses,
-        };
-    }
-    if (args.length !== 3 && args.length !== 4) {
-        throw new Error("ccs proxy config retry requires WINDOW BASE MAX [STATUSES] milliseconds or statuses STATUSES");
-    }
-    const [totalWindowMs, backoffBaseMs, backoffMaxMs] = args.slice(0, 3).map((value) => {
-        if (!value || !/^\d+$/.test(value) || !isPositiveProxyTimerMs(Number(value))) {
-            throw new Error("ccs proxy config retry requires positive timer-range integers");
-        }
-        return Number(value);
-    });
-    const statuses = args[3] !== undefined
-        ? (args[3] === "default" ? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES] : parseProxyRetryStatuses(args[3], "retry config statuses"))
-        : (currentRetry?.statuses ?? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES]);
-    return parseProxyStatusRetry({
-        enabled,
-        statuses,
-        total_window_ms: totalWindowMs,
-        backoff_base_ms: backoffBaseMs,
-        backoff_max_ms: backoffMaxMs,
-    }, "retry config");
 }
 function printProxyStatusRetry(value) {
     printKeyValue("retry:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
@@ -6181,7 +6089,6 @@ function printProxyRouteStatus(profiles, route) {
     const config = proxyRouteConfig(profiles, route);
     printKeyValue(`${route}:`, config.enabled ? textGreen("up") : textDim("down"), 8);
     printKeyValue("profile:", config.profile ? colorName(config.profile) : textDim("none"), 8);
-    printKeyValue("commands:", "up | down | set PROFILE", 8);
 }
 function assertRouteProfile(profiles, name, route) {
     const profile = profiles.profiles?.[name];
@@ -6202,6 +6109,202 @@ async function applyProxyRouteConfig(expectedProfiles, nextConfig, route) {
         ...currentProfiles,
         proxy: { ...currentProfiles.proxy, [route]: nextConfig },
     });
+}
+function printProxyChange(label, before, after, width) {
+    printKeyValue(label, before === after ? after : `${textYellow(before)} -> ${textGreen(after)}`, width);
+}
+function proxyRouteProfileIssue(profiles, name, route) {
+    try {
+        assertRouteProfile(profiles, name, route);
+        return undefined;
+    }
+    catch {
+        return "missing baseURL or apiKey";
+    }
+}
+async function runProxyRouteCommand(route) {
+    const profiles = await readProfiles();
+    printProxyRouteStatus(profiles, route);
+    if (!isInteractive()) {
+        printKeyValue("note:", "run in an interactive terminal to change", 8);
+        return;
+    }
+    const current = proxyRouteConfig(profiles, route);
+    const purpose = route === "search" ? "/alpha/search requests" : "compaction requests";
+    const choice = await select(`Route ${purpose} to`, [
+        { value: null, label: "off", hint: `use the current profile for ${purpose}` },
+        ...Object.entries(profiles.profiles ?? {}).map(([name, profile]) => ({
+            value: name,
+            label: name,
+            hint: profile.baseURL,
+            disabled: proxyRouteProfileIssue(profiles, name, route),
+        })),
+    ], { default: current.enabled ? current.profile ?? null : null });
+    const next = choice === null ? { ...current, enabled: false } : { enabled: true, profile: choice };
+    if (next.enabled === current.enabled && next.profile === current.profile) {
+        printKeyValue("result:", "no changes", 8);
+        return;
+    }
+    printProxyChange(`${route}:`, current.enabled ? "up" : "down", next.enabled ? "up" : "down", 8);
+    printProxyChange("profile:", current.profile ?? "none", next.profile ?? "none", 8);
+    printKeyValue("note:", "no changes are written unless you type yes", 8);
+    if (!(await confirmApply()))
+        return;
+    await applyProxyRouteConfig(profiles, next, route);
+    printProxyRouteStatus(await readProfiles(), route);
+}
+async function runProxyModeCommand(options) {
+    const state = await readProxyState(options.stateRoot);
+    printKeyValue("mode:", state ? colorName(state.mode) : textDim("missing"), 5);
+    if (!state)
+        return;
+    const retryEnabled = proxyStatusRetryEnabled(state);
+    printKeyValue("retry:", retryEnabled ? textGreen("enabled") : textDim("disabled"), 5);
+    if (!isInteractive()) {
+        printKeyValue("note:", "run in an interactive terminal to change", 5);
+        return;
+    }
+    const mode = await select("Response mode", [
+        { value: PROXY_MODE_PASSTHROUGH, label: PROXY_MODE_PASSTHROUGH, hint: "forward responses without inspection" },
+        { value: PROXY_MODE_RECOVERY, label: PROXY_MODE_RECOVERY, hint: "guard retry plus continuation recovery for streaming Responses" },
+        { value: PROXY_MODE_INTERCEPT, label: PROXY_MODE_INTERCEPT, hint: "guard retry without continuation recovery" },
+    ], { default: state.mode });
+    const retry = await select("Status retry", [
+        { value: true, label: "on", hint: `retry ${state.status_retry.statuses.join(",")} within ${formatDurationMs(state.status_retry.total_window_ms)}` },
+        { value: false, label: "off", hint: "forward retryable statuses as received" },
+    ], { default: retryEnabled });
+    if (mode === state.mode && retry === retryEnabled) {
+        printKeyValue("result:", "no changes", 5);
+        return;
+    }
+    printProxyChange("mode:", state.mode, mode, 5);
+    printProxyChange("retry:", retryEnabled ? "enabled" : "disabled", retry ? "enabled" : "disabled", 5);
+    printKeyValue("note:", "no changes are written unless you type yes", 5);
+    if (!(await confirmApply()))
+        return;
+    const current = await readProxyState(options.stateRoot);
+    if (!current || current.mode !== state.mode || proxyStatusRetryEnabled(current) !== retryEnabled) {
+        throw new Error("proxy mode changed after preview; run ccs proxy mode again");
+    }
+    const result = await setProxyMode(options, mode, retry);
+    printKeyValue("mode:", formatProxyModeChange(result), 5);
+    printKeyValue("retry:", retry ? textGreen("enabled") : textDim("disabled"), 5);
+    printProxyModeRuntime(result.runtime);
+}
+function validateProxyMs(value, positive) {
+    if (!/^\d+$/.test(value))
+        return "enter milliseconds as an integer";
+    const parsed = Number(value);
+    if (positive ? !isPositiveProxyTimerMs(parsed) : !isProxyTimeoutMs(parsed)) {
+        return positive ? `enter 1 through ${PROXY_TIMER_MAX_MS}` : `enter 0 through ${PROXY_TIMER_MAX_MS}`;
+    }
+    return null;
+}
+async function askProxyStatusRetry(current) {
+    const window = Number(await input("Retry window ms", {
+        default: String(current.total_window_ms),
+        validate: (value) => validateProxyMs(value, true),
+    }));
+    const base = Number(await input("Backoff base ms", {
+        default: String(Math.min(current.backoff_base_ms, window)),
+        validate: (value) => validateProxyMs(value, true) ?? (Number(value) > window ? `must not exceed the retry window (${window})` : null),
+    }));
+    const max = Number(await input("Backoff max ms", {
+        default: String(Math.min(Math.max(current.backoff_max_ms, base), window)),
+        validate: (value) => validateProxyMs(value, true)
+            ?? (Number(value) < base ? `must be at least the backoff base (${base})` : null)
+            ?? (Number(value) > window ? `must not exceed the retry window (${window})` : null),
+    }));
+    const parseStatuses = (value) => value === "default"
+        ? [...PROXY_DEFAULT_STATUS_RETRY_STATUSES]
+        : parseProxyRetryStatuses(value, "retry statuses");
+    const statusesText = await input("Retry statuses (comma-separated, or default)", {
+        default: current.statuses.join(","),
+        validate: (value) => {
+            try {
+                parseStatuses(value);
+                return null;
+            }
+            catch (error) {
+                return error.message.replace(/^invalid proxy request data at retry statuses: /, "");
+            }
+        },
+    });
+    return {
+        enabled: current.enabled,
+        statuses: parseStatuses(statusesText),
+        total_window_ms: window,
+        backoff_base_ms: base,
+        backoff_max_ms: max,
+    };
+}
+async function askProxyLatencyGuard(current) {
+    const enabled = await select("Latency deadlines", [
+        { value: false, label: "off", hint: "no first-progress or total deadline" },
+        { value: true, label: "on", hint: "fail slow requests in recovery and intercept modes" },
+    ], { default: current.enabled });
+    if (!enabled)
+        return { ...PROXY_DEFAULT_LATENCY_GUARD };
+    const first = Number(await input("First-progress timeout ms (0 disables)", {
+        default: String(current.first_progress_timeout_ms),
+        validate: (value) => validateProxyMs(value, false),
+    }));
+    const action = first === 0 ? current.first_progress_action : await select("First-progress action", [
+        { value: "return_502", label: "return_502", hint: "return 502 when the first deadline passes" },
+        { value: "retry_then_502", label: "retry_then_502", hint: "retry the upstream first, then return 502" },
+    ], { default: current.first_progress_action });
+    const total = Number(await input("Total timeout ms (0 disables)", {
+        default: String(current.total_timeout_ms),
+        validate: (value) => validateProxyMs(value, false) ?? (first === 0 && Number(value) === 0 ? "at least one timeout must be positive" : null),
+    }));
+    return { enabled: true, first_progress_timeout_ms: first, first_progress_action: action, total_timeout_ms: total };
+}
+async function runProxyConfigCommand(options) {
+    const state = await readProxyState(options.stateRoot);
+    if (!state) {
+        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
+    }
+    printProxyStatusRetry(state.status_retry);
+    printProxyLatencyGuard(state.latency_guard);
+    if (!isInteractive()) {
+        printKeyValue("note:", "run in an interactive terminal to change", 15);
+        return;
+    }
+    const section = await select("Configure", [
+        { value: "retry", label: "status retry policy", hint: "window, backoff, and retryable statuses" },
+        { value: "latency", label: "latency deadlines", hint: "first-progress and total timeouts" },
+    ]);
+    const statusRetry = section === "retry" ? await askProxyStatusRetry(state.status_retry) : state.status_retry;
+    const latencyGuard = section === "latency" ? await askProxyLatencyGuard(state.latency_guard) : state.latency_guard;
+    const before = section === "retry" ? state.status_retry : state.latency_guard;
+    const after = section === "retry" ? statusRetry : latencyGuard;
+    if (JSON.stringify(before) === JSON.stringify(after)) {
+        printKeyValue("result:", "no changes", 15);
+        return;
+    }
+    if (section === "retry") {
+        printProxyChange("retry_statuses:", state.status_retry.statuses.join(","), statusRetry.statuses.join(","), 15);
+        printProxyChange("retry_window:", `${state.status_retry.total_window_ms}ms`, `${statusRetry.total_window_ms}ms`, 15);
+        printProxyChange("backoff_base:", `${state.status_retry.backoff_base_ms}ms`, `${statusRetry.backoff_base_ms}ms`, 15);
+        printProxyChange("backoff_max:", `${state.status_retry.backoff_max_ms}ms`, `${statusRetry.backoff_max_ms}ms`, 15);
+    }
+    else {
+        printProxyChange("latency:", state.latency_guard.enabled ? "enabled" : "disabled", latencyGuard.enabled ? "enabled" : "disabled", 15);
+        printProxyChange("first_progress:", `${state.latency_guard.first_progress_timeout_ms}ms`, `${latencyGuard.first_progress_timeout_ms}ms`, 15);
+        printProxyChange("first_action:", state.latency_guard.first_progress_action, latencyGuard.first_progress_action, 15);
+        printProxyChange("total:", `${state.latency_guard.total_timeout_ms}ms`, `${latencyGuard.total_timeout_ms}ms`, 15);
+    }
+    printKeyValue("note:", "no changes are written unless you type yes", 15);
+    if (!(await confirmApply()))
+        return;
+    const current = await readProxyState(options.stateRoot);
+    if (!current || JSON.stringify(current.status_retry) !== JSON.stringify(state.status_retry)
+        || JSON.stringify(current.latency_guard) !== JSON.stringify(state.latency_guard)) {
+        throw new Error("proxy configuration changed after preview; run ccs proxy config again");
+    }
+    await writeProxyState(options.stateRoot, { ...current, status_retry: statusRetry, latency_guard: latencyGuard });
+    printProxyStatusRetry(statusRetry);
+    printProxyLatencyGuard(latencyGuard);
 }
 function proxySessionChoices(state, nowMs) {
     const sessions = new Map();
@@ -6491,108 +6594,18 @@ export async function runProxyCommand(args, options) {
         return;
     }
     if (command === "mode") {
-        if (rest.length === 0) {
-            const state = await readProxyState(options.stateRoot);
-            printKeyValue("mode:", state ? colorName(state.mode) : textDim("missing"), 5);
-            if (state)
-                printKeyValue("retry:", proxyStatusRetryEnabled(state) ? textGreen("enabled") : textDim("disabled"), 5);
-            return;
-        }
-        rejectRemovedYesFlags(rest, "ccs proxy mode");
-        const mode = parseProxyUserMode(rest[0]);
-        const retryArgument = rest[1];
-        if (mode === "retry") {
-            if (rest.length > 2 || (retryArgument !== undefined && retryArgument !== "on" && retryArgument !== "off")) {
-                throw new Error(`ccs proxy mode retry requires optional on or off`);
-            }
-        }
-        else if (rest.length > 2 || (retryArgument !== undefined && retryArgument !== "retry")) {
-            throw new Error(`unknown argument for ccs proxy mode ${mode}: ${retryArgument ?? rest[2]}`);
-        }
-        const state = await readProxyState(options.stateRoot);
-        if (!state) {
-            throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
-        }
-        const nextMode = mode === "retry" ? state.mode : mode;
-        const nextRetryEnabled = mode === "retry"
-            ? retryArgument !== "off"
-            : retryArgument === "retry"
-                ? true
-                : proxyStatusRetryEnabled(state);
-        printKeyValue("plan:", `proxy mode ${state.mode} -> ${nextMode}`, 5);
-        printKeyValue("retry:", `${proxyStatusRetryEnabled(state) ? "enabled" : "disabled"} -> ${nextRetryEnabled ? "enabled" : "disabled"}`, 5);
-        printKeyValue("note:", "no changes are written unless you type yes", 5);
-        if (!(await confirmApply())) {
-            return;
-        }
-        const result = await setProxyMode(options, nextMode, nextRetryEnabled);
-        printKeyValue("mode:", formatProxyModeChange(result), 5);
-        printKeyValue("retry:", nextRetryEnabled ? textGreen("enabled") : textDim("disabled"), 5);
-        printProxyModeRuntime(result.runtime);
+        rejectProxyCommandArgs(rest, "ccs proxy mode");
+        await runProxyModeCommand(options);
         return;
     }
     if (command === "search" || command === "compact") {
-        rejectRemovedYesFlags(rest, `ccs proxy ${command}`);
-        const profiles = await readProfiles();
-        if (rest.length === 0) {
-            printProxyRouteStatus(profiles, command);
-            return;
-        }
-        const current = proxyRouteConfig(profiles, command);
-        let next;
-        if (rest.length === 1 && (rest[0] === "up" || rest[0] === "down")) {
-            if (rest[0] === "up") {
-                if (!current.profile) {
-                    throw new Error(`ccs proxy ${command} up requires a profile; run ccs proxy ${command} set PROFILE first`);
-                }
-                assertRouteProfile(profiles, current.profile, command);
-            }
-            next = { ...current, enabled: rest[0] === "up" };
-        }
-        else if (rest.length === 2 && rest[0] === "set" && rest[1]) {
-            assertRouteProfile(profiles, rest[1], command);
-            next = { ...current, profile: rest[1] };
-        }
-        else {
-            throw new Error(`ccs proxy ${command} requires up, down, or set PROFILE`);
-        }
-        printKeyValue(`${command}:`, `${current.enabled ? "up" : "down"} -> ${next.enabled ? "up" : "down"}`, 8);
-        printKeyValue("profile:", `${current.profile ?? "none"} -> ${next.profile ?? "none"}`, 8);
-        printKeyValue("note:", "no changes are written unless you type yes", 8);
-        if (!(await confirmApply()))
-            return;
-        await applyProxyRouteConfig(profiles, next, command);
-        printProxyRouteStatus(await readProfiles(), command);
+        rejectProxyCommandArgs(rest, `ccs proxy ${command}`);
+        await runProxyRouteCommand(command);
         return;
     }
     if (command === "config") {
-        const state = await readProxyState(options.stateRoot);
-        if (!state) {
-            throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
-        }
-        if (rest.length === 0) {
-            printProxyStatusRetry(state.status_retry);
-            printProxyLatencyGuard(state.latency_guard);
-            return;
-        }
-        rejectRemovedYesFlags(rest, "ccs proxy config");
-        if (rest[0] !== "latency" && rest[0] !== "retry") {
-            throw new Error(`unknown argument for ccs proxy config: ${rest[0]}`);
-        }
-        const statusRetry = rest[0] === "retry" ? parseProxyStatusRetryConfig(rest.slice(1), state.status_retry.enabled, state.status_retry) : state.status_retry;
-        const latencyGuard = rest[0] === "latency" ? parseProxyLatencyConfig(rest.slice(1)) : state.latency_guard;
-        if (rest[0] === "retry")
-            printProxyStatusRetry(statusRetry);
-        else
-            printProxyLatencyGuard(latencyGuard);
-        printKeyValue("note:", "no changes are written unless you type yes", 5);
-        if (!(await confirmApply()))
-            return;
-        await writeProxyState(options.stateRoot, { ...state, status_retry: statusRetry, latency_guard: latencyGuard });
-        if (rest[0] === "retry")
-            printProxyStatusRetry(statusRetry);
-        else
-            printProxyLatencyGuard(latencyGuard);
+        rejectProxyCommandArgs(rest, "ccs proxy config");
+        await runProxyConfigCommand(options);
         return;
     }
     if (command === "install") {

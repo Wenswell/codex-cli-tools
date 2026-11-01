@@ -363,39 +363,30 @@ test("proxy config prints latency state and writes only after exact confirmation
     assert.match(status, /first_action:\s+return_502/);
     assert.match(status, /total:\s+0ms/);
 
-    const preview = stripAnsi(await captureStdout(() => runProxyCommand(
-      ["config", "latency", "1500", "9000", "retry_then_502"],
-      options,
-    )));
-    assert.match(preview, /latency:\s+enabled/);
-    assert.match(preview, /no changes are written unless you type yes/);
+    assert.match(status, /run in an interactive terminal to change/);
+
+    const latency = await runInteractive(() => runProxyCommand(["config"], options), [
+      ["Configure", `${KEYS.down}${KEYS.enter}`],
+      ["Latency deadlines", `${KEYS.down}${KEYS.enter}`],
+      ["First-progress timeout ms", `1500${KEYS.enter}`],
+      ["First-progress action", `${KEYS.down}${KEYS.enter}`],
+      ["Total timeout ms", `abc${KEYS.enter}`],
+      ["enter milliseconds as an integer", `${KEYS.backspace.repeat(3)}9000${KEYS.enter}`],
+      ["Apply changes?", "no\n"],
+    ]);
+    assert.match(latency.output, /latency:\s+disabled -> enabled/);
+    assert.match(latency.output, /first_progress:\s+0ms -> 1500ms/);
+    assert.match(latency.output, /no changes are written unless you type yes/);
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).latency_guard, proxyStateFixture().latency_guard);
 
-    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-    let answered = false;
-    try {
-      await captureStdout(
-        () => runProxyCommand(["config", "latency", "1500", "9000", "retry_then_502"], options),
-        {
-          isTTY: true,
-          onWrite(output) {
-            if (!answered && output.includes("Apply changes?")) {
-              answered = true;
-              process.stdin.emit("data", Buffer.from("yes\n"));
-            }
-          },
-        },
-      );
-    } finally {
-      if (stdinIsTty) {
-        Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
-      } else {
-        delete process.stdin.isTTY;
-      }
-    }
-
-    assert.equal(answered, true);
+    await runInteractive(() => runProxyCommand(["config"], options), [
+      ["Configure", `${KEYS.down}${KEYS.enter}`],
+      ["Latency deadlines", `${KEYS.down}${KEYS.enter}`],
+      ["First-progress timeout ms", `1500${KEYS.enter}`],
+      ["First-progress action", `${KEYS.down}${KEYS.enter}`],
+      ["Total timeout ms", `9000${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).latency_guard, {
       enabled: true,
       first_progress_timeout_ms: 1500,
@@ -403,220 +394,108 @@ test("proxy config prints latency state and writes only after exact confirmation
       total_timeout_ms: 9000,
     });
 
-    const retryPreview = stripAnsi(await captureStdout(() => runProxyCommand(
-      ["config", "retry", "5400000", "2000", "45000"],
-      options,
-    )));
-    assert.match(retryPreview, /retry_statuses:\s+429,503,520/);
-    assert.match(retryPreview, /retry_window:\s+5400000ms/);
-    assert.match(retryPreview, /backoff_base:\s+2000ms/);
-    assert.match(retryPreview, /backoff_max:\s+45000ms/);
-    assert.match(retryPreview, /no changes are written unless you type yes/);
-    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
-
-    const statusPreview = stripAnsi(await captureStdout(() => runProxyCommand(
-      ["config", "retry", "statuses", "400,429,502,503"],
-      options,
-    )));
-    assert.match(statusPreview, /retry_statuses:\s+400,429,502,503/);
-    assert.match(statusPreview, /no changes are written unless you type yes/);
-    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
-
-    const applyCommand = async (args) => {
-      const currentStdin = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-      let didAnswer = false;
-      try {
-        await captureStdout(
-          () => runProxyCommand(args, options),
-          {
-            isTTY: true,
-            onWrite(output) {
-              if (!didAnswer && output.includes("Apply changes?")) {
-                didAnswer = true;
-                process.stdin.emit("data", Buffer.from("yes\n"));
-              }
-            },
-          },
-        );
-      } finally {
-        if (currentStdin) {
-          Object.defineProperty(process.stdin, "isTTY", currentStdin);
-        } else {
-          delete process.stdin.isTTY;
-        }
-      }
-      assert.equal(didAnswer, true);
-    };
-
-    await applyCommand(["config", "retry", "statuses", "400,502,503,429"]);
-    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, {
-      ...defaultStatusRetry(),
-      statuses: [400, 429, 502, 503],
-    });
-
-    await applyCommand(["config", "retry", "statuses", "default"]);
-    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, defaultStatusRetry());
-
-    await applyCommand(["config", "retry", "5400000", "2000", "45000", "400,503"]);
+    const invalidStatuses = await runInteractive(() => runProxyCommand(["config"], options), [
+      ["Configure", KEYS.enter],
+      ["Retry window ms", `5400000${KEYS.enter}`],
+      ["Backoff base ms", `2000${KEYS.enter}`],
+      ["Backoff max ms", `1000${KEYS.enter}`],
+      ["must be at least the backoff base (2000)", `${KEYS.backspace.repeat(4)}45000${KEYS.enter}`],
+      ["Retry statuses", `${KEYS.backspace.repeat(11)}200${KEYS.enter}`],
+      ["invalid HTTP status code 200, expected integer between 400 and 599", `${KEYS.backspace.repeat(3)}400,502,503,429${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.match(invalidStatuses.output, /retry_statuses:\s+429,503,520 -> 400,429,502,503/);
     assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry, {
       enabled: false,
-      statuses: [400, 503],
+      statuses: [400, 429, 502, 503],
       total_window_ms: 5400000,
       backoff_base_ms: 2000,
       backoff_max_ms: 45000,
     });
 
-    await assert.rejects(
-      () => runProxyCommand(["config", "retry", "statuses", "200"], options),
-      /invalid HTTP status code 200, expected integer between 400 and 599/,
-    );
-    await assert.rejects(
-      () => runProxyCommand(["config", "retry", "statuses", ""], options),
-      /at least one status code is required/,
-    );
+    await runInteractive(() => runProxyCommand(["config"], options), [
+      ["Configure", KEYS.enter],
+      ["Retry window ms", KEYS.enter],
+      ["Backoff base ms", KEYS.enter],
+      ["Backoff max ms", KEYS.enter],
+      ["Retry statuses", `default${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).status_retry.statuses, [429, 503, 520]);
+
+    await runInteractive(() => runProxyCommand(["config"], options), [
+      ["Configure", `${KEYS.down}${KEYS.enter}`],
+      ["Latency deadlines", `${KEYS.up}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).latency_guard, proxyStateFixture().latency_guard);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("proxy search config selects and enables an alpha search profile", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-search-config-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const stateRoot = join(home, ".config", "codex-tools");
-  const options = {
-    codexConfigPath: join(home, ".codex", "config.toml"),
-    listenHost: "127.0.0.1",
-    listenPort: 4610,
-    stateRoot,
-  };
-  const apply = async (args) => {
-    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    let answered = false;
-    try {
-      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-      await captureStdout(() => runProxyCommand(args, options), {
-        isTTY: true,
-        onWrite(output) {
-          if (!answered && output.includes("Apply changes?")) {
-            answered = true;
-            process.stdin.emit("data", Buffer.from("yes\n"));
-          }
-        },
-      });
-    } finally {
-      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
-      else delete process.stdin.isTTY;
-    }
-    assert.equal(answered, true);
-  };
-
-  try {
-    process.env.HOME = home;
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestStateWithProfiles(
-      home,
+for (const route of ["search", "compact"]) {
+  test(`proxy ${route} picks a profile or off in one interactive step`, async () => {
+    const home = await mkdtemp(join(tmpdir(), `ccs-proxy-${route}-config-`));
+    const previousHome = process.env.HOME;
+    const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+    const stateRoot = join(home, ".config", "codex-tools");
+    const options = {
+      codexConfigPath: join(home, ".codex", "config.toml"),
+      listenHost: "127.0.0.1",
+      listenPort: 4610,
       stateRoot,
-      4610,
-      { search: { baseURL: "https://search.example.test", apiKey: "search-key" } },
-      "search",
-    );
+    };
+    const readRoute = async () => JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8")).proxy?.[route];
 
-    const status = stripAnsi(await captureStdout(() => runProxyCommand(["search"], options)));
-    assert.match(status, /search:\s+down/);
-    assert.match(status, /profile:\s+none/);
-    assert.match(status, /commands:\s+up \| down \| set PROFILE/);
-    await assert.rejects(() => runProxyCommand(["search", "up"], options), /requires a profile/);
-
-    await apply(["search", "set", "search"]);
-    let profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.search, { enabled: false, profile: "search" });
-
-    await apply(["search", "up"]);
-    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.search, { enabled: true, profile: "search" });
-
-    await apply(["search", "down"]);
-    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.search, { enabled: false, profile: "search" });
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
-    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("proxy compact config selects and enables a compact profile", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-compact-config-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const stateRoot = join(home, ".config", "codex-tools");
-  const options = {
-    codexConfigPath: join(home, ".codex", "config.toml"),
-    listenHost: "127.0.0.1",
-    listenPort: 4610,
-    stateRoot,
-  };
-  const apply = async (args) => {
-    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    let answered = false;
     try {
-      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-      await captureStdout(() => runProxyCommand(args, options), {
-        isTTY: true,
-        onWrite(output) {
-          if (!answered && output.includes("Apply changes?")) {
-            answered = true;
-            process.stdin.emit("data", Buffer.from("yes\n"));
-          }
+      process.env.HOME = home;
+      process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+      await writeProxyTestStateWithProfiles(
+        home,
+        stateRoot,
+        4610,
+        {
+          [route]: { baseURL: `https://${route}.example.test`, apiKey: `${route}-key` },
+          incomplete: { baseURL: "https://incomplete.example.test", apiKey: "" },
         },
-      });
+        route,
+      );
+
+      const status = stripAnsi(await captureStdout(() => runProxyCommand([route], options)));
+      assert.match(status, new RegExp(`${route}:\\s+down`));
+      assert.match(status, /profile:\s+none/);
+      assert.match(status, /run in an interactive terminal to change/);
+      for (const removed of [["up"], ["down"], ["set", route]]) {
+        await assert.rejects(() => runProxyCommand([route, ...removed], options), /unknown argument/);
+      }
+
+      const enabled = await runInteractive(() => runProxyCommand([route], options), [
+        ["Route", `${KEYS.down}${KEYS.enter}`],
+        ["Apply changes?", "yes\n"],
+      ]);
+      assert.match(enabled.output, /incomplete\s+\(missing baseURL or apiKey\)/);
+      assert.match(enabled.output, new RegExp(`${route}:\\s+down -> up`));
+      assert.match(enabled.output, new RegExp(`profile:\\s+none -> ${route}`));
+      assert.deepEqual(await readRoute(), { enabled: true, profile: route });
+
+      const unchanged = await runInteractive(() => runProxyCommand([route], options), [["Route", KEYS.enter]]);
+      assert.match(unchanged.output, /result:\s+no changes/);
+
+      await runInteractive(() => runProxyCommand([route], options), [
+        ["Route", `${KEYS.up}${KEYS.enter}`],
+        ["Apply changes?", "yes\n"],
+      ]);
+      assert.deepEqual(await readRoute(), { enabled: false, profile: route });
     } finally {
-      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
-      else delete process.stdin.isTTY;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+      else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+      await rm(home, { recursive: true, force: true });
     }
-    assert.equal(answered, true);
-  };
-
-  try {
-    process.env.HOME = home;
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestStateWithProfiles(
-      home,
-      stateRoot,
-      4610,
-      { compact: { baseURL: "https://compact.example.test", apiKey: "compact-key" } },
-      "compact",
-    );
-
-    const status = stripAnsi(await captureStdout(() => runProxyCommand(["compact"], options)));
-    assert.match(status, /compact:\s+down/);
-    assert.match(status, /profile:\s+none/);
-    assert.match(status, /commands:\s+up \| down \| set PROFILE/);
-    await assert.rejects(() => runProxyCommand(["compact", "up"], options), /requires a profile/);
-
-    await apply(["compact", "set", "compact"]);
-    let profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.compact, { enabled: false, profile: "compact" });
-
-    await apply(["compact", "up"]);
-    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.compact, { enabled: true, profile: "compact" });
-
-    await apply(["compact", "down"]);
-    profiles = JSON.parse(await readFile(join(stateRoot, "profiles.json"), "utf8"));
-    assert.deepEqual(profiles.proxy.compact, { enabled: false, profile: "compact" });
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
-    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    await rm(home, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 test("proxy records active and history request lifecycle", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
@@ -3032,29 +2911,24 @@ test("proxy passthrough forwards one untouched upstream response without policy"
       listenPort: proxyPort,
       stateRoot,
     };
-    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["mode", "passthrough"], proxyOptions)));
-    assert.match(preview, /proxy mode recovery -> passthrough/);
-    assert.match(preview, /no changes are written unless you type yes/);
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["mode"], proxyOptions)));
+    assert.match(preview, /mode:\s+recovery/);
+    assert.match(preview, /run in an interactive terminal to change/);
     assert.equal((await readProxyState(stateRoot)).mode, "recovery");
 
-    const stdinIsTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-    let answered = false;
-    try {
-      await captureStdout(() => runProxyCommand(["mode", "passthrough"], proxyOptions), {
-        isTTY: true,
-        onWrite(output) {
-          if (!answered && output.includes("Apply changes?")) {
-            answered = true;
-            process.stdin.emit("data", Buffer.from("yes\n"));
-          }
-        },
-      });
-    } finally {
-      if (stdinIsTty) Object.defineProperty(process.stdin, "isTTY", stdinIsTty);
-      else delete process.stdin.isTTY;
-    }
-    assert.equal(answered, true);
+    const unchanged = await runInteractive(() => runProxyCommand(["mode"], proxyOptions), [
+      ["Response mode", KEYS.enter],
+      ["Status retry", KEYS.enter],
+    ]);
+    assert.match(unchanged.output, /result:\s+no changes/);
+
+    const { output: applied } = await runInteractive(() => runProxyCommand(["mode"], proxyOptions), [
+      ["Response mode", `${KEYS.up}${KEYS.enter}`],
+      ["Status retry", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.match(applied, /mode:\s+recovery -> passthrough/);
+    assert.match(applied, /retry:\s+disabled/);
     assert.equal((await readProxyState(stateRoot)).mode, "passthrough");
     const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
     const healthPayload = await health.json();
@@ -5650,13 +5524,16 @@ test("proxy rejects invalid and removed command arguments", async () => {
     ["--once", "watch"],
     ["watch", "--once"],
     ["watch", "--history", "2", "--once"],
-    ["mode", "recovery", "extra"],
     ["reroute", "extra"],
     ["restart", "extra"],
     ["restart", "--force"],
     ["capture", "session-a", "2"],
     ["capture", "cancel"],
     ["cancel", "all"],
+    ["mode", "passthrough"],
+    ["mode", "retry", "on"],
+    ["config", "latency", "off"],
+    ["config", "retry", "statuses", "default"],
     ["install", "extra"],
     ["restore", "extra"],
   ]) {
