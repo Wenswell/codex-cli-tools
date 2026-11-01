@@ -17,7 +17,7 @@ import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } 
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { createLiveViewController, runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache, type ModelPriceCache } from "../lib/pricing.js";
-import { assertProfile, readProfiles, writeProfiles, type ProfilesFile, type ProxyRouteConfig } from "../lib/profiles.js";
+import { assertProfile, readProfiles, writeProfiles, type ProfilesFile, type ProxyRouteConfig, type ProxyRouteName } from "../lib/profiles.js";
 import { recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select, type Choice, type Shortcut } from "../lib/prompt.js";
 import { setUsageCommand } from "../lib/usage.js";
@@ -459,6 +459,8 @@ const PROXY_PROFILE_USAGE_INTERVAL_MS = 60_000;
 const PROXY_CAPTURE_REFRESH_MS = 1000;
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
+// Claude Code Messages API paths, including /v1/messages/count_tokens.
+const CLAUDE_PROXY_PATH = /^\/v1\/messages(?:\/|$)/;
 const PROXY_HEALTH_PROTOCOL = 8;
 const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
@@ -1211,7 +1213,8 @@ function buildProfileOrder(profiles: ProfilesFile): string[] {
 
 function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string, requestPath?: string, requestKind?: ProxyRequestKind): ProxyUpstream {
   const route = requestKind === REQUEST_KIND_CONTEXT_COMPACTION ? "compact"
-    : requestPath && isProxySearchPath(requestPath) ? "search" : undefined;
+    : requestPath && isProxySearchPath(requestPath) ? "search"
+      : requestPath && isClaudeProxyPath(requestPath) ? "claude" : undefined;
   const routeProfile = route && profiles.proxy?.[route]?.enabled ? profiles.proxy[route].profile : undefined;
   const name = requestedProfile || routeProfile || profiles.current;
   if (!name) {
@@ -1247,6 +1250,10 @@ function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string,
 
 function isProxySearchPath(requestPath: string): boolean {
   return SEARCH_PROXY_PATHS.has(requestPath);
+}
+
+function isClaudeProxyPath(requestPath: string): boolean {
+  return CLAUDE_PROXY_PATH.test(requestPath);
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -1966,6 +1973,7 @@ function formatProxyRoute(record: ProxyRequestRecord): string {
 
 function formatProxyRequestMarker(record: ProxyRequestRecord): string {
   if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION) return textGreen("[C]");
+  if (isClaudeProxyPath(record.path)) return textGreen("[A]");
   return isProxySearchPath(record.path) ? textGreen("[S]") : "";
 }
 
@@ -6638,7 +6646,8 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
           const body = await readBody(req);
           const requestJson = parseJsonBody(body);
           const turnMetadata = parseCodexTurnMetadata(req.headers);
-          const sessionId = extractSessionId(requestJson, turnMetadata);
+          // Claude Code sends its session id as a plain header.
+          const sessionId = extractSessionId(requestJson, turnMetadata) ?? (headerSignal(req.headers, "x-claude-code-session-id") || null);
           captureOwner = captureTask;
           captureRequest = startCaptureRequest(
             captureOwner, sessionId, activeRecord.id, method, `${url.pathname}${url.search}`, req.headers, body,
@@ -7209,6 +7218,7 @@ function usageHelpLines(): string[] {
     "  ccs proxy mode                           # show, then choose response mode and status retry",
     "  ccs proxy compact                        # show, then choose the compaction profile or off",
     "  ccs proxy search                         # show, then choose the alpha search profile or off",
+    "  ccs proxy claude                         # show, then choose the Claude Code profile for ccx/ccxs or off",
     "  ccs proxy config                         # show, then edit the status retry policy or latency deadlines",
     "  ccs proxy install                        # back up config, install routing, and start background proxy",
     "  ccs proxy restart                        # restart; asks before terminating active requests",
@@ -7280,17 +7290,17 @@ function printProxyStatusRetry(value: ProxyStatusRetry): void {
   printKeyValue("backoff_max:", `${value.backoff_max_ms}ms`, 15);
 }
 
-function proxyRouteConfig(profiles: ProfilesFile, route: "search" | "compact"): ProxyRouteConfig {
+function proxyRouteConfig(profiles: ProfilesFile, route: ProxyRouteName): ProxyRouteConfig {
   return profiles.proxy?.[route] ?? { enabled: false };
 }
 
-function printProxyRouteStatus(profiles: ProfilesFile, route: "search" | "compact"): void {
+function printProxyRouteStatus(profiles: ProfilesFile, route: ProxyRouteName): void {
   const config = proxyRouteConfig(profiles, route);
   printKeyValue(`${route}:`, config.enabled ? textGreen("up") : textDim("down"), 8);
   printKeyValue("profile:", config.profile ? colorName(config.profile) : textDim("none"), 8);
 }
 
-function assertRouteProfile(profiles: ProfilesFile, name: string, route: "search" | "compact"): void {
+function assertRouteProfile(profiles: ProfilesFile, name: string, route: ProxyRouteName): void {
   const profile = profiles.profiles?.[name];
   if (!profile) {
     throw new Error(`ccs proxy ${route} profile was not found: ${name}`);
@@ -7301,7 +7311,7 @@ function assertRouteProfile(profiles: ProfilesFile, name: string, route: "search
   }
 }
 
-async function applyProxyRouteConfig(expectedProfiles: ProfilesFile, nextConfig: ProxyRouteConfig, route: "search" | "compact"): Promise<void> {
+async function applyProxyRouteConfig(expectedProfiles: ProfilesFile, nextConfig: ProxyRouteConfig, route: ProxyRouteName): Promise<void> {
   const currentProfiles = await readProfiles();
   if (JSON.stringify(currentProfiles) !== JSON.stringify(expectedProfiles)) {
     throw new Error(`profiles.json changed after preview; run ccs proxy ${route} again`);
@@ -7316,7 +7326,7 @@ function printProxyChange(label: string, before: string, after: string, width: n
   printKeyValue(label, before === after ? after : `${textYellow(before)} -> ${textGreen(after)}`, width);
 }
 
-function proxyRouteProfileIssue(profiles: ProfilesFile, name: string, route: "search" | "compact"): string | undefined {
+function proxyRouteProfileIssue(profiles: ProfilesFile, name: string, route: ProxyRouteName): string | undefined {
   try {
     assertRouteProfile(profiles, name, route);
     return undefined;
@@ -7325,7 +7335,7 @@ function proxyRouteProfileIssue(profiles: ProfilesFile, name: string, route: "se
   }
 }
 
-async function runProxyRouteCommand(route: "search" | "compact"): Promise<void> {
+async function runProxyRouteCommand(route: ProxyRouteName): Promise<void> {
   const profiles = await readProfiles();
   printProxyRouteStatus(profiles, route);
   if (!isInteractive()) {
@@ -7333,7 +7343,8 @@ async function runProxyRouteCommand(route: "search" | "compact"): Promise<void> 
     return;
   }
   const current = proxyRouteConfig(profiles, route);
-  const purpose = route === "search" ? "/alpha/search requests" : "compaction requests";
+  const purpose = route === "search" ? "/alpha/search requests"
+    : route === "claude" ? "Claude Code /v1/messages requests" : "compaction requests";
   const choice = await select<string | null>(`Route ${purpose} to`, [
     { value: null, label: "off", hint: `use the current profile for ${purpose}` },
     ...Object.entries(profiles.profiles ?? {}).map(([name, profile]) => ({
@@ -7750,6 +7761,7 @@ const PROXY_SHORTCUTS: Shortcut[] = [
   { key: "m", label: "mode" },
   { key: "s", label: "search" },
   { key: "p", label: "compact", at: 3 },
+  { key: "a", label: "claude", at: 2 },
   { key: "f", label: "config", at: 3 },
   { key: "t", label: "restart", at: 3 },
 ];
@@ -7762,7 +7774,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
 
   const command = args[0] ?? "";
   const rest = args.slice(1);
-  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "config", "restore", "restart", "serve"]);
+  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "claude", "config", "restore", "restart", "serve"]);
   const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
   if (reset) {
     printKeyValue(
@@ -7829,7 +7841,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     await runProxyModeCommand(options);
     return;
   }
-  if (command === "search" || command === "compact") {
+  if (command === "search" || command === "compact" || command === "claude") {
     rejectProxyCommandArgs(rest, `ccs proxy ${command}`);
     await runProxyRouteCommand(command);
     return;

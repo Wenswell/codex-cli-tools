@@ -27,7 +27,7 @@ commands:   version | PROFILE | models | use | list | config | sync | add | remo
 namespaces: proxy | --help
 ```
 
-In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `c`onfig, `s`ync, `a`dd, `r`emove, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
+In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `c`onfig, `s`ync, `a`dd, `r`emove, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, cl`a`ude, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
 
 Supported commands:
 
@@ -45,6 +45,7 @@ ccs proxy capture
 ccs proxy mode
 ccs proxy search
 ccs proxy compact
+ccs proxy claude
 ccs proxy config
 ccs proxy install|restart|restore|serve
 ccs use
@@ -112,6 +113,8 @@ Set `routeConversion.enabled` to `true` for a provider that only accepts Chat Co
 When proxy mode is installed, run `ccs proxy search` to show alpha-search forwarding and pick its provider, or `off`, from a list. Profiles without a `baseURL` or `apiKey` are shown but cannot be selected. Picking a profile selects and enables it in one step; `off` disables forwarding and keeps the stored profile. The change is previewed and written after exact `yes`. The example above sends `/alpha/search` and `/v1/alpha/search` to `test002`; an explicit `cx run PROFILE` (or equivalent) profile remains higher priority.
 
 Run `ccs proxy compact` and pick a profile to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider; it works like `ccs proxy search`, and `off` disables it. Explicit `run PROFILE` selection takes priority. Native remote-compaction v2 requests with boolean stream: true and a compaction_trigger item anywhere in input[] are also routed and marked [C]. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
+
+Run `ccs proxy claude` and pick a profile to send Claude Code traffic from `ccx` and `ccxs` through the proxy; `off` turns it off. Add the Claude provider first with `ccs add` (its `baseURL` is the Anthropic-compatible base, such as the `ANTHROPIC_BASE_URL` from `~/.claude/settings.json`, and its key is the Bearer token). While the route is enabled and proxy state exists, `ccx` passes `--settings` with `ANTHROPIC_BASE_URL` set to the proxy and a placeholder `ANTHROPIC_AUTH_TOKEN`; the proxy sends `/v1/messages` and `/v1/messages/*` to that profile with `Authorization: Bearer <profile key>`. `~/.claude/settings.json` is not changed, so plain `claude` keeps its own provider. See [wrappers](./WRAPPERS.md#ccx--ccxs).
 
 
 ### Set up and update local files
@@ -202,6 +205,7 @@ ccs proxy capture
 ccs proxy mode
 ccs proxy search
 ccs proxy compact
+ccs proxy claude
 ccs proxy config
 ccs proxy install
 ccs proxy restart
@@ -265,7 +269,7 @@ Behavior:
 - `backups/config-<timestamp>.toml` is a complete `config.toml` snapshot made before install; `backups/config-restore-<timestamp>.toml` is a complete snapshot made before restore. They are archives for manual inspection or recovery, are not automatically selected by `restore`, and are not automatically deleted.
 - A newly started proxy process clears persisted `active_requests` before serving traffic, so `active` only shows requests owned by the current proxy process.
 - `ccs proxy` without arguments ensures the installed runtime and prints one compact snapshot. `ccs proxy watch` reads state and health without starting, upgrading, or replacing the runtime. Both show mode, last/average latency, status counts, active/non-zero policy details, compact active requests, and grouped history. Healthy output omits URL, PID, version, protocol, file paths, disabled policies, zero policy counters, latency minimum/maximum, and command hints.
-- `active` and `history` remain separate. Active rows use `session route state age size`; route combines a six-character provider with an eight-character normalized model, and state carries search (green `[S]`), compaction (green `[C]`), conversion, or current retry facts. History also marks search requests with a green `[S]` and compaction requests with a green `[C]` in `result`, shows each non-empty session once using its newest route context, retains the newest five complete `time status dur. size result` events, then compresses older events to ordered `status/dur.` pairs. Requests without a session remain separate. Equal visible session ids keep the same color across sections, while the first 11 distinct visible ids use different ANSI 256 palette colors.
+- `active` and `history` remain separate. Active rows use `session route state age size`; route combines a six-character provider with an eight-character normalized model, and state carries search (green `[S]`), compaction (green `[C]`), Claude Code (green `[A]`), conversion, or current retry facts. History also marks search requests with a green `[S]`, compaction requests with a green `[C]`, and Claude Code requests with a green `[A]` in `result`, shows each non-empty session once using its newest route context, retains the newest five complete `time status dur. size result` events, then compresses older events to ordered `status/dur.` pairs. Requests without a session remain separate. Equal visible session ids keep the same color across sections, while the first 11 distinct visible ids use different ANSI 256 palette colors.
 - Token and cost columns aggregate every proxy-owned upstream attempt. `input` is uncached input (`input_tokens - cached_input_tokens`), matching the `input$` pricing basis; `cached` reports cached input separately. A token total appears only when every attempt reports the required fields. Cost uses each attempt's exact upstream/request model and response/request/config service tier with local cached prices and profile overrides; it performs no network refresh. Missing facts render as `-`, and cached input above input tokens renders `invalid`.
 - `ccs proxy` terminal output displays local file paths under `$HOME` with `~/`.
 - `ccs proxy serve` runs the proxy server in the foreground for direct debugging.

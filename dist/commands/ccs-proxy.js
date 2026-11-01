@@ -42,6 +42,8 @@ const PROXY_PROFILE_USAGE_INTERVAL_MS = 60_000;
 const PROXY_CAPTURE_REFRESH_MS = 1000;
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
+// Claude Code Messages API paths, including /v1/messages/count_tokens.
+const CLAUDE_PROXY_PATH = /^\/v1\/messages(?:\/|$)/;
 const PROXY_HEALTH_PROTOCOL = 8;
 const PROXY_STATE_SCHEMA_VERSION = 4;
 const PROXY_STATE_FILE = "proxy.json";
@@ -738,7 +740,8 @@ function buildProfileOrder(profiles) {
 }
 function resolveProxyUpstream(profiles, requestedProfile, requestPath, requestKind) {
     const route = requestKind === REQUEST_KIND_CONTEXT_COMPACTION ? "compact"
-        : requestPath && isProxySearchPath(requestPath) ? "search" : undefined;
+        : requestPath && isProxySearchPath(requestPath) ? "search"
+            : requestPath && isClaudeProxyPath(requestPath) ? "claude" : undefined;
     const routeProfile = route && profiles.proxy?.[route]?.enabled ? profiles.proxy[route].profile : undefined;
     const name = requestedProfile || routeProfile || profiles.current;
     if (!name) {
@@ -773,6 +776,9 @@ function resolveProxyUpstream(profiles, requestedProfile, requestPath, requestKi
 }
 function isProxySearchPath(requestPath) {
     return SEARCH_PROXY_PATHS.has(requestPath);
+}
+function isClaudeProxyPath(requestPath) {
+    return CLAUDE_PROXY_PATH.test(requestPath);
 }
 function createProxyMetrics() {
     return {
@@ -1383,6 +1389,8 @@ function formatProxyRoute(record) {
 function formatProxyRequestMarker(record) {
     if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION)
         return textGreen("[C]");
+    if (isClaudeProxyPath(record.path))
+        return textGreen("[A]");
     return isProxySearchPath(record.path) ? textGreen("[S]") : "";
 }
 function formatProxyActiveState(record) {
@@ -5548,7 +5556,8 @@ async function serveProxy(options) {
                     const body = await readBody(req);
                     const requestJson = parseJsonBody(body);
                     const turnMetadata = parseCodexTurnMetadata(req.headers);
-                    const sessionId = extractSessionId(requestJson, turnMetadata);
+                    // Claude Code sends its session id as a plain header.
+                    const sessionId = extractSessionId(requestJson, turnMetadata) ?? (headerSignal(req.headers, "x-claude-code-session-id") || null);
                     captureOwner = captureTask;
                     captureRequest = startCaptureRequest(captureOwner, sessionId, activeRecord.id, method, `${url.pathname}${url.search}`, req.headers, body);
                     if (captureOwner?.error) {
@@ -6055,6 +6064,7 @@ function usageHelpLines() {
         "  ccs proxy mode                           # show, then choose response mode and status retry",
         "  ccs proxy compact                        # show, then choose the compaction profile or off",
         "  ccs proxy search                         # show, then choose the alpha search profile or off",
+        "  ccs proxy claude                         # show, then choose the Claude Code profile for ccx/ccxs or off",
         "  ccs proxy config                         # show, then edit the status retry policy or latency deadlines",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
         "  ccs proxy restart                        # restart; asks before terminating active requests",
@@ -6168,7 +6178,8 @@ async function runProxyRouteCommand(route) {
         return;
     }
     const current = proxyRouteConfig(profiles, route);
-    const purpose = route === "search" ? "/alpha/search requests" : "compaction requests";
+    const purpose = route === "search" ? "/alpha/search requests"
+        : route === "claude" ? "Claude Code /v1/messages requests" : "compaction requests";
     const choice = await select(`Route ${purpose} to`, [
         { value: null, label: "off", hint: `use the current profile for ${purpose}` },
         ...Object.entries(profiles.profiles ?? {}).map(([name, profile]) => ({
@@ -6595,6 +6606,7 @@ const PROXY_SHORTCUTS = [
     { key: "m", label: "mode" },
     { key: "s", label: "search" },
     { key: "p", label: "compact", at: 3 },
+    { key: "a", label: "claude", at: 2 },
     { key: "f", label: "config", at: 3 },
     { key: "t", label: "restart", at: 3 },
 ];
@@ -6605,7 +6617,7 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "claude", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
@@ -6672,7 +6684,7 @@ export async function runProxyCommand(args, options) {
         await runProxyModeCommand(options);
         return;
     }
-    if (command === "search" || command === "compact") {
+    if (command === "search" || command === "compact" || command === "claude") {
         rejectProxyCommandArgs(rest, `ccs proxy ${command}`);
         await runProxyRouteCommand(command);
         return;

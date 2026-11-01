@@ -884,6 +884,82 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
   }
 });
 
+test("proxy routes Claude Code messages to the claude profile and marks them in history", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-claude-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const defaultPort = await reservePort();
+  const claudePort = await reservePort();
+  const defaultHits = [];
+  const claudeHits = [];
+  const defaultUpstream = createServer(async (req, res) => {
+    defaultHits.push({ authorization: req.headers.authorization, url: req.url });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "default" }));
+  });
+  const claudeUpstream = createServer(async (req, res) => {
+    await readServerRequestBody(req);
+    claudeHits.push({ authorization: req.headers.authorization, apiKey: req.headers["x-api-key"], url: req.url });
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ provider: "claude" }));
+  });
+  const stateRoot = join(home, ".config", "codex-tools");
+  const proxyOptions = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestStateWithProfiles(
+      home,
+      stateRoot,
+      proxyPort,
+      {
+        default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
+        pool: { baseURL: `http://127.0.0.1:${claudePort}/`, apiKey: "pool-key" },
+      },
+      "default",
+      { claude: { enabled: true, profile: "pool" } },
+    );
+    await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(claudeUpstream, claudePort)]);
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+    const claudeHeaders = {
+      authorization: "Bearer ccs-proxy",
+      "x-api-key": "stray",
+      "x-claude-code-session-id": "5a7ca8b1-7140-46ca-ba5c-036461af1149",
+      "content-type": "application/json",
+    };
+    const body = JSON.stringify({ model: "claude-sonnet-5", messages: [{ role: "user", content: "hi" }] });
+    for (const path of ["/v1/messages?beta=true", "/v1/messages/count_tokens"]) {
+      const response = await fetch(`http://127.0.0.1:${proxyPort}${path}`, { method: "POST", headers: claudeHeaders, body });
+      assert.deepEqual(await response.json(), { provider: "claude" });
+    }
+    const codex = await fetch(`http://127.0.0.1:${proxyPort}/v1/models`, { headers: { authorization: "Bearer client" } });
+    assert.deepEqual(await codex.json(), { provider: "default" });
+    assert.deepEqual(claudeHits, [
+      { authorization: "Bearer pool-key", apiKey: undefined, url: "/v1/messages?beta=true" },
+      { authorization: "Bearer pool-key", apiKey: undefined, url: "/v1/messages/count_tokens" },
+    ]);
+    assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/models" }]);
+
+    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 3);
+    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["default", "pool", "pool"]);
+    assert.deepEqual(state.metrics.recent_requests.map((record) => record.session).sort(), ["5a7ca8b1", "5a7ca8b1", null]);
+    const lines = buildProxyStatusLines(new Date(), state, ["default"], { healthy: true, started: false, pid: 1, state, version: packageVersion(), protocol: 8 }, proxyOptions)
+      .map(stripAnsi).join("\n");
+    assert.match(lines, /200\s+\S+\s+\S+\s+\[A\]/);
+  } finally {
+    await shutdownProxyRuntime(proxyOptions).catch(() => null);
+    await Promise.all([closeServer(defaultUpstream), closeServer(claudeUpstream)]);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("proxy routes alpha search to its mapped profile and preserves explicit profile priority", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
   const previousHome = process.env.HOME;

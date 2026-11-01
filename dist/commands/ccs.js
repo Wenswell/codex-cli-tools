@@ -1032,7 +1032,7 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details",
         "  ccs models [PROFILE] [--json]        # list models from the profile v1/models endpoint",
         "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
-        "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|config|install|restart|restore|serve] # manage proxy state and runtime",
+        "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|claude|config|install|restart|restore|serve] # manage proxy state and runtime",
         "  ccs use                              # choose the current profile; shows last use and switch times",
         "  ccs list | l                         # list profiles",
         "  ccs config                           # create or update profiles.json, config.toml, and AGENTS.md from the templates",

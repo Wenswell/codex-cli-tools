@@ -46,6 +46,7 @@ export function parseProfiles(text, label = "profiles.json", strict = false) {
         }
         assertProxyRoute(profiles.proxy?.search, "search");
         assertProxyRoute(profiles.proxy?.compact, "compact");
+        assertProxyRoute(profiles.proxy?.claude, "claude");
         assertCimgConfig(profiles.cimg);
         return profiles;
     }

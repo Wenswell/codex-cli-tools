@@ -13,6 +13,8 @@ export type Profile = {
   };
 };
 
+export type ProxyRouteName = "search" | "compact" | "claude";
+
 export type ProxyRouteConfig = {
   enabled: boolean;
   profile?: string;
@@ -34,6 +36,8 @@ export type ProfilesFile = {
     search?: ProxyRouteConfig;
     /** Route standalone and explicitly marked compaction requests. */
     compact?: ProxyRouteConfig;
+    /** Route Claude Code `/v1/messages` requests from ccx and ccxs. */
+    claude?: ProxyRouteConfig;
   };
   cimg?: CimgConfig;
   usage?: Record<string, Profile>;
@@ -99,6 +103,7 @@ export function parseProfiles(text: string, label = "profiles.json", strict = fa
     }
     assertProxyRoute(profiles.proxy?.search, "search");
     assertProxyRoute(profiles.proxy?.compact, "compact");
+    assertProxyRoute(profiles.proxy?.claude, "claude");
     assertCimgConfig(profiles.cimg);
     return profiles;
   } catch (error) {
@@ -107,7 +112,7 @@ export function parseProfiles(text: string, label = "profiles.json", strict = fa
   }
 }
 
-function assertProxyRoute(value: unknown, route: "search" | "compact"): void {
+function assertProxyRoute(value: unknown, route: ProxyRouteName): void {
   if (value === undefined) {
     return;
   }

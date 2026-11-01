@@ -93,5 +93,13 @@ Equivalent to:
 claude --dangerously-skip-permissions --resume ARGS...
 ```
 
+When `ccs proxy` is installed and `ccs proxy claude` selects a profile, both wrappers route Claude Code through the local proxy:
+
+```bash
+claude --settings '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:4610","ANTHROPIC_AUTH_TOKEN":"ccs-proxy"}}' --dangerously-skip-permissions ARGS...
+```
+
+`--settings` takes precedence over `~/.claude/settings.json`, which is not modified; the proxy replaces the placeholder token with the selected profile's key and records the requests in proxy history with a green `[A]`. Without proxy state or with the route `off`, the wrappers run exactly as above.
+
 Use `ccx` and `ccxs` only in directories and tasks you trust.
 

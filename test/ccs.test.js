@@ -14,7 +14,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
-  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
+  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|claude\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
   assert.doesNotMatch(output, /ccs run/);
@@ -332,6 +332,48 @@ test("Codex wrappers launch with a selected profile through an installed proxy",
       ]);
       assert.equal(captured.args.includes("--remote"), false);
     }
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    await rm(binDir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Claude wrappers route through the proxy only when proxy.claude is enabled", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      test001: { baseURL: "https://test001.example.com", apiKey: "test001-key" },
+      pool: { baseURL: "https://pool.example.com", apiKey: "pool-key" },
+    },
+    current: "test001",
+    proxy: { claude: { enabled: true, profile: "pool" } },
+  });
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const proxyPort = await reservePort();
+  const binDir = await mkdtemp(join(tmpdir(), "fake-claude-bin-"));
+  await writeFile(join(binDir, "claude"), "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n", "utf8");
+  await chmod(join(binDir, "claude"), 0o755);
+  const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
+  const env = {
+    XDG_CACHE_HOME: join(home, ".cache"),
+    CCS_PROXY_STATE_ROOT: stateRoot,
+    CCS_PROXY_LISTEN_PORT: String(proxyPort),
+    PATH: `${binDir}:${process.env.PATH}`,
+  };
+  const run = async (tool, args = []) => JSON.parse(await runCcs([`dist/bin/${tool}.js`, ...args], home, env));
+  try {
+    assert.deepEqual(await run("ccx"), ["--dangerously-skip-permissions"]);
+
+    await writeProxyStateForRunTest(home, stateRoot, proxyPort);
+    const settings = JSON.stringify({ env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${proxyPort}`, ANTHROPIC_AUTH_TOKEN: "ccs-proxy" } });
+    assert.deepEqual(await run("ccx", ["-p", "hi"]), ["--settings", settings, "--dangerously-skip-permissions", "-p", "hi"]);
+    assert.deepEqual(await run("ccxs"), ["--settings", settings, "--dangerously-skip-permissions", "--resume"]);
+
+    await replaceJson(join(home, ".config", "codex-tools", "profiles.json"), {
+      ...JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")),
+      proxy: { claude: { enabled: false, profile: "pool" } },
+    });
+    assert.deepEqual(await run("ccx"), ["--dangerously-skip-permissions"]);
   } finally {
     await shutdownProxyRuntime(options).catch(() => null);
     await rm(binDir, { recursive: true, force: true });
