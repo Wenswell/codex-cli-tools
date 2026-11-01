@@ -1,6 +1,6 @@
-import { textBlue, textCyan, textGreen, textMagenta, textYellow, } from "./text.js";
+import { textBlue, textCyan, textGreen, textMagenta, padVisibleRight, textYellow, } from "./text.js";
 export function printKeyValue(label, value, width = 8) {
-    console.log(`${label.padEnd(width)} ${value}`);
+    console.log(`${padVisibleRight(label, width)} ${value}`);
 }
 export function colorCount(value) {
     return textGreen(value);

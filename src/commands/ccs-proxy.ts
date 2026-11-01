@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { claudeSettingsPath, codexConfigPath, codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
-import { writePlatformConnection } from "../lib/platforms.js";
+import { colorPlatform, writePlatformConnection } from "../lib/platforms.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
@@ -5622,7 +5622,7 @@ async function applyProxyClaudePlan(plan: ProxyClaudePlan | null): Promise<void>
 
 function printProxyClaudePlan(plan: ProxyClaudePlan | null, applied: boolean): void {
   if (!plan) return;
-  printKeyValue("claude:", `${applied ? textGreen(formatProxyFilePath(plan.settingsPath)) : formatProxyFilePath(plan.settingsPath)}  ${colorName(plan.profileName)}  ${colorUrl(plan.targetBaseUrl)}`, 8);
+  printKeyValue(colorPlatform("claude", ":"), `${applied ? textGreen(formatProxyFilePath(plan.settingsPath)) : formatProxyFilePath(plan.settingsPath)}  ${colorName(plan.profileName)}  ${colorUrl(plan.targetBaseUrl)}`, 8);
 }
 
 export async function restoreProxy(options: ProxyOptions): Promise<string> {

@@ -2,11 +2,17 @@ import { stat } from "node:fs/promises";
 import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from "./fs.js";
 import { parseJsonObject, stringifyJson } from "./json.js";
 import { claudeSettingsPath, codexAuthPath, codexConfigPath, codexDir } from "./paths.js";
+import { textAnsi256, textGreen } from "./text.js";
 import { readTomlBaseUrl, updateTomlBaseUrl } from "./toml.js";
 export const PLATFORM_LABELS = {
     codex: "Codex",
     claude: "Claude Code",
 };
+// Platform identifiers print in upper case with a fixed color each: Codex green, Claude orange.
+export function colorPlatform(platform, suffix = "") {
+    const label = `${platform.toUpperCase()}${suffix}`;
+    return platform === "codex" ? textGreen(label) : textAnsi256(208, label);
+}
 // The client config files `ccs use` writes for each platform.
 export function platformFiles(platform) {
     return platform === "codex" ? [codexConfigPath(), codexAuthPath()] : [claudeSettingsPath()];

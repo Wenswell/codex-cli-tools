@@ -12,7 +12,7 @@ import {
   codexToolsConfigDir,
   profilesPath,
 } from "../lib/paths.js";
-import { PLATFORM_LABELS, readPlatformConnection, writePlatformConnection } from "../lib/platforms.js";
+import { colorPlatform, PLATFORM_LABELS, readPlatformConnection, writePlatformConnection } from "../lib/platforms.js";
 import {
   PLATFORMS,
   assertProfile,
@@ -446,7 +446,7 @@ function planSyncedProfiles(source: ProfilesFile, target: ProfilesFile | null): 
 function formatCurrentMap(profiles: ProfilesFile | null): string {
   const entries = PLATFORMS.flatMap((platform) => {
     const name = currentProfileName(profiles ?? {}, platform);
-    return name ? [`${platform} ${colorName(name)}`] : [];
+    return name ? [`${colorPlatform(platform)} ${colorName(name)}`] : [];
   });
   return entries.length > 0 ? entries.join(" · ") : textDim("none");
 }
@@ -585,7 +585,7 @@ async function runDeviceSync(args: string[]): Promise<void> {
   console.log(textBold(`ccs sync ${direction}`));
   printDiffBlock(preview);
   for (const platform of dropped) {
-    console.log(`${textYellow("warning:")} current ${platform} ${currentProfileName(targetProfiles ?? {}, platform)} is not in the incoming file; it becomes ${currentProfileName(next, platform) ?? "none"}`);
+    console.log(`${textYellow("warning:")} current ${colorPlatform(platform)} ${currentProfileName(targetProfiles ?? {}, platform)} is not in the incoming file; it becomes ${currentProfileName(next, platform) ?? "none"}`);
   }
   for (const platform of refresh) {
     console.log(textDim(`${PLATFORM_LABELS[platform]} settings will switch to ${currentProfileName(next, platform)} as ccs use does.`));
@@ -794,7 +794,7 @@ async function addProfile(): Promise<void> {
   const existing = target ? assertProfile(profiles[target], target) : undefined;
   const platform = existing ? profilePlatform(existing) : await select<Platform>("Platform", PLATFORMS.map((value) => ({
     value,
-    label: value,
+    label: colorPlatform(value),
     hint: PLATFORM_LABELS[value],
   })));
   const baseURL = await input("baseURL", {
@@ -813,7 +813,7 @@ async function addProfile(): Promise<void> {
 
   const profile: Profile = { baseURL, apiKey, ...(platform === "codex" ? {} : { platform }) };
   if (conversion) profile.routeConversion = { enabled: true };
-  printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${textDim(platform)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
+  printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${colorPlatform(platform)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
   if (platform === "codex") printKeyValue("conversion:", formatRouteConversion(profile), 11);
   console.log(textDim("no changes are written unless you type yes at the prompt."));
   if (!(await confirmApply())) {
@@ -839,7 +839,7 @@ function printProfile(name: string, profiles: ProfilesFile): void {
 
 function printProfileDetails(name: string, profile: Profile): void {
   printProfileSummary("profile", name, profile);
-  printKeyValue("platform:", profilePlatform(profile));
+  printKeyValue("platform:", colorPlatform(profilePlatform(profile)));
   if (profilePlatform(profile) === "codex") printKeyValue("conversion:", formatRouteConversion(profile));
 }
 
@@ -902,7 +902,7 @@ async function removeProfile(): Promise<void> {
   const name = await select("Remove which profile?", names.map((item) => ({
     value: item,
     label: item,
-    hint: `${profilePlatform(data.profiles![item])}  ${data.profiles![item].baseURL}${isCurrent(item) ? "  (current)" : ""}`,
+    hint: `${colorPlatform(profilePlatform(data.profiles![item]))}  ${textDim(`${data.profiles![item].baseURL}${isCurrent(item) ? "  (current)" : ""}`)}`,
   })));
   const platform = profilePlatform(data.profiles![name]);
   const replacement = profilesOf(data, platform).find((item) => item !== name);
@@ -913,7 +913,7 @@ async function removeProfile(): Promise<void> {
   }
   printProfileSummary("remove", name, assertProfile(data.profiles![name], name));
   if (isCurrent(name)) {
-    printKeyValue("current:", `${platform} ${textYellow(name)} -> ${replacement ? colorName(replacement) : textDim("none")}`);
+    printKeyValue("current:", `${colorPlatform(platform)} ${textYellow(name)} -> ${replacement ? colorName(replacement) : textDim("none")}`);
   }
   console.log(textDim("no changes are written unless you type yes at the prompt."));
   if (!(await confirmApply())) {
@@ -969,12 +969,11 @@ function isCurrentProfile(profiles: ProfilesFile, name: string): boolean {
 function profileUsageHint(profiles: ProfilesFile, name: string, entry: ProfileUsageEntry | undefined, nowMs: number): string {
   const used = profileLastUsedMs(entry);
   const parts = [
-    profilePlatform(profiles.profiles?.[name]),
     ...(isCurrentProfile(profiles, name) ? ["current"] : []),
     used === null ? "never used" : `used ${formatAgo(used, nowMs)}`,
     ...(entry?.switched_at ? [`switched ${formatAgo(Date.parse(entry.switched_at), nowMs)}`] : []),
   ];
-  return parts.join(" · ");
+  return `${colorPlatform(profilePlatform(profiles.profiles?.[name]))} ${textDim(`· ${parts.join(" · ")}`)}`;
 }
 
 async function useProfile(profiles: ProfilesFile): Promise<void> {
@@ -987,7 +986,7 @@ async function useProfile(profiles: ProfilesFile): Promise<void> {
   const nowMs = Date.now();
   if (!isInteractive()) {
     for (const name of names) {
-      console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${textDim(profileUsageHint(profiles, name, usage[name], nowMs))}`);
+      console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${profileUsageHint(profiles, name, usage[name], nowMs)}`);
     }
     console.log(textDim("run in an interactive terminal to switch."));
     return;
@@ -1021,7 +1020,7 @@ async function useProfile(profiles: ProfilesFile): Promise<void> {
   const previousName = currentProfileName(profiles, platform);
   await switchProfile(name);
   await recordProfileUsage(name, "switched_at");
-  printKeyValue("current:", `${textDim(platform)} ${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
+  printKeyValue("current:", `${colorPlatform(platform)} ${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
 }
 
 // One line per platform that has profiles; Codex always shows.
@@ -1033,12 +1032,12 @@ async function printStatus(): Promise<void> {
     if (platform !== "codex" && !name && profilesOf(profiles, platform).length === 0) continue;
     const profile = name ? profiles.profiles?.[name] : undefined;
     if (!name || !profile) {
-      printKeyValue(`${platform}:`, textDim(name ? `${name} (missing)` : "none"), 11);
+      printKeyValue(colorPlatform(platform, ":"), textDim(name ? `${name} (missing)` : "none"), 11);
       continue;
     }
     const normalized = assertProfile(profile, name);
     const switchedAt = usage[name]?.switched_at;
-    printKeyValue(`${platform}:`, [
+    printKeyValue(colorPlatform(platform, ":"), [
       colorName(name),
       colorUrl(normalized.baseURL),
       formatApiKey(normalized.apiKey),
@@ -1076,7 +1075,7 @@ async function printProfileList(profiles: ProfilesFile): Promise<void> {
     return {
       marker: row.marker,
       name: colorName(row.name),
-      platform: textDim(profilePlatform(row.profile)),
+      platform: colorPlatform(profilePlatform(row.profile)),
       url: colorUrl(row.profile.baseURL),
       key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
       conversion: row.conversion,

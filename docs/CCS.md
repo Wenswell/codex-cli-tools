@@ -9,6 +9,8 @@
 
 Each platform has its own current profile in `profiles.current`, such as `{ "codex": "test001", "claude": "pool" }`; switching one never touches the other platform's files. A profile without `platform` is a `codex` profile.
 
+Terminal output prints platform identifiers in upper case with a fixed color each: `CODEX` green and `CLAUDE` orange. `profiles.json` keeps the lower-case values.
+
 `ccs stats` summarizes the local usage records written by every tool (see [CLI runtime records](./CLI_RUNTIME_RECORDS.md#command-usage-records)): runs, last run, ok/error/cancelled counts, median duration, and shortcut share per command, then how often each interactive prompt was cancelled or answered with its default.
 
 `ccs version` and `ccs -v` print the package version from `package.json`.

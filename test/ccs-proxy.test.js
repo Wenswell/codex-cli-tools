@@ -6588,7 +6588,7 @@ test("proxy install and restore point Claude Code settings at the proxy and back
     await writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://pool.example.com/", ANTHROPIC_AUTH_TOKEN: "pool-key" }, theme: "dark" }), "utf8");
 
     const preview = stripAnsi(await captureStdout(() => runProxyCommand(["install"], options)));
-    assert.match(preview, new RegExp(`claude:\\s+~/\\.claude/settings\\.json\\s+pool\\s+http://127\\.0\\.0\\.1:${listenPort}`));
+    assert.match(preview, new RegExp(`CLAUDE:\\s+~/\\.claude/settings\\.json\\s+pool\\s+http://127\\.0\\.0\\.1:${listenPort}`));
     const installed = await installProxy(options);
     assert.equal(installed.claude?.profileName, "pool");
     const proxied = JSON.parse(await readFile(settingsPath, "utf8"));

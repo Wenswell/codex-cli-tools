@@ -7,7 +7,7 @@ import { confirmApply } from "../lib/confirm.js";
 import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
 import { codexAgentsPath, codexConfigPath, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
-import { PLATFORM_LABELS, readPlatformConnection, writePlatformConnection } from "../lib/platforms.js";
+import { colorPlatform, PLATFORM_LABELS, readPlatformConnection, writePlatformConnection } from "../lib/platforms.js";
 import { PLATFORMS, assertProfile, currentProfileName, parseProfiles, profilePlatform, profilesOf, readProfiles, writeProfiles, } from "../lib/profiles.js";
 import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select } from "../lib/prompt.js";
@@ -329,7 +329,7 @@ function planSyncedProfiles(source, target) {
 function formatCurrentMap(profiles) {
     const entries = PLATFORMS.flatMap((platform) => {
         const name = currentProfileName(profiles ?? {}, platform);
-        return name ? [`${platform} ${colorName(name)}`] : [];
+        return name ? [`${colorPlatform(platform)} ${colorName(name)}`] : [];
     });
     return entries.length > 0 ? entries.join(" · ") : textDim("none");
 }
@@ -454,7 +454,7 @@ async function runDeviceSync(args) {
     console.log(textBold(`ccs sync ${direction}`));
     printDiffBlock(preview);
     for (const platform of dropped) {
-        console.log(`${textYellow("warning:")} current ${platform} ${currentProfileName(targetProfiles ?? {}, platform)} is not in the incoming file; it becomes ${currentProfileName(next, platform) ?? "none"}`);
+        console.log(`${textYellow("warning:")} current ${colorPlatform(platform)} ${currentProfileName(targetProfiles ?? {}, platform)} is not in the incoming file; it becomes ${currentProfileName(next, platform) ?? "none"}`);
     }
     for (const platform of refresh) {
         console.log(textDim(`${PLATFORM_LABELS[platform]} settings will switch to ${currentProfileName(next, platform)} as ccs use does.`));
@@ -634,7 +634,7 @@ async function addProfile() {
     const existing = target ? assertProfile(profiles[target], target) : undefined;
     const platform = existing ? profilePlatform(existing) : await select("Platform", PLATFORMS.map((value) => ({
         value,
-        label: value,
+        label: colorPlatform(value),
         hint: PLATFORM_LABELS[value],
     })));
     const baseURL = await input("baseURL", {
@@ -653,7 +653,7 @@ async function addProfile() {
     const profile = { baseURL, apiKey, ...(platform === "codex" ? {} : { platform }) };
     if (conversion)
         profile.routeConversion = { enabled: true };
-    printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${textDim(platform)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
+    printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${colorPlatform(platform)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
     if (platform === "codex")
         printKeyValue("conversion:", formatRouteConversion(profile), 11);
     console.log(textDim("no changes are written unless you type yes at the prompt."));
@@ -678,7 +678,7 @@ function printProfile(name, profiles) {
 }
 function printProfileDetails(name, profile) {
     printProfileSummary("profile", name, profile);
-    printKeyValue("platform:", profilePlatform(profile));
+    printKeyValue("platform:", colorPlatform(profilePlatform(profile)));
     if (profilePlatform(profile) === "codex")
         printKeyValue("conversion:", formatRouteConversion(profile));
 }
@@ -734,7 +734,7 @@ async function removeProfile() {
     const name = await select("Remove which profile?", names.map((item) => ({
         value: item,
         label: item,
-        hint: `${profilePlatform(data.profiles[item])}  ${data.profiles[item].baseURL}${isCurrent(item) ? "  (current)" : ""}`,
+        hint: `${colorPlatform(profilePlatform(data.profiles[item]))}  ${textDim(`${data.profiles[item].baseURL}${isCurrent(item) ? "  (current)" : ""}`)}`,
     })));
     const platform = profilePlatform(data.profiles[name]);
     const replacement = profilesOf(data, platform).find((item) => item !== name);
@@ -747,7 +747,7 @@ async function removeProfile() {
     }
     printProfileSummary("remove", name, assertProfile(data.profiles[name], name));
     if (isCurrent(name)) {
-        printKeyValue("current:", `${platform} ${textYellow(name)} -> ${replacement ? colorName(replacement) : textDim("none")}`);
+        printKeyValue("current:", `${colorPlatform(platform)} ${textYellow(name)} -> ${replacement ? colorName(replacement) : textDim("none")}`);
     }
     console.log(textDim("no changes are written unless you type yes at the prompt."));
     if (!(await confirmApply())) {
@@ -798,12 +798,11 @@ function isCurrentProfile(profiles, name) {
 function profileUsageHint(profiles, name, entry, nowMs) {
     const used = profileLastUsedMs(entry);
     const parts = [
-        profilePlatform(profiles.profiles?.[name]),
         ...(isCurrentProfile(profiles, name) ? ["current"] : []),
         used === null ? "never used" : `used ${formatAgo(used, nowMs)}`,
         ...(entry?.switched_at ? [`switched ${formatAgo(Date.parse(entry.switched_at), nowMs)}`] : []),
     ];
-    return parts.join(" · ");
+    return `${colorPlatform(profilePlatform(profiles.profiles?.[name]))} ${textDim(`· ${parts.join(" · ")}`)}`;
 }
 async function useProfile(profiles) {
     const names = Object.keys(profiles.profiles ?? {});
@@ -815,7 +814,7 @@ async function useProfile(profiles) {
     const nowMs = Date.now();
     if (!isInteractive()) {
         for (const name of names) {
-            console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${textDim(profileUsageHint(profiles, name, usage[name], nowMs))}`);
+            console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${profileUsageHint(profiles, name, usage[name], nowMs)}`);
         }
         console.log(textDim("run in an interactive terminal to switch."));
         return;
@@ -847,7 +846,7 @@ async function useProfile(profiles) {
     const previousName = currentProfileName(profiles, platform);
     await switchProfile(name);
     await recordProfileUsage(name, "switched_at");
-    printKeyValue("current:", `${textDim(platform)} ${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
+    printKeyValue("current:", `${colorPlatform(platform)} ${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
 }
 // One line per platform that has profiles; Codex always shows.
 async function printStatus() {
@@ -859,12 +858,12 @@ async function printStatus() {
             continue;
         const profile = name ? profiles.profiles?.[name] : undefined;
         if (!name || !profile) {
-            printKeyValue(`${platform}:`, textDim(name ? `${name} (missing)` : "none"), 11);
+            printKeyValue(colorPlatform(platform, ":"), textDim(name ? `${name} (missing)` : "none"), 11);
             continue;
         }
         const normalized = assertProfile(profile, name);
         const switchedAt = usage[name]?.switched_at;
-        printKeyValue(`${platform}:`, [
+        printKeyValue(colorPlatform(platform, ":"), [
             colorName(name),
             colorUrl(normalized.baseURL),
             formatApiKey(normalized.apiKey),
@@ -900,7 +899,7 @@ async function printProfileList(profiles) {
         return {
             marker: row.marker,
             name: colorName(row.name),
-            platform: textDim(profilePlatform(row.profile)),
+            platform: colorPlatform(profilePlatform(row.profile)),
             url: colorUrl(row.profile.baseURL),
             key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
             conversion: row.conversion,

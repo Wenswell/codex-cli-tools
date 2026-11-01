@@ -175,7 +175,9 @@ function choiceLines(choices, focus, offset, size, marker) {
         const padded = padVisibleRight(choice.label, labelWidth);
         const label = choice.disabled ? textDim(padded) : focused ? textCyan(padded) : padded;
         const detail = choice.disabled ? `(${choice.disabled})` : choice.hint;
-        lines.push(`${focused ? textCyan("❯") : " "} ${marker(choice, index)}${label}${detail ? `  ${textDim(detail)}` : ""}`);
+        // A hint that carries its own styling is printed as is.
+        const styledDetail = detail && stripAnsi(detail) === detail ? textDim(detail) : detail;
+        lines.push(`${focused ? textCyan("❯") : " "} ${marker(choice, index)}${label}${styledDetail ? `  ${styledDetail}` : ""}`);
     }
     const below = choices.length - offset - size;
     if (below > 0)

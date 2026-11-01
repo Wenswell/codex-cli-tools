@@ -80,10 +80,10 @@ test("ccs exposes route conversion in current, list, and profile views", async (
     const list = await runCcs(["dist/bin/ccs.js", "list"], home, env);
     const profile = await runCcs(["dist/bin/ccs.js", "test001"], home, env);
 
-    assert.match(status, /^codex:\s+test001\s+https:\/\/test001\.example\.test\s+\S+\s+responses→chat$/m);
-    assert.doesNotMatch(status, /^claude:/m);
-    assert.match(list, /test001\s+codex\s+https:\/\/test001\.example\.test.*responses→chat/);
-    assert.match(list, /direct\s+codex\s+https:\/\/direct\.example\.test.*off/);
+    assert.match(status, /^CODEX:\s+test001\s+https:\/\/test001\.example\.test\s+\S+\s+responses→chat$/m);
+    assert.doesNotMatch(status, /^CLAUDE:/m);
+    assert.match(list, /test001\s+CODEX\s+https:\/\/test001\.example\.test.*responses→chat/);
+    assert.match(list, /direct\s+CODEX\s+https:\/\/direct\.example\.test.*off/);
     assert.match(profile, /^conversion:\s+responses→chat$/m);
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -373,12 +373,12 @@ test("ccs use switches Claude Code settings independently of Codex", async () =>
     assert.deepEqual(profiles.current, { codex: "test001", claude: "pool" });
 
     const status = await runCcsDirect([], home);
-    assert.match(status, /^codex:\s+test001\s+https:\/\/test001\.example\.test/m);
-    assert.match(status, /^claude:\s+pool\s+https:\/\/pool\.example\.test\//m);
+    assert.match(status, /^CODEX:\s+test001\s+https:\/\/test001\.example\.test/m);
+    assert.match(status, /^CLAUDE:\s+pool\s+https:\/\/pool\.example\.test\//m);
 
     // pool is current but settings.json still points elsewhere, so selecting it re-applies it.
     const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
-    assert.match(output, /pool\s+claude · current/);
+    assert.match(output, /pool\s+CLAUDE · current/);
     assert.match(output, /current:\s+pool\s+Claude Code files re-applied/);
     const written = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.deepEqual(written, {
@@ -665,8 +665,8 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
       ["Remove which profile?", KEYS.enter],
       ["Apply changes?", "no\n"],
     ]);
-    assert.match(declined.output, /test001\s+codex\s+https:\/\/test001\.example\.test\s+\(current\)/);
-    assert.match(declined.output, /current:\s+codex test001 -> test002/);
+    assert.match(declined.output, /test001\s+CODEX\s+https:\/\/test001\.example\.test\s+\(current\)/);
+    assert.match(declined.output, /current:\s+CODEX test001 -> test002/);
     assert.equal(declined.output.includes("test001-key-123456"), false);
     assert.ok(JSON.parse(await readFile(profilesFile, "utf8")).profiles.test001);
 
@@ -715,10 +715,10 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     await assert.rejects(() => runCcsDirect(["use", "test002"], home), /usage: ccs use/);
 
     const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", KEYS.enter]]);
-    assert.match(output, /test001\s+codex · current · used 1m ago · switched 3d ago/);
+    assert.match(output, /test001\s+CODEX · current · used 1m ago · switched 3d ago/);
     assert.match(output, /empty\s+\(missing apiKey\)/);
     assert.match(output, /✔ Switch to which profile\? · test002/);
-    assert.match(output, /current:\s+codex test001 -> test002/);
+    assert.match(output, /current:\s+CODEX test001 -> test002/);
     assert.deepEqual(JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")).current, { codex: "test002" });
     assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /base_url = "https:\/\/test002\.example\.test"/);
     assert.equal(JSON.parse(await readFile(join(home, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "test002-key-123456");
