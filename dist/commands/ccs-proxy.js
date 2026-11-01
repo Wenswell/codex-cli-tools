@@ -345,14 +345,30 @@ function publicCaptureStatus(task) {
     const { directory, ...publicTask } = task;
     return { active: true, task: publicTask, directory };
 }
+// Codex session ids are UUIDv7: the first 48 bits are the creation time in Unix milliseconds.
+function isSessionCreatedSince(sessionId, sinceMs) {
+    const match = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.exec(sessionId);
+    return match !== null && Number.parseInt(`${match[1]}${match[2]}`, 16) >= sinceMs;
+}
 function startCaptureRequest(task, sessionId, requestId, method, url, requestHeaders, requestBody) {
-    if (!task || task.claimed >= task.requested || !sessionId || !sessionId.startsWith(task.target))
+    if (!task || task.claimed >= task.requested)
         return null;
-    if (task.sessionId && task.sessionId !== sessionId) {
-        task.error = "capture target is ambiguous; use a longer session prefix";
-        return null;
+    if (task.scope === "new") {
+        if (!sessionId)
+            return null;
+        if (task.sessionId ? task.sessionId !== sessionId : !isSessionCreatedSince(sessionId, Date.parse(task.startedAt)))
+            return null;
+        task.sessionId = sessionId;
     }
-    task.sessionId ??= sessionId;
+    else if (task.scope === "session") {
+        if (!sessionId || !sessionId.startsWith(task.target ?? ""))
+            return null;
+        if (task.sessionId && task.sessionId !== sessionId) {
+            task.error = "capture target is ambiguous; use a longer session prefix";
+            return null;
+        }
+        task.sessionId = sessionId;
+    }
     task.claimed += 1;
     return {
         taskId: task.id,
@@ -5229,20 +5245,19 @@ async function serveProxy(options) {
                             return;
                         }
                         const payload = parseJsonBody(await readBody(req));
-                        const target = payload && typeof payload === "object" && !Array.isArray(payload)
-                            ? payload.target
-                            : null;
-                        const count = payload && typeof payload === "object" && !Array.isArray(payload)
-                            ? payload.count
-                            : null;
+                        const fields = payload && typeof payload === "object" && !Array.isArray(payload)
+                            ? payload
+                            : {};
+                        const { scope, target, count } = fields;
                         if (captureTask) {
                             res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
                             res.end(JSON.stringify({ error: "proxy capture already has an active task" }));
                             return;
                         }
-                        if (typeof target !== "string" || target.length === 0 || !Number.isSafeInteger(count) || Number(count) <= 0) {
+                        const validScope = scope === "all" || scope === "new" || (scope === "session" && typeof target === "string" && target.length > 0);
+                        if (!validScope || !Number.isSafeInteger(count) || Number(count) <= 0) {
                             res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-                            res.end(JSON.stringify({ error: "proxy capture requires a non-empty target and positive integer count" }));
+                            res.end(JSON.stringify({ error: "proxy capture requires scope all, new, or session with a non-empty target, and a positive integer count" }));
                             return;
                         }
                         const id = randomUUID();
@@ -5250,7 +5265,7 @@ async function serveProxy(options) {
                         await mkdir(directory, { recursive: true, mode: 0o700 });
                         await chmod(directory, 0o700);
                         captureTask = {
-                            id, target, sessionId: null, requested: Number(count), claimed: 0, captured: 0,
+                            id, scope, target: scope === "session" ? target : null, sessionId: null, requested: Number(count), claimed: 0, captured: 0,
                             startedAt: new Date().toISOString(), directory, error: null,
                         };
                         res.writeHead(201, { "content-type": "application/json; charset=utf-8" });
@@ -6328,10 +6343,23 @@ function formatProxyWaitRequest(request) {
 }
 async function readCaptureSummary(directory) {
     const files = (await readdir(directory).catch(() => [])).filter((file) => file.endsWith(".json")).sort();
-    if (files.length === 0)
-        return { count: 0, sessionId: null };
-    const first = await readFile(path.join(directory, files[0]), "utf8").then((text) => JSON.parse(text)).catch(() => null);
-    return { count: files.length, sessionId: typeof first?.session_id === "string" ? first.session_id : null };
+    const sessionIds = new Set();
+    for (const file of files) {
+        const record = await readFile(path.join(directory, file), "utf8").then((text) => JSON.parse(text)).catch(() => null);
+        if (typeof record?.session_id === "string")
+            sessionIds.add(record.session_id);
+    }
+    return { count: files.length, sessionIds: [...sessionIds] };
+}
+function formatCaptureTarget(task) {
+    return task.scope === "all" ? "all sessions" : task.scope === "new" ? "next new session" : task.target ?? "-";
+}
+function formatCaptureSession(task) {
+    if (task.scope === "all")
+        return textDim("any");
+    if (task.sessionId)
+        return task.sessionId;
+    return textDim(task.scope === "new" ? "waiting for a new session" : "waiting for the next request");
 }
 function proxyCaptureFrame(status) {
     const task = status.task;
@@ -6339,8 +6367,8 @@ function proxyCaptureFrame(status) {
         `${bgDarkBlue(" ccs proxy capture ")}  ${textDim(new Date().toLocaleTimeString("en-GB", { hour12: false }))}`,
         "",
         `capture:   ${textGreen("active")}`,
-        `target:    ${task.target}`,
-        `session:   ${task.sessionId ?? textDim("waiting for the next request")}`,
+        `target:    ${formatCaptureTarget(task)}`,
+        `session:   ${formatCaptureSession(task)}`,
         `progress:  ${textGreen(String(task.captured))}/${task.requested}`,
         `directory: ${colorPath(formatProxyFilePath(status.directory))}`,
         textDim("authentication headers are redacted; files remain until manually removed"),
@@ -6407,7 +6435,7 @@ async function watchProxyCapture(options, state, started) {
     if (failure)
         throw failure;
     const summary = outcome === "detached"
-        ? { count: latest.task.captured, sessionId: latest.task.sessionId }
+        ? { count: latest.task.captured, sessionIds: latest.task.sessionId ? [latest.task.sessionId] : [] }
         : await readCaptureSummary(directory);
     const captured = summary.count;
     const result = outcome === "detached"
@@ -6416,7 +6444,11 @@ async function watchProxyCapture(options, state, started) {
             ? textYellow("cancelled")
             : captured >= task.requested ? textGreen("complete") : textYellow("ended early");
     printKeyValue("capture:", result, 10);
-    printKeyValue("session:", summary.sessionId ?? textDim("none"), 10);
+    printKeyValue("target:", formatCaptureTarget(task), 10);
+    if (task.scope === "all")
+        printKeyValue("sessions:", String(summary.sessionIds.length), 10);
+    else
+        printKeyValue("session:", summary.sessionIds[0] ?? textDim("none"), 10);
     printKeyValue("progress:", `${captured}/${task.requested}`, 10);
     printKeyValue("directory:", colorPath(formatProxyFilePath(directory)), 10);
     if (outcome === "detached") {
@@ -6434,8 +6466,8 @@ async function runProxyCaptureCommand(options) {
             return;
         }
         printKeyValue("capture:", textGreen("active"), 10);
-        printKeyValue("target:", status.task.target, 10);
-        printKeyValue("session:", status.task.sessionId ?? textDim("waiting"), 10);
+        printKeyValue("target:", formatCaptureTarget(status.task), 10);
+        printKeyValue("session:", formatCaptureSession(status.task), 10);
         printKeyValue("progress:", `${status.task.captured}/${status.task.requested}`, 10);
         printKeyValue("directory:", colorPath(formatProxyFilePath(status.directory)), 10);
         return;
@@ -6445,19 +6477,18 @@ async function runProxyCaptureCommand(options) {
         printKeyValue("note:", "run in an interactive terminal to start a capture", 10);
         return;
     }
-    const choices = proxySessionChoices(state, Date.now());
-    if (choices.length === 0) {
-        printKeyValue("result:", "no sessions yet; send a Codex request through the proxy first", 10);
-        return;
-    }
-    const target = await select("Capture which session?", choices);
+    const target = await select("Capture which session?", [
+        { value: { scope: "all" }, label: "all sessions", hint: "every request through the proxy, including requests without a session" },
+        { value: { scope: "new" }, label: "next new session", hint: "the first Codex session created after this starts" },
+        ...proxySessionChoices(state, Date.now()).map((choice) => ({ ...choice, value: { scope: "session", target: choice.value } })),
+    ]);
     const count = Number(await input("How many requests?", {
         default: String(PROXY_CAPTURE_DEFAULT_COUNT),
         validate: (value) => /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? null : "enter a positive integer",
     }));
     const started = await proxyCaptureRequest(state, {
         method: "POST",
-        body: JSON.stringify({ target, count }),
+        body: JSON.stringify({ ...target, count }),
     });
     await watchProxyCapture(options, state, started);
 }

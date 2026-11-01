@@ -1145,7 +1145,7 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
     await waitForState(stateRoot, (state) => state.metrics.recent_requests.some((record) => record.session === "session-"));
 
     const cancelled = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
-      ["Capture which session?", KEYS.enter],
+      ["Capture which session?", `${KEYS.down}${KEYS.down}${KEYS.enter}`],
       ["How many requests?", `2${KEYS.enter}`],
       ["c cancel capture", "c"],
     ]);
@@ -1157,7 +1157,7 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
     let second;
     let sends;
     const completed = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
-      ["Capture which session?", KEYS.enter],
+      ["Capture which session?", `${KEYS.down}${KEYS.down}${KEYS.enter}`],
       ["How many requests?", KEYS.enter],
       ["progress:  0/5", () => {
         sends = (async () => {
@@ -1215,6 +1215,102 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
       listenPort: proxyPort,
       stateRoot: join(home, ".config", "codex-tools"),
     }).catch(() => null);
+    await closeServer(upstream);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy captures all requests or only the next new session", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-capture-scope-"));
+  const previousHome = process.env.HOME;
+  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+  const proxyPort = await reservePort();
+  const upstreamPort = await reservePort();
+  const upstream = createServer(async (req, res) => {
+    await readServerRequestBody(req);
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end("{}");
+  });
+  const stateRoot = join(home, ".config", "codex-tools");
+  const proxyOptions = {
+    codexConfigPath: join(home, ".codex", "config.toml"),
+    listenHost: "127.0.0.1",
+    listenPort: proxyPort,
+    stateRoot,
+  };
+  const uuidv7At = (ms, suffix) => {
+    const hex = ms.toString(16).padStart(12, "0");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7000-8000-${String(suffix).padStart(12, "0")}`;
+  };
+  const send = async (sessionId) => {
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(sessionId ? { session_id: sessionId, input: "x" } : { input: "x" }),
+    });
+    await response.text();
+  };
+  const sessionIdsIn = async (directory) => {
+    const files = (await readdir(directory)).filter((file) => file.endsWith(".json")).sort();
+    return Promise.all(files.map(async (file) => JSON.parse(await readFile(join(directory, file), "utf8")).session_id));
+  };
+
+  try {
+    process.env.HOME = home;
+    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+    await writeProxyTestState(home, stateRoot, proxyPort, upstreamPort);
+    await listenServer(upstream, upstreamPort);
+    await ensureProxyRunning(proxyOptions);
+    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+    const existing = uuidv7At(Date.now() - 60_000, 1);
+
+    let sends;
+    const fresh = uuidv7At(Date.now() + 1000, 2);
+    const later = uuidv7At(Date.now() + 2000, 3);
+    const created = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
+      ["Capture which session?", `${KEYS.down}${KEYS.enter}`],
+      ["How many requests?", `2${KEYS.enter}`],
+      ["waiting for a new session", () => {
+        sends = (async () => {
+          await send(existing);
+          await send(null);
+          await send(fresh);
+          await send(later);
+          await send(fresh);
+        })();
+      }],
+    ]);
+    await sends;
+    assert.match(created.output, /target:\s+next new session/);
+    assert.match(created.output, /capture:\s+complete/);
+    assert.match(created.output, new RegExp(`session:\\s+${fresh}`));
+    const captureRoot = join(stateRoot, "captures");
+    const [newDir] = await readdir(captureRoot);
+    assert.deepEqual(await sessionIdsIn(join(captureRoot, newDir)), [fresh, fresh]);
+
+    const all = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
+      ["Capture which session?", KEYS.enter],
+      ["How many requests?", `3${KEYS.enter}`],
+      ["session:   any", () => {
+        sends = (async () => {
+          await send(existing);
+          await send(null);
+          await send(later);
+        })();
+      }],
+    ]);
+    await sends;
+    assert.match(all.output, /target:\s+all sessions/);
+    assert.match(all.output, /capture:\s+complete/);
+    assert.match(all.output, /sessions:\s+2/);
+    const allDir = (await readdir(captureRoot)).find((directory) => directory !== newDir);
+    assert.deepEqual(await sessionIdsIn(join(captureRoot, allDir)), [existing, null, later]);
+  } finally {
+    await shutdownProxyRuntime(proxyOptions).catch(() => null);
     await closeServer(upstream);
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
