@@ -39,6 +39,9 @@ function withAnsi(code, value) {
 export function textBold(value) {
     return withAnsi(1, value);
 }
+export function textUnderline(value) {
+    return withAnsi(4, value);
+}
 export function textDim(value) {
     return withAnsi(2, value);
 }

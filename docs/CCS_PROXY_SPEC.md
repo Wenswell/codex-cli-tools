@@ -315,6 +315,7 @@ History row count follows these rules:
 
 - TTY output computes the count from `process.stdout.rows` after runtime, status, active policy, active section, history section, history group lines, and watch footer are reserved.
 - Tiny terminals can render zero history rows.
+- One-shot TTY output ends with a `commands:` line that highlights one key each for `watch`, `capture`, `cancel`, `reroute`, `mode`, `search`, `compact`, `config`, and `restart`, then waits for one key; a mapped key runs that command, and any other key exits. `watch` and non-TTY output have no shortcut line.
 - Non-TTY output reads 11 history records: five full records plus up to six compact older trend samples for one history group.
 - `--history N` overrides adaptive sizing for `ccs proxy` and `ccs proxy watch` with up to `N` history groups.
 - `N` is a positive integer. A non-empty session is one history group; each request without a session is one group.

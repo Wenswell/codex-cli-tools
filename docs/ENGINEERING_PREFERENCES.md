@@ -26,6 +26,11 @@ in the command-specific specifications.
 - Exception: a command whose only effect is selecting one value that the user
   can select back, such as `ccs use`, applies the selection on Enter without a
   separate `yes`. The selection list must show the current value.
+- A no-argument status page in a terminal may highlight one letter per footer
+  command and wait for one key that runs that command once; any other key
+  exits. Only map commands that are read-only or start with a selection or
+  preview, so a stray key cannot write without a further step. Non-TTY footers
+  stay plain and the command exits immediately.
 - Commands that follow a background task after starting it show live progress
   until it finishes, and provide keys to cancel the task or leave the view.
 - Apply rechecks the preview source, writes only the previewed target, verifies

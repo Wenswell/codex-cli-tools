@@ -35,6 +35,37 @@ test("ccs status footer separates direct commands from namespaces", async () => 
   }
 });
 
+test("ccs status keys run one highlighted command and other keys exit", async () => {
+  const home = await writeProfiles({
+    profiles: { test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" } },
+    current: "test001",
+  });
+  try {
+    const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
+    const version = await runCcsInteractive([], home, [["press a highlighted key", "v"]]);
+    assert.match(version.output, /^commands:\s+version \| PROFILE \| models \| use \| list .* \| stats$/m);
+    assert.match(version.output, /^namespaces:\s+proxy \| help/m);
+    assert.match(version.output, new RegExp(`^ccs ${packageJson.version.replaceAll(".", "\\.")}$`, "m"));
+
+    const exited = await runCcsInteractive([], home, [["press a highlighted key", "x"]]);
+    assert.doesNotMatch(exited.output, /^ccs \d/m);
+    assert.doesNotMatch(exited.output, /Usage:/);
+
+    const proxy = await runCcsInteractive([], home, [
+      ["press a highlighted key", "p"],
+      ["watch | capture | cancel", "m"],
+    ], { CCS_PROXY_STATE_ROOT: join(home, ".cache", "codex-tools", "proxy") });
+    assert.match(proxy.output, /ccs proxy\s+\d{2}:\d{2}:\d{2}/);
+    assert.match(proxy.output, /^mode:\s+missing$/m);
+
+    const plain = await runCcsDirect([], home);
+    assert.match(plain, /^commands:\s+version \| PROFILE \| models \| use/m);
+    assert.doesNotMatch(plain, /press a highlighted key/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs exposes route conversion in current, list, and profile views", async () => {
   const home = await writeProfiles({
     profiles: {

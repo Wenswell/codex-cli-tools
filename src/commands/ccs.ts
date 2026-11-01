@@ -18,7 +18,8 @@ import {
 } from "../lib/paths.js";
 import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
 import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage, type ProfileUsageEntry } from "../lib/profile-usage.js";
-import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
+import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select, type Shortcut } from "../lib/prompt.js";
+import { setUsageCommand } from "../lib/usage.js";
 import {
   maskSecret,
   textBlue,
@@ -1309,17 +1310,44 @@ function printCommandFooter(rows: CommandFooterRow[]): void {
   console.log(formatCommandFooterLines(rows).map(textDim).join("\n"));
 }
 
+const CCS_COMMAND_SHORTCUTS: Shortcut[] = [
+  { key: "v", label: "version" },
+  { key: "m", label: "models" },
+  { key: "u", label: "use" },
+  { key: "l", label: "list" },
+  { key: "i", label: "init" },
+  { key: "s", label: "sync" },
+  { key: "a", label: "add" },
+  { key: "r", label: "remove" },
+  { key: "c", label: "config" },
+  { key: "t", label: "stats", at: 1 },
+];
+const CCS_NAMESPACE_SHORTCUTS: Shortcut[] = [
+  { key: "p", label: "proxy" },
+  { key: "h", label: "help" },
+];
+
 function printUsageHelp(): void {
-  printCommandFooter([
-    {
-      label: "commands:",
-      commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config", "stats"],
-    },
-    {
-      label: "namespaces:",
-      commands: ["proxy", "--help"],
-    },
-  ]);
+  if (!isInteractive()) {
+    printCommandFooter([
+      {
+        label: "commands:",
+        commands: ["version", "PROFILE", "models", ...CCS_COMMAND_SHORTCUTS.slice(2).map((shortcut) => shortcut.label)],
+      },
+      {
+        label: "namespaces:",
+        commands: ["proxy", "--help"],
+      },
+    ]);
+    return;
+  }
+  const separator = textDim(" | ");
+  console.log(`${textDim("commands:  ")} ${[
+    formatShortcut(CCS_COMMAND_SHORTCUTS[0]),
+    textDim("PROFILE"),
+    ...CCS_COMMAND_SHORTCUTS.slice(1).map(formatShortcut),
+  ].join(separator)}`);
+  console.log(`${textDim("namespaces:")} ${CCS_NAMESPACE_SHORTCUTS.map(formatShortcut).join(separator)}`);
 }
 
 export async function runCcs(argv: string[]): Promise<void> {
@@ -1351,6 +1379,11 @@ export async function runCcs(argv: string[]): Promise<void> {
   if (!command) {
     await printStatus();
     printUsageHelp();
+    const key = await readShortcutKey([...CCS_COMMAND_SHORTCUTS, ...CCS_NAMESPACE_SHORTCUTS]);
+    const shortcut = [...CCS_COMMAND_SHORTCUTS, ...CCS_NAMESPACE_SHORTCUTS].find((entry) => entry.key === key);
+    if (!shortcut) return;
+    setUsageCommand("ccs", [shortcut.label], "shortcut");
+    await runCcs([shortcut.label]);
     return;
   }
 

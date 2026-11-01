@@ -49,6 +49,10 @@ export function textBold(value: string): string {
   return withAnsi(1, value);
 }
 
+export function textUnderline(value: string): string {
+  return withAnsi(4, value);
+}
+
 export function textDim(value: string): string {
   return withAnsi(2, value);
 }

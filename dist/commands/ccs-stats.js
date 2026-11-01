@@ -49,7 +49,7 @@ export async function runCcsStats(args) {
         commands.set(record.command, [...(commands.get(record.command) ?? []), record]);
     }
     const commandColumns = [
-        { key: "command", title: "command", flex: true, truncate: true },
+        { key: "command", title: "command", truncate: true },
         { key: "runs", title: "runs", align: "right" },
         { key: "last", title: "last", align: "right" },
         { key: "ok", title: "ok", align: "right" },
@@ -88,7 +88,7 @@ export async function runCcsStats(args) {
     console.log("");
     console.log(textBold("prompts"));
     printTable([
-        { key: "prompt", title: "prompt", flex: true, truncate: true },
+        { key: "prompt", title: "prompt", truncate: true },
         { key: "command", title: "command", truncate: true },
         { key: "shown", title: "shown", align: "right" },
         { key: "cancelled", title: "cancelled", align: "right" },

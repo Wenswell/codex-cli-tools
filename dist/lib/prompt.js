@@ -1,5 +1,5 @@
 import stripAnsi from "strip-ansi";
-import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, truncateVisible, visibleLength } from "./text.js";
+import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, textUnderline, truncateVisible, visibleLength } from "./text.js";
 import { recordUsagePrompt } from "./usage.js";
 export class PromptCancelledError extends Error {
     interrupted;
@@ -319,5 +319,36 @@ export function input(message, options = {}) {
             return textCyan(value ? maskSecret(value) : "-");
         },
         usage: () => ({ kept_default: options.default === undefined ? null : !typed }),
+    });
+}
+export function formatShortcut(shortcut) {
+    const at = shortcut.at ?? 0;
+    return `${textDim(shortcut.label.slice(0, at))}${textUnderline(textBold(textCyan(shortcut.label[at])))}${textDim(shortcut.label.slice(at + 1))}`;
+}
+// Waits for one key and returns it when it names a shortcut; any other key returns null.
+export function readShortcutKey(shortcuts, hint = "press a highlighted key · any other key exits") {
+    const input = process.stdin;
+    const output = process.stdout;
+    if (!input.isTTY || !output.isTTY)
+        return Promise.resolve(null);
+    return new Promise((resolve) => {
+        const wasRaw = Boolean(input.isRaw);
+        const done = (key) => {
+            input.off("data", onData);
+            input.off("end", onEnd);
+            if (typeof input.setRawMode === "function")
+                input.setRawMode(wasRaw);
+            input.pause();
+            output.write("\r\u001b[2K\u001b[?25h");
+            resolve(key !== null && shortcuts.some((shortcut) => shortcut.key === key) ? key : null);
+        };
+        const onData = (chunk) => done(parseKeys(chunk.toString())[0] ?? null);
+        const onEnd = () => done(null);
+        if (typeof input.setRawMode === "function")
+            input.setRawMode(true);
+        input.on("data", onData);
+        input.once("end", onEnd);
+        input.resume();
+        output.write(`\u001b[?25l${textDim(hint)}`);
     });
 }

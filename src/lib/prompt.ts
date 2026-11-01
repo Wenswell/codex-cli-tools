@@ -1,5 +1,5 @@
 import stripAnsi from "strip-ansi";
-import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, truncateVisible, visibleLength } from "./text.js";
+import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, textUnderline, truncateVisible, visibleLength } from "./text.js";
 import { recordUsagePrompt, type UsagePromptRecord } from "./usage.js";
 
 export class PromptCancelledError extends Error {
@@ -347,5 +347,42 @@ export function input(
       return textCyan(value ? maskSecret(value) : "-");
     },
     usage: () => ({ kept_default: options.default === undefined ? null : !typed }),
+  });
+}
+
+export type Shortcut = {
+  key: string;
+  label: string;
+  // Index of the highlighted letter in `label`; defaults to the first letter.
+  at?: number;
+};
+
+export function formatShortcut(shortcut: Shortcut): string {
+  const at = shortcut.at ?? 0;
+  return `${textDim(shortcut.label.slice(0, at))}${textUnderline(textBold(textCyan(shortcut.label[at])))}${textDim(shortcut.label.slice(at + 1))}`;
+}
+
+// Waits for one key and returns it when it names a shortcut; any other key returns null.
+export function readShortcutKey(shortcuts: Shortcut[], hint = "press a highlighted key · any other key exits"): Promise<string | null> {
+  const input = process.stdin;
+  const output = process.stdout;
+  if (!input.isTTY || !output.isTTY) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const wasRaw = Boolean(input.isRaw);
+    const done = (key: string | null): void => {
+      input.off("data", onData);
+      input.off("end", onEnd);
+      if (typeof input.setRawMode === "function") input.setRawMode(wasRaw);
+      input.pause();
+      output.write("\r\u001b[2K\u001b[?25h");
+      resolve(key !== null && shortcuts.some((shortcut) => shortcut.key === key) ? key : null);
+    };
+    const onData = (chunk: Buffer | string): void => done(parseKeys(chunk.toString())[0] ?? null);
+    const onEnd = (): void => done(null);
+    if (typeof input.setRawMode === "function") input.setRawMode(true);
+    input.on("data", onData);
+    input.once("end", onEnd);
+    input.resume();
+    output.write(`\u001b[?25l${textDim(hint)}`);
   });
 }

@@ -27,6 +27,8 @@ commands:   version | PROFILE | models | use | list | init | sync | add | remove
 namespaces: proxy | --help
 ```
 
+In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `i`nit, `s`ync, `a`dd, `r`emove, `c`onfig, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
+
 Supported commands:
 
 ```bash

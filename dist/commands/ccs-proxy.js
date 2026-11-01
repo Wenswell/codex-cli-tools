@@ -19,7 +19,8 @@ import { createLiveViewController, runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { assertProfile, readProfiles, writeProfiles } from "../lib/profiles.js";
 import { recordProfileUsage } from "../lib/profile-usage.js";
-import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
+import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select } from "../lib/prompt.js";
+import { setUsageCommand } from "../lib/usage.js";
 import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow } from "../lib/table.js";
@@ -6586,6 +6587,17 @@ async function runProxyRestartCommand(options) {
     printKeyValue("server:", result.runtime.version ? textGreen(result.runtime.version) : textDim("none"), 9);
     printKeyValue("protocol:", result.runtime.protocol === null ? textDim("none") : textGreen(String(result.runtime.protocol)), 9);
 }
+const PROXY_SHORTCUTS = [
+    { key: "w", label: "watch" },
+    { key: "c", label: "capture" },
+    { key: "n", label: "cancel", at: 2 },
+    { key: "e", label: "reroute", at: 1 },
+    { key: "m", label: "mode" },
+    { key: "s", label: "search" },
+    { key: "p", label: "compact", at: 3 },
+    { key: "f", label: "config", at: 3 },
+    { key: "t", label: "restart", at: 3 },
+];
 export async function runProxyCommand(args, options) {
     if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
         console.log(usageHelpLines().join("\n"));
@@ -6603,6 +6615,15 @@ export async function runProxyCommand(args, options) {
     }
     if (command === "") {
         await runProxyStatusOnce(options);
+        if (!isInteractive())
+            return;
+        console.log(`${textDim("commands:")} ${PROXY_SHORTCUTS.map(formatShortcut).join(textDim(" | "))}`);
+        const key = await readShortcutKey(PROXY_SHORTCUTS);
+        const shortcut = PROXY_SHORTCUTS.find((entry) => entry.key === key);
+        if (!shortcut)
+            return;
+        setUsageCommand("ccs", ["proxy", shortcut.label], "shortcut");
+        await runProxyCommand([shortcut.label], options);
         return;
     }
     if (command === "--history" || command === "--view") {
