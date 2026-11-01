@@ -59,7 +59,7 @@ import {
   printKeyValue,
 } from "../lib/output.js";
 import { runCcsStats } from "./ccs-stats.js";
-import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
+import { ensureProxyRunning, proxyStateExists, readProxyState, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   syncTomlTemplate,
   tomlLeafDifferences,
@@ -954,11 +954,12 @@ async function switchProfile(name: string): Promise<Profile> {
   return normalized;
 }
 
-// With proxy mode the provider URL points at the proxy, which reads the profile itself; only the key is compared.
+// With proxy mode the client must point at the proxy, which reads the profile itself.
 async function platformFilesMatch(profile: Profile): Promise<boolean> {
   const active = await readPlatformConnection(profilePlatform(profile)).catch(() => null);
   if (!active || active.apiKey !== profile.apiKey) return false;
-  return (await proxyStateExists()) || sameBaseUrl(active.baseURL, profile.baseURL);
+  const proxyBaseUrl = resolveProxySwitchBaseUrl(await readProxyState(proxyOptions().stateRoot));
+  return sameBaseUrl(active.baseURL, proxyBaseUrl ?? profile.baseURL);
 }
 
 function isCurrentProfile(profiles: ProfilesFile, name: string): boolean {

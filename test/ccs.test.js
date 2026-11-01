@@ -392,6 +392,21 @@ test("ccs use switches Claude Code settings independently of Codex", async () =>
     const again = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
     assert.match(again.output, /no changes\./);
 
+    // Installing the proxy later: selecting the current profile now points Claude Code at the proxy.
+    const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+    const proxyPort = await reservePort();
+    await writeProxyStateForRunTest(home, stateRoot, proxyPort);
+    try {
+      const proxied = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]], {
+        CCS_PROXY_STATE_ROOT: stateRoot,
+        CCS_PROXY_LISTEN_PORT: String(proxyPort),
+      });
+      assert.match(proxied.output, /Claude Code files re-applied/);
+      assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${proxyPort}`);
+    } finally {
+      await shutdownProxyRuntime({ codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot }).catch(() => null);
+    }
+
     await assert.rejects(
       () => runCcs(["dist/bin/cx.js", "run", "pool"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
       /profile pool is a claude profile; Codex needs a codex profile/,
