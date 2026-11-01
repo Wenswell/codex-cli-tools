@@ -2,6 +2,9 @@
 import { runCcs } from "../commands/ccs.js";
 import { PromptCancelledError } from "../lib/prompt.js";
 import { textRed } from "../lib/text.js";
+import { startUsage } from "../lib/usage.js";
+
+startUsage("ccs", process.argv.slice(2));
 
 runCcs(process.argv.slice(2)).catch((error: unknown) => {
   if (error instanceof PromptCancelledError) {

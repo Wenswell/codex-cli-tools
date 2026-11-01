@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { flushUsage } from "../lib/usage.js";
 import { colorName, colorUrl, printKeyValue } from "../lib/output.js";
 import { maskSecret, textBold, textDim, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
@@ -56,6 +57,7 @@ function runCodexSearch(
 
   child.on("exit", (code, signal) => {
     if (signal) {
+      flushUsage(130, "interrupted");
       process.kill(process.pid, signal);
       return;
     }

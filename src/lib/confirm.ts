@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import { textDim } from "./text.js";
+import { recordUsagePrompt } from "./usage.js";
 
 export function rejectRemovedYesFlags(argv: string[], command: string): void {
   if (argv.includes("-y") || argv.includes("--yes")) {
@@ -20,6 +21,7 @@ export async function confirmApply(): Promise<boolean> {
   });
   try {
     const answer = await input.question("\nApply changes? Type yes to continue: ");
+    recordUsagePrompt({ prompt: "Apply changes?", outcome: answer === "yes" ? "answered" : "cancelled", kept_default: null });
     if (answer === "yes") {
       return true;
     }

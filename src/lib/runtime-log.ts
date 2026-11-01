@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { access, appendFile, chmod, readFile, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureDir, writeTextFileAtomic } from "./fs.js";
@@ -46,6 +47,34 @@ export async function appendBoundedJsonLine(path: string, value: unknown, option
   }
   await appendRuntimeLine(path, line, mode);
   await trimJsonLineFileToBytes(path, options.maxBytes, trimToBytes, mode);
+}
+
+// Synchronous form for `process.on("exit")` handlers, where asynchronous work never runs.
+export function appendBoundedJsonLineSync(path: string, value: unknown, options: JsonLineRetentionOptions): void {
+  const mode = options.mode ?? 0o600;
+  const trimToBytes = options.trimToBytes ?? Math.floor(options.maxBytes * 0.75);
+  const line = `${JSON.stringify(value)}\n`;
+  if (Buffer.byteLength(line, "utf8") > options.maxBytes) {
+    throw new Error(`jsonl record exceeds maxBytes: ${path}`);
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, line, { encoding: "utf8", mode });
+  chmodSync(path, mode);
+  if (statSync(path).size <= options.maxBytes) {
+    return;
+  }
+  const lines = readFileSync(path, "utf8").split("\n").filter((entry) => entry.length > 0);
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const lineBytes = Buffer.byteLength(lines[index], "utf8") + 1;
+    if (bytes > 0 && bytes + lineBytes > trimToBytes) break;
+    kept.push(lines[index]);
+    bytes += lineBytes;
+  }
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tempPath, kept.length === 0 ? "" : `${kept.reverse().join("\n")}\n`, { encoding: "utf8", mode });
+  renameSync(tempPath, path);
 }
 
 async function appendRuntimeLine(path: string, line: string, mode: number): Promise<void> {

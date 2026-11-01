@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { appendBoundedJsonLine } from "../dist/lib/runtime-log.js";
+import { appendBoundedJsonLine, appendBoundedJsonLineSync } from "../dist/lib/runtime-log.js";
 
 test("appendBoundedJsonLine keeps newest complete lines within byte limit", async () => {
   const dir = await mkdtemp(join(tmpdir(), "runtime-log-"));
@@ -34,6 +34,24 @@ test("appendBoundedJsonLine keeps a newest record that is larger than trim targe
     const lines = text.trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(lines.map((line) => line.index), [2]);
     assert.ok((await stat(path)).size <= 120);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("synchronous bounded JSONL append keeps the newest complete lines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "runtime-log-sync-"));
+  const path = join(dir, "nested", "usage.jsonl");
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      appendBoundedJsonLineSync(path, { index, pad: "x".repeat(20) }, { maxBytes: 400, trimToBytes: 200 });
+    }
+    const text = await readFile(path, "utf8");
+    assert.ok(Buffer.byteLength(text) <= 400);
+    const indexes = text.trim().split("\n").map((line) => JSON.parse(line).index);
+    assert.equal(indexes.at(-1), 19);
+    assert.deepEqual(indexes, [...indexes].sort((left, right) => left - right));
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

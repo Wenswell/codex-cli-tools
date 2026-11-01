@@ -47,6 +47,14 @@ Large raw payloads should use content-addressed archives:
 - Redact secret-like headers and metadata before writing enabled raw records.
 - Explicit finite packet captures may preserve byte-exact bodies without automatic retention when the user chooses both the target and record count. Keep them in a dedicated private directory, redact authentication headers, fail visibly on incomplete writes, and leave ordinary state/history contracts unchanged.
 
+## Command usage records
+
+Every public tool appends one record per invocation to `~/.cache/codex-tools/usage.jsonl` (`0600`, bounded to 16M and trimmed to the newest 12M). The record is written synchronously from the process `exit` handler, so wrappers that end with `process.exit` are included; a wrapper whose child ends by signal records `interrupted` before re-raising it. The background `ccs proxy serve` process is not recorded. Set `CODEX_TOOLS_USAGE=off` to disable recording. Write failures are ignored and never change command output or exit status.
+
+Record version `1` fields: `recorded_at`, `tool`, `command`, `flags`, `via` (`argv` or `shortcut`), `tty`, `outcome` (`ok`, `error`, `cancelled`, `interrupted`), `exit_code`, `duration_ms`, `package_version`, and `prompts`. Exit code `130` is `interrupted`, other non-zero codes are `error`, and a zero exit after a cancelled prompt or a declined `Apply changes?` is `cancelled`.
+
+`command` keeps only subcommands known to the tool; other tokens become `<profile>` or `<arg>`. `flags` keeps flag names without values. Wrapper arguments passed to codex or claude are not recorded. Each `prompts` entry stores the fixed prompt text, `answered` or `cancelled`, `kept_default` (the initial selection, unchanged checked set, or an empty input that used the default; `null` when not applicable), and `selected` for multi-select. Records never contain argument values, profile names, paths, session ids, prompt input, or error messages.
+
 ## Profile usage times
 
 `~/.cache/codex-tools/profile-usage.json` stores `{ version: 1, profiles: { NAME: { switched_at, launched_at, requested_at } } }` with ISO timestamps. It is written atomically with `0600` permissions. It holds display hints only: readers treat a missing, unreadable, or unknown-version file as empty, and it is never synced with `profiles.json`.

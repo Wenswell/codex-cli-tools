@@ -4,6 +4,9 @@ import stripAnsi from "strip-ansi";
 
 export { stripAnsi };
 
+// Spawned tools inherit this; tests that cover usage recording set it explicitly.
+process.env.CODEX_TOOLS_USAGE = "off";
+
 export function setStdoutProperties(properties) {
   for (const [key, value] of Object.entries(properties)) {
     Object.defineProperty(process.stdout, key, {

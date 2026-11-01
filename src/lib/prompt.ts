@@ -1,5 +1,6 @@
 import stripAnsi from "strip-ansi";
 import { maskSecret, padVisibleRight, textBold, textCyan, textDim, textGreen, textRed, truncateVisible, visibleLength } from "./text.js";
+import { recordUsagePrompt, type UsagePromptRecord } from "./usage.js";
 
 export class PromptCancelledError extends Error {
   readonly interrupted: boolean;
@@ -28,6 +29,7 @@ type PromptSession<T> = {
   render: () => Frame;
   onKey: (key: string) => { value: T } | void;
   summary: (value: T) => string;
+  usage: (value: T) => Omit<UsagePromptRecord, "prompt" | "outcome">;
 };
 
 const ESCAPE_KEYS: Record<string, string> = {
@@ -126,6 +128,7 @@ function runPrompt<T>(session: PromptSession<T>): Promise<T> {
     const handleKey = (key: string): void => {
       if (settled) return;
       if (key === "ctrl-c" || key === "escape") {
+        recordUsagePrompt({ prompt: session.message, outcome: "cancelled", kept_default: null });
         finish(`${textRed("✖")} ${textBold(session.message)} ${textDim("· cancelled")}`);
         reject(new PromptCancelledError(key === "ctrl-c"));
         return;
@@ -133,6 +136,7 @@ function runPrompt<T>(session: PromptSession<T>): Promise<T> {
       try {
         const result = session.onKey(key);
         if (result) {
+          recordUsagePrompt({ prompt: session.message, outcome: "answered", ...session.usage(result.value) });
           finish(`${textGreen("✔")} ${textBold(session.message)} ${textDim("·")} ${session.summary(result.value)}`);
           resolve(result.value);
           return;
@@ -222,6 +226,7 @@ export function select<T>(
   }
   const defaultIndex = choices.findIndex((choice) => !choice.disabled && Object.is(choice.value, options.default));
   let focus = defaultIndex >= 0 ? defaultIndex : firstEnabled;
+  const initialFocus = focus;
   const size = visibleChoiceCount(choices.length, options.pageSize);
   let offset = scrollOffset(0, focus, size, choices.length);
   return runPrompt<T>({
@@ -239,6 +244,7 @@ export function select<T>(
       offset = scrollOffset(offset, focus, size, choices.length);
     },
     summary: () => textCyan(plainLabel(choices[focus])),
+    usage: () => ({ kept_default: focus === initialFocus }),
   });
 }
 
@@ -252,6 +258,7 @@ export function multiSelect<T>(
     return Promise.reject(new Error(`${message}: no selectable choices`));
   }
   const checked = new Set(selectable.filter((index) => choices[index].checked));
+  const initialChecked = [...checked].sort((left, right) => left - right).join(",");
   let focus = selectable[0];
   let error: string | null = null;
   const size = visibleChoiceCount(choices.length, options.pageSize);
@@ -292,6 +299,7 @@ export function multiSelect<T>(
       const labels = selected().map((index) => plainLabel(choices[index]));
       return labels.length === 0 ? textDim("none") : textCyan(labels.join(", "));
     },
+    usage: (value) => ({ kept_default: selected().join(",") === initialChecked, selected: value.length }),
   });
 }
 
@@ -306,6 +314,7 @@ export function input(
 ): Promise<string> {
   let buffer = "";
   let error: string | null = null;
+  let typed = false;
   const shownDefault = options.defaultLabel ?? options.default;
   return runPrompt<string>({
     message,
@@ -320,6 +329,7 @@ export function input(
     onKey: (key) => {
       error = null;
       if (key === "enter") {
+        typed = buffer.trim().length > 0;
         const value = buffer.trim() || options.default || "";
         error = options.validate?.(value) ?? null;
         if (!error) return { value };
@@ -336,5 +346,6 @@ export function input(
       if (value === options.default && options.defaultLabel) return textCyan(options.defaultLabel);
       return textCyan(value ? maskSecret(value) : "-");
     },
+    usage: () => ({ kept_default: options.default === undefined ? null : !typed }),
   });
 }

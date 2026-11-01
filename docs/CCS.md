@@ -2,6 +2,8 @@
 
 `ccs` switches Codex between OpenAI-compatible provider profiles and can list usage-only keys.
 
+`ccs stats` summarizes the local usage records written by every tool (see [CLI runtime records](./CLI_RUNTIME_RECORDS.md#command-usage-records)): runs, last run, ok/error/cancelled counts, median duration, and shortcut share per command, then how often each interactive prompt was cancelled or answered with its default.
+
 `ccs version` and `ccs -v` print the package version from `package.json`.
 
 Profile config lives at:
@@ -21,7 +23,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | PROFILE | models | use | list | init | sync | add | remove | config
+commands:   version | PROFILE | models | use | list | init | sync | add | remove | config | stats
 namespaces: proxy | --help
 ```
 
@@ -50,6 +52,7 @@ ccs init
 ccs sync
 ccs add
 ccs remove
+ccs stats
 ```
 
 `ccs list` marks the current profile with `*`.

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { flushUsage } from "../lib/usage.js";
 import { textBold, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
 
@@ -45,6 +46,7 @@ export function runClaude(args: string[], options: { resume?: boolean } = {}): v
 
   child.on("exit", (code, signal) => {
     if (signal) {
+      flushUsage(130, "interrupted");
       process.kill(process.pid, signal);
       return;
     }

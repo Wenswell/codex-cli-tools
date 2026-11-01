@@ -15,6 +15,7 @@ import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage } fr
 import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, } from "../lib/text.js";
 import { colorHost, colorName, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
+import { runCcsStats } from "./ccs-stats.js";
 import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import { syncTomlTemplate, readTomlBaseUrl, tomlLeafDifferences, updateTomlBaseUrl, } from "../lib/toml.js";
 import { printTable } from "../lib/table.js";
@@ -1057,6 +1058,7 @@ function usageLines() {
         "  ccs sync                             # add missing template fields; choose existing values to replace",
         "  ccs add                              # choose a profile to edit or create, then enter its values",
         "  ccs remove                           # choose a profile to remove",
+        "  ccs stats                            # summarize local command and prompt usage",
     ];
 }
 function printHelp() {
@@ -1075,7 +1077,7 @@ function printUsageHelp() {
     printCommandFooter([
         {
             label: "commands:",
-            commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config"],
+            commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config", "stats"],
         },
         {
             label: "namespaces:",
@@ -1096,6 +1098,10 @@ export async function runCcs(argv) {
     }
     if (command === "config") {
         await runConfigSync(args);
+        return;
+    }
+    if (command === "stats") {
+        await runCcsStats(args);
         return;
     }
     const profiles = await readProfiles();

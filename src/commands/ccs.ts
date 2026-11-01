@@ -36,6 +36,7 @@ import {
   colorUrl,
   printKeyValue,
 } from "../lib/output.js";
+import { runCcsStats } from "./ccs-stats.js";
 import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
 import {
   syncTomlTemplate,
@@ -1289,6 +1290,7 @@ function usageLines(): string[] {
     "  ccs sync                             # add missing template fields; choose existing values to replace",
     "  ccs add                              # choose a profile to edit or create, then enter its values",
     "  ccs remove                           # choose a profile to remove",
+    "  ccs stats                            # summarize local command and prompt usage",
   ];
 }
 
@@ -1311,7 +1313,7 @@ function printUsageHelp(): void {
   printCommandFooter([
     {
       label: "commands:",
-      commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config"],
+      commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config", "stats"],
     },
     {
       label: "namespaces:",
@@ -1336,6 +1338,11 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (command === "config") {
     await runConfigSync(args);
+    return;
+  }
+
+  if (command === "stats") {
+    await runCcsStats(args);
     return;
   }
 
