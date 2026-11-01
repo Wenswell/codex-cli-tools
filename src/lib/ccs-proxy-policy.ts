@@ -1,25 +1,7 @@
-export type ProxyPolicyAction = "pass_through" | "return_502" | "retry_then_pass_through" | "retry_then_502";
-export type ProxyPolicyTrigger = "timeout" | "capacity" | "http_429" | "http_503" | "reasoning" | "pass_through";
-
-type ProxyPolicyDecision = {
-  trigger: ProxyPolicyTrigger;
-  action: ProxyPolicyAction;
-  retry: boolean;
-  exhaustedAction: "pass_through" | "return_502";
-};
-
-type ProxyPolicyFacts = {
-  timeout: boolean;
-  capacity: boolean;
-  status: number;
-  reasoningMatched: boolean;
-};
-
-type ProxyPolicyActions = {
-  timeout: Extract<ProxyPolicyAction, "return_502" | "retry_then_502">;
-  capacity: ProxyPolicyAction;
-  http429: ProxyPolicyAction;
-};
+// Status retry is the only proxy policy: it retries a listed status or a Capacity error and then
+// passes the final upstream response through.
+export type ProxyPolicyAction = "retry_then_pass_through";
+export type ProxyPolicyTrigger = "capacity" | "http_429" | "http_503";
 
 type RetryAfterResult =
   | { kind: "missing_or_invalid" }
@@ -29,60 +11,6 @@ type RetryAfterResult =
 const RETRY_AFTER_MAX_MS = 60_000;
 const RETRY_BACKOFF_MAX_MS = 30_000;
 const NODE_TIMER_MAX_MS = 2_147_483_647;
-
-export class ProxyRetryBudget {
-  private usedCount = 0;
-
-  constructor(readonly limit: number) {
-    if (!Number.isInteger(limit) || limit < 0) {
-      throw new Error("retry budget limit must be a non-negative integer");
-    }
-  }
-
-  get used(): number {
-    return this.usedCount;
-  }
-
-  get remaining(): number {
-    return Math.max(0, this.limit - this.usedCount);
-  }
-
-  consume(): boolean {
-    if (this.remaining === 0) {
-      return false;
-    }
-    this.usedCount += 1;
-    return true;
-  }
-}
-
-export function matchesReasoningTokens(value: number | null, values: readonly number[]): boolean {
-  return value !== null && values.includes(value);
-}
-
-export function decideProxyPolicy(
-  facts: ProxyPolicyFacts,
-  actions: ProxyPolicyActions,
-  retryBudgetRemaining: number,
-): ProxyPolicyDecision {
-  const selected = facts.timeout
-    ? { trigger: "timeout" as const, action: actions.timeout }
-    : facts.capacity
-      ? { trigger: "capacity" as const, action: actions.capacity }
-      : facts.status === 429
-        ? { trigger: "http_429" as const, action: actions.http429 }
-        : facts.reasoningMatched
-          ? { trigger: "reasoning" as const, action: "retry_then_502" as const }
-          : { trigger: "pass_through" as const, action: "pass_through" as const };
-  const retryAction = selected.action === "retry_then_pass_through" || selected.action === "retry_then_502";
-  return {
-    ...selected,
-    retry: retryAction && retryBudgetRemaining > 0,
-    exhaustedAction: selected.action === "return_502" || selected.action === "retry_then_502"
-      ? "return_502"
-      : "pass_through",
-  };
-}
 
 export function parseRetryAfter(value: string | null, nowMs = Date.now(), maxDelayMs = RETRY_AFTER_MAX_MS): RetryAfterResult {
   if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0 || maxDelayMs > NODE_TIMER_MAX_MS) {

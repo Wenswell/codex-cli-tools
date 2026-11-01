@@ -1,51 +1,6 @@
 const RETRY_AFTER_MAX_MS = 60_000;
 const RETRY_BACKOFF_MAX_MS = 30_000;
 const NODE_TIMER_MAX_MS = 2_147_483_647;
-export class ProxyRetryBudget {
-    limit;
-    usedCount = 0;
-    constructor(limit) {
-        this.limit = limit;
-        if (!Number.isInteger(limit) || limit < 0) {
-            throw new Error("retry budget limit must be a non-negative integer");
-        }
-    }
-    get used() {
-        return this.usedCount;
-    }
-    get remaining() {
-        return Math.max(0, this.limit - this.usedCount);
-    }
-    consume() {
-        if (this.remaining === 0) {
-            return false;
-        }
-        this.usedCount += 1;
-        return true;
-    }
-}
-export function matchesReasoningTokens(value, values) {
-    return value !== null && values.includes(value);
-}
-export function decideProxyPolicy(facts, actions, retryBudgetRemaining) {
-    const selected = facts.timeout
-        ? { trigger: "timeout", action: actions.timeout }
-        : facts.capacity
-            ? { trigger: "capacity", action: actions.capacity }
-            : facts.status === 429
-                ? { trigger: "http_429", action: actions.http429 }
-                : facts.reasoningMatched
-                    ? { trigger: "reasoning", action: "retry_then_502" }
-                    : { trigger: "pass_through", action: "pass_through" };
-    const retryAction = selected.action === "retry_then_pass_through" || selected.action === "retry_then_502";
-    return {
-        ...selected,
-        retry: retryAction && retryBudgetRemaining > 0,
-        exhaustedAction: selected.action === "return_502" || selected.action === "retry_then_502"
-            ? "return_502"
-            : "pass_through",
-    };
-}
 export function parseRetryAfter(value, nowMs = Date.now(), maxDelayMs = RETRY_AFTER_MAX_MS) {
     if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0 || maxDelayMs > NODE_TIMER_MAX_MS) {
         throw new Error("Retry-After maximum must be within the Node timer range");

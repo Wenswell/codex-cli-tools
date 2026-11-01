@@ -15,10 +15,6 @@ export function colorCount(value: string): string {
   return textGreen(value);
 }
 
-export function colorCost(value: string): string {
-  return textYellow(value);
-}
-
 export function colorHost(value: string): string {
   return textYellow(value);
 }

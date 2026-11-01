@@ -5,9 +5,6 @@ export function printKeyValue(label, value, width = 8) {
 export function colorCount(value) {
     return textGreen(value);
 }
-export function colorCost(value) {
-    return textYellow(value);
-}
 export function colorHost(value) {
     return textYellow(value);
 }

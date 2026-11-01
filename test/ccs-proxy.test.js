@@ -8,20 +8,12 @@ import { createServer } from "node:http";
 import {
   buildProxyStatusLines,
   ensureProxyRunning,
-  formatProxyAttemptCosts,
-  formatProxyAttemptTokens,
-  formatProxyModel,
-  formatProxyTokenCount,
-  formatProxyUsd,
   installProxy,
   parseProxyStatusArgs,
-  projectProxyUsageAttempts,
   proxyWatchKeyAction,
-  proxyRequestTableColumns,
   readProxyState,
   restoreProxy,
   runProxyCommand,
-  setProxyMode,
   shutdownProxyRuntime,
 } from "../dist/commands/ccs-proxy.js";
 import { packageVersion } from "../dist/lib/version.js";
@@ -6434,8 +6426,7 @@ test("proxy restore uses the current profile and preserves unrelated config edit
     assert.equal(healthPayload.status, "ok");
     assert.equal(healthPayload.pid, runtime.pid);
     assert.equal(healthPayload.version, packageJson.version);
-    assert.equal(healthPayload.protocol, 8);
-    assert.equal(healthPayload.mode, "passthrough");
+    assert.equal(healthPayload.protocol, 9);
     await waitForLogIncludes(join(stateRoot, "proxy-runtime.log"), /proxy listening: http:\/\/127\.0\.0\.1:\d+/);
     assert.equal(await readTextOrEmpty(join(stateRoot, "proxy.log")), "");
     assert.ok((await stat(join(stateRoot, "proxy-runtime.log"))).size <= 16 * 1024 * 1024);
@@ -7066,193 +7057,3 @@ async function closeServer(server) {
 
 // Proxy view and pricing contracts.
 
-test("proxy request views expose the confirmed column sets", () => {
-  const titles = (view) => proxyRequestTableColumns(view).map((column) => column.title);
-  assert.deepEqual(titles("overview"), ["session", "route", "state", "age", "size"]);
-  assert.deepEqual(titles("tokens"), ["session", "route", "state", "input", "output", "cached"]);
-  assert.deepEqual(titles("cost"), ["session", "route", "state", "input$", "output$", "cached$", "total$"]);
-});
-
-test("proxy view argument parsing accepts one initial view with optional history", () => {
-  assert.deepEqual(parseProxyStatusArgs(["--view", "tokens"], "ccs proxy"), { historyCount: undefined, view: "tokens" });
-  assert.deepEqual(parseProxyStatusArgs(["--history", "12", "--view", "cost"], "ccs proxy"), { historyCount: 12, view: "cost" });
-  assert.deepEqual(parseProxyStatusArgs(["--view", "overview", "--history", "3"], "ccs proxy watch"), { historyCount: 3, view: "overview" });
-  assert.throws(() => parseProxyStatusArgs(["--view", "other"], "ccs proxy"), /requires overview, tokens, or cost/);
-  assert.throws(() => parseProxyStatusArgs(["--view"], "ccs proxy"), /requires overview, tokens, or cost/);
-  assert.throws(() => parseProxyStatusArgs(["--view", "tokens", "--view", "cost"], "ccs proxy"), /unknown argument/);
-});
-
-test("proxy watch keys cycle views and exit", () => {
-  const tokens = proxyWatchKeyAction("v", "overview", true);
-  const cost = proxyWatchKeyAction("v", tokens.view, tokens.historyVisible);
-  const overview = proxyWatchKeyAction("v", cost.view, cost.historyVisible);
-  assert.deepEqual([tokens, cost, overview], [
-    { view: "tokens", historyVisible: true, action: "render" },
-    { view: "cost", historyVisible: true, action: "render" },
-    { view: "overview", historyVisible: true, action: "render" },
-  ]);
-  assert.deepEqual(proxyWatchKeyAction("t", "cost", true), { view: "cost", historyVisible: false, action: "render" });
-  assert.deepEqual(proxyWatchKeyAction("t", "cost", false), { view: "cost", historyVisible: true, action: "render" });
-  assert.deepEqual(proxyWatchKeyAction("q", "cost", false), { view: "cost", historyVisible: false, action: "stop" });
-  assert.deepEqual(proxyWatchKeyAction("x", "tokens", true), { view: "tokens", historyVisible: true, action: "none" });
-});
-
-test("proxy watch hidden history omits the section and reports footer state", () => {
-  const lines = buildProxyStatusLines(
-    new Date("2026-01-01T00:00:00.000Z"),
-    proxyStateFixture({ recent_requests: [proxyHistoryRecord()] }),
-    ["test001"],
-    { healthy: true, started: false, pid: 1234, state: null, version: "0.2.43", protocol: 8 },
-    {
-      codexConfigPath: "/home/test/.codex/config.toml",
-      listenHost: "127.0.0.1",
-      listenPort: 4610,
-      stateRoot: "/tmp/codex-tools",
-      watch: true,
-      historyVisible: false,
-    },
-  );
-
-  assert.equal(lines.some((line) => stripAnsi(line).startsWith("history ")), false);
-  assert.match(stripAnsi(lines.at(-1)), /history=off\s+v:view t:history q:quit/);
-});
-
-test("proxy model rendering compares raw values before abbreviation and truncation", () => {
-  withStdoutProperties({ isTTY: true, noColor: false, columns: 120 }, () => {
-    assert.equal(stripAnsi(formatProxyModel(null, null)), "-");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", null)), "5.6");
-    assert.equal(stripAnsi(formatProxyModel(null, "gpt-5.6-mini")), "5.6-mini");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6")), "5.6");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6-mini")), "5.6-mini");
-    assert.equal(stripAnsi(formatProxyModel("gpt-5.6-sol", "o5.6-sol")), "5.6-sol");
-    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")), "12345678");
-  });
-});
-
-test("proxy usage attempts project every internal, transport, and passthrough attempt exactly once", () => {
-  const attempt = (number, overrides = {}) => ({
-    attempt: number,
-    upstream_model: null,
-    service_tier: null,
-    input_tokens: null,
-    output_tokens: null,
-    cached_input_tokens: null,
-    ...overrides,
-  });
-  const cases = [
-    {
-      name: "internal retry",
-      attempts: [attempt(1), attempt(2), attempt(3), attempt(4, { upstream_model: "actual", service_tier: "priority", input_tokens: 10, output_tokens: 2, cached_input_tokens: 1 })],
-    },
-    { name: "transport retry", attempts: [attempt(1), attempt(2, { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0 })] },
-    { name: "passthrough", attempts: [attempt(1, { upstream_model: "pass", input_tokens: 7, output_tokens: 3, cached_input_tokens: 2 })] },
-  ];
-  for (const fixture of cases) {
-    const projected = projectProxyUsageAttempts(fixture.attempts, "requested", "standard", "fast");
-    assert.equal(projected.length, fixture.attempts.length, fixture.name);
-    assert.deepEqual(projected.map((entry) => entry.attempt), fixture.attempts.map((entry) => entry.attempt), fixture.name);
-    assert.equal(new Set(projected.map((entry) => entry.attempt)).size, projected.length, fixture.name);
-  }
-  const attributed = projectProxyUsageAttempts([
-    attempt(1),
-    attempt(2, { upstream_model: "actual", service_tier: "priority" }),
-  ], "requested", "default", "fast");
-  assert.deepEqual(attributed.map(({ pricing_model, pricing_model_source, pricing_tier, pricing_tier_source }) => ({
-    pricing_model,
-    pricing_model_source,
-    pricing_tier,
-    pricing_tier_source,
-  })), [
-    { pricing_model: "requested", pricing_model_source: "request_model", pricing_tier: "default", pricing_tier_source: "request" },
-    { pricing_model: "actual", pricing_model_source: "upstream_model", pricing_tier: "priority", pricing_tier_source: "response" },
-  ]);
-});
-
-test("proxy token formatting covers the confirmed boundaries and unknown attempt data", () => {
-  for (const [value, expected] of [[0, "0"], [999, "999"], [1000, "1K"], [1200, "1.2K"], [312400, "312.4K"], [999900, "999.9K"]]) {
-    assert.equal(formatProxyTokenCount(value), expected);
-  }
-  const usage = (input_tokens) => ({ input_tokens, output_tokens: 0, cached_input_tokens: 0 });
-  assert.equal(stripAnsi(formatProxyAttemptTokens([usage(0), usage(1200)], "input_tokens")), "1.2K");
-  assert.equal(stripAnsi(formatProxyAttemptTokens([usage(1000), usage(null)], "input_tokens")), "-");
-  assert.equal(stripAnsi(formatProxyAttemptTokens([], "input_tokens")), "-");
-  assert.equal(stripAnsi(formatProxyAttemptTokens([
-    { input_tokens: 1200, cached_input_tokens: 200 },
-    { input_tokens: 800, cached_input_tokens: 300 },
-  ], "uncached_input_tokens")), "1.5K");
-  assert.equal(stripAnsi(formatProxyAttemptTokens([
-    { input_tokens: 1200, cached_input_tokens: null },
-  ], "uncached_input_tokens")), "-");
-  assert.equal(stripAnsi(formatProxyAttemptTokens([
-    { input_tokens: 100, cached_input_tokens: 101 },
-  ], "uncached_input_tokens")), "invalid");
-});
-
-test("proxy attempt costs use each model and tier, cached subtraction, and one final rounding", () => {
-  const cache = {
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    patterns: [],
-    providers: [],
-    models: {
-      standard_model: {
-        input_cost_per_token: 0.000001,
-        cache_read_input_token_cost: 0.0000005,
-        output_cost_per_token: 0.000002,
-      },
-      tiered_model: {
-        input_cost_per_token: 0.000001,
-        cache_read_input_token_cost: 0.0000005,
-        output_cost_per_token: 0.000002,
-        input_cost_per_token_priority: 0.000002,
-        cache_read_input_token_cost_priority: 0.000001,
-        output_cost_per_token_priority: 0.000004,
-      },
-    },
-  };
-  const costs = formatProxyAttemptCosts([
-    { attempt: 1, input_tokens: 100, cached_input_tokens: 20, output_tokens: 11, pricing_model: "standard_model", pricing_tier: "standard" },
-    { attempt: 2, input_tokens: 200, cached_input_tokens: 50, output_tokens: 20, pricing_model: "tiered_model", pricing_tier: "fast" },
-  ], cache);
-  assert.deepEqual(Object.fromEntries(Object.entries(costs).map(([key, value]) => [key, stripAnsi(value)])), {
-    input_cost: "$0.0004",
-    output_cost: "$0.0001",
-    cached_cost: "<$0.0001",
-    total_cost: "$0.0005",
-  });
-});
-
-test("proxy attempt costs distinguish missing and invalid inputs", () => {
-  const cache = {
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    patterns: [],
-    providers: [],
-    models: { known: { input_cost_per_token: 0.001, cache_read_input_token_cost: 0.0005, output_cost_per_token: 0.002 } },
-  };
-  const missing = formatProxyAttemptCosts([
-    { attempt: 1, input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, pricing_model: "missing", pricing_tier: "standard" },
-  ], cache);
-  assert.deepEqual(Object.fromEntries(Object.entries(missing).map(([key, value]) => [key, stripAnsi(value)])), {
-    input_cost: "-", output_cost: "-", cached_cost: "-", total_cost: "-",
-  });
-  const invalid = formatProxyAttemptCosts([
-    { attempt: 1, input_tokens: 2, cached_input_tokens: 3, output_tokens: 1, pricing_model: "known", pricing_tier: "default" },
-  ], cache);
-  assert.deepEqual(Object.fromEntries(Object.entries(invalid).map(([key, value]) => [key, stripAnsi(value)])), {
-    input_cost: "invalid", output_cost: "$0.0020", cached_cost: "$0.0015", total_cost: "invalid",
-  });
-  const unsupportedTier = formatProxyAttemptCosts([
-    { attempt: 1, input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, pricing_model: "known", pricing_tier: "turbo" },
-  ], cache);
-  assert.equal(stripAnsi(unsupportedTier.total_cost), "-");
-});
-
-test("proxy USD formatting uses adaptive precision", () => {
-  assert.equal(formatProxyUsd(0), "$0");
-  assert.equal(formatProxyUsd(0.00001), "<$0.0001");
-  assert.equal(formatProxyUsd(0.0001), "$0.0001");
-  assert.equal(formatProxyUsd(0.00994), "$0.0099");
-  assert.equal(formatProxyUsd(0.01), "$0.01");
-  assert.equal(formatProxyUsd(1.239), "$1.24");
-});

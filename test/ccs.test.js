@@ -13,7 +13,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
-  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
+  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
 });
 
@@ -50,10 +50,11 @@ test("ccs status keys run one highlighted command and other keys exit", async ()
 
     const proxy = await runCcsInteractive([], home, [
       ["press a highlighted key", "p"],
-      ["watch | capture | cancel", "m"],
+      ["watch | capture | cancel", "w"],
+      ["q:quit", "q"],
     ], { CCS_PROXY_STATE_ROOT: join(home, ".cache", "codex-tools", "proxy") });
     assert.match(proxy.output, /ccs proxy\s+\d{2}:\d{2}:\d{2}/);
-    assert.match(proxy.output, /^mode:\s+missing$/m);
+    assert.match(proxy.output, /history=on\s+t:history q:quit/);
 
     const plain = await runCcsDirect([], home);
     assert.match(plain, /^commands:\s+version \| PROFILE \| models \| use/m);
@@ -904,24 +905,17 @@ async function writeProfiles(profiles) {
 async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-    state_schema_version: 4,
+    state_schema_version: 5,
     installed_at: "2026-01-01T00:00:00.000Z",
     codex_config_path: join(home, ".codex", "config.toml"),
     provider_name: "codex",
     original_base_url: "https://test002.example.com",
     proxy_base_url: `http://127.0.0.1:${proxyPort}`,
-    mode: "passthrough",
     status_retry: {
       enabled: false,
       total_window_ms: 3_600_000,
       backoff_base_ms: 1000,
       backoff_max_ms: 30_000,
-    },
-    latency_guard: {
-      enabled: false,
-      first_progress_timeout_ms: 0,
-      first_progress_action: "return_502",
-      total_timeout_ms: 0,
     },
     listen_host: "127.0.0.1",
     listen_port: proxyPort,
@@ -931,7 +925,6 @@ async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
       total_requests: 0,
       active_requests: [],
       status_counts: {},
-      reasoning_token_counts: {},
       upstream_hit_counts: {},
       latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
       recent_requests: [],

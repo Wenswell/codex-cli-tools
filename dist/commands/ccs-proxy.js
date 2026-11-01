@@ -14,10 +14,9 @@ import { claudeSettingsPath, codexConfigPath, codexToolsCacheDir, formatHomePath
 import { colorPlatform, writePlatformConnection } from "../lib/platforms.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
-import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
+import { colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { createLiveViewController, runLiveView } from "../lib/live-view.js";
-import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { assertProfile, currentProfileName, readProfiles, writeProfiles } from "../lib/profiles.js";
 import { recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select } from "../lib/prompt.js";
@@ -27,13 +26,11 @@ import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updat
 import { renderTable, styleTableRow } from "../lib/table.js";
 import { fitTerminalLine } from "../lib/terminal.js";
 import { packageVersion } from "../lib/version.js";
-import { ProxyRetryBudget, decideProxyPolicy, matchesReasoningTokens, parseRetryAfter, retryDelayMs, waitForProxyRetry, } from "../lib/ccs-proxy-policy.js";
+import { parseRetryAfter, retryDelayMs, waitForProxyRetry, } from "../lib/ccs-proxy-policy.js";
 import { determineRouteConversion, convertRequestBody, convertResponseBody, createStreamingResponseConverter, rewriteUpstreamPath, } from "../lib/proxy-router.js";
 import { ProtocolConversionError, buildResponsesChatToolContext } from "../lib/responses-to-chat.js";
 class ProxyProfileSelectionError extends Error {
 }
-const DEFAULT_LISTEN_HOST = "127.0.0.1";
-const DEFAULT_LISTEN_PORT = 4610;
 const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
@@ -45,14 +42,9 @@ export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
 // Claude Code Messages API paths, including /v1/messages/count_tokens.
 const CLAUDE_PROXY_PATH = /^\/v1\/messages(?:\/|$)/;
-const PROXY_HEALTH_PROTOCOL = 8;
-const PROXY_STATE_SCHEMA_VERSION = 4;
+const PROXY_HEALTH_PROTOCOL = 9;
+const PROXY_STATE_SCHEMA_VERSION = 5;
 const PROXY_STATE_FILE = "proxy.json";
-const PROXY_MODE_PASSTHROUGH = "passthrough";
-const PROXY_MODE_INTERCEPT = "intercept";
-const PROXY_MODE_RECOVERY = "recovery";
-const PROXY_DEFAULT_MODE = PROXY_MODE_RECOVERY;
-const PROXY_INSTALL_MODE = PROXY_MODE_PASSTHROUGH;
 const PROXY_DEFAULT_STATUS_RETRY_STATUSES = [429, 503, 520];
 const PROXY_DEFAULT_STATUS_RETRY = {
     enabled: false,
@@ -61,23 +53,11 @@ const PROXY_DEFAULT_STATUS_RETRY = {
     backoff_base_ms: 1000,
     backoff_max_ms: 30_000,
 };
-const PROXY_DEFAULT_LATENCY_GUARD = {
-    enabled: false,
-    first_progress_timeout_ms: 0,
-    first_progress_action: "return_502",
-    total_timeout_ms: 0,
-};
 const NON_STREAM_STATUS_CODE = 502;
-const REASONING_EQUALS = [516, 1034, 1552];
-const REASONING_SUMMARY_VALUES = [0, ...REASONING_EQUALS];
-const GUARD_RETRY_ATTEMPTS = 3;
-const FETCH_FAILED_TRANSPORT_RETRIES = 1;
 const UPSTREAM_CAPACITY_ERROR_MESSAGE = "Selected model is at capacity. Please try a different model.";
 const REQUEST_KIND_NORMAL = "normal";
 const REQUEST_KIND_CONTEXT_COMPACTION = "context_compaction";
 const CONTEXT_COMPACTION_MARKERS = ["remote_compaction", "context_compaction"];
-const CONTINUATION_ENCRYPTED_INCLUDE = "reasoning.encrypted_content";
-const CONTINUATION_MARKER_TEXT = "Continue thinking...";
 const PROXY_RECENT_REQUEST_LIMIT = 100;
 const PROXY_ACTIVE_REQUEST_LIMIT = 50;
 const PROXY_RECENT_RENDER_COUNT = 5;
@@ -89,7 +69,7 @@ const PROXY_REQUEST_LOG_MAX_BYTES = 64 * 1024 * 1024;
 const PROXY_EVENT_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_MAX_BYTES = 16 * 1024 * 1024;
 const PROXY_RUNTIME_LOG_TRIM_BYTES = 12 * 1024 * 1024;
-const PROXY_REQUEST_SCHEMA_VERSION = 8;
+const PROXY_REQUEST_SCHEMA_VERSION = 9;
 const proxyConversionFailures = new WeakMap();
 const PROXY_RESPONSE_INSPECTION_LIMIT_BYTES = 1024 * 1024;
 const PROXY_TIMER_MAX_MS = 2_147_483_647;
@@ -108,24 +88,6 @@ const PROXY_START_TIMEOUT_MS = 5000;
 const PROXY_HEALTH_TIMEOUT_MS = 500;
 const PROXY_HEALTH_POLL_MS = 100;
 const PROXY_STATUS_REFRESH_SECONDS = 1;
-const REASONING_POINTERS = [
-    "/usage/output_tokens_details/reasoning_tokens",
-    "/usage/completion_tokens_details/reasoning_tokens",
-    "/response/usage/output_tokens_details/reasoning_tokens",
-    "/response/usage/completion_tokens_details/reasoning_tokens",
-];
-const REASONING_TEXT_POINTERS = [
-    "/choices/0/delta/reasoning_content",
-    "/choices/0/message/reasoning_content",
-    "/choices/0/delta/reasoning",
-    "/choices/0/message/reasoning",
-    "/delta/reasoning_content",
-    "/message/reasoning_content",
-    "/delta/reasoning",
-    "/message/reasoning",
-    "/output/0/content/0/reasoning",
-    "/response/output/0/content/0/reasoning",
-];
 const REQUEST_HEADER_ALLOWLIST = [
     "content-type",
     "accept",
@@ -137,49 +99,19 @@ const REQUEST_HEADER_ALLOWLIST = [
     "openai-organization",
     "openai-project",
 ];
-const PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS = [
+const PROXY_ACTIVE_TABLE_COLUMNS = [
     { key: "session", title: "session", width: PROXY_TABLE_SESSION_WIDTH, align: "right" },
     { key: "route", title: "route", width: PROXY_TABLE_ROUTE_WIDTH, align: "left" },
     { key: "state", title: "state", width: PROXY_TABLE_STATE_WIDTH, align: "left" },
     { key: "age", title: "age", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
 ];
-const PROXY_ACTIVE_TOKEN_TABLE_COLUMNS = [
-    ...PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS.slice(0, 3),
-    { key: "input_tokens", title: "input", width: 9, align: "right" },
-    { key: "output_tokens", title: "output", width: 9, align: "right" },
-    { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
-];
-const PROXY_ACTIVE_COST_TABLE_COLUMNS = [
-    ...PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS.slice(0, 3),
-    { key: "input_cost", title: "input$", width: 9, align: "right" },
-    { key: "output_cost", title: "output$", width: 9, align: "right" },
-    { key: "cached_cost", title: "cached$", width: 9, align: "right" },
-    { key: "total_cost", title: "total$", width: 9, align: "right" },
-];
-const PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS = [
+const PROXY_HISTORY_TABLE_COLUMNS = [
     { key: "time", title: "time", width: PROXY_TABLE_TIME_WIDTH, align: "right" },
     { key: "status", title: "status", width: PROXY_TABLE_STATUS_WIDTH, align: "right" },
     { key: "ms", title: "dur.", width: PROXY_TABLE_LATENCY_WIDTH, align: "right" },
     { key: "size", title: "size", width: PROXY_TABLE_SIZE_WIDTH, align: "right" },
     { key: "error", title: "result", flex: true, minWidth: 12, align: "left" },
-];
-const PROXY_HISTORY_TOKEN_TABLE_COLUMNS = [
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[0],
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[1],
-    { key: "input_tokens", title: "input", width: 9, align: "right" },
-    { key: "output_tokens", title: "output", width: 9, align: "right" },
-    { key: "cached_input_tokens", title: "cached", width: 9, align: "right" },
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS.at(-1),
-];
-const PROXY_HISTORY_COST_TABLE_COLUMNS = [
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[0],
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS[1],
-    { key: "input_cost", title: "input$", width: 9, align: "right" },
-    { key: "output_cost", title: "output$", width: 9, align: "right" },
-    { key: "cached_cost", title: "cached$", width: 9, align: "right" },
-    { key: "total_cost", title: "total$", width: 9, align: "right" },
-    PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS.at(-1),
 ];
 const PROXY_SESSION_COLOR_CODES = [39, 48, 51, 69, 114, 135, 177, 190, 198, 202, 214];
 function statePath(stateRoot) {
@@ -236,6 +168,14 @@ async function resetIncompatibleProxyState(options) {
         throw new Error(`proxy state upgrade requires [model_providers.${providerName}].base_url=${storedProxyBaseUrl}`);
     }
     const profiles = await readProfiles();
+    // Status retry is the only setting that keeps its meaning across schema versions.
+    let statusRetry;
+    try {
+        statusRetry = parseProxyStatusRetry(raw.status_retry, "proxy.json.status_retry");
+    }
+    catch {
+        statusRetry = { ...PROXY_DEFAULT_STATUS_RETRY };
+    }
     const resetState = {
         state_schema_version: PROXY_STATE_SCHEMA_VERSION,
         installed_at: installedAt,
@@ -243,9 +183,7 @@ async function resetIncompatibleProxyState(options) {
         provider_name: providerName,
         original_base_url: originalBaseUrl,
         proxy_base_url: storedProxyBaseUrl,
-        mode: PROXY_INSTALL_MODE,
-        status_retry: { ...PROXY_DEFAULT_STATUS_RETRY },
-        latency_guard: { ...PROXY_DEFAULT_LATENCY_GUARD },
+        status_retry: statusRetry,
         listen_host: listenHost,
         listen_port: listenPort,
         profile_order: buildProfileOrder(profiles),
@@ -436,7 +374,7 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             signal: AbortSignal.timeout(timeoutMs),
         });
         if (!response.ok) {
-            return { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
+            return { healthy: false, pid: null, version: null, protocol: null, statusRetryEnabled: null };
         }
         const payload = await response.json().catch(() => null);
         return {
@@ -444,12 +382,11 @@ async function readProxyHealth(state, timeoutMs = PROXY_HEALTH_TIMEOUT_MS) {
             pid: payload && Number.isInteger(payload.pid) ? Number(payload.pid) : null,
             version: typeof payload?.version === "string" ? payload.version : null,
             protocol: payload && Number.isInteger(payload.protocol) ? Number(payload.protocol) : null,
-            mode: normalizeProxyMode(payload?.mode),
             statusRetryEnabled: typeof payload?.status_retry_enabled === "boolean" ? payload.status_retry_enabled : null,
         };
     }
     catch {
-        return { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
+        return { healthy: false, pid: null, version: null, protocol: null, statusRetryEnabled: null };
     }
 }
 function assertProxyHealthRuntime(health) {
@@ -792,7 +729,6 @@ function createProxyMetrics() {
         total_requests: 0,
         active_requests: [],
         status_counts: createProxyStatusCounts(),
-        reasoning_token_counts: createProxyReasoningTokenCounts(),
         upstream_hit_counts: {},
         latency_ms: {
             last: null,
@@ -807,12 +743,8 @@ function createProxyMetrics() {
 function createProxyStatusCounts() {
     return {};
 }
-function createProxyReasoningTokenCounts() {
-    return {};
-}
 function proxyMetricsFromRecentRequests(recentRequests) {
     const statusCounts = createProxyStatusCounts();
-    const reasoningTokenCounts = createProxyReasoningTokenCounts();
     const upstreamHitCounts = {};
     const latency = {
         last: recentRequests[0]?.latency_ms ?? null,
@@ -822,9 +754,8 @@ function proxyMetricsFromRecentRequests(recentRequests) {
         max: null,
     };
     for (const record of recentRequests) {
-        incrementProxyStatusCountsForRecord(statusCounts, record);
-        incrementProxyReasoningTokenCountsForRecord(reasoningTokenCounts, record);
-        incrementProxyUpstreamHitCountsForRecord(upstreamHitCounts, record);
+        incrementProxyStatusCount(statusCounts, record.status);
+        incrementProxyUpstreamHitCount(upstreamHitCounts, record.upstream);
         latency.sum += record.latency_ms;
         latency.min = latency.min === null ? record.latency_ms : Math.min(latency.min, record.latency_ms);
         latency.max = latency.max === null ? record.latency_ms : Math.max(latency.max, record.latency_ms);
@@ -832,7 +763,6 @@ function proxyMetricsFromRecentRequests(recentRequests) {
     return {
         total_requests: recentRequests.length,
         status_counts: statusCounts,
-        reasoning_token_counts: reasoningTokenCounts,
         upstream_hit_counts: upstreamHitCounts,
         latency_ms: latency,
     };
@@ -862,14 +792,12 @@ function parseProxyRequestRecord(value, source) {
     }
     for (const field of [
         "completed_at", "upstream", "session", "client_turn_id", "request_model", "request_reasoning_effort",
-        "request_body_sha256", "upstream_model", "upstream_model_source", "stream_model", "final_response_model",
-        "system_fingerprint", "service_tier", "reasoning_tokens_source", "reasoning_text_source", "error",
+        "request_body_sha256", "error",
     ]) {
         requireProxyField(request, field, source, isNullableString, "string or null");
     }
     requireProxyField(request, "protocol_conversion", source, (value) => value === null || value === "responses_to_chat", "responses_to_chat or null");
     requireProxyField(request, "conversion_failure_stage", source, isConversionFailureStage, "conversion failure stage or null");
-    requireProxyField(request, "mode", source, (value) => normalizeProxyMode(value) !== null, "proxy mode");
     requireProxyField(request, "request_kind", source, (value) => value === REQUEST_KIND_NORMAL || value === REQUEST_KIND_CONTEXT_COMPACTION, "request kind");
     for (const field of ["status", "upstream_status", "client_status"]) {
         requireProxyField(request, field, source, isNullableInteger, "integer or null");
@@ -879,35 +807,12 @@ function parseProxyRequestRecord(value, source) {
     for (const field of ["latency_ms", "request_bytes", "response_bytes"]) {
         requireProxyField(request, field, source, isNonNegativeNumber, "non-negative number");
     }
-    for (const field of ["client_ttfb_ms", "upstream_wait_ms", "time_to_first_chunk_ms", "stream_duration_ms"]) {
+    for (const field of ["client_ttfb_ms", "upstream_wait_ms"]) {
         requireProxyField(request, field, source, isNullableNonNegativeNumber, "non-negative number or null");
     }
-    for (const field of ["input_tokens", "cached_input_tokens", "reasoning_tokens", "output_tokens", "total_tokens"]) {
-        requireProxyField(request, field, source, (value) => value === null || isProxyTokenCount(value), "non-negative integer or null");
-    }
-    for (const field of ["reasoning_text_observed", "has_commentary", "has_final_answer", "final_answer_only", "has_tool_call", "has_reasoning_item"]) {
-        requireProxyField(request, field, source, (value) => typeof value === "boolean", "boolean");
-    }
     parseProxyFailureSummary(requireProxyField(request, "failure_summary", source), `${source}.failure_summary`);
-    parseProxyUsageAttempts(requireProxyField(request, "usage_attempts", source), `${source}.usage_attempts`);
-    parseProxyGuardActions(requireProxyField(request, "guard_actions", source), `${source}.guard_actions`);
     parseProxyRetrySummary(requireProxyField(request, "retry_summary", source), `${source}.retry_summary`);
     return request;
-}
-function parseProxyUsageAttempts(value, source) {
-    requireProxyArray(value, source).forEach((value, index) => {
-        const itemSource = `${source}[${index}]`;
-        const item = requireProxyObject(value, itemSource);
-        requireProxyField(item, "attempt", itemSource, isPositiveInteger, "positive integer");
-        for (const field of ["input_tokens", "output_tokens", "cached_input_tokens"]) {
-            requireProxyField(item, field, itemSource, (value) => value === null || isProxyTokenCount(value), "non-negative integer or null");
-        }
-        for (const field of ["pricing_model", "pricing_tier"]) {
-            requireProxyField(item, field, itemSource, isNullableString, "string or null");
-        }
-        requireProxyField(item, "pricing_model_source", itemSource, (value) => value === null || value === "upstream_model" || value === "request_model", "pricing model source or null");
-        requireProxyField(item, "pricing_tier_source", itemSource, (value) => value === null || value === "response" || value === "request" || value === "config", "pricing tier source or null");
-    });
 }
 function parseProxyFailureSummary(value, source) {
     if (value === null) {
@@ -920,22 +825,9 @@ function parseProxyFailureSummary(value, source) {
 }
 function parseProxyRetrySummary(value, source) {
     const summary = requireProxyObject(value, source);
-    for (const field of ["total", "reasoning_guard", "upstream_capacity", "http_429", "http_503", "timeout", "transport"]) {
+    for (const field of ["total", "upstream_capacity", "http_429", "http_503"]) {
         requireProxyField(summary, field, source, isNonNegativeInteger, "non-negative integer");
     }
-}
-function parseProxyGuardActions(value, source) {
-    requireProxyArray(value, source).forEach((value, index) => {
-        const itemSource = `${source}[${index}]`;
-        const item = requireProxyObject(value, itemSource);
-        requireProxyField(item, "at", itemSource, (value) => typeof value === "string", "string");
-        requireProxyField(item, "action", itemSource, (value) => value === "internal_retry" || value === "continuation_recovery" || value === "return_status_502" || value === "upstream_error", "guard action");
-        requireProxyField(item, "upstream", itemSource, isNullableString, "string or null");
-        requireProxyField(item, "attempt", itemSource, isPositiveInteger, "positive integer");
-        requireProxyField(item, "status", itemSource, isNullableInteger, "integer or null");
-        requireProxyField(item, "reasoning_tokens", itemSource, (value) => value === null || isReasoningTokenCount(value), "non-negative integer or null");
-        requireProxyField(item, "error", itemSource, isNullableString, "string or null");
-    });
 }
 function requireProxyObject(value, source) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -983,9 +875,6 @@ function nullableStringField(value) {
     const text = `${value}`;
     return text.length > 0 ? text : null;
 }
-function nullableNumberField(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
 function normalizeProxyState(state) {
     if (!state) {
         return null;
@@ -993,9 +882,7 @@ function normalizeProxyState(state) {
     requireProxyField(state, "state_schema_version", "proxy.json", (field) => field === PROXY_STATE_SCHEMA_VERSION, `number ${PROXY_STATE_SCHEMA_VERSION}`);
     return {
         ...state,
-        mode: normalizeProxyMode(state.mode) ?? PROXY_DEFAULT_MODE,
         status_retry: parseProxyStatusRetry(state.status_retry, "proxy.json.status_retry"),
-        latency_guard: parseProxyLatencyGuard(state.latency_guard, "proxy.json.latency_guard"),
         profile_order: Array.isArray(state.profile_order) ? state.profile_order.filter((value) => typeof value === "string" && value.length > 0) : [],
         metrics: parseProxyMetrics(state.metrics),
     };
@@ -1046,45 +933,11 @@ function parseProxyStatusRetry(value, source) {
         backoff_max_ms: backoffMaxMs,
     };
 }
-function parseProxyLatencyGuard(value, source) {
-    const raw = requireProxyObject(value, source);
-    const enabled = requireProxyField(raw, "enabled", source, (field) => typeof field === "boolean", "boolean");
-    const firstProgressTimeoutMs = requireProxyField(raw, "first_progress_timeout_ms", source, isProxyTimeoutMs, "timer-range integer");
-    const firstProgressAction = requireProxyField(raw, "first_progress_action", source, (field) => field === "return_502" || field === "retry_then_502", "return_502 or retry_then_502");
-    const totalTimeoutMs = requireProxyField(raw, "total_timeout_ms", source, isProxyTimeoutMs, "timer-range integer");
-    if (enabled && firstProgressTimeoutMs === 0 && totalTimeoutMs === 0) {
-        throw new Error(`invalid proxy request data at ${source}: enabled guard requires a positive timeout`);
-    }
-    return {
-        enabled,
-        first_progress_timeout_ms: firstProgressTimeoutMs,
-        first_progress_action: firstProgressAction,
-        total_timeout_ms: totalTimeoutMs,
-    };
-}
 function isProxyTimeoutMs(value) {
     return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= PROXY_TIMER_MAX_MS;
 }
 function isPositiveProxyTimerMs(value) {
     return Number.isInteger(value) && Number(value) > 0 && Number(value) <= PROXY_TIMER_MAX_MS;
-}
-function normalizeProxyMode(value) {
-    if (value === PROXY_MODE_PASSTHROUGH) {
-        return PROXY_MODE_PASSTHROUGH;
-    }
-    if (value === PROXY_MODE_INTERCEPT) {
-        return PROXY_MODE_INTERCEPT;
-    }
-    if (value === PROXY_MODE_RECOVERY) {
-        return PROXY_MODE_RECOVERY;
-    }
-    return null;
-}
-function isProxyInspectionMode(mode) {
-    return mode === PROXY_MODE_INTERCEPT || mode === PROXY_MODE_RECOVERY;
-}
-function proxyStatusRetryEnabled(state) {
-    return state.status_retry.enabled;
 }
 function ensureProxyMetrics(state) {
     return state.metrics ?? createProxyMetrics();
@@ -1129,14 +982,13 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
         const windowMetrics = proxyMetricsFromRecentRequests(metrics.recent_requests);
         metrics.total_requests = windowMetrics.total_requests;
         metrics.status_counts = windowMetrics.status_counts;
-        metrics.reasoning_token_counts = windowMetrics.reasoning_token_counts;
         metrics.upstream_hit_counts = windowMetrics.upstream_hit_counts;
         metrics.latency_ms = windowMetrics.latency_ms;
     });
     const persistedRecord = completedRecord ?? record;
     await appendProxyRequestRecord(stateRoot, persistedRecord);
     for (const attempt of persistedRecord.attempt_records) {
-        if (attempt.policy_trigger && attempt.policy_trigger !== "pass_through") {
+        if (attempt.policy_trigger) {
             await appendProxyJsonLine(proxyLogPath(stateRoot), {
                 event: "ccs_proxy_policy_trigger",
                 gateway_request_id: attempt.gateway_request_id,
@@ -1147,7 +999,6 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
                 retry_after_ms: attempt.retry_after_ms,
                 retry_delay_ms: attempt.retry_delay_ms,
                 retry_budget_used: attempt.retry_budget_used,
-                retry_budget_remaining: attempt.retry_budget_remaining,
             });
         }
         await appendProxyJsonLine(proxyLogPath(stateRoot), {
@@ -1160,9 +1011,6 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
             final_action: attempt.final_action,
             upstream_http_status: attempt.upstream_status,
             client_http_status: attempt.client_http_status,
-            timeout_phase: attempt.timeout_phase,
-            timeout_limit_ms: attempt.timeout_limit_ms,
-            timeout_response_control_lost: attempt.timeout_response_control_lost,
             upstream_stream_terminated: attempt.upstream_stream_terminated,
             failure_summary: attempt.failure_summary,
         });
@@ -1171,28 +1019,6 @@ async function completeProxyRequestMetric(state, stateRoot, record) {
 function compactProxyRequestRecord(record) {
     const { attempt_records: _attemptRecords, request_headers: _requestHeaders, ...compactRecord } = record;
     return compactRecord;
-}
-export function projectProxyUsageAttempts(attempts, requestModel, requestTier, configTier) {
-    return attempts.map((attempt) => {
-        const pricingModel = attempt.upstream_model ?? requestModel;
-        const pricingModelSource = attempt.upstream_model
-            ? "upstream_model"
-            : requestModel ? "request_model" : null;
-        const pricingTier = attempt.service_tier ?? requestTier ?? configTier;
-        const pricingTierSource = attempt.service_tier
-            ? "response"
-            : requestTier ? "request" : configTier ? "config" : null;
-        return {
-            attempt: attempt.attempt,
-            input_tokens: attempt.input_tokens,
-            output_tokens: attempt.output_tokens,
-            cached_input_tokens: attempt.cached_input_tokens,
-            pricing_model: pricingModel,
-            pricing_model_source: pricingModelSource,
-            pricing_tier: pricingTier,
-            pricing_tier_source: pricingTierSource,
-        };
-    });
 }
 function resolveClientRequestAttempt(record, recentRequests) {
     if (!record.client_turn_id || !record.request_body_sha256) {
@@ -1214,59 +1040,11 @@ function incrementProxyStatusCount(counts, status) {
     const key = String(status ?? 500);
     counts[key] = (counts[key] ?? 0) + 1;
 }
-function incrementProxyStatusCountsForRecord(counts, record) {
-    for (const action of record.guard_actions) {
-        incrementProxyStatusCount(counts, action.status);
-    }
-    if (!finalStatusDuplicatesGuardFailure(record)) {
-        incrementProxyStatusCount(counts, record.status);
-    }
-}
-function incrementProxyUpstreamHitCountsForRecord(counts, record) {
-    for (const action of record.guard_actions) {
-        incrementProxyUpstreamHitCount(counts, action.upstream);
-    }
-    if (!finalStatusDuplicatesGuardFailure(record)) {
-        incrementProxyUpstreamHitCount(counts, record.upstream);
-    }
-}
 function incrementProxyUpstreamHitCount(counts, upstream) {
     if (!upstream) {
         return;
     }
     counts[upstream] = (counts[upstream] ?? 0) + 1;
-}
-function incrementProxyReasoningTokenCount(counts, reasoningTokens) {
-    if (reasoningTokens === null) {
-        return;
-    }
-    const key = String(reasoningTokens);
-    counts[key] = (counts[key] ?? 0) + 1;
-}
-function incrementProxyReasoningTokenCountsForRecord(counts, record) {
-    for (const action of record.guard_actions) {
-        incrementProxyReasoningTokenCount(counts, action.reasoning_tokens);
-    }
-    if (!finalReasoningTokenDuplicatesGuardFailure(record)) {
-        incrementProxyReasoningTokenCount(counts, record.reasoning_tokens);
-    }
-}
-function finalStatusDuplicatesGuardFailure(record) {
-    const lastStatusAction = [...record.guard_actions]
-        .reverse()
-        .find((action) => action.status !== null);
-    return lastStatusAction?.action === "return_status_502"
-        && lastStatusAction.status === record.status;
-}
-function finalReasoningTokenDuplicatesGuardFailure(record) {
-    if (record.reasoning_tokens === null) {
-        return false;
-    }
-    const lastReasoningAction = [...record.guard_actions]
-        .reverse()
-        .find((action) => action.reasoning_tokens !== null);
-    return lastReasoningAction?.action === "return_status_502"
-        && lastReasoningAction.reasoning_tokens === record.reasoning_tokens;
 }
 function averageLatency(latency) {
     return latency.count > 0 ? latency.sum / latency.count : 0;
@@ -1292,8 +1070,7 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
         ? textDim("none")
         : colorCount(String(runtime.protocol));
     const proxy = state ? colorUrl(state.proxy_base_url) : textDim("unset");
-    const mode = state ? colorName(state.mode) : textDim("unset");
-    const statusRetry = state && proxyStatusRetryEnabled(state) ? textGreen("retry") : null;
+    const statusRetry = state && state.status_retry.enabled ? textGreen("retry") : null;
     const latency = metrics.latency_ms.count === 0
         ? [`last=${textDim("-")}`, `avg=${textDim("-")}`]
         : [
@@ -1306,7 +1083,6 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
     return [
         bgDarkBlue(" ccs proxy "),
         textDim(now.toLocaleTimeString("en-GB", { hour12: false })),
-        mode,
         ...(statusRetry ? [statusRetry] : []),
         ...latency,
         ...runtimeDetails,
@@ -1315,7 +1091,7 @@ function formatProxyStatusLine(now, state, runtime, metrics) {
 function formatProxyFilePath(value) {
     return formatHomePath(value);
 }
-function formatProxyHistoryRequest(record, nowMs, priceCache) {
+function formatProxyHistoryRequest(record, nowMs) {
     const completed = record.completed_at !== null;
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
@@ -1327,14 +1103,10 @@ function formatProxyHistoryRequest(record, nowMs, priceCache) {
         status: formatProxyRequestStatus(record.status),
         ms: textYellow(formatLatencyMs(latencyMs)),
         size: formatProxyBytes(size),
-        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
-        output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
-        cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
-        ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
         error: formatProxyError(record),
     };
 }
-function formatProxyActiveRequest(record, nowMs, sessionColorIndexes, priceCache) {
+function formatProxyActiveRequest(record, nowMs, sessionColorIndexes) {
     const startedAt = Date.parse(record.started_at);
     const elapsedMs = Number.isFinite(startedAt) ? Math.max(0, nowMs - startedAt) : 0;
     return {
@@ -1343,10 +1115,6 @@ function formatProxyActiveRequest(record, nowMs, sessionColorIndexes, priceCache
         state: formatProxyActiveState(record),
         age: textYellow(formatLatencyMs(elapsedMs)),
         size: formatProxyBytes(record.response_bytes),
-        input_tokens: formatProxyAttemptTokens(record.usage_attempts, "uncached_input_tokens"),
-        output_tokens: formatProxyAttemptTokens(record.usage_attempts, "output_tokens"),
-        cached_input_tokens: formatProxyAttemptTokens(record.usage_attempts, "cached_input_tokens"),
-        ...formatProxyAttemptCosts(record.usage_attempts, priceCache),
     };
 }
 function formatProxyRequestStatus(status) {
@@ -1371,19 +1139,11 @@ function formatProxyModelDisplayName(model) {
     }
     return /^o\d/.test(model) ? model.slice(1) : model;
 }
-export function formatProxyModel(requestModel, upstreamModel) {
-    const model = upstreamModel ?? requestModel;
-    if (!model) {
+function formatProxyModel(requestModel) {
+    if (!requestModel) {
         return textDim("-");
     }
-    const display = truncateVisible(formatProxyModelDisplayName(model), PROXY_TABLE_MODEL_WIDTH, "");
-    if (requestModel && upstreamModel === requestModel) {
-        return textGreen(display);
-    }
-    if (requestModel && upstreamModel) {
-        return textRed(display);
-    }
-    return colorName(display);
+    return colorName(truncateVisible(formatProxyModelDisplayName(requestModel), PROXY_TABLE_MODEL_WIDTH, ""));
 }
 function formatProxyProvider(upstream) {
     return upstream
@@ -1391,7 +1151,7 @@ function formatProxyProvider(upstream) {
         : textDim("-");
 }
 function formatProxyRoute(record) {
-    return `${formatProxyProvider(record.upstream)}${textDim("/")}${formatProxyModel(record.request_model, record.upstream_model)}`;
+    return `${formatProxyProvider(record.upstream)}${textDim("/")}${formatProxyModel(record.request_model)}`;
 }
 function formatProxyRequestMarker(record) {
     if (record.request_kind === REQUEST_KIND_CONTEXT_COMPACTION)
@@ -1419,108 +1179,10 @@ function formatProxyActiveState(record) {
     return `${marker}${textGreen(`stream${conversion}${retries > 0 ? `${marker ? "x" : " x"}${retries}` : ""}`)}`;
 }
 function proxyActiveRetryState(record) {
-    const lastAction = record.guard_actions.at(-1);
-    if (record.response_bytes === 0 && lastAction?.action === "continuation_recovery") {
-        return `retry:rec x${Math.max(1, record.attempts)}`;
-    }
-    if (record.response_bytes === 0 && lastAction?.action === "internal_retry") {
-        return `retry:${lastAction.reasoning_tokens === null ? record.status ?? "upstream" : "guard"} x${Math.max(1, record.attempts)}`;
-    }
     if (record.status !== null && record.status >= 400 && record.response_bytes === 0) {
         return `retry:${record.status} x${Math.max(1, record.attempts)}`;
     }
     return null;
-}
-export function formatProxyAttemptTokens(attempts, field) {
-    if (attempts.length === 0) {
-        return textDim("-");
-    }
-    if (field === "uncached_input_tokens") {
-        if (attempts.some((attempt) => attempt.input_tokens === null || attempt.cached_input_tokens === null)) {
-            return textDim("-");
-        }
-        if (attempts.some((attempt) => (attempt.cached_input_tokens ?? 0) > (attempt.input_tokens ?? 0))) {
-            return textRed("invalid");
-        }
-        return colorCount(formatProxyTokenCount(attempts.reduce((sum, attempt) => sum + (attempt.input_tokens ?? 0) - (attempt.cached_input_tokens ?? 0), 0)));
-    }
-    if (attempts.some((attempt) => attempt[field] === null)) {
-        return textDim("-");
-    }
-    return colorCount(formatProxyTokenCount(attempts.reduce((sum, attempt) => sum + (attempt[field] ?? 0), 0)));
-}
-export function formatProxyTokenCount(value) {
-    if (value < 1000)
-        return String(value);
-    const compact = Math.round(value / 100) / 10;
-    return `${Number.isInteger(compact) ? compact.toFixed(0) : compact.toFixed(1)}K`;
-}
-function normalizeProxyPricingTier(value) {
-    if (value === "default" || value === "standard")
-        return "standard";
-    if (value === "fast" || value === "priority")
-        return "fast";
-    return null;
-}
-export function formatProxyAttemptCosts(attempts, cache) {
-    if (!cache || attempts.length === 0) {
-        return missingProxyCosts();
-    }
-    let input = 0;
-    let output = 0;
-    let cached = 0;
-    let inputMissing = false;
-    let outputMissing = false;
-    let cachedMissing = false;
-    let invalid = false;
-    for (const attempt of attempts) {
-        const tier = normalizeProxyPricingTier(attempt.pricing_tier);
-        const prices = attempt.pricing_model && tier ? modelPriceParts(cache, attempt.pricing_model, tier) : null;
-        if (attempt.input_tokens !== null && attempt.cached_input_tokens !== null && attempt.cached_input_tokens > attempt.input_tokens) {
-            invalid = true;
-        }
-        else if (attempt.input_tokens === null || attempt.cached_input_tokens === null || !prices) {
-            inputMissing = true;
-        }
-        else {
-            const uncachedTokens = attempt.input_tokens - attempt.cached_input_tokens;
-            if (uncachedTokens > 0 && prices.input === null)
-                inputMissing = true;
-            else
-                input += uncachedTokens * (prices.input ?? 0);
-        }
-        if (attempt.output_tokens === null || !prices)
-            outputMissing = true;
-        else if (attempt.output_tokens > 0 && prices.output === null)
-            outputMissing = true;
-        else
-            output += attempt.output_tokens * (prices.output ?? 0);
-        if (attempt.cached_input_tokens === null || !prices)
-            cachedMissing = true;
-        else if (attempt.cached_input_tokens > 0 && prices.cacheRead === null)
-            cachedMissing = true;
-        else
-            cached += attempt.cached_input_tokens * (prices.cacheRead ?? 0);
-    }
-    const totalMissing = inputMissing || outputMissing || cachedMissing;
-    return {
-        input_cost: invalid ? textRed("invalid") : inputMissing ? textDim("-") : colorCost(formatProxyUsd(input)),
-        output_cost: outputMissing ? textDim("-") : colorCost(formatProxyUsd(output)),
-        cached_cost: cachedMissing ? textDim("-") : colorCost(formatProxyUsd(cached)),
-        total_cost: invalid ? textRed("invalid") : totalMissing ? textDim("-") : colorCost(formatProxyUsd(input + output + cached)),
-    };
-}
-function missingProxyCosts() {
-    return { input_cost: textDim("-"), output_cost: textDim("-"), cached_cost: textDim("-"), total_cost: textDim("-") };
-}
-export function formatProxyUsd(value) {
-    if (value === 0)
-        return "$0";
-    if (value < 0.0001)
-        return "<$0.0001";
-    if (value < 0.01)
-        return `$${value.toFixed(4)}`;
-    return `$${value.toFixed(2)}`;
 }
 function formatProxyError(record) {
     const prefix = formatProxyErrorPrefix(record);
@@ -1537,9 +1199,6 @@ function proxyDisplayError(record) {
     if (record.status === 499 && record.error?.startsWith("client closed response")) {
         return "client abort";
     }
-    if (record.error?.startsWith("reasoning_guard_triggered")) {
-        return null;
-    }
     return record.error ?? proxyFailureSummaryDisplay(record.failure_summary);
 }
 function proxyFailureSummaryDisplay(summary) {
@@ -1554,8 +1213,6 @@ function proxyFailureSummaryDisplay(summary) {
 function formatProxyErrorPrefix(record) {
     const values = [
         formatProxyClientRequestAttemptPrefixValue(record.client_request_attempt),
-        ...record.guard_actions
-            .map((action) => formatProxyGuardActionPrefixValue(action, record.status)),
     ].filter((value) => value.length > 0);
     const marker = formatProxyRequestMarker(record);
     const actions = values.length === 0 ? "" : `[${values.join(" ")}]`;
@@ -1563,52 +1220,6 @@ function formatProxyErrorPrefix(record) {
 }
 function formatProxyClientRequestAttemptPrefixValue(attempt) {
     return attempt > 1 ? textYellow(`client:${attempt}`) : "";
-}
-function formatProxyGuardActionPrefixValue(action, requestStatus) {
-    const label = formatProxyGuardActionLabel(action);
-    if (action.reasoning_tokens !== null) {
-        return textRed(`${label}:${action.reasoning_tokens}`);
-    }
-    const status = action.status ?? proxyGuardActionDisplayStatus(action, requestStatus);
-    if (status !== null) {
-        return textYellow(`${label}:${status}`);
-    }
-    return textDim(`${label}:-`);
-}
-function proxyGuardActionDisplayStatus(action, requestStatus) {
-    if (action.action !== "upstream_error" || requestStatus === null || requestStatus < 400) {
-        return null;
-    }
-    return requestStatus;
-}
-function formatProxyGuardActionLabel(action) {
-    if (action.action === "continuation_recovery") {
-        return "rec";
-    }
-    if (action.action === "return_status_502") {
-        return "block";
-    }
-    if (action.action === "upstream_error") {
-        return "err";
-    }
-    if (action.error?.startsWith("upstream_capacity:")) {
-        return "cap";
-    }
-    return action.reasoning_tokens === null ? "retry" : "guard";
-}
-async function logProxyGuardAction(stateRoot, request, action) {
-    await appendProxyJsonLine(proxyLogPath(stateRoot), {
-        event: "ccs_proxy_guard_action",
-        request_id: request.id,
-        method: request.method,
-        path: request.path,
-        action: action.action,
-        upstream: action.upstream,
-        attempt: action.attempt,
-        status: action.status,
-        reasoning_tokens: action.reasoning_tokens,
-        error: action.error,
-    });
 }
 async function logProxyRequestError(stateRoot, request, status, error) {
     await appendProxyJsonLine(proxyLogPath(stateRoot), {
@@ -1680,9 +1291,7 @@ function buildProxyStateFromProfiles(profiles, codexConfigText, codexConfigFile,
         provider_name: providerName,
         original_base_url: originalBaseUrl,
         proxy_base_url: proxyBaseUrl(listenHost, listenPort),
-        mode: PROXY_INSTALL_MODE,
         status_retry: { ...PROXY_DEFAULT_STATUS_RETRY },
-        latency_guard: { ...PROXY_DEFAULT_LATENCY_GUARD },
         listen_host: listenHost,
         listen_port: listenPort,
         profile_order: buildProfileOrder(profiles),
@@ -1696,494 +1305,24 @@ function assertProxyInstallTarget(configText, providerName, targetBaseUrl) {
         throw new Error(`failed to prepare proxy routing in [model_providers.${providerName}]: expected ${targetBaseUrl}, got ${actualBaseUrl ?? "missing"}`);
     }
 }
-function createEmptyReasoningMetadata() {
-    return {
-        reasoningTokens: null,
-        reasoningTokensSource: null,
-        reasoningTextObserved: false,
-        reasoningTextSource: null,
-    };
-}
-function createEmptyProxyUsageMetadata() {
-    return {
-        inputTokens: null,
-        cachedInputTokens: null,
-        outputTokens: null,
-        totalTokens: null,
-    };
-}
-function createEmptyProxyUpstreamMetadata() {
-    return {
-        systemFingerprint: null,
-        serviceTier: null,
-    };
-}
-function createEmptyProxyResponseShape() {
-    return {
-        hasCommentary: false,
-        hasFinalAnswer: false,
-        hasToolCall: false,
-        hasReasoningItem: false,
-    };
-}
 function createEmptyProxyRetrySummary() {
     return {
         total: 0,
-        reasoning_guard: 0,
         upstream_capacity: 0,
         http_429: 0,
         http_503: 0,
-        timeout: 0,
-        transport: 0,
     };
-}
-function parseReasoningMetadata(payload, sourcePrefix = "") {
-    const metadata = createEmptyReasoningMetadata();
-    if (!payload || typeof payload !== "object") {
-        return metadata;
-    }
-    for (const pointer of REASONING_POINTERS) {
-        const value = jsonPointerGet(payload, pointer);
-        if (isReasoningTokenCount(value)) {
-            metadata.reasoningTokens = value;
-            metadata.reasoningTokensSource = reasoningSource(sourcePrefix, pointer);
-            break;
-        }
-    }
-    for (const pointer of REASONING_TEXT_POINTERS) {
-        const value = jsonPointerGet(payload, pointer);
-        if (typeof value === "string" && value.length > 0) {
-            metadata.reasoningTextObserved = true;
-            metadata.reasoningTextSource = reasoningSource(sourcePrefix, pointer);
-            break;
-        }
-    }
-    return metadata;
-}
-function parseProxyUsageMetadata(payload) {
-    const usage = createEmptyProxyUsageMetadata();
-    if (!payload || typeof payload !== "object") {
-        return usage;
-    }
-    usage.inputTokens = firstProxyTokenAt(payload, [
-        "/usage/input_tokens",
-        "/usage/prompt_tokens",
-        "/response/usage/input_tokens",
-        "/response/usage/prompt_tokens",
-    ]);
-    usage.cachedInputTokens = firstProxyTokenAt(payload, [
-        "/usage/input_tokens_details/cached_tokens",
-        "/usage/prompt_tokens_details/cached_tokens",
-        "/response/usage/input_tokens_details/cached_tokens",
-        "/response/usage/prompt_tokens_details/cached_tokens",
-    ]);
-    usage.outputTokens = firstProxyTokenAt(payload, [
-        "/usage/output_tokens",
-        "/usage/completion_tokens",
-        "/response/usage/output_tokens",
-        "/response/usage/completion_tokens",
-    ]);
-    usage.totalTokens = firstProxyTokenAt(payload, [
-        "/usage/total_tokens",
-        "/response/usage/total_tokens",
-    ]);
-    return usage;
-}
-function firstProxyTokenAt(payload, pointers) {
-    for (const pointer of pointers) {
-        const value = jsonPointerGet(payload, pointer);
-        if (isProxyTokenCount(value)) {
-            return value;
-        }
-    }
-    return null;
-}
-function parseProxyUpstreamMetadata(payload) {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return createEmptyProxyUpstreamMetadata();
-    }
-    return {
-        systemFingerprint: jsonStringAt(payload, ["system_fingerprint"]) ?? jsonStringAt(payload, ["response", "system_fingerprint"]),
-        serviceTier: jsonStringAt(payload, ["service_tier"]) ?? jsonStringAt(payload, ["response", "service_tier"]),
-    };
-}
-function parseProxyResponseShape(payload) {
-    const shape = createEmptyProxyResponseShape();
-    visitProxyResponseShape(payload, shape, {});
-    return shape;
-}
-function visitProxyResponseShape(value, shape, context) {
-    if (!value || typeof value !== "object") {
-        return;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            visitProxyResponseShape(item, shape, context);
-        }
-        return;
-    }
-    const raw = value;
-    const type = typeof raw.type === "string" ? raw.type : null;
-    const phase = nullableStringField(raw.phase) ?? nullableStringField(raw.channel) ?? context.phase ?? null;
-    const role = nullableStringField(raw.role) ?? context.role ?? null;
-    if (phase === "commentary") {
-        shape.hasCommentary = true;
-    }
-    if (phase === "final") {
-        shape.hasFinalAnswer = true;
-    }
-    if (type === "reasoning") {
-        shape.hasReasoningItem = true;
-    }
-    if (isProxyToolCallObject(raw, type)) {
-        shape.hasToolCall = true;
-    }
-    if (isProxyFinalAnswerObject(raw, type, phase, role)) {
-        shape.hasFinalAnswer = true;
-    }
-    for (const item of Object.values(raw)) {
-        visitProxyResponseShape(item, shape, { phase, role });
-    }
-}
-function isProxyToolCallObject(raw, type) {
-    if (Array.isArray(raw.tool_calls) && raw.tool_calls.length > 0) {
-        return true;
-    }
-    if (raw.function_call && typeof raw.function_call === "object") {
-        return true;
-    }
-    return Boolean(type && (type.includes("tool_call")
-        || type === "function_call"
-        || type === "mcp_call"
-        || type === "local_shell_call"
-        || type === "custom_tool_call"));
-}
-function isProxyFinalAnswerObject(raw, type, phase, role) {
-    if (phase === "commentary") {
-        return false;
-    }
-    if (phase === "final") {
-        return true;
-    }
-    if (type === "output_text") {
-        return typeof raw.text === "string" && raw.text.length > 0;
-    }
-    if (type === "message" && role === "assistant") {
-        return typeof raw.content === "string"
-            ? raw.content.length > 0
-            : Array.isArray(raw.content) && raw.content.length > 0;
-    }
-    if (raw.message && typeof raw.message === "object" && !Array.isArray(raw.message)) {
-        const message = raw.message;
-        return nullableStringField(message.role) === "assistant"
-            && typeof message.content === "string"
-            && message.content.length > 0;
-    }
-    return false;
-}
-function mergeProxyUsageMetadata(current, next) {
-    return {
-        inputTokens: next.inputTokens ?? current.inputTokens,
-        cachedInputTokens: next.cachedInputTokens ?? current.cachedInputTokens,
-        outputTokens: next.outputTokens ?? current.outputTokens,
-        totalTokens: next.totalTokens ?? current.totalTokens,
-    };
-}
-function mergeProxyUpstreamMetadata(current, next) {
-    return {
-        systemFingerprint: next.systemFingerprint ?? current.systemFingerprint,
-        serviceTier: next.serviceTier ?? current.serviceTier,
-    };
-}
-function mergeProxyResponseShape(current, next) {
-    return {
-        hasCommentary: current.hasCommentary || next.hasCommentary,
-        hasFinalAnswer: current.hasFinalAnswer || next.hasFinalAnswer,
-        hasToolCall: current.hasToolCall || next.hasToolCall,
-        hasReasoningItem: current.hasReasoningItem || next.hasReasoningItem,
-    };
-}
-function isProxyFinalAnswerOnly(shape) {
-    return shape.hasFinalAnswer
-        && !shape.hasCommentary
-        && !shape.hasToolCall
-        && !shape.hasReasoningItem;
 }
 function createProxyOutcome(input) {
-    const reasoning = input.inspection?.reasoning ?? createEmptyReasoningMetadata();
-    const upstreamModel = input.upstreamModel ?? input.inspection?.upstreamModel ?? { model: null, source: null };
-    const usage = input.inspection?.usage ?? createEmptyProxyUsageMetadata();
-    const upstreamMetadata = input.inspection?.upstreamMetadata ?? createEmptyProxyUpstreamMetadata();
-    const responseShape = input.inspection?.responseShape ?? createEmptyProxyResponseShape();
     return {
         response: input.response,
         upstream: input.upstream,
         upstreamStatus: input.upstreamStatus,
         attempts: input.attempts,
         attemptRecords: input.attemptRecords,
-        upstreamModel: upstreamModel.model,
-        upstreamModelSource: upstreamModel.source,
-        streamModel: upstreamModel.source?.startsWith("sse.") ? upstreamModel.model : null,
-        finalResponseModel: upstreamModel.model,
-        systemFingerprint: upstreamMetadata.systemFingerprint,
-        serviceTier: upstreamMetadata.serviceTier,
-        usage,
-        reasoningTokens: input.reasoningTokens ?? reasoning.reasoningTokens,
-        reasoningTokensSource: input.reasoningTokensSource ?? reasoning.reasoningTokensSource,
-        reasoningTextObserved: reasoning.reasoningTextObserved,
-        reasoningTextSource: reasoning.reasoningTextSource,
-        responseShape,
         failureSummary: input.failureSummary ?? null,
         error: input.error ?? null,
     };
-}
-function enforceProxyDeadlineBeforeHeaders(outcome, latencyGuard) {
-    if (!latencyGuard.enabled || latencyGuard.total_timeout_ms === 0)
-        return;
-    const firstAttempt = outcome.attemptRecords[0];
-    const lastAttempt = outcome.attemptRecords.at(-1);
-    if (!firstAttempt || !lastAttempt)
-        return;
-    const deadlineAtMs = Date.parse(firstAttempt.upstream_fetch_started_at) + latencyGuard.total_timeout_ms;
-    if (!Number.isFinite(deadlineAtMs) || Date.now() < deadlineAtMs)
-        return;
-    const timeout = new ProxyLatencyTimeoutError("total", "before_client_headers", latencyGuard.total_timeout_ms);
-    const retryBudget = new ProxyRetryBudget(GUARD_RETRY_ATTEMPTS);
-    const guardRetriesUsed = outcome.attemptRecords.filter((attempt) => attempt.retry_trigger && attempt.retry_trigger !== "transport").length;
-    for (let index = 0; index < guardRetriesUsed; index += 1)
-        retryBudget.consume();
-    const failureSummary = proxyFailureSummary("gateway_error", "upstream_total_timeout", timeout.message);
-    lastAttempt.timeout_phase = timeout.phase;
-    lastAttempt.timeout_limit_ms = timeout.limitMs;
-    lastAttempt.policy_trigger = "timeout";
-    lastAttempt.policy_action = "return_502";
-    lastAttempt.client_http_status = NON_STREAM_STATUS_CODE;
-    lastAttempt.final_action = "timeout_returned_502";
-    lastAttempt.failure_summary = failureSummary;
-    void outcome.response.body?.cancel(timeout).catch(() => undefined);
-    outcome.response = createProxyPolicyErrorResponse("timeout", retryBudget, timeout);
-    outcome.streamScanner = undefined;
-    outcome.failureSummary = failureSummary;
-    outcome.error = timeout.message;
-}
-function jsonPointerGet(value, pointer) {
-    if (!pointer.startsWith("/")) {
-        return undefined;
-    }
-    return pointer
-        .slice(1)
-        .split("/")
-        .map((segment) => segment.replace(/~1/g, "/").replace(/~0/g, "~"))
-        .reduce((current, segment) => {
-        if (current === null || current === undefined || typeof current !== "object") {
-            return undefined;
-        }
-        return current[segment];
-    }, value);
-}
-function isReasoningTokenCount(value) {
-    return Number.isInteger(value) && typeof value === "number" && value >= 0;
-}
-function isProxyTokenCount(value) {
-    return Number.isInteger(value) && typeof value === "number" && value >= 0;
-}
-function reasoningSource(sourcePrefix, pointer) {
-    return sourcePrefix ? `${sourcePrefix}${pointer}` : pointer;
-}
-function mergeReasoningMetadata(current, next) {
-    return {
-        reasoningTokens: next.reasoningTokens ?? current.reasoningTokens,
-        reasoningTokensSource: next.reasoningTokens !== null ? next.reasoningTokensSource : current.reasoningTokensSource,
-        reasoningTextObserved: current.reasoningTextObserved || next.reasoningTextObserved,
-        reasoningTextSource: current.reasoningTextSource ?? next.reasoningTextSource,
-    };
-}
-function reasoningMetadataKey(metadata) {
-    return [
-        metadata.reasoningTokens ?? "",
-        metadata.reasoningTokensSource ?? "",
-        metadata.reasoningTextObserved ? "1" : "0",
-        metadata.reasoningTextSource ?? "",
-    ].join("\n");
-}
-function cloneJsonValue(value) {
-    return value === undefined ? value : JSON.parse(JSON.stringify(value));
-}
-function cloneContinuationReasoningItem(item) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-        return null;
-    }
-    const raw = item;
-    return raw.type === "reasoning"
-        && typeof raw.encrypted_content === "string"
-        && raw.encrypted_content.trim().length > 0
-        ? cloneJsonValue(raw)
-        : null;
-}
-function collectContinuationReasoningItems(payload) {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return [];
-    }
-    const raw = payload;
-    const items = [];
-    const directItem = cloneContinuationReasoningItem(raw.item);
-    if (directItem) {
-        items.push(directItem);
-    }
-    for (const outputItems of [raw.output, jsonObjectField(raw.response)?.output]) {
-        if (!Array.isArray(outputItems)) {
-            continue;
-        }
-        for (const item of outputItems) {
-            const reasoningItem = cloneContinuationReasoningItem(item);
-            if (reasoningItem) {
-                items.push(reasoningItem);
-            }
-        }
-    }
-    return items;
-}
-function jsonObjectField(value) {
-    return value && typeof value === "object" && !Array.isArray(value)
-        ? value
-        : null;
-}
-function mergeContinuationInclude(include) {
-    const items = Array.isArray(include) ? include.map((item) => `${item}`) : [];
-    if (!items.includes(CONTINUATION_ENCRYPTED_INCLUDE)) {
-        items.push(CONTINUATION_ENCRYPTED_INCLUDE);
-    }
-    return items;
-}
-function requestIncludesEncryptedReasoning(requestJson) {
-    const raw = jsonObjectField(requestJson);
-    return Array.isArray(raw?.include)
-        && raw.include.some((item) => `${item}` === CONTINUATION_ENCRYPTED_INCLUDE);
-}
-function prepareContinuationRecoveryRequestBody(input) {
-    const raw = jsonObjectField(input.requestJson);
-    const shouldAutoInclude = input.endpointClass === "responses"
-        && input.requestKind !== REQUEST_KIND_CONTEXT_COMPACTION
-        && raw?.stream === true
-        && !requestIncludesEncryptedReasoning(raw);
-    if (!shouldAutoInclude) {
-        return {
-            requestJson: input.requestJson,
-            requestBody: input.requestBody,
-            autoAddedEncryptedReasoning: false,
-        };
-    }
-    const nextBody = cloneJsonValue(raw);
-    nextBody.include = mergeContinuationInclude(nextBody.include);
-    return {
-        requestJson: nextBody,
-        requestBody: Buffer.from(JSON.stringify(nextBody), "utf8"),
-        autoAddedEncryptedReasoning: true,
-    };
-}
-function normalizeResponsesInputItemForContinuation(item) {
-    if (typeof item === "string") {
-        return {
-            type: "message",
-            role: "user",
-            content: item,
-        };
-    }
-    return cloneJsonValue(item);
-}
-function normalizeResponsesInputForContinuation(input) {
-    if (Array.isArray(input)) {
-        return input.map(normalizeResponsesInputItemForContinuation);
-    }
-    if (input === undefined || input === null) {
-        return [];
-    }
-    return [normalizeResponsesInputItemForContinuation(input)];
-}
-function buildContinuationMarkerItem() {
-    return {
-        type: "message",
-        role: "assistant",
-        phase: "commentary",
-        content: [
-            {
-                type: "output_text",
-                text: CONTINUATION_MARKER_TEXT,
-            },
-        ],
-    };
-}
-function buildContinuationRecoveryRequestBody(baseRequestJson, continuationReasoningItems) {
-    const base = cloneJsonValue(jsonObjectField(baseRequestJson) ?? {});
-    base.stream = true;
-    base.include = mergeContinuationInclude(base.include);
-    base.input = [
-        ...normalizeResponsesInputForContinuation(base.input),
-        ...continuationReasoningItems.map(cloneJsonValue),
-        buildContinuationMarkerItem(),
-    ];
-    return {
-        requestJson: base,
-        requestBody: Buffer.from(JSON.stringify(base), "utf8"),
-    };
-}
-function stripEncryptedContent(value) {
-    if (Array.isArray(value)) {
-        return value.map(stripEncryptedContent);
-    }
-    if (!value || typeof value !== "object") {
-        return value;
-    }
-    const stripped = {};
-    for (const [key, entry] of Object.entries(value)) {
-        if (key !== "encrypted_content") {
-            stripped[key] = stripEncryptedContent(entry);
-        }
-    }
-    return stripped;
-}
-function stripEncryptedContentFromJsonBuffer(buffer) {
-    if (!buffer.toString("utf8").includes("encrypted_content")) {
-        return buffer;
-    }
-    try {
-        return Buffer.from(JSON.stringify(stripEncryptedContent(JSON.parse(buffer.toString("utf8")))), "utf8");
-    }
-    catch {
-        return buffer;
-    }
-}
-function stripEncryptedContentFromSseBody(buffer) {
-    const text = buffer.toString("utf8");
-    if (!text.includes("encrypted_content")) {
-        return buffer;
-    }
-    const transformed = text.split(/\r?\n\r?\n/).map((block) => {
-        if (!block) {
-            return block;
-        }
-        const lines = block.split(/\r?\n/);
-        const dataLines = lines
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).replace(/^ /, ""));
-        if (dataLines.length === 0) {
-            return block;
-        }
-        const payloadText = dataLines.join("\n").trim();
-        if (!payloadText || payloadText === "[DONE]") {
-            return block;
-        }
-        try {
-            return [
-                ...lines.filter((line) => !line.startsWith("data:")),
-                `data: ${JSON.stringify(stripEncryptedContent(JSON.parse(payloadText)))}`,
-            ].join("\n");
-        }
-        catch {
-            return block;
-        }
-    }).join("\n\n");
-    return Buffer.from(transformed, "utf8");
 }
 function responseHeadersToObject(headers) {
     const result = {};
@@ -2194,14 +1333,6 @@ function responseHeadersToObject(headers) {
 }
 function isStreamContentType(contentType) {
     return contentType.toLowerCase().includes("text/event-stream");
-}
-function isProxyStreamingRequest(value) {
-    return Boolean(value && typeof value === "object" && !Array.isArray(value) && value.stream === true);
-}
-function isJsonContentType(contentType) {
-    const mediaType = contentType.toLowerCase().split(";")[0]?.trim() ?? "";
-    return mediaType === "application/json"
-        || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 function isUpstreamCapacityError(body) {
     if (body.length === 0) {
@@ -2273,10 +1404,6 @@ async function readBody(request) {
     }
     return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
 }
-function extractSessionShortId(requestJson, turnMetadata) {
-    const sessionId = extractSessionId(requestJson, turnMetadata);
-    return sessionId ? shortSessionId(sessionId) : null;
-}
 function extractSessionId(requestJson, turnMetadata) {
     return jsonStringAt(turnMetadata, ["session_id"])
         ?? findJsonStringField(requestJson, "session_id");
@@ -2319,13 +1446,6 @@ function parseJsonBody(body) {
     catch {
         return null;
     }
-}
-function extractRequestModel(body, endpointClass) {
-    if (!endpointClass) {
-        return null;
-    }
-    const parsed = parseJsonBody(body);
-    return extractRequestModelFromJson(parsed, endpointClass);
 }
 function extractRequestModelFromJson(parsed, endpointClass) {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -2412,28 +1532,6 @@ function stringifyRequestKindSignal(value) {
 function includesContextCompactionMarker(value) {
     const normalized = value.trim().toLowerCase();
     return normalized.length > 0 && CONTEXT_COMPACTION_MARKERS.some((marker) => normalized.includes(marker));
-}
-function extractUpstreamModelFromJson(payload, endpointClass) {
-    if (!endpointClass || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return { model: null, source: null };
-    }
-    if (endpointClass === "chat/completions") {
-        const model = jsonStringAt(payload, ["model"]);
-        return model ? { model, source: "json.model" } : { model: null, source: null };
-    }
-    const responseModel = jsonStringAt(payload, ["response", "model"]);
-    if (responseModel) {
-        return { model: responseModel, source: "json.response.model" };
-    }
-    const model = jsonStringAt(payload, ["model"]);
-    return model ? { model, source: "json.model" } : { model: null, source: null };
-}
-function extractUpstreamModelFromSsePayload(payload, endpointClass) {
-    const extraction = extractUpstreamModelFromJson(payload, endpointClass);
-    if (!extraction.model || !extraction.source) {
-        return extraction;
-    }
-    return { model: extraction.model, source: `sse.data.${extraction.source.slice("json.".length)}` };
 }
 function jsonStringAt(value, pathSegments) {
     let current = value;
@@ -2533,1054 +1631,13 @@ async function forwardRequest(request, upstream, body, signal) {
 class ProxyResponseWriteError extends Error {
     status;
     responseBytes;
-    timeout;
-    inspectionLimit;
     conversionFailureStage;
-    constructor(message, status, responseBytes, timeout = null, inspectionLimit = false, conversionFailureStage = null) {
+    constructor(message, status, responseBytes, conversionFailureStage = null) {
         super(message);
         this.status = status;
         this.responseBytes = responseBytes;
-        this.timeout = timeout;
-        this.inspectionLimit = inspectionLimit;
         this.conversionFailureStage = conversionFailureStage;
         this.name = "ProxyResponseWriteError";
-    }
-}
-class ProxyLatencyTimeoutError extends Error {
-    timeoutType;
-    phase;
-    limitMs;
-    constructor(timeoutType, phase, limitMs) {
-        super(timeoutType === "total" ? "upstream total deadline exceeded" : "upstream first progress timeout exceeded");
-        this.timeoutType = timeoutType;
-        this.phase = phase;
-        this.limitMs = limitMs;
-        this.name = "ProxyLatencyTimeoutError";
-    }
-}
-class ProxyInspectionLimitError extends Error {
-    constructor() {
-        super(`SSE event exceeds inspection limit: ${PROXY_RESPONSE_INSPECTION_LIMIT_BYTES} bytes`);
-        this.name = "ProxyInspectionLimitError";
-    }
-}
-class ProxySseScanner {
-    endpointClass;
-    buffer = Buffer.alloc(0);
-    bomPending = true;
-    inspection = emptyProxyPayloadInspection();
-    progress = false;
-    constructor(endpointClass) {
-        this.endpointClass = endpointClass;
-    }
-    push(chunk) {
-        let offset = 0;
-        while (offset < chunk.length) {
-            const available = PROXY_RESPONSE_INSPECTION_LIMIT_BYTES - this.buffer.length;
-            if (available === 0)
-                throw new ProxyInspectionLimitError();
-            const take = Math.min(available, chunk.length - offset);
-            const piece = chunk.subarray(offset, offset + take);
-            this.buffer = this.buffer.length === 0 ? Buffer.from(piece) : Buffer.concat([this.buffer, piece]);
-            this.stripBomForInspection();
-            this.consumeCompleteEvents(false);
-            offset += take;
-            if (offset < chunk.length && this.buffer.length >= PROXY_RESPONSE_INSPECTION_LIMIT_BYTES) {
-                throw new ProxyInspectionLimitError();
-            }
-        }
-    }
-    finish() {
-        this.consumeCompleteEvents(true);
-    }
-    currentInspection() {
-        return this.inspection;
-    }
-    hasProgress() {
-        return this.progress;
-    }
-    stripBomForInspection() {
-        if (!this.bomPending)
-            return;
-        const bom = Buffer.from([0xef, 0xbb, 0xbf]);
-        const compared = Math.min(this.buffer.length, bom.length);
-        for (let index = 0; index < compared; index += 1) {
-            if (this.buffer[index] !== bom[index]) {
-                this.bomPending = false;
-                return;
-            }
-        }
-        if (this.buffer.length >= bom.length) {
-            this.buffer = Buffer.from(this.buffer.subarray(bom.length));
-            this.bomPending = false;
-        }
-    }
-    consumeCompleteEvents(allowTrailingCr) {
-        while (true) {
-            const boundary = findSseEventBoundary(this.buffer, allowTrailingCr);
-            if (!boundary)
-                return;
-            const block = this.buffer.subarray(0, boundary.index);
-            this.buffer = Buffer.from(this.buffer.subarray(boundary.index + boundary.length));
-            this.consumeEvent(block);
-        }
-    }
-    consumeEvent(block) {
-        const lines = block.toString("utf8").split(/\r\n|\r|\n/);
-        const data = lines
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).replace(/^ /, ""))
-            .join("\n")
-            .trim();
-        if (!data) {
-            const nonEmptyLines = lines.filter((line) => line.length > 0);
-            const recognizedControl = nonEmptyLines.length > 0 && nonEmptyLines.every((line) => (line.startsWith("data:")
-                || line.startsWith("event:")
-                || line.startsWith("id:")
-                || line.startsWith("retry:")
-                || line.startsWith(":")));
-            this.progress ||= !recognizedControl && block.toString("utf8").trim().length > 0;
-            return;
-        }
-        if (data === "[DONE]")
-            return;
-        try {
-            const payload = JSON.parse(data);
-            this.consumePayload(payload);
-        }
-        catch {
-            this.progress = true;
-        }
-    }
-    consumePayload(payload) {
-        const current = this.inspection;
-        const upstreamModel = current.upstreamModel.model
-            ? current.upstreamModel
-            : extractUpstreamModelFromSsePayload(payload, this.endpointClass);
-        const reasoning = mergeReasoningMetadata(current.reasoning, parseReasoningMetadata(payload, "sse.data"));
-        const eventReasoningTokens = parseReasoningMetadata(payload, "sse.data").reasoningTokens;
-        this.inspection = {
-            upstreamModel,
-            reasoning,
-            usage: mergeProxyUsageMetadata(current.usage, parseProxyUsageMetadata(payload)),
-            upstreamMetadata: mergeProxyUpstreamMetadata(current.upstreamMetadata, parseProxyUpstreamMetadata(payload)),
-            responseShape: mergeProxyResponseShape(current.responseShape, parseProxyResponseShape(payload)),
-            guardReasoningTokens: matchesReasoningTokens(eventReasoningTokens, REASONING_EQUALS)
-                ? eventReasoningTokens
-                : current.guardReasoningTokens,
-            continuationReasoningItems: [
-                ...current.continuationReasoningItems,
-                ...collectContinuationReasoningItems(payload),
-            ],
-        };
-        this.progress ||= proxyPayloadHasMeaningfulProgress(payload);
-    }
-}
-function getSseLineEndingLength(buffer, index, allowTrailingCr) {
-    if (buffer[index] === 0x0a)
-        return 1;
-    if (buffer[index] !== 0x0d)
-        return 0;
-    if (index + 1 >= buffer.length)
-        return allowTrailingCr ? 1 : 0;
-    return buffer[index + 1] === 0x0a ? 2 : 1;
-}
-function findSseEventBoundary(buffer, allowTrailingCr = false) {
-    for (let index = 0; index < buffer.length; index += 1) {
-        const firstLength = getSseLineEndingLength(buffer, index, allowTrailingCr);
-        if (firstLength === 0)
-            continue;
-        const secondLength = getSseLineEndingLength(buffer, index + firstLength, allowTrailingCr);
-        if (secondLength > 0)
-            return { index, length: firstLength + secondLength };
-    }
-    return null;
-}
-function proxyPayloadHasMeaningfulProgress(payload) {
-    if (parseProxyResponseShape(payload).hasToolCall)
-        return true;
-    return proxyPayloadHasVisibleText(payload, false);
-}
-function proxyPayloadHasVisibleText(value, reasoningContext) {
-    if (!value || typeof value !== "object")
-        return false;
-    if (Array.isArray(value))
-        return value.some((item) => proxyPayloadHasVisibleText(item, reasoningContext));
-    const raw = value;
-    const type = typeof raw.type === "string" ? raw.type : "";
-    const nextReasoningContext = reasoningContext || type.includes("reasoning") || type.includes("encrypted");
-    for (const [key, item] of Object.entries(raw)) {
-        if (!nextReasoningContext && ["text", "content", "output_text", "delta", "arguments"].includes(key) && typeof item === "string" && item.trim()) {
-            return true;
-        }
-        if (proxyPayloadHasVisibleText(item, nextReasoningContext || key.includes("reasoning") || key.includes("encrypted")))
-            return true;
-    }
-    return false;
-}
-async function proxyThroughActiveUpstreamWithStats(request, upstream, body, endpointClass, requestKind, requestJson, gatewayRequestId, attemptRecords, mode, latencyGuard, callbacks = {}, statusRetryConfig) {
-    const recoveryMode = mode === PROXY_MODE_RECOVERY;
-    const reasoningEnabled = mode !== PROXY_MODE_PASSTHROUGH;
-    const preparedRequest = recoveryMode
-        ? prepareContinuationRecoveryRequestBody({
-            endpointClass,
-            requestKind,
-            requestJson,
-            requestBody: body,
-        })
-        : {
-            requestJson,
-            requestBody: body,
-            autoAddedEncryptedReasoning: false,
-        };
-    const attemptState = { gatewayRequestId, attempts: 0, attemptRecords, attemptStartedAtMs: [] };
-    const retryBudget = new ProxyRetryBudget(GUARD_RETRY_ATTEMPTS);
-    let totalDeadlineAtMs = null;
-    let pendingRetry = null;
-    let statusRetryCount = 0;
-    const statusRetryDeadlineAtMs = statusRetryConfig ? Date.now() + statusRetryConfig.total_window_ms : null;
-    let currentBody = preparedRequest.requestBody;
-    let currentRequestJson = preparedRequest.requestJson;
-    const stripAutoEncryptedReasoning = preparedRequest.autoAddedEncryptedReasoning;
-    while (true) {
-        if (pendingRetry) {
-            const waitResult = await waitForProxyRetry(pendingRetry.delayMs, callbacks.signal ?? new AbortController().signal, totalDeadlineAtMs);
-            if (waitResult === "aborted") {
-                throw new ProxyResponseWriteError("client closed response before upstream retry", 499, 0);
-            }
-            if (waitResult === "deadline") {
-                const timeout = new ProxyLatencyTimeoutError("total", "retry_wait", latencyGuard.total_timeout_ms);
-                const failureSummary = proxyFailureSummary("gateway_error", "upstream_total_timeout", timeout.message);
-                pendingRetry.attempt.timeout_phase = timeout.phase;
-                pendingRetry.attempt.timeout_limit_ms = timeout.limitMs;
-                pendingRetry.attempt.policy_trigger = "timeout";
-                pendingRetry.attempt.policy_action = "return_502";
-                pendingRetry.attempt.client_http_status = NON_STREAM_STATUS_CODE;
-                completeProxyAttempt(pendingRetry.attempt, "timeout_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-                return createProxyOutcome({
-                    response: createProxyPolicyErrorResponse("timeout", retryBudget, timeout),
-                    upstream: upstream.name,
-                    upstreamStatus: pendingRetry.attempt.upstream_status,
-                    attempts: attemptState.attempts,
-                    attemptRecords,
-                    failureSummary,
-                    error: timeout.message,
-                });
-            }
-        }
-        if (totalDeadlineAtMs === null && latencyGuard.enabled && latencyGuard.total_timeout_ms > 0) {
-            totalDeadlineAtMs = Date.now() + latencyGuard.total_timeout_ms;
-        }
-        const pendingForDispatch = pendingRetry;
-        let fetched;
-        try {
-            fetched = await fetchUpstreamWithTransportRetry(request, upstream, currentBody, attemptState, callbacks, latencyGuard, totalDeadlineAtMs, async () => {
-                if (!pendingForDispatch)
-                    return;
-                if (!retryBudget.consume())
-                    throw new Error("proxy retry budget exhausted before dispatch");
-                const dispatchedAttempt = currentProxyAttemptRecord(attemptState);
-                if (dispatchedAttempt) {
-                    dispatchedAttempt.retry_budget_used = retryBudget.used;
-                    dispatchedAttempt.retry_budget_remaining = retryBudget.remaining;
-                }
-                applyProxyAttemptPolicy(pendingForDispatch.attempt, {
-                    trigger: pendingForDispatch.trigger,
-                    action: pendingForDispatch.action,
-                    retryTrigger: pendingForDispatch.trigger,
-                    retryAfterMs: pendingForDispatch.retryAfterMs,
-                    retryDelayMs: pendingForDispatch.delayMs,
-                    retryBudget,
-                });
-                completeProxyAttempt(pendingForDispatch.attempt, pendingForDispatch.finalAction, {
-                    failureSummary: pendingForDispatch.failureSummary,
-                    remainingRetries: retryBudget.remaining,
-                });
-                await callbacks.onGuardAction?.(pendingForDispatch.guardAction);
-                pendingRetry = null;
-            }, isProxyInspectionMode(mode));
-        }
-        catch (error) {
-            if (!(error instanceof ProxyLatencyTimeoutError))
-                throw error;
-            const attempt = currentProxyAttemptRecord(attemptState);
-            if (!attempt)
-                throw error;
-            const timeoutAction = error.timeoutType === "total" ? "return_502" : latencyGuard.first_progress_action;
-            const decision = decideProxyPolicy({ timeout: true, capacity: false, status: 0, reasoningMatched: false }, { timeout: timeoutAction, capacity: "retry_then_pass_through", http429: "pass_through" }, retryBudget.remaining);
-            attempt.timeout_phase = error.phase;
-            attempt.timeout_limit_ms = error.limitMs;
-            attempt.upstream_stream_terminated = true;
-            applyProxyAttemptPolicy(attempt, { trigger: decision.trigger, action: decision.action, retryBudget });
-            const failureSummary = proxyFailureSummary("gateway_error", error.timeoutType === "total" ? "upstream_total_timeout" : "upstream_first_progress_timeout", error.message);
-            if (decision.retry) {
-                pendingRetry = {
-                    attempt,
-                    trigger: "timeout",
-                    action: decision.action,
-                    finalAction: "timeout_internal_retry",
-                    failureSummary,
-                    delayMs: 0,
-                    retryAfterMs: null,
-                    guardAction: createProxyGuardAction({
-                        action: "internal_retry",
-                        upstream: upstream.name,
-                        attempt: attempt.attempt,
-                        status: attempt.upstream_status,
-                        reasoningTokens: null,
-                        error: `${error.timeoutType}: ${error.message}`,
-                    }),
-                };
-                continue;
-            }
-            attempt.client_http_status = NON_STREAM_STATUS_CODE;
-            completeProxyAttempt(attempt, "timeout_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-            return createProxyOutcome({
-                response: createProxyPolicyErrorResponse("timeout", retryBudget, error),
-                upstream: upstream.name,
-                upstreamStatus: attempt.upstream_status,
-                attempts: attemptState.attempts,
-                attemptRecords,
-                failureSummary,
-                error: error.message,
-            });
-        }
-        if (!("controller" in fetched)) {
-            return fetched;
-        }
-        const response = fetched.response;
-        const status = response.status;
-        await callbacks.onResponseStart?.(status, upstream.name);
-        if (statusRetryConfig && isRetryableUpstreamStatus(status, statusRetryConfig)) {
-            const attempt = currentProxyAttemptRecord(attemptState);
-            const trigger = status === 429 ? "http_429" : "http_503";
-            const retryAfter = parseRetryAfter(response.headers.get("retry-after"), Date.now(), statusRetryConfig.total_window_ms);
-            const retryAfterMs = retryAfter.kind === "missing_or_invalid" ? null : retryAfter.delayMs;
-            const delayMs = retryAfter.kind === "missing_or_invalid"
-                ? retryDelayMs(statusRetryCount, statusRetryConfig.backoff_base_ms, statusRetryConfig.backoff_max_ms)
-                : retryAfter.delayMs;
-            const remainingMs = statusRetryDeadlineAtMs === null ? 0 : statusRetryDeadlineAtMs - Date.now();
-            attempt.policy_trigger = trigger;
-            attempt.policy_action = "retry_then_pass_through";
-            attempt.retry_after_ms = retryAfterMs;
-            attempt.retry_delay_ms = delayMs;
-            attempt.retry_budget_used = statusRetryCount;
-            attempt.retry_budget_remaining = 0;
-            if (retryAfter.kind !== "exceeds_limit" && remainingMs > 0 && delayMs <= remainingMs) {
-                const waitAbort = new AbortController();
-                const abortFromClient = () => waitAbort.abort("client");
-                if (callbacks.signal?.aborted)
-                    abortFromClient();
-                else
-                    callbacks.signal?.addEventListener("abort", abortFromClient, { once: true });
-                const unregisterWait = callbacks.onStatusRetryWait?.({
-                    requestId: gatewayRequestId,
-                    upstream: upstream.name,
-                    status,
-                    attempt: attemptState.attempts,
-                    waitingSince: new Date().toISOString(),
-                    wake: () => waitAbort.abort("reroute"),
-                    cancel: () => waitAbort.abort("cancel"),
-                });
-                let waitResult;
-                try {
-                    waitResult = await waitForProxyRetry(delayMs, waitAbort.signal, statusRetryDeadlineAtMs);
-                }
-                finally {
-                    unregisterWait?.();
-                    callbacks.signal?.removeEventListener("abort", abortFromClient);
-                }
-                if (waitResult === "aborted" && waitAbort.signal.reason !== "reroute") {
-                    await response.body?.cancel().catch(() => undefined);
-                    throw new ProxyResponseWriteError(waitAbort.signal.reason === "cancel" ? "retry cancelled by ccs proxy" : "client closed response before upstream retry", 499, 0);
-                }
-                if (waitResult === "ready" || waitAbort.signal.reason === "reroute") {
-                    await response.body?.cancel().catch(() => undefined);
-                    statusRetryCount += 1;
-                    attempt.retry_trigger = trigger;
-                    completeProxyAttempt(attempt, "status_retry", { failureSummary: proxyHttpFailureSummary(status, response.headers), remainingRetries: null });
-                    if (callbacks.resolveRetryUpstream) {
-                        upstream = await callbacks.resolveRetryUpstream();
-                    }
-                    continue;
-                }
-            }
-        }
-        const headers = responseHeadersToObject(response.headers);
-        const responseContentType = `${response.headers.get("content-type") || ""}`;
-        const responseIsStream = isStreamContentType(responseContentType)
-            || (status < 400 && isProxyStreamingRequest(currentRequestJson) && !isJsonContentType(responseContentType));
-        const inspectionContentType = responseIsStream ? "text/event-stream" : responseContentType;
-        if (!reasoningEnabled && status < 400 && !latencyGuard.enabled && responseIsStream) {
-            if (fetched.firstProgressTimer)
-                clearTimeout(fetched.firstProgressTimer);
-            if (fetched.totalTimer)
-                clearTimeout(fetched.totalTimer);
-            return {
-                ...createProxyOutcome({
-                    response,
-                    upstream: upstream.name,
-                    upstreamStatus: status,
-                    attempts: attemptState.attempts,
-                    attemptRecords,
-                    failureSummary: null,
-                }),
-                streamScanner: new ProxySseScanner(endpointClass),
-            };
-        }
-        let body;
-        try {
-            if (!reasoningEnabled && status < 400 && latencyGuard.enabled && responseIsStream) {
-                const direct = await prepareProxyDirectStream(fetched, endpointClass, currentProxyAttemptStartedAtMs(attemptState));
-                if (direct.kind === "direct") {
-                    const attempt = currentProxyAttemptRecord(attemptState);
-                    attempt.timeout_response_control_lost = direct.responseControlLost;
-                    if (!direct.responseControlLost) {
-                        attempt.first_progress_at = new Date().toISOString();
-                        attempt.time_to_first_progress_ms = currentProxyAttemptStartedAtMs(attemptState) === null
-                            ? null
-                            : Math.max(0, performance.now() - currentProxyAttemptStartedAtMs(attemptState));
-                    }
-                    return {
-                        ...createProxyOutcome({
-                            response: direct.response,
-                            upstream: upstream.name,
-                            upstreamStatus: status,
-                            attempts: attemptState.attempts,
-                            attemptRecords,
-                            failureSummary: null,
-                        }),
-                        streamScanner: direct.scanner,
-                    };
-                }
-                body = direct.body;
-            }
-            else {
-                body = await readProxyResponseBody(fetched, inspectionContentType, endpointClass, currentProxyAttemptStartedAtMs(attemptState), callbacks);
-            }
-        }
-        catch (error) {
-            const attempt = currentProxyAttemptRecord(attemptState);
-            if (!attempt)
-                throw error;
-            if (error instanceof ProxyInspectionLimitError) {
-                fetched.controller.abort(error);
-                const failureSummary = proxyFailureSummary("gateway_error", "response_inspection_limit_exceeded", error.message);
-                attempt.upstream_stream_terminated = true;
-                attempt.client_http_status = NON_STREAM_STATUS_CODE;
-                applyProxyAttemptPolicy(attempt, { trigger: "response_inspection_limit", action: "return_502", retryBudget });
-                completeProxyAttempt(attempt, "response_inspection_limit_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-                return createProxyOutcome({
-                    response: createProxyPolicyErrorResponse("response_inspection_limit", retryBudget),
-                    upstream: upstream.name,
-                    upstreamStatus: status,
-                    attempts: attemptState.attempts,
-                    attemptRecords,
-                    failureSummary,
-                    error: error.message,
-                });
-            }
-            if (!(error instanceof ProxyLatencyTimeoutError))
-                throw error;
-            const timeoutAction = error.timeoutType === "total" ? "return_502" : latencyGuard.first_progress_action;
-            const decision = decideProxyPolicy({ timeout: true, capacity: false, status, reasoningMatched: false }, { timeout: timeoutAction, capacity: "retry_then_pass_through", http429: "pass_through" }, retryBudget.remaining);
-            attempt.timeout_phase = error.phase;
-            attempt.timeout_limit_ms = error.limitMs;
-            attempt.upstream_stream_terminated = true;
-            applyProxyAttemptPolicy(attempt, { trigger: decision.trigger, action: decision.action, retryBudget });
-            const failureSummary = proxyFailureSummary("gateway_error", error.timeoutType === "total" ? "upstream_total_timeout" : "upstream_first_progress_timeout", error.message);
-            if (decision.retry) {
-                pendingRetry = {
-                    attempt,
-                    trigger: "timeout",
-                    action: decision.action,
-                    finalAction: "timeout_internal_retry",
-                    failureSummary,
-                    delayMs: 0,
-                    retryAfterMs: null,
-                    guardAction: createProxyGuardAction({
-                        action: "internal_retry",
-                        upstream: upstream.name,
-                        attempt: attempt.attempt,
-                        status,
-                        reasoningTokens: null,
-                        error: `${error.timeoutType}: ${error.message}`,
-                    }),
-                };
-                continue;
-            }
-            attempt.client_http_status = NON_STREAM_STATUS_CODE;
-            completeProxyAttempt(attempt, "timeout_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-            return createProxyOutcome({
-                response: createProxyPolicyErrorResponse("timeout", retryBudget, error),
-                upstream: upstream.name,
-                upstreamStatus: status,
-                attempts: attemptState.attempts,
-                attemptRecords,
-                failureSummary,
-                error: error.message,
-            });
-        }
-        const buffer = body.buffer;
-        updateProxyAttemptBodyTiming(attemptState, body);
-        updateProxyAttemptProgress(attemptState, body);
-        const inspection = body.inspection;
-        updateProxyAttemptInspection(attemptState, inspection);
-        const upstreamModel = inspection.upstreamModel;
-        if (upstreamModel.model) {
-            await callbacks.onUpstreamModel?.(upstreamModel);
-        }
-        await callbacks.onReasoningMetadata?.(inspection.reasoning);
-        fetched.phase = "response_parse";
-        if (totalDeadlineAtMs !== null && Date.now() >= totalDeadlineAtMs) {
-            const timeout = new ProxyLatencyTimeoutError("total", "response_parse", latencyGuard.total_timeout_ms);
-            const attempt = currentProxyAttemptRecord(attemptState);
-            const failureSummary = proxyFailureSummary("gateway_error", "upstream_total_timeout", timeout.message);
-            attempt.timeout_phase = timeout.phase;
-            attempt.timeout_limit_ms = timeout.limitMs;
-            attempt.client_http_status = NON_STREAM_STATUS_CODE;
-            applyProxyAttemptPolicy(attempt, { trigger: "timeout", action: "return_502", retryBudget });
-            completeProxyAttempt(attempt, "timeout_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-            return createProxyOutcome({
-                response: createProxyPolicyErrorResponse("timeout", retryBudget, timeout),
-                upstream: upstream.name,
-                upstreamStatus: status,
-                attempts: attemptState.attempts,
-                attemptRecords,
-                inspection,
-                failureSummary,
-                error: timeout.message,
-            });
-        }
-        const capacityMatched = isUpstreamCapacityError(buffer);
-        const policyDecision = decideProxyPolicy({
-            timeout: false,
-            capacity: capacityMatched,
-            status,
-            reasoningMatched: reasoningEnabled && inspection.guardReasoningTokens !== null,
-        }, {
-            timeout: latencyGuard.first_progress_action,
-            capacity: "retry_then_pass_through",
-            http429: "pass_through",
-        }, retryBudget.remaining);
-        if (policyDecision.trigger === "capacity") {
-            const attempt = currentProxyAttemptRecord(attemptState);
-            const failureSummary = proxyFailureSummary("upstream_error", "model_at_capacity", UPSTREAM_CAPACITY_ERROR_MESSAGE);
-            applyProxyAttemptPolicy(attempt, { trigger: policyDecision.trigger, action: policyDecision.action, retryBudget });
-            if (policyDecision.retry) {
-                const retryAfter = status === 429 ? parseRetryAfter(response.headers.get("retry-after")) : { kind: "valid", delayMs: 0 };
-                const retryAfterMs = retryAfter.kind === "missing_or_invalid" ? null : retryAfter.delayMs;
-                const delayMs = retryAfter.kind === "missing_or_invalid" ? retryDelayMs(retryBudget.used) : retryAfter.delayMs;
-                attempt.retry_after_ms = retryAfterMs;
-                attempt.retry_delay_ms = delayMs;
-                const delayFitsDeadline = totalDeadlineAtMs === null || Date.now() + delayMs <= totalDeadlineAtMs;
-                if (retryAfter.kind !== "exceeds_limit" && delayFitsDeadline) {
-                    pendingRetry = {
-                        attempt,
-                        trigger: policyDecision.trigger,
-                        action: policyDecision.action,
-                        finalAction: "upstream_capacity_internal_retry",
-                        failureSummary,
-                        delayMs,
-                        retryAfterMs,
-                        guardAction: createProxyGuardAction({
-                            action: "internal_retry",
-                            upstream: upstream.name,
-                            attempt: attemptState.attempts,
-                            status,
-                            reasoningTokens: null,
-                            error: `upstream_capacity: ${UPSTREAM_CAPACITY_ERROR_MESSAGE}`,
-                        }),
-                    };
-                    continue;
-                }
-            }
-            if (policyDecision.exhaustedAction === "return_502") {
-                attempt.client_http_status = NON_STREAM_STATUS_CODE;
-                completeProxyAttempt(attempt, "policy_returned_502", { failureSummary, remainingRetries: retryBudget.remaining });
-                return createProxyOutcome({
-                    response: createProxyPolicyErrorResponse("capacity", retryBudget),
-                    upstream: upstream.name,
-                    upstreamStatus: status,
-                    attempts: attemptState.attempts,
-                    attemptRecords,
-                    inspection,
-                    failureSummary,
-                    error: "upstream capacity policy triggered",
-                });
-            }
-            attempt.client_http_status = status;
-            completeProxyAttempt(attempt, "upstream_error", { failureSummary, remainingRetries: retryBudget.remaining });
-            return createProxyOutcome({
-                response: createBufferedResponse(buffer, status, headers, inspectionContentType, stripAutoEncryptedReasoning),
-                upstream: upstream.name,
-                upstreamStatus: status,
-                attempts: attemptState.attempts,
-                attemptRecords: attemptState.attemptRecords,
-                inspection,
-                upstreamModel,
-                failureSummary,
-                error: null,
-            });
-        }
-        if (policyDecision.trigger === "http_429") {
-            const attempt = currentProxyAttemptRecord(attemptState);
-            applyProxyAttemptPolicy(attempt, { trigger: policyDecision.trigger, action: policyDecision.action, retryBudget });
-        }
-        if (policyDecision.trigger === "reasoning" && inspection.guardReasoningTokens !== null) {
-            const attempt = currentProxyAttemptRecord(attemptState);
-            applyProxyAttemptPolicy(attempt, { trigger: policyDecision.trigger, action: policyDecision.action, retryBudget });
-            const canContinuationRecover = responseIsStream
-                && recoveryMode
-                && endpointClass === "responses"
-                && requestKind !== REQUEST_KIND_CONTEXT_COMPACTION
-                && inspection.continuationReasoningItems.length > 0
-                && policyDecision.retry;
-            if (canContinuationRecover) {
-                const continuationRequest = buildContinuationRecoveryRequestBody(currentRequestJson, inspection.continuationReasoningItems);
-                currentBody = continuationRequest.requestBody;
-                currentRequestJson = continuationRequest.requestJson;
-                pendingRetry = {
-                    attempt,
-                    trigger: policyDecision.trigger,
-                    action: policyDecision.action,
-                    finalAction: "continuation_recovery",
-                    failureSummary: null,
-                    delayMs: 0,
-                    retryAfterMs: null,
-                    guardAction: createProxyGuardAction({
-                        action: "continuation_recovery",
-                        upstream: upstream.name,
-                        attempt: attemptState.attempts,
-                        status,
-                        reasoningTokens: inspection.guardReasoningTokens,
-                        error: null,
-                    }),
-                };
-                continue;
-            }
-            if (policyDecision.retry) {
-                pendingRetry = {
-                    attempt,
-                    trigger: policyDecision.trigger,
-                    action: policyDecision.action,
-                    finalAction: "internal_retry",
-                    failureSummary: null,
-                    delayMs: 0,
-                    retryAfterMs: null,
-                    guardAction: createProxyGuardAction({
-                        action: "internal_retry",
-                        upstream: upstream.name,
-                        attempt: attemptState.attempts,
-                        status,
-                        reasoningTokens: inspection.guardReasoningTokens,
-                        error: null,
-                    }),
-                };
-                continue;
-            }
-            const error = `reasoning_guard_triggered reasoning_tokens=${inspection.guardReasoningTokens}`;
-            attempt.client_http_status = NON_STREAM_STATUS_CODE;
-            completeProxyAttempt(attempt, "blocked", {
-                failureSummary: proxyFailureSummary("codex_proxy", "reasoning_guard_triggered", error),
-                remainingRetries: 0,
-            });
-            await callbacks.onGuardAction?.(createProxyGuardAction({
-                action: "return_status_502",
-                upstream: upstream.name,
-                attempt: attemptState.attempts,
-                status: NON_STREAM_STATUS_CODE,
-                reasoningTokens: inspection.guardReasoningTokens,
-                error,
-            }));
-            return createProxyOutcome({
-                response: createReasoningGuardResponse(upstream, inspection.guardReasoningTokens),
-                upstream: upstream.name,
-                upstreamStatus: status,
-                attempts: attemptState.attempts,
-                attemptRecords: attemptState.attemptRecords,
-                inspection,
-                upstreamModel,
-                reasoningTokens: inspection.guardReasoningTokens,
-                reasoningTokensSource: inspection.reasoning.reasoningTokensSource,
-                failureSummary: proxyFailureSummary("codex_proxy", "reasoning_guard_triggered", error),
-                error,
-            });
-        }
-        const failureSummary = proxyFailureSummaryFromBufferedPayload(status, buffer, responseContentType, response.headers);
-        const finalAttempt = currentProxyAttemptRecord(attemptState);
-        if (finalAttempt.policy_trigger === null) {
-            applyProxyAttemptPolicy(finalAttempt, { trigger: policyDecision.trigger, action: policyDecision.action, retryBudget });
-        }
-        finalAttempt.client_http_status = status;
-        fetched.phase = "before_client_headers";
-        completeProxyAttempt(finalAttempt, proxyUpstreamFinalAction(status), { failureSummary, remainingRetries: retryBudget.remaining });
-        return createProxyOutcome({
-            response: createBufferedResponse(buffer, status, headers, inspectionContentType, stripAutoEncryptedReasoning),
-            upstream: upstream.name,
-            upstreamStatus: status,
-            attempts: attemptState.attempts,
-            attemptRecords: attemptState.attemptRecords,
-            inspection,
-            upstreamModel,
-            failureSummary,
-            error: null,
-        });
-    }
-}
-async function readProxyResponseBody(fetched, contentType, endpointClass, attemptStartedAtMs, callbacks) {
-    const response = fetched.response;
-    if (!response.body) {
-        if (fetched.firstProgressTimer)
-            clearTimeout(fetched.firstProgressTimer);
-        if (fetched.totalTimer)
-            clearTimeout(fetched.totalTimer);
-        return {
-            buffer: Buffer.alloc(0),
-            inspection: emptyProxyPayloadInspection(),
-            firstProgressAt: null,
-            timeToFirstProgressMs: null,
-            timeToFirstChunkMs: null,
-            streamDurationMs: null,
-        };
-    }
-    if (!isStreamContentType(contentType)) {
-        try {
-            const buffer = Buffer.from(await response.arrayBuffer());
-            await callbacks.onResponseBytes?.(buffer.length);
-            const inspection = inspectProxyPayload(buffer, contentType, endpointClass);
-            const hasProgress = buffer.length > 0 && proxyPayloadHasMeaningfulProgress(parseJsonBody(buffer));
-            if (fetched.firstProgressTimer)
-                clearTimeout(fetched.firstProgressTimer);
-            if (fetched.totalTimer)
-                clearTimeout(fetched.totalTimer);
-            return {
-                buffer,
-                inspection,
-                firstProgressAt: hasProgress ? new Date().toISOString() : null,
-                timeToFirstProgressMs: hasProgress && attemptStartedAtMs !== null ? Math.max(0, performance.now() - attemptStartedAtMs) : null,
-                timeToFirstChunkMs: null,
-                streamDurationMs: null,
-            };
-        }
-        catch (error) {
-            if (fetched.controller.signal.reason instanceof ProxyLatencyTimeoutError)
-                throw fetched.controller.signal.reason;
-            throw proxyResponseBodyReadError(error, callbacks.signal, 0);
-        }
-    }
-    const chunks = [];
-    const scanner = new ProxySseScanner(endpointClass);
-    let responseBytes = 0;
-    let firstChunkAtMs = null;
-    let firstProgressAtMs = null;
-    let firstProgressAt = null;
-    let lastChunkAtMs = null;
-    let emittedModelKey = "";
-    let emittedReasoningKey = reasoningMetadataKey(createEmptyReasoningMetadata());
-    const emitModelIfChanged = async (extraction) => {
-        const key = `${extraction.model ?? ""}\n${extraction.source ?? ""}`;
-        if (!extraction.model || key === emittedModelKey) {
-            return;
-        }
-        emittedModelKey = key;
-        await callbacks.onUpstreamModel?.(extraction);
-    };
-    const emitReasoningIfChanged = async (metadata) => {
-        const key = reasoningMetadataKey(metadata);
-        if (key === emittedReasoningKey) {
-            return;
-        }
-        emittedReasoningKey = key;
-        await callbacks.onReasoningMetadata?.(metadata);
-    };
-    try {
-        for await (const chunk of Readable.fromWeb(response.body)) {
-            const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            const nowMs = performance.now();
-            firstChunkAtMs ??= nowMs;
-            lastChunkAtMs = nowMs;
-            chunks.push(value);
-            responseBytes += value.length;
-            await callbacks.onResponseBytes?.(responseBytes);
-            scanner.push(value);
-            if (scanner.hasProgress() && firstProgressAtMs === null) {
-                firstProgressAtMs = nowMs;
-                firstProgressAt = new Date().toISOString();
-                if (fetched.firstProgressTimer)
-                    clearTimeout(fetched.firstProgressTimer);
-            }
-            const currentInspection = scanner.currentInspection();
-            await emitModelIfChanged(currentInspection.upstreamModel);
-            await emitReasoningIfChanged(currentInspection.reasoning);
-        }
-        scanner.finish();
-    }
-    catch (error) {
-        if (fetched.firstProgressTimer)
-            clearTimeout(fetched.firstProgressTimer);
-        if (fetched.totalTimer)
-            clearTimeout(fetched.totalTimer);
-        if (fetched.controller.signal.reason instanceof ProxyLatencyTimeoutError)
-            throw fetched.controller.signal.reason;
-        if (error instanceof ProxyInspectionLimitError)
-            throw error;
-        throw proxyResponseBodyReadError(error, callbacks.signal, responseBytes);
-    }
-    if (fetched.firstProgressTimer)
-        clearTimeout(fetched.firstProgressTimer);
-    if (fetched.totalTimer)
-        clearTimeout(fetched.totalTimer);
-    const inspection = scanner.currentInspection();
-    await emitModelIfChanged(inspection.upstreamModel);
-    await emitReasoningIfChanged(inspection.reasoning);
-    const buffer = chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
-    return {
-        buffer,
-        inspection,
-        firstProgressAt,
-        timeToFirstProgressMs: firstProgressAtMs === null || attemptStartedAtMs === null ? null : Math.max(0, firstProgressAtMs - attemptStartedAtMs),
-        timeToFirstChunkMs: firstChunkAtMs === null || attemptStartedAtMs === null ? null : Math.max(0, firstChunkAtMs - attemptStartedAtMs),
-        streamDurationMs: firstChunkAtMs === null || lastChunkAtMs === null ? null : Math.max(0, lastChunkAtMs - firstChunkAtMs),
-    };
-}
-function proxyResponseBodyReadError(error, signal, responseBytes) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (isClientAbortError(error, signal)) {
-        return new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
-    }
-    return new ProxyResponseWriteError(`upstream stream terminated: ${message}`, 502, responseBytes);
-}
-async function prepareProxyDirectStream(fetched, endpointClass, attemptStartedAtMs) {
-    const response = fetched.response;
-    if (!response.body) {
-        return {
-            kind: "buffered",
-            body: {
-                buffer: Buffer.alloc(0),
-                inspection: emptyProxyPayloadInspection(),
-                firstProgressAt: null,
-                timeToFirstProgressMs: null,
-                timeToFirstChunkMs: null,
-                streamDurationMs: null,
-            },
-        };
-    }
-    const reader = response.body.getReader();
-    const scanner = new ProxySseScanner(endpointClass);
-    const chunks = [];
-    let bufferedBytes = 0;
-    let firstChunkAtMs = null;
-    let lastChunkAtMs = null;
-    try {
-        while (true) {
-            const next = await reader.read();
-            if (next.done) {
-                scanner.finish();
-                if (fetched.firstProgressTimer)
-                    clearTimeout(fetched.firstProgressTimer);
-                if (fetched.totalTimer)
-                    clearTimeout(fetched.totalTimer);
-                return {
-                    kind: "buffered",
-                    body: {
-                        buffer: chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks),
-                        inspection: scanner.currentInspection(),
-                        firstProgressAt: null,
-                        timeToFirstProgressMs: null,
-                        timeToFirstChunkMs: firstChunkAtMs === null || attemptStartedAtMs === null ? null : Math.max(0, firstChunkAtMs - attemptStartedAtMs),
-                        streamDurationMs: firstChunkAtMs === null || lastChunkAtMs === null ? null : Math.max(0, lastChunkAtMs - firstChunkAtMs),
-                    },
-                };
-            }
-            const value = Buffer.from(next.value);
-            const nowMs = performance.now();
-            firstChunkAtMs ??= nowMs;
-            lastChunkAtMs = nowMs;
-            chunks.push(value);
-            bufferedBytes += value.length;
-            scanner.push(value);
-            const responseControlLost = !scanner.hasProgress() && bufferedBytes > PROXY_RESPONSE_INSPECTION_LIMIT_BYTES;
-            if (!scanner.hasProgress() && !responseControlLost)
-                continue;
-            if (!responseControlLost && fetched.firstProgressTimer)
-                clearTimeout(fetched.firstProgressTimer);
-            fetched.phase = "before_client_headers";
-            const prefix = chunks.map((chunk) => new Uint8Array(chunk));
-            let prefixIndex = 0;
-            const stream = new ReadableStream({
-                async pull(controller) {
-                    fetched.phase = "response_body";
-                    if (prefixIndex < prefix.length) {
-                        controller.enqueue(prefix[prefixIndex++]);
-                        return;
-                    }
-                    try {
-                        const item = await reader.read();
-                        if (item.done) {
-                            if (fetched.totalTimer)
-                                clearTimeout(fetched.totalTimer);
-                            controller.close();
-                        }
-                        else {
-                            controller.enqueue(item.value);
-                        }
-                    }
-                    catch (error) {
-                        controller.error(fetched.controller.signal.reason ?? error);
-                    }
-                },
-                async cancel(reason) {
-                    if (fetched.totalTimer)
-                        clearTimeout(fetched.totalTimer);
-                    await reader.cancel(reason);
-                },
-            });
-            return {
-                kind: "direct",
-                response: new Response(stream, { status: response.status, headers: response.headers }),
-                scanner: new ProxySseScanner(endpointClass),
-                responseControlLost,
-            };
-        }
-    }
-    catch (error) {
-        if (fetched.firstProgressTimer)
-            clearTimeout(fetched.firstProgressTimer);
-        if (fetched.totalTimer)
-            clearTimeout(fetched.totalTimer);
-        if (fetched.controller.signal.reason instanceof ProxyLatencyTimeoutError)
-            throw fetched.controller.signal.reason;
-        throw error;
-    }
-}
-async function fetchUpstreamWithTransportRetry(request, upstream, body, attemptState, callbacks, latencyGuard, totalDeadlineAtMs, onGuardRetryDispatched, allowTransportRetry = true) {
-    let fetchFailedRetries = 0;
-    let guardRetryDispatched = false;
-    while (true) {
-        if (callbacks.signal?.aborted) {
-            throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
-        }
-        const totalRemainingMs = totalDeadlineAtMs === null ? null : totalDeadlineAtMs - Date.now();
-        if (totalRemainingMs !== null && totalRemainingMs <= 0) {
-            throw new ProxyLatencyTimeoutError("total", "upstream_fetch", latencyGuard.total_timeout_ms);
-        }
-        const priorAttempt = currentProxyAttemptRecord(attemptState);
-        attemptState.attempts += 1;
-        const attemptRecord = createProxyAttemptRecord(attemptState.gatewayRequestId, attemptState.attempts, upstream.name);
-        annotateProxyAttemptRoute(request, upstream, attemptRecord);
-        if (priorAttempt) {
-            attemptRecord.retry_budget_used = priorAttempt.retry_budget_used;
-            attemptRecord.retry_budget_remaining = priorAttempt.retry_budget_remaining;
-        }
-        attemptState.attemptRecords.push(attemptRecord);
-        attemptState.attemptStartedAtMs.push(performance.now());
-        const controller = new AbortController();
-        const timeoutState = { phase: "upstream_fetch" };
-        const abortForTimeout = (timeoutType, limitMs) => {
-            if (controller.signal.aborted)
-                return;
-            controller.abort(new ProxyLatencyTimeoutError(timeoutType, timeoutState.phase, limitMs));
-        };
-        const totalTimer = totalRemainingMs === null
-            ? null
-            : setTimeout(() => abortForTimeout("total", latencyGuard.total_timeout_ms), totalRemainingMs);
-        const firstProgressTimer = latencyGuard.enabled && latencyGuard.first_progress_timeout_ms > 0
-            ? setTimeout(() => {
-                if (totalDeadlineAtMs !== null && Date.now() >= totalDeadlineAtMs) {
-                    abortForTimeout("total", latencyGuard.total_timeout_ms);
-                }
-                else {
-                    abortForTimeout("first_progress", latencyGuard.first_progress_timeout_ms);
-                }
-            }, latencyGuard.first_progress_timeout_ms)
-            : null;
-        const signal = callbacks.signal
-            ? AbortSignal.any([callbacks.signal, controller.signal])
-            : controller.signal;
-        try {
-            const fetchPromise = forwardRequest(request, upstream, body, signal);
-            void fetchPromise.catch(() => undefined);
-            if (!guardRetryDispatched) {
-                guardRetryDispatched = true;
-                await onGuardRetryDispatched?.();
-            }
-            await callbacks.onAttempt?.(attemptState.attempts, upstream.name);
-            const response = await fetchPromise;
-            const conversionFailure = finishRequestConversionFailure(response, attemptState, upstream.name);
-            if (conversionFailure) {
-                if (firstProgressTimer)
-                    clearTimeout(firstProgressTimer);
-                if (totalTimer)
-                    clearTimeout(totalTimer);
-                return conversionFailure;
-            }
-            markProxyAttemptHeaders(attemptState, response.status);
-            timeoutState.phase = "response_body";
-            return {
-                response,
-                controller,
-                firstProgressTimer,
-                totalTimer,
-                firstProgressTimeoutMs: latencyGuard.first_progress_timeout_ms,
-                get phase() { return timeoutState.phase; },
-                set phase(value) { timeoutState.phase = value; },
-            };
-        }
-        catch (error) {
-            if (firstProgressTimer)
-                clearTimeout(firstProgressTimer);
-            if (totalTimer)
-                clearTimeout(totalTimer);
-            if (controller.signal.reason instanceof ProxyLatencyTimeoutError) {
-                throw controller.signal.reason;
-            }
-            if (isClientAbortError(error, callbacks.signal)) {
-                throw new ProxyResponseWriteError("client closed response before upstream stream completed", 499, 0);
-            }
-            const fetchFailed = isFetchFailedError(error);
-            const message = error instanceof Error ? error.message : String(error);
-            const code = fetchFailed ? "upstream_fetch_failed" : "upstream_error";
-            const failureSummary = proxyFailureSummaryFromError(code, error);
-            if (allowTransportRetry) {
-                await callbacks.onGuardAction?.(createProxyGuardAction({
-                    action: "upstream_error",
-                    upstream: upstream.name,
-                    attempt: attemptState.attempts,
-                    status: null,
-                    reasoningTokens: null,
-                    error: `${code}: ${message}`,
-                }));
-            }
-            if (allowTransportRetry && fetchFailed && fetchFailedRetries < FETCH_FAILED_TRANSPORT_RETRIES) {
-                fetchFailedRetries += 1;
-                const attempt = currentProxyAttemptRecord(attemptState);
-                if (attempt) {
-                    attempt.retry_trigger = "transport";
-                }
-                completeProxyAttemptRecord(attemptState, "transport_retry", {
-                    failureSummary,
-                    remainingRetries: Math.max(0, FETCH_FAILED_TRANSPORT_RETRIES - fetchFailedRetries),
-                });
-                continue;
-            }
-            completeProxyAttemptRecord(attemptState, code, {
-                failureSummary,
-                remainingRetries: 0,
-            });
-            const failedAttempt = currentProxyAttemptRecord(attemptState);
-            if (failedAttempt)
-                failedAttempt.client_http_status = NON_STREAM_STATUS_CODE;
-            return createProxyOutcome({
-                response: createUpstreamErrorResponse(message, code),
-                upstream: upstream.name,
-                upstreamStatus: null,
-                attempts: attemptState.attempts,
-                attemptRecords: attemptState.attemptRecords,
-                failureSummary,
-                error: `${code}: ${message}`,
-            });
-        }
     }
 }
 async function proxyThroughActiveUpstreamPassthrough(request, upstream, body, gatewayRequestId, attemptRecords, callbacks) {
@@ -3699,7 +1756,6 @@ async function proxyThroughActiveUpstreamStatusRetry(request, initialUpstream, b
             attempt.retry_after_ms = retryAfterMs;
             attempt.retry_delay_ms = delayMs;
             attempt.retry_budget_used = retries;
-            attempt.retry_budget_remaining = 0;
             const remainingMs = deadlineAtMs - Date.now();
             if (retryAfter.kind === "exceeds_limit" || remainingMs <= 0 || delayMs > remainingMs) {
                 attempt.client_http_status = response.status;
@@ -3816,57 +1872,6 @@ function isClientAbortError(error, signal) {
     }
     return Boolean(error && typeof error === "object" && error.name === "AbortError");
 }
-function inspectProxyPayload(buffer, contentType, endpointClass) {
-    if (isJsonContentType(contentType)) {
-        return inspectJsonPayload(buffer, endpointClass);
-    }
-    return {
-        upstreamModel: { model: null, source: null },
-        reasoning: createEmptyReasoningMetadata(),
-        usage: createEmptyProxyUsageMetadata(),
-        upstreamMetadata: createEmptyProxyUpstreamMetadata(),
-        responseShape: createEmptyProxyResponseShape(),
-        guardReasoningTokens: null,
-        continuationReasoningItems: [],
-    };
-}
-function emptyProxyPayloadInspection() {
-    return {
-        upstreamModel: { model: null, source: null },
-        reasoning: createEmptyReasoningMetadata(),
-        usage: createEmptyProxyUsageMetadata(),
-        upstreamMetadata: createEmptyProxyUpstreamMetadata(),
-        responseShape: createEmptyProxyResponseShape(),
-        guardReasoningTokens: null,
-        continuationReasoningItems: [],
-    };
-}
-function inspectJsonPayload(buffer, endpointClass) {
-    try {
-        const parsed = JSON.parse(buffer.toString("utf8"));
-        const reasoning = parseReasoningMetadata(parsed);
-        return {
-            upstreamModel: extractUpstreamModelFromJson(parsed, endpointClass),
-            reasoning,
-            usage: parseProxyUsageMetadata(parsed),
-            upstreamMetadata: parseProxyUpstreamMetadata(parsed),
-            responseShape: parseProxyResponseShape(parsed),
-            guardReasoningTokens: reasoning.reasoningTokens !== null && REASONING_EQUALS.includes(reasoning.reasoningTokens) ? reasoning.reasoningTokens : null,
-            continuationReasoningItems: [],
-        };
-    }
-    catch {
-        return {
-            upstreamModel: { model: null, source: null },
-            reasoning: createEmptyReasoningMetadata(),
-            usage: createEmptyProxyUsageMetadata(),
-            upstreamMetadata: createEmptyProxyUpstreamMetadata(),
-            responseShape: createEmptyProxyResponseShape(),
-            guardReasoningTokens: null,
-            continuationReasoningItems: [],
-        };
-    }
-}
 function createProxyAttemptRecord(gatewayRequestId, attempt, upstream) {
     const startedAt = new Date().toISOString();
     return {
@@ -3876,8 +1881,6 @@ function createProxyAttemptRecord(gatewayRequestId, attempt, upstream) {
         attempt_dispatched: true,
         upstream_fetch_started_at: startedAt,
         upstream_headers_at: null,
-        first_progress_at: null,
-        time_to_first_progress_ms: null,
         started_at: startedAt,
         headers_at: null,
         completed_at: null,
@@ -3888,27 +1891,6 @@ function createProxyAttemptRecord(gatewayRequestId, attempt, upstream) {
         conversion_failure_stage: null,
         upstream_status: null,
         upstream_wait_ms: null,
-        time_to_first_chunk_ms: null,
-        stream_duration_ms: null,
-        upstream_model: null,
-        upstream_model_source: null,
-        stream_model: null,
-        final_response_model: null,
-        system_fingerprint: null,
-        service_tier: null,
-        input_tokens: null,
-        cached_input_tokens: null,
-        reasoning_tokens: null,
-        reasoning_tokens_source: null,
-        output_tokens: null,
-        total_tokens: null,
-        reasoning_text_observed: false,
-        reasoning_text_source: null,
-        has_commentary: false,
-        has_final_answer: false,
-        final_answer_only: false,
-        has_tool_call: false,
-        has_reasoning_item: false,
         final_action: "pending",
         policy_trigger: null,
         policy_action: null,
@@ -3916,10 +1898,6 @@ function createProxyAttemptRecord(gatewayRequestId, attempt, upstream) {
         retry_after_ms: null,
         retry_delay_ms: null,
         retry_budget_used: 0,
-        retry_budget_remaining: GUARD_RETRY_ATTEMPTS,
-        timeout_phase: null,
-        timeout_limit_ms: null,
-        timeout_response_control_lost: false,
         upstream_stream_terminated: false,
         client_http_status: null,
         failure_summary: null,
@@ -3946,46 +1924,6 @@ function markProxyAttemptHeaders(attemptState, status) {
     const startedAtMs = currentProxyAttemptStartedAtMs(attemptState);
     attempt.upstream_wait_ms = startedAtMs === null ? null : Math.max(0, performance.now() - startedAtMs);
 }
-function updateProxyAttemptInspection(attemptState, inspection) {
-    const attempt = currentProxyAttemptRecord(attemptState);
-    if (!attempt) {
-        return;
-    }
-    attempt.upstream_model = inspection.upstreamModel.model;
-    attempt.upstream_model_source = inspection.upstreamModel.source;
-    attempt.stream_model = inspection.upstreamModel.source?.startsWith("sse.") ? inspection.upstreamModel.model : null;
-    attempt.final_response_model = inspection.upstreamModel.model;
-    attempt.system_fingerprint = inspection.upstreamMetadata.systemFingerprint;
-    attempt.service_tier = inspection.upstreamMetadata.serviceTier;
-    attempt.input_tokens = inspection.usage.inputTokens;
-    attempt.cached_input_tokens = inspection.usage.cachedInputTokens;
-    attempt.reasoning_tokens = inspection.reasoning.reasoningTokens;
-    attempt.reasoning_tokens_source = inspection.reasoning.reasoningTokensSource;
-    attempt.output_tokens = inspection.usage.outputTokens;
-    attempt.total_tokens = inspection.usage.totalTokens;
-    attempt.reasoning_text_observed = inspection.reasoning.reasoningTextObserved;
-    attempt.reasoning_text_source = inspection.reasoning.reasoningTextSource;
-    attempt.has_commentary = inspection.responseShape.hasCommentary;
-    attempt.has_final_answer = inspection.responseShape.hasFinalAnswer;
-    attempt.final_answer_only = isProxyFinalAnswerOnly(inspection.responseShape);
-    attempt.has_tool_call = inspection.responseShape.hasToolCall;
-    attempt.has_reasoning_item = inspection.responseShape.hasReasoningItem;
-}
-function updateProxyAttemptBodyTiming(attemptState, timing) {
-    const attempt = currentProxyAttemptRecord(attemptState);
-    if (!attempt) {
-        return;
-    }
-    attempt.time_to_first_chunk_ms = timing.timeToFirstChunkMs;
-    attempt.stream_duration_ms = timing.streamDurationMs;
-}
-function updateProxyAttemptProgress(attemptState, progress) {
-    const attempt = currentProxyAttemptRecord(attemptState);
-    if (!attempt)
-        return;
-    attempt.first_progress_at = progress.firstProgressAt;
-    attempt.time_to_first_progress_ms = progress.timeToFirstProgressMs;
-}
 function currentProxyAttemptStartedAtMs(attemptState) {
     const startedAtMs = attemptState.attemptStartedAtMs.at(-1);
     return typeof startedAtMs === "number" && Number.isFinite(startedAtMs) ? startedAtMs : null;
@@ -4010,15 +1948,6 @@ function completeProxyAttempt(attempt, finalAction, input = {}) {
     attempt.failure_summary = input.failureSummary ?? attempt.failure_summary;
     attempt.remaining_retries = input.remainingRetries ?? attempt.remaining_retries;
 }
-function applyProxyAttemptPolicy(attempt, input) {
-    attempt.policy_trigger = input.trigger;
-    attempt.policy_action = input.action;
-    attempt.retry_trigger = input.retryTrigger ?? null;
-    attempt.retry_after_ms = input.retryAfterMs ?? null;
-    attempt.retry_delay_ms = input.retryDelayMs ?? null;
-    attempt.retry_budget_used = input.retryBudget.used;
-    attempt.retry_budget_remaining = input.retryBudget.remaining;
-}
 function completeLastPendingProxyAttemptRecord(attemptRecords, finalAction, input = {}) {
     completeProxyAttemptRecord({ gatewayRequestId: "", attempts: attemptRecords.length, attemptRecords, attemptStartedAtMs: [] }, finalAction, input);
 }
@@ -4028,39 +1957,6 @@ function proxyFailureSummary(type, code, message) {
 function proxyFailureSummaryFromError(code, error) {
     const message = error instanceof Error ? error.message : String(error);
     return proxyFailureSummary("upstream_error", code, message);
-}
-function proxyFailureSummaryFromBufferedPayload(status, buffer, contentType, headers) {
-    if (status < 400) {
-        return null;
-    }
-    if (isJsonContentType(contentType) && buffer.length > 0) {
-        try {
-            const parsed = JSON.parse(buffer.toString("utf8"));
-            const summary = proxyFailureSummaryFromJsonPayload(parsed);
-            if (summary) {
-                return appendProxyFailureDiagnostics(summary, headers);
-            }
-        }
-        catch {
-            return proxyHttpFailureSummary(status, headers);
-        }
-    }
-    return proxyHttpFailureSummary(status, headers);
-}
-function proxyFailureSummaryFromJsonPayload(parsed) {
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return null;
-    }
-    const raw = parsed;
-    const error = raw.error;
-    if (typeof error === "string" && error.length > 0) {
-        return proxyFailureSummary("upstream_error", null, error);
-    }
-    if (error && typeof error === "object" && !Array.isArray(error)) {
-        const errorRaw = error;
-        return proxyFailureSummary(nullableStringField(errorRaw.type) ?? "upstream_error", nullableStringField(errorRaw.code), nullableStringField(errorRaw.message));
-    }
-    return null;
 }
 function proxyHttpFailureSummary(status, headers) {
     return appendProxyFailureDiagnostics(proxyFailureSummary("upstream_error", `upstream_http_${status}`, `upstream returned HTTP ${status}`), headers);
@@ -4090,10 +1986,7 @@ function proxyUpstreamFinalAction(status) {
 function createRetrySummary(attemptRecords) {
     const summary = createEmptyProxyRetrySummary();
     for (const attempt of attemptRecords) {
-        if (attempt.final_action === "internal_retry" || attempt.final_action === "continuation_recovery") {
-            summary.reasoning_guard += 1;
-        }
-        else if (attempt.final_action === "upstream_capacity_internal_retry") {
+        if (attempt.final_action === "upstream_capacity_internal_retry") {
             summary.upstream_capacity += 1;
         }
         else if (attempt.retry_trigger === "http_429") {
@@ -4102,25 +1995,12 @@ function createRetrySummary(attemptRecords) {
         else if (attempt.retry_trigger === "http_503") {
             summary.http_503 += 1;
         }
-        else if (attempt.final_action === "timeout_internal_retry") {
-            summary.timeout += 1;
-        }
-        else if (attempt.final_action === "transport_retry") {
-            summary.transport += 1;
-        }
     }
-    summary.total = summary.reasoning_guard + summary.upstream_capacity + summary.http_429 + summary.http_503 + summary.timeout + summary.transport;
+    summary.total = summary.upstream_capacity + summary.http_429 + summary.http_503;
     return summary;
 }
 function lastProxyAttemptRecord(attemptRecords) {
     return attemptRecords.at(-1) ?? null;
-}
-function requestTimingFromAttempt(attempt) {
-    return {
-        upstream_wait_ms: attempt?.upstream_wait_ms ?? null,
-        time_to_first_chunk_ms: attempt?.time_to_first_chunk_ms ?? null,
-        stream_duration_ms: attempt?.stream_duration_ms ?? null,
-    };
 }
 function requestFinalAction(input) {
     if (input.status === 499) {
@@ -4128,17 +2008,6 @@ function requestFinalAction(input) {
     }
     if (input.failureSummary?.code === "route_conversion_failed") {
         return "route_conversion_failed";
-    }
-    if (input.failureSummary?.code === "upstream_total_timeout" || input.failureSummary?.code === "upstream_first_progress_timeout") {
-        return input.status === NON_STREAM_STATUS_CODE ? "timeout_returned_502" : "timeout_disconnected_after_forward";
-    }
-    if (input.failureSummary?.code === "response_inspection_limit_exceeded") {
-        return input.status === NON_STREAM_STATUS_CODE
-            ? "response_inspection_limit_returned_502"
-            : "response_inspection_limit_disconnected_after_forward";
-    }
-    if (input.failureSummary?.code === "reasoning_guard_triggered" || input.error?.includes("reasoning_guard_triggered")) {
-        return "blocked";
     }
     if (input.failureSummary?.code === "upstream_fetch_failed" || input.error?.includes("upstream_fetch_failed")) {
         return "upstream_fetch_failed";
@@ -4157,28 +2026,6 @@ function requestFinalAction(input) {
     }
     return "passed";
 }
-function createProxyGuardAction(input) {
-    return {
-        at: new Date().toISOString(),
-        action: input.action,
-        upstream: input.upstream,
-        attempt: input.attempt,
-        status: input.status,
-        reasoning_tokens: input.reasoningTokens,
-        error: input.error,
-    };
-}
-function createReasoningGuardResponse(upstream, reasoningTokens) {
-    return new Response(JSON.stringify({
-        error: {
-            message: `codex proxy blocked suspicious reasoning response from ${upstream.baseURL}`,
-            type: "codex_proxy",
-            code: "reasoning_guard_triggered",
-            reasoning_tokens: reasoningTokens,
-            status_code: NON_STREAM_STATUS_CODE,
-        },
-    }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } });
-}
 function createUpstreamErrorResponse(message, code) {
     return new Response(JSON.stringify({
         error: {
@@ -4188,54 +2035,6 @@ function createUpstreamErrorResponse(message, code) {
             status_code: NON_STREAM_STATUS_CODE,
         },
     }), { status: NON_STREAM_STATUS_CODE, headers: { "content-type": "application/json; charset=utf-8" } });
-}
-function createProxyPolicyErrorResponse(trigger, retryBudget, timeout) {
-    const details = trigger === "capacity"
-        ? { reason: "upstream-capacity", code: "upstream_capacity_policy_triggered", message: "upstream capacity policy rejected the response" }
-        : trigger === "http_429"
-            ? { reason: "upstream-rate-limited", code: "upstream_rate_limit_policy_triggered", message: "upstream rate limit policy rejected the response" }
-            : trigger === "response_inspection_limit"
-                ? { reason: "response-inspection-limit-exceeded", code: "response_inspection_limit_exceeded", message: "upstream response exceeded the SSE inspection limit" }
-                : timeout?.timeoutType === "total"
-                    ? { reason: "upstream-total-timeout", code: "upstream_total_timeout", message: "upstream request exceeded the total deadline" }
-                    : { reason: "upstream-first-progress-timeout", code: "upstream_first_progress_timeout", message: "upstream request did not produce meaningful progress in time" };
-    const error = {
-        error: {
-            type: trigger === "response_inspection_limit" ? "codex_retry_gateway_error" : "codex_retry_gateway_upstream_policy_error",
-            code: details.code,
-            message: details.message,
-        },
-        retry_attempt_index: retryBudget.used,
-        retry_attempts_used: retryBudget.used,
-        retry_attempts_remaining: retryBudget.remaining,
-        ...(timeout ? { timeout_limit_ms: timeout.limitMs, timeout_phase: timeout.phase } : {}),
-    };
-    return new Response(JSON.stringify(error), {
-        status: NON_STREAM_STATUS_CODE,
-        headers: {
-            "content-type": "application/json; charset=utf-8",
-            "x-codex-retry-gateway-reason": details.reason,
-        },
-    });
-}
-function createBufferedResponse(buffer, status, headers, contentType = "", stripAutoEncryptedReasoning = false) {
-    const responseHeaders = { ...headers };
-    let responseBuffer = buffer;
-    if (stripAutoEncryptedReasoning) {
-        if (isStreamContentType(contentType)) {
-            responseBuffer = stripEncryptedContentFromSseBody(buffer);
-        }
-        else if (isJsonContentType(contentType)) {
-            responseBuffer = stripEncryptedContentFromJsonBuffer(buffer);
-        }
-        if (responseBuffer !== buffer) {
-            delete responseHeaders["content-length"];
-        }
-    }
-    return new Response(responseStatusAllowsBody(status) ? responseBuffer : null, { status, headers: responseHeaders });
-}
-function responseStatusAllowsBody(status) {
-    return status !== 101 && status !== 204 && status !== 205 && status !== 304;
 }
 function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten, responseObserver) {
     if (res.destroyed || res.writableEnded) {
@@ -4254,7 +2053,7 @@ function writeProxyJsonErrorResponse(res, status, message, onHeadersWritten, res
     res.end(payload);
     return true;
 }
-async function writeResponse(res, response, endpointClass, modelObserver, onHeadersWritten, onResponseBytes, existingScanner, inspectStream = true, conversion, responseObserver) {
+async function writeResponse(res, response, onHeadersWritten, conversion, responseObserver) {
     let finalResponse = response;
     if (conversion?.needsConversion && response.body) {
         const contentType = response.headers.get("content-type") || "";
@@ -4295,14 +2094,7 @@ async function writeResponse(res, response, endpointClass, modelObserver, onHead
     if (!finalResponse.body) {
         return endEmptyResponse(res);
     }
-    const scanner = conversion?.needsConversion
-        ? (inspectStream && isStreamContentType(`${finalResponse.headers.get("content-type") || ""}`)
-            ? new ProxySseScanner(endpointClass)
-            : null)
-        : existingScanner ?? (inspectStream && isStreamContentType(`${finalResponse.headers.get("content-type") || ""}`)
-            ? new ProxySseScanner(endpointClass)
-            : null);
-    return writeReadableResponse(res, Readable.fromWeb(finalResponse.body), scanner, modelObserver, onResponseBytes, responseObserver);
+    return writeReadableResponse(res, Readable.fromWeb(finalResponse.body), responseObserver);
 }
 async function endEmptyResponse(res) {
     return new Promise((resolve, reject) => {
@@ -4323,21 +2115,11 @@ async function endEmptyResponse(res) {
         res.end();
     });
 }
-function updateProxyModelObserver(modelObserver, extraction) {
-    if (modelObserver.model === extraction.model && modelObserver.source === extraction.source) {
-        return Promise.resolve();
-    }
-    modelObserver.model = extraction.model;
-    modelObserver.source = extraction.source;
-    return Promise.resolve(modelObserver.update?.(extraction));
-}
-async function writeReadableResponse(res, stream, scanner, modelObserver, onResponseBytes, responseObserver) {
+async function writeReadableResponse(res, stream, responseObserver) {
     return new Promise((resolve, reject) => {
         let responseBytes = 0;
         let settled = false;
         let finished = false;
-        let modelUpdateQueue = Promise.resolve();
-        let responseBytesUpdateQueue = Promise.resolve();
         const finish = (error = null) => {
             if (settled) {
                 return;
@@ -4350,39 +2132,12 @@ async function writeReadableResponse(res, stream, scanner, modelObserver, onResp
             }
             resolve(responseBytes);
         };
-        const queueModelObserverUpdate = (extraction) => {
-            modelUpdateQueue = modelUpdateQueue.then(() => updateProxyModelObserver(modelObserver, extraction));
-            return modelUpdateQueue;
-        };
-        const queueResponseBytesUpdate = (observedBytes) => {
-            responseBytesUpdateQueue = responseBytesUpdateQueue.then(async () => {
-                await onResponseBytes?.(observedBytes);
-            });
-            return responseBytesUpdateQueue;
-        };
         stream.on("data", (chunk) => {
             const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             responseObserver?.onChunk(value);
             responseBytes += value.length;
-            void queueResponseBytesUpdate(responseBytes).catch((error) => {
-                stream.destroy(error instanceof Error ? error : new Error(String(error)));
-            });
-            if (scanner) {
-                try {
-                    scanner.push(value);
-                }
-                catch (error) {
-                    stream.destroy(error instanceof Error ? error : new Error(String(error)));
-                    return;
-                }
-                void queueModelObserverUpdate(scanner.currentInspection().upstreamModel).catch((error) => {
-                    stream.destroy(error instanceof Error ? error : new Error(String(error)));
-                });
-            }
         });
-        stream.on("error", (error) => finish(new ProxyResponseWriteError(error instanceof ProxyLatencyTimeoutError || error instanceof ProxyInspectionLimitError || error instanceof ProtocolConversionError
-            ? error.message
-            : `upstream stream terminated: ${error.message}`, 502, responseBytes, error instanceof ProxyLatencyTimeoutError ? error : null, error instanceof ProxyInspectionLimitError, error instanceof ProtocolConversionError ? error.stage : null)));
+        stream.on("error", (error) => finish(new ProxyResponseWriteError(error instanceof ProtocolConversionError ? error.message : `upstream stream terminated: ${error.message}`, 502, responseBytes, error instanceof ProtocolConversionError ? error.stage : null)));
         res.on("error", (error) => finish(new ProxyResponseWriteError(error.message, 500, responseBytes)));
         res.on("close", () => {
             if (!finished) {
@@ -4391,20 +2146,7 @@ async function writeReadableResponse(res, stream, scanner, modelObserver, onResp
         });
         res.on("finish", () => {
             finished = true;
-            void (async () => {
-                if (scanner) {
-                    scanner.finish();
-                    await queueModelObserverUpdate(scanner.currentInspection().upstreamModel);
-                }
-                else {
-                    await modelUpdateQueue;
-                }
-                await responseBytesUpdateQueue;
-                finish();
-            })().catch((error) => {
-                const message = error instanceof Error ? error.message : String(error);
-                finish(new ProxyResponseWriteError(message, 500, responseBytes));
-            });
+            finish();
         });
         stream.pipe(res);
     });
@@ -4598,32 +2340,6 @@ function formatProxyStatusSummary(metrics) {
     const statusCounts = formatExactProxyStatusCounts(metrics.status_counts);
     return statusCounts.length > 0 ? `status ${statusCounts.join(" ")}` : null;
 }
-function formatProxyPolicySummary(records) {
-    const totals = records.reduce((summary, record) => ({
-        upstream_capacity: summary.upstream_capacity + record.retry_summary.upstream_capacity,
-        http_429: summary.http_429 + record.retry_summary.http_429,
-        http_503: summary.http_503 + record.retry_summary.http_503,
-        reasoning_guard: summary.reasoning_guard + record.retry_summary.reasoning_guard,
-        timeout: summary.timeout + record.retry_summary.timeout,
-        transport: summary.transport + record.retry_summary.transport,
-    }), { upstream_capacity: 0, http_429: 0, http_503: 0, reasoning_guard: 0, timeout: 0, transport: 0 });
-    const retries = totals.upstream_capacity + totals.http_429 + totals.http_503 + totals.reasoning_guard + totals.timeout + totals.transport;
-    if (retries === 0) {
-        return null;
-    }
-    const categories = [
-        ["capacity", totals.upstream_capacity],
-        ["429", totals.http_429],
-        ["503", totals.http_503],
-        ["reasoning", totals.reasoning_guard],
-        ["timeout", totals.timeout],
-        ["transport", totals.transport],
-    ];
-    return [
-        `policy retries=${colorCount(String(retries))}`,
-        ...categories.filter(([, count]) => count > 0).map(([label, count]) => `${label}=${colorCount(String(count))}`),
-    ].join(" ");
-}
 function formatProxyStatusRetrySummary(records, config) {
     const totals = records.reduce((summary, record) => ({
         upstream_capacity: summary.upstream_capacity + record.retry_summary.upstream_capacity,
@@ -4638,69 +2354,8 @@ function formatProxyStatusRetrySummary(records, config) {
         ...(totals.http_503 > 0 ? [`503=${colorCount(String(totals.http_503))}`] : []),
     ].join(" ");
 }
-function formatProxyReasoningSummary(metrics) {
-    const reasoningCounts = formatGroupedProxyReasoningTokenCounts(metrics.reasoning_token_counts);
-    const recoveryCounts = formatProxyContinuationRecoveryCounts(proxyContinuationRecoveryCounts(metrics.recent_requests));
-    if (reasoningCounts.length === 0 && recoveryCounts.length === 0) {
-        return null;
-    }
-    return [
-        "reasoning",
-        ...reasoningCounts,
-        ...recoveryCounts,
-    ].join(" ");
-}
 function formatProxyPolicyLines(state, metrics) {
-    if (!state) {
-        return [];
-    }
-    const lines = [];
-    if (proxyStatusRetryEnabled(state)) {
-        lines.push(formatProxyStatusRetrySummary(metrics.recent_requests, state.status_retry));
-    }
-    const mode = state.mode;
-    if (mode === PROXY_MODE_PASSTHROUGH)
-        return lines;
-    const deadline = state.latency_guard.enabled
-        ? `policy deadline=${colorCount(formatDurationMs(state.latency_guard.first_progress_timeout_ms, { maxUnit: "m" }))}/${colorCount(formatDurationMs(state.latency_guard.total_timeout_ms, { maxUnit: "m" }))} ${state.latency_guard.first_progress_action}`
-        : null;
-    lines.push(...[
-        deadline,
-        formatProxyPolicySummary(metrics.recent_requests),
-        formatProxyReasoningSummary(metrics),
-    ].filter((line) => line !== null));
-    return lines;
-}
-function proxyContinuationRecoveryCounts(records) {
-    const counts = {
-        attempts: 0,
-        recovered: 0,
-        exhausted: 0,
-    };
-    for (const record of records) {
-        const recoveryAttempts = record.guard_actions.filter((action) => action.action === "continuation_recovery").length;
-        if (recoveryAttempts === 0) {
-            continue;
-        }
-        counts.attempts += recoveryAttempts;
-        if (record.guard_actions.some((action) => action.action === "return_status_502")) {
-            counts.exhausted += 1;
-        }
-        else if (record.status !== null && record.status < 400 && record.error === null) {
-            counts.recovered += 1;
-        }
-    }
-    return counts;
-}
-function formatProxyContinuationRecoveryCounts(counts) {
-    if (counts.attempts === 0) {
-        return [];
-    }
-    return [
-        `recovery=${textYellow(String(counts.attempts))}`,
-        `recovered=${textGreen(String(counts.recovered))}`,
-        `exhausted=${formatProxyStatusCount(counts.exhausted, textRed)}`,
-    ];
+    return state?.status_retry.enabled ? [formatProxyStatusRetrySummary(metrics.recent_requests, state.status_retry)] : [];
 }
 function formatProxyStatusCount(value, color) {
     return value === 0 ? textDim("0") : color(String(value));
@@ -4710,25 +2365,6 @@ function formatExactProxyStatusCounts(counts) {
         .filter(([, count]) => count > 0)
         .sort(([left], [right]) => Number(left) - Number(right))
         .map(([status, count]) => `${status}=${formatProxyStatusCount(count, proxyStatusCountColor(Number(status)))}`);
-}
-function formatGroupedProxyReasoningTokenCounts(counts) {
-    const grouped = REASONING_SUMMARY_VALUES.map((value) => [String(value), counts[String(value)] ?? 0]);
-    const otherCount = totalOtherProxyReasoningTokenCounts(counts);
-    return [
-        ...grouped
-            .filter(([, count]) => count > 0)
-            .map(([reasoningTokens, count]) => {
-            const color = reasoningTokens === "0" ? textYellow : textRed;
-            return `${reasoningTokens}=${color(String(count))}`;
-        }),
-        ...(otherCount > 0 ? [`other=${textGreen(String(otherCount))}`] : []),
-    ];
-}
-function totalOtherProxyReasoningTokenCounts(counts) {
-    const fixedKeys = new Set(REASONING_SUMMARY_VALUES.map(String));
-    return Object.entries(counts)
-        .filter(([reasoningTokens]) => !fixedKeys.has(reasoningTokens))
-        .reduce((sum, [, count]) => sum + count, 0);
 }
 function proxyStatusCountColor(status) {
     if (status >= 500) {
@@ -4742,20 +2378,6 @@ function proxyStatusCountColor(status) {
     }
     return textGreen;
 }
-export function proxyRequestTableColumns(view) {
-    if (view === "tokens")
-        return PROXY_ACTIVE_TOKEN_TABLE_COLUMNS;
-    if (view === "cost")
-        return PROXY_ACTIVE_COST_TABLE_COLUMNS;
-    return PROXY_ACTIVE_OVERVIEW_TABLE_COLUMNS;
-}
-function proxyHistoryTableColumns(view) {
-    if (view === "tokens")
-        return PROXY_HISTORY_TOKEN_TABLE_COLUMNS;
-    if (view === "cost")
-        return PROXY_HISTORY_COST_TABLE_COLUMNS;
-    return PROXY_HISTORY_OVERVIEW_TABLE_COLUMNS;
-}
 function renderProxyTable(columns, rows, indent, header = true) {
     const terminalColumns = process.stdout.columns;
     const maxWidth = terminalColumns ? Math.max(1, terminalColumns - indent.length) : undefined;
@@ -4766,8 +2388,8 @@ function renderProxyTable(columns, rows, indent, header = true) {
         header,
     }).map((line) => `${indent}${line}`);
 }
-function renderProxyRequestTable(rows, view) {
-    return renderProxyTable(proxyRequestTableColumns(view), rows, PROXY_REQUEST_TABLE_INDENT);
+function renderProxyRequestTable(rows) {
+    return renderProxyTable(PROXY_ACTIVE_TABLE_COLUMNS, rows, PROXY_REQUEST_TABLE_INDENT);
 }
 function proxyActiveRowCount(metrics) {
     return Math.min(metrics.active_requests.length, PROXY_RECENT_RENDER_COUNT);
@@ -4814,16 +2436,16 @@ function resolveProxyHistoryRenderCount(metrics, options, state) {
     }
     return count;
 }
-function formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache) {
+function formatProxyActiveRows(metrics, now, sessionColorIndexes) {
     const activeRows = metrics.active_requests
         .slice(0, PROXY_RECENT_RENDER_COUNT)
-        .map((record) => formatProxyActiveRequest(record, now.getTime(), sessionColorIndexes, priceCache));
+        .map((record) => formatProxyActiveRequest(record, now.getTime(), sessionColorIndexes));
     if (activeRows.length === 0) {
         return [`${textBold("active")} ${textDim("0")}`];
     }
     return [
         `${textBold("active")} ${textYellow(String(metrics.active_requests.length))}`,
-        ...renderProxyRequestTable(activeRows, view),
+        ...renderProxyRequestTable(activeRows),
     ];
 }
 function formatProxyHistoryContext(record, sessionColorIndexes) {
@@ -4833,21 +2455,21 @@ function formatProxyHistoryContext(record, sessionColorIndexes) {
         ...(record.protocol_conversion === "responses_to_chat" ? [colorName("R→C")] : []),
     ].join("  ");
 }
-function formatProxyHistoryRows(metrics, records, count, now, view, sessionColorIndexes, priceCache) {
+function formatProxyHistoryRows(metrics, records, count, now, sessionColorIndexes) {
     const visibleRecords = records.slice(0, count);
     if (visibleRecords.length === 0) {
         return [`${textBold("history")} ${textDim(String(metrics.recent_requests.length))}`];
     }
     const lines = [
         `${textBold("history")} ${colorCount(String(metrics.recent_requests.length))}`,
-        ...renderProxyTable(proxyHistoryTableColumns(view), [], PROXY_HISTORY_TABLE_INDENT),
+        ...renderProxyTable(PROXY_HISTORY_TABLE_COLUMNS, [], PROXY_HISTORY_TABLE_INDENT),
     ];
     for (const group of proxyHistoryGroups(visibleRecords)) {
         lines.push(`${PROXY_REQUEST_TABLE_INDENT}${formatProxyHistoryContext(group[0], sessionColorIndexes)}`);
         const completeRows = group
             .slice(0, PROXY_HISTORY_FULL_ROW_LIMIT)
-            .map((record) => styleTableRow(formatProxyHistoryRequest(record, now.getTime(), priceCache), textDim));
-        lines.push(...renderProxyTable(proxyHistoryTableColumns(view), completeRows, PROXY_HISTORY_TABLE_INDENT, false));
+            .map((record) => styleTableRow(formatProxyHistoryRequest(record, now.getTime()), textDim));
+        lines.push(...renderProxyTable(PROXY_HISTORY_TABLE_COLUMNS, completeRows, PROXY_HISTORY_TABLE_INDENT, false));
         if (group.length > PROXY_HISTORY_FULL_ROW_LIMIT) {
             lines.push(formatProxyHistoryEarlier(group.slice(PROXY_HISTORY_FULL_ROW_LIMIT)));
         }
@@ -4962,7 +2584,6 @@ async function renderProxyStatusLines(options) {
         : await ensureProxyRunning(options);
     const state = runtime?.state ?? await readProxyState(options.stateRoot);
     const profiles = await readProfiles();
-    const priceCache = options.view === "cost" ? await readModelPriceCache({ overrides: profiles.pricing?.overrides }) : undefined;
     const currentProfileOrder = buildProfileOrder(profiles);
     const profileOrder = currentProfileOrder.length ? currentProfileOrder : state?.profile_order ?? [];
     const metrics = state?.metrics ?? createProxyMetrics();
@@ -4970,9 +2591,9 @@ async function renderProxyStatusLines(options) {
     const historyRecords = options.historyVisible === false
         ? []
         : await resolveProxyHistoryRecords(options.stateRoot, metrics, historyCount, options.historyCount !== undefined);
-    return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords, priceCache);
+    return buildProxyStatusLines(new Date(), state, profileOrder, runtime, options, historyRecords);
 }
-export function buildProxyStatusLines(now, state, profileOrder, runtime, options, historyRecords, priceCache) {
+export function buildProxyStatusLines(now, state, profileOrder, runtime, options, historyRecords) {
     const metrics = state?.metrics
         ? { ...state.metrics, ...proxyMetricsFromRecentRequests(state.metrics.recent_requests) }
         : createProxyMetrics();
@@ -4980,7 +2601,6 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
     const resolvedHistoryRecords = historyRecords ?? (options.historyCount === undefined
         ? metrics.recent_requests.slice(0, historyCount)
         : takeProxyHistoryGroups(metrics.recent_requests, historyCount));
-    const view = options.view ?? "overview";
     const historyVisible = options.historyVisible ?? true;
     const sessionColorIndexes = allocateProxySessionColorIndexes([
         ...metrics.active_requests.slice(0, PROXY_RECENT_RENDER_COUNT),
@@ -4992,12 +2612,12 @@ export function buildProxyStatusLines(now, state, profileOrder, runtime, options
         fitTerminalLine(formatProxyStatusLine(now, state, runtime, metrics)),
         ...(statusSummary ? [fitTerminalLine(statusSummary)] : []),
         ...policyLines.map((line) => fitTerminalLine(line)),
-        ...formatProxyActiveRows(metrics, now, view, sessionColorIndexes, priceCache),
+        ...formatProxyActiveRows(metrics, now, sessionColorIndexes),
         ...(historyVisible
-            ? formatProxyHistoryRows(metrics, resolvedHistoryRecords, resolvedHistoryRecords.length, now, view, sessionColorIndexes, priceCache)
+            ? formatProxyHistoryRows(metrics, resolvedHistoryRecords, resolvedHistoryRecords.length, now, sessionColorIndexes)
             : []),
         ...(options.watch
-            ? [fitTerminalLine(textDim(`view=${view} history=${historyVisible ? "on" : "off"}  v:view t:history q:quit`))]
+            ? [fitTerminalLine(textDim(`history=${historyVisible ? "on" : "off"}  t:history q:quit`))]
             : []),
     ];
 }
@@ -5005,14 +2625,12 @@ async function runProxyStatusOnce(options) {
     console.log((await renderProxyStatusLines({ ...options, once: true })).join("\n"));
 }
 async function runProxyStatusWatch(options) {
-    let view = options.view ?? "overview";
     let historyVisible = true;
-    await runLiveView(() => renderProxyStatusLines({ ...options, watch: true, view, historyVisible }), {
+    await runLiveView(() => renderProxyStatusLines({ ...options, watch: true, historyVisible }), {
         intervalMs: PROXY_STATUS_REFRESH_SECONDS * 1000,
         pinFooter: true,
         onKey: (key, controls) => {
-            const result = proxyWatchKeyAction(key, view, historyVisible);
-            view = result.view;
+            const result = proxyWatchKeyAction(key, historyVisible);
             historyVisible = result.historyVisible;
             if (result.action === "stop") {
                 controls.stop();
@@ -5023,22 +2641,16 @@ async function runProxyStatusWatch(options) {
         },
     });
 }
-export function proxyWatchKeyAction(key, view, historyVisible) {
+export function proxyWatchKeyAction(key, historyVisible) {
     if (key === "q")
-        return { view, historyVisible, action: "stop" };
+        return { historyVisible, action: "stop" };
     if (key === "t")
-        return { view, historyVisible: !historyVisible, action: "render" };
-    if (key !== "v")
-        return { view, historyVisible, action: "none" };
-    return {
-        view: view === "overview" ? "tokens" : view === "tokens" ? "cost" : "overview",
-        historyVisible,
-        action: "render",
-    };
+        return { historyVisible: !historyVisible, action: "render" };
+    return { historyVisible, action: "none" };
 }
 export async function shutdownProxyRuntime(options) {
     const state = await readProxyState(options.stateRoot);
-    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null, mode: null, statusRetryEnabled: null };
+    const health = state ? await readProxyHealth(state) : { healthy: false, pid: null, version: null, protocol: null, statusRetryEnabled: null };
     const file = pidPath(options.stateRoot);
     if (!fs.existsSync(file)) {
         if (state && health.healthy && health.pid !== null) {
@@ -5107,7 +2719,6 @@ async function buildProxyRestartPlan(options, force = false) {
         installedAt: state.installed_at,
         providerName: state.provider_name,
         proxyBaseUrl: state.proxy_base_url,
-        mode: state.mode,
         force,
         activeRequests: state.metrics.active_requests,
         current: await readProxyHealth(state),
@@ -5120,8 +2731,7 @@ async function restartProxyRuntime(options, plan) {
     if (!state
         || state.installed_at !== plan.installedAt
         || state.provider_name !== plan.providerName
-        || state.proxy_base_url !== plan.proxyBaseUrl
-        || state.mode !== plan.mode) {
+        || state.proxy_base_url !== plan.proxyBaseUrl) {
         throw new Error(`proxy state changed after preview: ${statePath(options.stateRoot)}`);
     }
     if (!plan.force && state.metrics.active_requests.length > 0) {
@@ -5237,22 +2847,6 @@ async function applyProxyCancelPlan(plan) {
         body: JSON.stringify({ request_ids: plan.status.requests.map((request) => request.request_id) }),
     });
 }
-export async function setProxyMode(options, mode, retryEnabled) {
-    const state = await readProxyState(options.stateRoot);
-    if (!state) {
-        throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
-    }
-    const previousMode = state.mode;
-    const nextRetryEnabled = retryEnabled ?? proxyStatusRetryEnabled(state);
-    const nextState = { ...state, mode, status_retry: { ...state.status_retry, enabled: nextRetryEnabled } };
-    await writeProxyState(options.stateRoot, nextState);
-    const health = await readProxyHealth(nextState);
-    if (health.healthy && health.protocol !== PROXY_HEALTH_PROTOCOL) {
-        await shutdownProxyRuntime(options);
-    }
-    const runtime = await ensureProxyRunning(options);
-    return { previousMode, mode, runtime };
-}
 async function serveProxy(options) {
     const state = await readProxyState(options.stateRoot);
     if (!state) {
@@ -5341,9 +2935,9 @@ async function serveProxy(options) {
                     if (route.endpoint === "reroute" || route.endpoint === "cancel") {
                         const profiles = await readProfiles();
                         const profile = resolveProxyUpstream(profiles).name;
-                        if (route.endpoint === "reroute" && !proxyStatusRetryEnabled(currentState)) {
+                        if (route.endpoint === "reroute" && !currentState.status_retry.enabled) {
                             res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
-                            res.end(JSON.stringify({ error: `proxy reroute requires enabled status retry; mode=${currentState.mode}` }));
+                            res.end(JSON.stringify({ error: "proxy reroute requires enabled status retry" }));
                             return;
                         }
                         if (route.endpoint === "cancel") {
@@ -5394,7 +2988,6 @@ async function serveProxy(options) {
                         }
                         if (method === "GET") {
                             const payload = {
-                                mode: currentState.mode,
                                 profile,
                                 requests: [...statusRetryWaits.values()]
                                     .filter((wait) => !wait.pinned)
@@ -5440,8 +3033,7 @@ async function serveProxy(options) {
                         pid: process.pid,
                         version: packageVersion(),
                         protocol: PROXY_HEALTH_PROTOCOL,
-                        mode: currentState.mode,
-                        status_retry_enabled: proxyStatusRetryEnabled(currentState),
+                        status_retry_enabled: currentState.status_retry.enabled,
                     }));
                     return;
                 }
@@ -5458,8 +3050,7 @@ async function serveProxy(options) {
                     return;
                 }
                 const requestState = await readProxyState(options.stateRoot) ?? state;
-                const mode = requestState.mode;
-                const retryEnabled = proxyStatusRetryEnabled(requestState);
+                const retryEnabled = requestState.status_retry.enabled;
                 const downstreamAbort = new AbortController();
                 const abortDownstream = () => {
                     if (!downstreamAbort.signal.aborted)
@@ -5486,7 +3077,6 @@ async function serveProxy(options) {
                     id: randomUUID(),
                     started_at: requestStartedAt.toISOString(),
                     completed_at: null,
-                    mode,
                     method,
                     path: url.pathname,
                     protocol_conversion: null,
@@ -5501,8 +3091,6 @@ async function serveProxy(options) {
                     latency_ms: 0,
                     client_ttfb_ms: null,
                     upstream_wait_ms: null,
-                    time_to_first_chunk_ms: null,
-                    stream_duration_ms: null,
                     request_bytes: 0,
                     response_bytes: 0,
                     session: null,
@@ -5512,27 +3100,6 @@ async function serveProxy(options) {
                     request_model: null,
                     request_reasoning_effort: null,
                     request_body_sha256: null,
-                    upstream_model: null,
-                    upstream_model_source: null,
-                    stream_model: null,
-                    final_response_model: null,
-                    system_fingerprint: null,
-                    service_tier: null,
-                    input_tokens: null,
-                    cached_input_tokens: null,
-                    reasoning_tokens: null,
-                    reasoning_tokens_source: null,
-                    output_tokens: null,
-                    total_tokens: null,
-                    usage_attempts: [],
-                    reasoning_text_observed: false,
-                    reasoning_text_source: null,
-                    has_commentary: false,
-                    has_final_answer: false,
-                    final_answer_only: false,
-                    has_tool_call: false,
-                    has_reasoning_item: false,
-                    guard_actions: [],
                     retry_summary: createEmptyProxyRetrySummary(),
                     error: null,
                 };
@@ -5552,25 +3119,6 @@ async function serveProxy(options) {
                 let upstreamConversion = undefined;
                 let attempts = 0;
                 let responseBytes = 0;
-                let upstreamModel = null;
-                let upstreamModelSource = null;
-                let streamModel = null;
-                let finalResponseModel = null;
-                let systemFingerprint = null;
-                let serviceTier = null;
-                let inputTokens = null;
-                let cachedInputTokens = null;
-                let reasoningTokens = null;
-                let reasoningTokensSource = null;
-                let outputTokens = null;
-                let totalTokens = null;
-                let reasoningTextObserved = false;
-                let reasoningTextSource = null;
-                let hasCommentary = false;
-                let hasFinalAnswer = false;
-                let finalAnswerOnly = false;
-                let hasToolCall = false;
-                let hasReasoningItem = false;
                 let failureSummary = null;
                 let errorText = null;
                 let captureOwner = null;
@@ -5588,9 +3136,6 @@ async function serveProxy(options) {
                 };
                 const attemptRecords = [];
                 let requestHeaders = {};
-                let requestServiceTier = null;
-                const requestStartConfig = (await readTextIfExists(options.codexConfigPath)) ?? "";
-                const configServiceTier = readTopLevelTomlString(requestStartConfig, "service_tier");
                 const endpointClass = route.endpointClass;
                 try {
                     const body = await readBody(req);
@@ -5615,7 +3160,6 @@ async function serveProxy(options) {
                     const requestKind = detectProxyRequestKind(req.headers, requestJson, url.pathname);
                     const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname, requestKind);
                     noteProfileRequest(upstreamProfile.name);
-                    requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
                     requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
                     activeRecord.request_bytes = body.length;
                     activeRecord.request_body_sha256 = hashRequestBody(body);
@@ -5667,82 +3211,9 @@ async function serveProxy(options) {
                             await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
                         },
                     };
-                    const guardedCallbacks = {
-                        ...passthroughCallbacks,
-                        onAttempt: async (attemptCount, upstreamName) => {
-                            const attempt = attemptRecords.at(-1);
-                            activeRecord.upstream = upstreamName;
-                            activeRecord.attempts = attemptCount;
-                            activeRecord.protocol_conversion = attempt?.protocol_conversion ?? null;
-                            activeRecord.conversion_failure_stage = null;
-                            if (attemptCount > 1) {
-                                activeRecord.status = null;
-                                activeRecord.upstream_status = null;
-                                activeRecord.reasoning_tokens = null;
-                                activeRecord.reasoning_tokens_source = null;
-                                activeRecord.input_tokens = null;
-                                activeRecord.cached_input_tokens = null;
-                                activeRecord.output_tokens = null;
-                                activeRecord.total_tokens = null;
-                                activeRecord.reasoning_text_observed = false;
-                                activeRecord.reasoning_text_source = null;
-                                activeRecord.upstream_model = null;
-                                activeRecord.upstream_model_source = null;
-                                activeRecord.stream_model = null;
-                                activeRecord.final_response_model = null;
-                                activeRecord.system_fingerprint = null;
-                                activeRecord.service_tier = null;
-                                activeRecord.has_commentary = false;
-                                activeRecord.has_final_answer = false;
-                                activeRecord.final_answer_only = false;
-                                activeRecord.has_tool_call = false;
-                                activeRecord.has_reasoning_item = false;
-                                activeRecord.error = null;
-                            }
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                        onUpstreamModel: async (extraction) => {
-                            if (activeRecord.upstream_model === extraction.model && activeRecord.upstream_model_source === extraction.source) {
-                                return;
-                            }
-                            activeRecord.upstream_model = extraction.model;
-                            activeRecord.upstream_model_source = extraction.source;
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                        onReasoningMetadata: async (metadata) => {
-                            if (activeRecord.reasoning_tokens === metadata.reasoningTokens
-                                && activeRecord.reasoning_tokens_source === metadata.reasoningTokensSource
-                                && activeRecord.reasoning_text_observed === metadata.reasoningTextObserved
-                                && activeRecord.reasoning_text_source === metadata.reasoningTextSource) {
-                                return;
-                            }
-                            activeRecord.reasoning_tokens = metadata.reasoningTokens;
-                            activeRecord.reasoning_tokens_source = metadata.reasoningTokensSource;
-                            activeRecord.reasoning_text_observed = metadata.reasoningTextObserved;
-                            activeRecord.reasoning_text_source = metadata.reasoningTextSource;
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                        onGuardAction: async (action) => {
-                            activeRecord.reasoning_tokens = action.reasoning_tokens;
-                            activeRecord.reasoning_tokens_source = action.reasoning_tokens === null ? null : activeRecord.reasoning_tokens_source;
-                            activeRecord.guard_actions.push(action);
-                            activeRecord.error = action.error;
-                            await logProxyGuardAction(options.stateRoot, activeRecord, action);
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                    };
-                    const upstreamEndpointClass = endpointClass === "responses"
-                        && upstreamProfile.routeConversion?.enabled === true
-                        ? "chat/completions"
-                        : endpointClass;
-                    const outcome = !route.policyManaged || (mode === PROXY_MODE_PASSTHROUGH && !retryEnabled)
-                        ? await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, activeRecord.id, attemptRecords, passthroughCallbacks)
-                        : mode === PROXY_MODE_PASSTHROUGH
-                            ? await proxyThroughActiveUpstreamStatusRetry(req, upstreamProfile, body, activeRecord.id, attemptRecords, requestState.status_retry, passthroughCallbacks)
-                            : await proxyThroughActiveUpstreamWithStats(req, upstreamProfile, body, upstreamEndpointClass, activeRecord.request_kind, requestJson, activeRecord.id, attemptRecords, mode, requestState.latency_guard, isProxyInspectionMode(mode) ? guardedCallbacks : passthroughCallbacks, retryEnabled ? requestState.status_retry : undefined);
-                    if (route.policyManaged && isProxyInspectionMode(mode)) {
-                        enforceProxyDeadlineBeforeHeaders(outcome, requestState.latency_guard);
-                    }
+                    const outcome = retryEnabled
+                        ? await proxyThroughActiveUpstreamStatusRetry(req, upstreamProfile, body, activeRecord.id, attemptRecords, requestState.status_retry, passthroughCallbacks)
+                        : await proxyThroughActiveUpstreamPassthrough(req, upstreamProfile, body, activeRecord.id, attemptRecords, passthroughCallbacks);
                     status = outcome.response.status;
                     upstreamStatus = outcome.upstreamStatus;
                     upstream = outcome.upstream;
@@ -5756,51 +3227,12 @@ async function serveProxy(options) {
                         }
                         : undefined;
                     attempts = outcome.attempts;
-                    upstreamModel = outcome.upstreamModel;
-                    upstreamModelSource = outcome.upstreamModelSource;
-                    streamModel = outcome.streamModel;
-                    finalResponseModel = outcome.finalResponseModel;
-                    systemFingerprint = outcome.systemFingerprint;
-                    serviceTier = outcome.serviceTier;
-                    inputTokens = outcome.usage.inputTokens;
-                    cachedInputTokens = outcome.usage.cachedInputTokens;
-                    reasoningTokens = outcome.reasoningTokens;
-                    reasoningTokensSource = outcome.reasoningTokensSource;
-                    outputTokens = outcome.usage.outputTokens;
-                    totalTokens = outcome.usage.totalTokens;
-                    reasoningTextObserved = outcome.reasoningTextObserved;
-                    reasoningTextSource = outcome.reasoningTextSource;
-                    hasCommentary = outcome.responseShape.hasCommentary;
-                    hasFinalAnswer = outcome.responseShape.hasFinalAnswer;
-                    finalAnswerOnly = isProxyFinalAnswerOnly(outcome.responseShape);
-                    hasToolCall = outcome.responseShape.hasToolCall;
-                    hasReasoningItem = outcome.responseShape.hasReasoningItem;
                     failureSummary = outcome.failureSummary;
                     errorText = outcome.error;
                     activeRecord.status = status;
                     activeRecord.upstream_status = upstreamStatus;
                     activeRecord.upstream = upstream;
                     activeRecord.attempts = attempts;
-                    activeRecord.upstream_model = upstreamModel;
-                    activeRecord.upstream_model_source = upstreamModelSource;
-                    activeRecord.stream_model = streamModel;
-                    activeRecord.final_response_model = finalResponseModel;
-                    activeRecord.system_fingerprint = systemFingerprint;
-                    activeRecord.service_tier = serviceTier;
-                    activeRecord.input_tokens = inputTokens;
-                    activeRecord.cached_input_tokens = cachedInputTokens;
-                    activeRecord.reasoning_tokens = reasoningTokens;
-                    activeRecord.reasoning_tokens_source = reasoningTokensSource;
-                    activeRecord.output_tokens = outputTokens;
-                    activeRecord.total_tokens = totalTokens;
-                    activeRecord.usage_attempts = projectProxyUsageAttempts(attemptRecords, activeRecord.request_model, requestServiceTier, configServiceTier);
-                    activeRecord.reasoning_text_observed = reasoningTextObserved;
-                    activeRecord.reasoning_text_source = reasoningTextSource;
-                    activeRecord.has_commentary = hasCommentary;
-                    activeRecord.has_final_answer = hasFinalAnswer;
-                    activeRecord.final_answer_only = finalAnswerOnly;
-                    activeRecord.has_tool_call = hasToolCall;
-                    activeRecord.has_reasoning_item = hasReasoningItem;
                     activeRecord.failure_summary = failureSummary;
                     activeRecord.error = errorText;
                     activeRecord.protocol_conversion = lastProxyAttemptRecord(attemptRecords)?.protocol_conversion ?? activeRecord.protocol_conversion;
@@ -5809,75 +3241,17 @@ async function serveProxy(options) {
                         await logProxyRequestError(options.stateRoot, activeRecord, status, errorText);
                     }
                     await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                    const streamModelObserver = {
-                        model: upstreamModel,
-                        source: upstreamModelSource,
-                        update: async (extraction) => {
-                            activeRecord.upstream_model = extraction.model;
-                            activeRecord.upstream_model_source = extraction.source;
-                            await updateProxyActiveRequestMetric(state, options.stateRoot, activeRecord);
-                        },
-                    };
-                    responseBytes = await writeResponse(res, outcome.response, endpointClass, streamModelObserver, recordClientTtfb, undefined, outcome.streamScanner, route.policyManaged && isProxyInspectionMode(mode), upstreamConversion, captureResponseObserver);
-                    if (outcome.streamScanner) {
-                        const inspection = outcome.streamScanner.currentInspection();
-                        const streamAttemptState = { gatewayRequestId: activeRecord.id, attempts, attemptRecords, attemptStartedAtMs: [] };
-                        updateProxyAttemptInspection(streamAttemptState, inspection);
-                        const streamAttempt = currentProxyAttemptRecord(streamAttemptState);
-                        if (streamAttempt) {
-                            const guardRetriesUsed = attemptRecords.filter((attempt) => attempt.retry_trigger && attempt.retry_trigger !== "transport").length;
-                            streamAttempt.policy_trigger ??= "pass_through";
-                            streamAttempt.policy_action ??= "pass_through";
-                            streamAttempt.retry_budget_used = guardRetriesUsed;
-                            streamAttempt.retry_budget_remaining = Math.max(0, GUARD_RETRY_ATTEMPTS - guardRetriesUsed);
-                            streamAttempt.client_http_status = status;
-                        }
-                        completeLastPendingProxyAttemptRecord(attemptRecords, proxyUpstreamFinalAction(status), { failureSummary });
-                        const deferred = createProxyOutcome({
-                            response: outcome.response,
-                            upstream: outcome.upstream,
-                            upstreamStatus: outcome.upstreamStatus,
-                            attempts: outcome.attempts,
-                            attemptRecords,
-                            inspection,
-                        });
-                        upstreamModel = deferred.upstreamModel;
-                        upstreamModelSource = deferred.upstreamModelSource;
-                        streamModel = deferred.streamModel;
-                        finalResponseModel = deferred.finalResponseModel;
-                        systemFingerprint = deferred.systemFingerprint;
-                        serviceTier = deferred.serviceTier;
-                        inputTokens = deferred.usage.inputTokens;
-                        cachedInputTokens = deferred.usage.cachedInputTokens;
-                        outputTokens = deferred.usage.outputTokens;
-                        totalTokens = deferred.usage.totalTokens;
-                        reasoningTokens = deferred.reasoningTokens;
-                        reasoningTokensSource = deferred.reasoningTokensSource;
-                        reasoningTextObserved = deferred.reasoningTextObserved;
-                        reasoningTextSource = deferred.reasoningTextSource;
-                        hasCommentary = deferred.responseShape.hasCommentary;
-                        hasFinalAnswer = deferred.responseShape.hasFinalAnswer;
-                        finalAnswerOnly = isProxyFinalAnswerOnly(deferred.responseShape);
-                        hasToolCall = deferred.responseShape.hasToolCall;
-                        hasReasoningItem = deferred.responseShape.hasReasoningItem;
-                    }
-                    upstreamModel = streamModelObserver.model ?? upstreamModel;
-                    upstreamModelSource = streamModelObserver.source ?? upstreamModelSource;
-                    streamModel = upstreamModelSource?.startsWith("sse.") ? upstreamModel : streamModel;
-                    finalResponseModel = upstreamModel ?? finalResponseModel;
+                    responseBytes = await writeResponse(res, outcome.response, recordClientTtfb, upstreamConversion, captureResponseObserver);
                 }
                 catch (error) {
-                    const timeoutAfterForward = error instanceof ProxyResponseWriteError && error.timeout !== null && res.headersSent;
-                    const inspectionLimitAfterForward = error instanceof ProxyResponseWriteError && error.inspectionLimit && res.headersSent;
                     const conversionFailureStage = error instanceof ProtocolConversionError
                         ? error.stage
                         : error instanceof ProxyResponseWriteError
                             ? error.conversionFailureStage
                             : null;
                     const conversionAfterForward = conversionFailureStage === "response_stream" && res.headersSent;
-                    const responseControlLost = timeoutAfterForward || inspectionLimitAfterForward || conversionAfterForward;
                     if (error instanceof ProxyResponseWriteError) {
-                        status = responseControlLost ? (activeRecord.status ?? status) : error.status;
+                        status = conversionAfterForward ? (activeRecord.status ?? status) : error.status;
                         responseBytes = error.responseBytes;
                         errorText = error.message;
                     }
@@ -5899,36 +3273,16 @@ async function serveProxy(options) {
                                 ? proxyFailureSummary("client_error", "proxy_retry_cancelled", errorText)
                                 : upstreamStreamTerminated
                                     ? proxyFailureSummary("upstream_error", "upstream_stream_terminated", errorText)
-                                    : responseControlLost
-                                        ? proxyFailureSummary("gateway_error", inspectionLimitAfterForward
-                                            ? "response_inspection_limit_exceeded"
-                                            : error instanceof ProxyResponseWriteError && error.timeout?.timeoutType === "total"
-                                                ? "upstream_total_timeout"
-                                                : "upstream_first_progress_timeout", errorText)
-                                        : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
+                                    : proxyFailureSummary(status === 499 ? "client_error" : "gateway_error", status === 499 ? "client_aborted" : "gateway_error", errorText);
                     const pendingAttempt = lastProxyAttemptRecord(attemptRecords);
                     activeRecord.conversion_failure_stage = conversionFailureStage;
                     if (pendingAttempt) {
                         pendingAttempt.conversion_failure_stage = conversionFailureStage;
                     }
-                    if (responseControlLost && pendingAttempt && error instanceof ProxyResponseWriteError) {
+                    if (conversionAfterForward && pendingAttempt) {
                         pendingAttempt.upstream_stream_terminated = true;
                         pendingAttempt.client_http_status = status;
-                        if (conversionAfterForward) {
-                            completeProxyAttempt(pendingAttempt, "route_conversion_failed", { failureSummary });
-                        }
-                        else {
-                            if (error.timeout) {
-                                pendingAttempt.timeout_phase = error.timeout.phase;
-                                pendingAttempt.timeout_limit_ms = error.timeout.limitMs;
-                            }
-                            pendingAttempt.timeout_response_control_lost = true;
-                            if (inspectionLimitAfterForward) {
-                                pendingAttempt.policy_trigger = "response_inspection_limit";
-                                pendingAttempt.policy_action = "return_502";
-                            }
-                            completeProxyAttempt(pendingAttempt, inspectionLimitAfterForward ? "response_inspection_limit_disconnected_after_forward" : "timeout_disconnected_after_forward", { failureSummary });
-                        }
+                        completeProxyAttempt(pendingAttempt, "route_conversion_failed", { failureSummary });
                     }
                     else {
                         completeLastPendingProxyAttemptRecord(attemptRecords, conversionFailureStage ? "route_conversion_failed" : status === 499 ? "client_aborted" : upstreamStreamTerminated ? "upstream_stream_terminated" : "gateway_error", { failureSummary });
@@ -5944,25 +3298,6 @@ async function serveProxy(options) {
                         }
                     }
                     upstreamStatus = activeRecord.upstream_status;
-                    upstreamModel = activeRecord.upstream_model;
-                    upstreamModelSource = activeRecord.upstream_model_source;
-                    streamModel = activeRecord.stream_model;
-                    finalResponseModel = activeRecord.final_response_model;
-                    systemFingerprint = activeRecord.system_fingerprint;
-                    serviceTier = activeRecord.service_tier;
-                    inputTokens = activeRecord.input_tokens;
-                    cachedInputTokens = activeRecord.cached_input_tokens;
-                    reasoningTokens = activeRecord.reasoning_tokens;
-                    reasoningTokensSource = activeRecord.reasoning_tokens_source;
-                    outputTokens = activeRecord.output_tokens;
-                    totalTokens = activeRecord.total_tokens;
-                    reasoningTextObserved = activeRecord.reasoning_text_observed;
-                    reasoningTextSource = activeRecord.reasoning_text_source;
-                    hasCommentary = activeRecord.has_commentary;
-                    hasFinalAnswer = activeRecord.has_final_answer;
-                    finalAnswerOnly = activeRecord.final_answer_only;
-                    hasToolCall = activeRecord.has_tool_call;
-                    hasReasoningItem = activeRecord.has_reasoning_item;
                     activeRecord.status = status;
                     activeRecord.client_status = status;
                     activeRecord.response_bytes = responseBytes;
@@ -5975,7 +3310,6 @@ async function serveProxy(options) {
                 const lastAttempt = lastProxyAttemptRecord(attemptRecords);
                 activeRecord.protocol_conversion = lastAttempt?.protocol_conversion ?? activeRecord.protocol_conversion;
                 activeRecord.conversion_failure_stage = lastAttempt?.conversion_failure_stage ?? activeRecord.conversion_failure_stage;
-                const attemptTiming = requestTimingFromAttempt(lastAttempt);
                 const finalAction = requestFinalAction({ status, error: errorText, failureSummary });
                 const retrySummary = createRetrySummary(attemptRecords);
                 const completedAt = new Date().toISOString();
@@ -5991,33 +3325,11 @@ async function serveProxy(options) {
                     attempts,
                     latency_ms: latencyMs,
                     client_ttfb_ms: clientTtfbMs,
-                    upstream_wait_ms: attemptTiming.upstream_wait_ms,
-                    time_to_first_chunk_ms: attemptTiming.time_to_first_chunk_ms,
-                    stream_duration_ms: attemptTiming.stream_duration_ms,
+                    upstream_wait_ms: lastAttempt?.upstream_wait_ms ?? null,
                     response_bytes: responseBytes,
                     request_model: activeRecord.request_model,
                     request_reasoning_effort: activeRecord.request_reasoning_effort,
                     request_body_sha256: activeRecord.request_body_sha256,
-                    upstream_model: upstreamModel,
-                    upstream_model_source: upstreamModelSource,
-                    stream_model: streamModel,
-                    final_response_model: finalResponseModel,
-                    system_fingerprint: systemFingerprint,
-                    service_tier: serviceTier,
-                    input_tokens: inputTokens,
-                    cached_input_tokens: cachedInputTokens,
-                    reasoning_tokens: reasoningTokens,
-                    reasoning_tokens_source: reasoningTokensSource,
-                    output_tokens: outputTokens,
-                    total_tokens: totalTokens,
-                    usage_attempts: projectProxyUsageAttempts(attemptRecords, activeRecord.request_model, requestServiceTier, configServiceTier),
-                    reasoning_text_observed: reasoningTextObserved,
-                    reasoning_text_source: reasoningTextSource,
-                    has_commentary: hasCommentary,
-                    has_final_answer: hasFinalAnswer,
-                    final_answer_only: finalAnswerOnly,
-                    has_tool_call: hasToolCall,
-                    has_reasoning_item: hasReasoningItem,
                     retry_summary: retrySummary,
                     error: errorText,
                     request_headers: requestHeaders,
@@ -6094,17 +3406,14 @@ function usageHelpLines() {
         "Usage:",
         "  ccs proxy                                # print proxy status and active upstream once",
         "  ccs proxy --history N                    # print proxy status with N history rows",
-        "  ccs proxy --view overview|tokens|cost    # select the initial request-table view",
         "  ccs proxy watch                          # watch proxy status and active upstream",
-        "  ccs proxy watch --history N              # watch proxy status with N history rows",
-        "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
+        "  ccs proxy watch --history N              # watch proxy status with N history rows; t toggles history, q exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
         "  ccs proxy cancel                         # choose waiting retry requests to cancel",
         "  ccs proxy capture                        # choose a session to capture, then watch or cancel it",
-        "  ccs proxy mode                           # show, then choose response mode and status retry",
         "  ccs proxy compact                        # show, then choose the compaction profile or off",
         "  ccs proxy search                         # show, then choose the alpha search profile or off",
-        "  ccs proxy config                         # show, then edit the status retry policy or latency deadlines",
+        "  ccs proxy config                         # show, then turn status retry on or off and edit its policy",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
         "  ccs proxy restart                        # restart; asks before terminating active requests",
         "  ccs proxy restore                        # restore active profile routing and remove proxy state",
@@ -6120,47 +3429,23 @@ function parseProxyHistoryCount(rawCount) {
     }
     return Number(rawCount);
 }
-function parseProxyView(value) {
-    if (value === "overview" || value === "tokens" || value === "cost")
-        return value;
-    throw new Error("ccs proxy --view requires overview, tokens, or cost");
-}
 export function parseProxyStatusArgs(args, commandName) {
     let historyCount;
-    let view;
     for (let index = 0; index < args.length; index += 2) {
         const flag = args[index];
         if (flag === "--history" && historyCount === undefined) {
             historyCount = parseProxyHistoryCount(args[index + 1]);
         }
-        else if (flag === "--view" && view === undefined) {
-            view = parseProxyView(args[index + 1]);
-        }
         else {
             throw new Error(`unknown argument for ${commandName}: ${flag}`);
         }
     }
-    return { historyCount, view };
+    return { historyCount };
 }
 function rejectProxyCommandArgs(args, commandName) {
     if (args.length > 0) {
         throw new Error(`unknown argument for ${commandName}: ${args[0]}`);
     }
-}
-function formatProxyModeChange(result) {
-    return result.previousMode === result.mode
-        ? textGreen(result.mode)
-        : `${textYellow(result.previousMode)} -> ${textGreen(result.mode)}`;
-}
-function printProxyModeRuntime(runtime) {
-    printKeyValue("runtime:", runtime?.started ? textGreen("started") : runtime?.healthy ? textGreen("healthy") : textDim("none"), 8);
-    printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);
-}
-function printProxyLatencyGuard(value) {
-    printKeyValue("latency:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
-    printKeyValue("first_progress:", `${value.first_progress_timeout_ms}ms`, 15);
-    printKeyValue("first_action:", value.first_progress_action, 15);
-    printKeyValue("total:", `${value.total_timeout_ms}ms`, 15);
 }
 function printProxyStatusRetry(value) {
     printKeyValue("retry:", value.enabled ? textGreen("enabled") : textDim("disabled"), 15);
@@ -6241,44 +3526,6 @@ async function runProxyRouteCommand(route) {
     await applyProxyRouteConfig(profiles, next, route);
     printProxyRouteStatus(await readProfiles(), route);
 }
-async function runProxyModeCommand(options) {
-    const state = await readProxyState(options.stateRoot);
-    printKeyValue("mode:", state ? colorName(state.mode) : textDim("missing"), 5);
-    if (!state)
-        return;
-    const retryEnabled = proxyStatusRetryEnabled(state);
-    printKeyValue("retry:", retryEnabled ? textGreen("enabled") : textDim("disabled"), 5);
-    if (!isInteractive()) {
-        printKeyValue("note:", "run in an interactive terminal to change", 5);
-        return;
-    }
-    const mode = await select("Response mode", [
-        { value: PROXY_MODE_PASSTHROUGH, label: PROXY_MODE_PASSTHROUGH, hint: "forward responses without inspection" },
-        { value: PROXY_MODE_RECOVERY, label: PROXY_MODE_RECOVERY, hint: "guard retry plus continuation recovery for streaming Responses" },
-        { value: PROXY_MODE_INTERCEPT, label: PROXY_MODE_INTERCEPT, hint: "guard retry without continuation recovery" },
-    ], { default: state.mode });
-    const retry = await select("Status retry", [
-        { value: true, label: "on", hint: `retry ${state.status_retry.statuses.join(",")} within ${formatDurationMs(state.status_retry.total_window_ms)}` },
-        { value: false, label: "off", hint: "forward retryable statuses as received" },
-    ], { default: retryEnabled });
-    if (mode === state.mode && retry === retryEnabled) {
-        printKeyValue("result:", "no changes", 5);
-        return;
-    }
-    printProxyChange("mode:", state.mode, mode, 5);
-    printProxyChange("retry:", retryEnabled ? "enabled" : "disabled", retry ? "enabled" : "disabled", 5);
-    printKeyValue("note:", "no changes are written unless you type yes", 5);
-    if (!(await confirmApply()))
-        return;
-    const current = await readProxyState(options.stateRoot);
-    if (!current || current.mode !== state.mode || proxyStatusRetryEnabled(current) !== retryEnabled) {
-        throw new Error("proxy mode changed after preview; run ccs proxy mode again");
-    }
-    const result = await setProxyMode(options, mode, retry);
-    printKeyValue("mode:", formatProxyModeChange(result), 5);
-    printKeyValue("retry:", retry ? textGreen("enabled") : textDim("disabled"), 5);
-    printProxyModeRuntime(result.runtime);
-}
 function validateProxyMs(value, positive) {
     if (!/^\d+$/.test(value))
         return "enter milliseconds as an integer";
@@ -6289,6 +3536,12 @@ function validateProxyMs(value, positive) {
     return null;
 }
 async function askProxyStatusRetry(current) {
+    const enabled = await select("Status retry", [
+        { value: false, label: "off", hint: "forward retryable statuses as received" },
+        { value: true, label: "on", hint: "retry listed statuses and Capacity errors within the window" },
+    ], { default: current.enabled });
+    if (!enabled)
+        return { ...current, enabled };
     const window = Number(await input("Retry window ms", {
         default: String(current.total_window_ms),
         validate: (value) => validateProxyMs(value, true),
@@ -6319,33 +3572,12 @@ async function askProxyStatusRetry(current) {
         },
     });
     return {
-        enabled: current.enabled,
+        enabled,
         statuses: parseStatuses(statusesText),
         total_window_ms: window,
         backoff_base_ms: base,
         backoff_max_ms: max,
     };
-}
-async function askProxyLatencyGuard(current) {
-    const enabled = await select("Latency deadlines", [
-        { value: false, label: "off", hint: "no first-progress or total deadline" },
-        { value: true, label: "on", hint: "fail slow requests in recovery and intercept modes" },
-    ], { default: current.enabled });
-    if (!enabled)
-        return { ...PROXY_DEFAULT_LATENCY_GUARD };
-    const first = Number(await input("First-progress timeout ms (0 disables)", {
-        default: String(current.first_progress_timeout_ms),
-        validate: (value) => validateProxyMs(value, false),
-    }));
-    const action = first === 0 ? current.first_progress_action : await select("First-progress action", [
-        { value: "return_502", label: "return_502", hint: "return 502 when the first deadline passes" },
-        { value: "retry_then_502", label: "retry_then_502", hint: "retry the upstream first, then return 502" },
-    ], { default: current.first_progress_action });
-    const total = Number(await input("Total timeout ms (0 disables)", {
-        default: String(current.total_timeout_ms),
-        validate: (value) => validateProxyMs(value, false) ?? (first === 0 && Number(value) === 0 ? "at least one timeout must be positive" : null),
-    }));
-    return { enabled: true, first_progress_timeout_ms: first, first_progress_action: action, total_timeout_ms: total };
 }
 async function runProxyConfigCommand(options) {
     const state = await readProxyState(options.stateRoot);
@@ -6353,46 +3585,29 @@ async function runProxyConfigCommand(options) {
         throw new Error(`proxy state file was not found: ${statePath(options.stateRoot)}`);
     }
     printProxyStatusRetry(state.status_retry);
-    printProxyLatencyGuard(state.latency_guard);
     if (!isInteractive()) {
         printKeyValue("note:", "run in an interactive terminal to change", 15);
         return;
     }
-    const section = await select("Configure", [
-        { value: "retry", label: "status retry policy", hint: "window, backoff, and retryable statuses" },
-        { value: "latency", label: "latency deadlines", hint: "first-progress and total timeouts" },
-    ]);
-    const statusRetry = section === "retry" ? await askProxyStatusRetry(state.status_retry) : state.status_retry;
-    const latencyGuard = section === "latency" ? await askProxyLatencyGuard(state.latency_guard) : state.latency_guard;
-    const before = section === "retry" ? state.status_retry : state.latency_guard;
-    const after = section === "retry" ? statusRetry : latencyGuard;
-    if (JSON.stringify(before) === JSON.stringify(after)) {
+    const statusRetry = await askProxyStatusRetry(state.status_retry);
+    if (JSON.stringify(state.status_retry) === JSON.stringify(statusRetry)) {
         printKeyValue("result:", "no changes", 15);
         return;
     }
-    if (section === "retry") {
-        printProxyChange("retry_statuses:", state.status_retry.statuses.join(","), statusRetry.statuses.join(","), 15);
-        printProxyChange("retry_window:", `${state.status_retry.total_window_ms}ms`, `${statusRetry.total_window_ms}ms`, 15);
-        printProxyChange("backoff_base:", `${state.status_retry.backoff_base_ms}ms`, `${statusRetry.backoff_base_ms}ms`, 15);
-        printProxyChange("backoff_max:", `${state.status_retry.backoff_max_ms}ms`, `${statusRetry.backoff_max_ms}ms`, 15);
-    }
-    else {
-        printProxyChange("latency:", state.latency_guard.enabled ? "enabled" : "disabled", latencyGuard.enabled ? "enabled" : "disabled", 15);
-        printProxyChange("first_progress:", `${state.latency_guard.first_progress_timeout_ms}ms`, `${latencyGuard.first_progress_timeout_ms}ms`, 15);
-        printProxyChange("first_action:", state.latency_guard.first_progress_action, latencyGuard.first_progress_action, 15);
-        printProxyChange("total:", `${state.latency_guard.total_timeout_ms}ms`, `${latencyGuard.total_timeout_ms}ms`, 15);
-    }
+    printProxyChange("retry:", state.status_retry.enabled ? "enabled" : "disabled", statusRetry.enabled ? "enabled" : "disabled", 15);
+    printProxyChange("retry_statuses:", state.status_retry.statuses.join(","), statusRetry.statuses.join(","), 15);
+    printProxyChange("retry_window:", `${state.status_retry.total_window_ms}ms`, `${statusRetry.total_window_ms}ms`, 15);
+    printProxyChange("backoff_base:", `${state.status_retry.backoff_base_ms}ms`, `${statusRetry.backoff_base_ms}ms`, 15);
+    printProxyChange("backoff_max:", `${state.status_retry.backoff_max_ms}ms`, `${statusRetry.backoff_max_ms}ms`, 15);
     printKeyValue("note:", "no changes are written unless you type yes", 15);
     if (!(await confirmApply()))
         return;
     const current = await readProxyState(options.stateRoot);
-    if (!current || JSON.stringify(current.status_retry) !== JSON.stringify(state.status_retry)
-        || JSON.stringify(current.latency_guard) !== JSON.stringify(state.latency_guard)) {
+    if (!current || JSON.stringify(current.status_retry) !== JSON.stringify(state.status_retry)) {
         throw new Error("proxy configuration changed after preview; run ccs proxy config again");
     }
-    await writeProxyState(options.stateRoot, { ...current, status_retry: statusRetry, latency_guard: latencyGuard });
+    await writeProxyState(options.stateRoot, { ...current, status_retry: statusRetry });
     printProxyStatusRetry(statusRetry);
-    printProxyLatencyGuard(latencyGuard);
 }
 function proxySessionChoices(state, nowMs) {
     const sessions = new Map();
@@ -6600,7 +3815,6 @@ async function runProxyRestartCommand(options) {
     }
     printKeyValue("provider:", plan.providerName, 9);
     printKeyValue("routing:", `${colorUrl(plan.proxyBaseUrl)} (unchanged)`, 9);
-    printKeyValue("mode:", `${colorName(plan.mode)} (unchanged)`, 9);
     printKeyValue("current:", plan.current.healthy
         ? `PID=${plan.current.pid ?? "unknown"} server=${plan.current.version ?? "unknown"} protocol=${plan.current.protocol ?? "unknown"}`
         : textDim("not running"), 9);
@@ -6642,7 +3856,6 @@ const PROXY_SHORTCUTS = [
     { key: "c", label: "capture" },
     { key: "n", label: "cancel", at: 2 },
     { key: "e", label: "reroute", at: 1 },
-    { key: "m", label: "mode" },
     { key: "s", label: "search" },
     { key: "p", label: "compact", at: 3 },
     { key: "f", label: "config", at: 3 },
@@ -6655,11 +3868,11 @@ export async function runProxyCommand(args, options) {
     }
     const command = args[0] ?? "";
     const rest = args.slice(1);
-    const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "config", "restore", "restart", "serve"]);
+    const installedCommands = new Set(["", "--history", "reroute", "cancel", "capture", "search", "compact", "config", "restore", "restart", "serve"]);
     const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
     if (reset) {
         printKeyValue("state:", textYellow(`reset schema ${reset.previousSchema === null ? "legacy" : reset.previousSchema} -> ${reset.currentSchema}`), 6);
-        if (command === "config" || (command === "mode" && rest.length === 0)) {
+        if (command === "config") {
             await ensureProxyRunning(options);
         }
     }
@@ -6676,7 +3889,7 @@ export async function runProxyCommand(args, options) {
         await runProxyCommand([shortcut.label], options);
         return;
     }
-    if (command === "--history" || command === "--view") {
+    if (command === "--history") {
         const parsed = parseProxyStatusArgs(args, "ccs proxy");
         await runProxyStatusOnce({ ...options, ...parsed });
         return;
@@ -6717,11 +3930,6 @@ export async function runProxyCommand(args, options) {
         await runProxyCaptureCommand(options);
         return;
     }
-    if (command === "mode") {
-        rejectProxyCommandArgs(rest, "ccs proxy mode");
-        await runProxyModeCommand(options);
-        return;
-    }
     if (command === "search" || command === "compact") {
         rejectProxyCommandArgs(rest, `ccs proxy ${command}`);
         await runProxyRouteCommand(command);
@@ -6753,7 +3961,6 @@ export async function runProxyCommand(args, options) {
         printProxyClaudePlan(applied.claude, true);
         printKeyValue("state:", textGreen(formatProxyFilePath(applied.statePath)), 8);
         printKeyValue("proxy:", textGreen(applied.state.proxy_base_url), 8);
-        printKeyValue("mode:", textGreen(applied.state.mode), 8);
         printKeyValue("retry:", applied.state.status_retry.enabled ? textGreen("enabled") : textDim("disabled"), 8);
         printKeyValue("runtime:", runtime?.started ? textGreen("started") : textGreen("healthy"), 8);
         printKeyValue("pid:", runtime?.pid === null || runtime?.pid === undefined ? textDim("none") : textGreen(String(runtime.pid)), 8);

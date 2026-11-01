@@ -1,7 +1,6 @@
 import { readTextIfExists, writeTextFileAtomic } from "./fs.js";
 import { parseJsonObject, stringifyJson } from "./json.js";
 import { profilesPath } from "./paths.js";
-import type { ModelPriceOverride } from "./pricing.js";
 
 // Client applications whose provider settings ccs manages. A profile belongs to one platform.
 export const PLATFORMS = ["codex", "claude"] as const;
@@ -47,9 +46,6 @@ export type ProfilesFile = {
   usage?: Record<string, Profile>;
   /** The active profile of each platform. */
   current?: Partial<Record<Platform, string>>;
-  pricing?: {
-    overrides?: Record<string, ModelPriceOverride>;
-  };
   top?: {
     stateUrls?: string[];
   };
