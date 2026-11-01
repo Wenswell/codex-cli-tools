@@ -38,12 +38,10 @@ in the command-specific specifications.
 
 ## Runtime Logging
 
-- Treat user-provided examples as indicators of a class of issues. If a request mentions `clvm-raw`, review all `clvm` runtime files and then scan other modules with the same logging pattern.
 - Runtime records store normalized operational facts by default. High-sensitivity payloads such as connection snapshots, prompts, responses, API keys, environment values, domains, IPs, process names, rules, and node routes require an explicit raw debug surface.
 - Raw debug surfaces use opt-in configuration, private file permissions, content-addressed files, redaction, payload-size limits, file-count limits, and total-byte limits.
 - State files keep the latest inspectable snapshot and use atomic writes. History files use bounded JSONL and append records only when they add new runtime information.
 - Long-running monitors avoid periodic history growth for unchanged samples. An idle empty sample is useful once; repeated identical samples belong in the live view, not in history.
-- Long-running status servers publish primary health and status endpoints before auxiliary derived-data refreshes. Auxiliary refresh failures should be logged without blocking the primary status surface.
 - Runtime records separate client-level repeated requests from tool-owned internal retries. Terminal status can show both, using distinct stored fields and distinct visible prefixes.
 - Upstream usage metadata preserves explicit non-negative token counts at both request and internal-attempt scope. Missing or invalid fields remain `null`, so downstream reports can distinguish unknown values from explicit zeroes.
 - Managed background processes with a health protocol treat protocol mismatch as a runtime replacement event: record a normalized event, stop the mismatched runtime, start the current entrypoint, and report a startup error when the current protocol remains unavailable.
@@ -73,18 +71,14 @@ in the command-specific specifications.
 
 ## Test Value
 
-- Prefer tests that protect behavior, data contracts, safety/privacy boundaries, parser behavior, retention limits, and calculations.
-- Exact terminal-output assertions should name the user-facing display contract they protect.
-- Cross-cutting testing rules live in [testing guidelines](./TESTING_GUIDELINES.md).
+- [Testing guidelines](./TESTING_GUIDELINES.md) own test selection and assertion rules.
 - Export source symbols only for a current cross-module or test consumer. Package
   binaries are the public surface; internal helpers stay module-local.
 
 ## Documentation
 
-- Keep `README.md` focused on introduction, quick start, and documentation links.
-  Root `AGENTS.md` owns development workflow, verification, and commit requirements.
-  Put detailed operation guides, engineering conventions, and data contracts under `docs/`.
-- Follow root `AGENTS.md` for required documentation updates and verification.
+- Document ownership is defined in [the documentation index](./README.md#ownership)
+  and root `AGENTS.md`.
 - Keep current contracts, not completed implementation plans, audits, or review
   logs. Git history owns historical implementation detail.
 - Convert repeated review feedback into a reusable rule in the owning document.

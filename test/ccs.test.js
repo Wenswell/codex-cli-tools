@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
 import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
-import { captureStdout, execNodeScript, execNodeStdout, KEYS, runInteractive, spawnNode, stdoutPropertiesScript, stripAnsi } from "./helpers/terminal.js";
+import { captureStdout, execNodeStdout, KEYS, runInteractive } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -16,8 +15,6 @@ test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
   assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
-  assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
-  assert.doesNotMatch(output, /ccs run/);
 });
 
 test("ccs status footer separates direct commands from namespaces", async () => {
@@ -274,7 +271,6 @@ test("Codex wrapper help documents profile launches", async () => {
   for (const tool of ["cx", "cxx", "cxxs"]) {
     const output = await runTool(tool, ["--help"]);
     assert.match(output, new RegExp(`${tool} run PROFILE`));
-    assert.doesNotMatch(output, new RegExp(`${tool} local`));
   }
 });
 
@@ -943,161 +939,6 @@ async function writeProxyStateForRunTest(home, stateRoot, proxyPort) {
   }, null, 2), "utf8");
 }
 
-async function replaceJson(path, value) {
-  const temporaryPath = `${path}.test.tmp`;
-  await writeFile(temporaryPath, JSON.stringify(value, null, 2), "utf8");
-  await rename(temporaryPath, path);
-}
-
-async function writeUsageTopState(home, entries) {
-  const cacheDir = join(home, ".cache", "codex-tools");
-  await mkdir(cacheDir, { recursive: true });
-  await replaceJson(join(cacheDir, "ccs-top-state.json"), {
-    version: 1,
-    active: true,
-    pid: process.pid,
-    updatedAt: new Date().toISOString(),
-    entries,
-  });
-}
-
-async function waitForFileMatch(path, pattern) {
-  const deadline = Date.now() + 5000;
-  let lastValue = "";
-  while (Date.now() < deadline) {
-    try {
-      lastValue = await readFile(path, "utf8");
-      if (pattern.test(lastValue)) {
-        return;
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") {
-        throw error;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`timeout waiting for ${path} to match ${pattern}; last value: ${lastValue}`);
-}
-
-async function writeModelPriceCache(home, models, { patterns = [], providers = [] } = {}) {
-  const configDir = join(home, ".config", "codex-tools");
-  await mkdir(configDir, { recursive: true });
-  await writeFile(join(configDir, "model-prices.json"), JSON.stringify({
-    source: "test",
-    fetchedAt: "2026-01-01T00:00:00.000Z",
-    patterns,
-    providers,
-    models,
-  }, null, 2), "utf8");
-}
-
-function modelPriceFixture(kind) {
-  return {
-    input_cost_per_token: 0.000001,
-    output_cost_per_token: 0.000002,
-    ...(kind === "ok" ? { cache_read_input_token_cost: 0.0000001 } : {}),
-  };
-}
-
-function modelPriceValueFixture(inputCostPerToken, provider = "openai") {
-  return {
-    litellm_provider: provider,
-    input_cost_per_token: inputCostPerToken,
-    output_cost_per_token: inputCostPerToken * 2,
-    cache_read_input_token_cost: inputCostPerToken / 10,
-  };
-}
-
-async function writeCodexCostFixture(home, model, usages = [{ model, test001: 100, output: 10 }]) {
-  const timestampMs = Date.parse("2026-01-01T12:00:00.000Z");
-  const codexDir = join(home, ".codex");
-  const sessionsDir = join(codexDir, "sessions", "2026", "01", "01");
-  await mkdir(sessionsDir, { recursive: true });
-  const rolloutPath = join(sessionsDir, "rollout-fixture.jsonl");
-  await writeFile(rolloutPath, `${[
-    taskStarted(uuidV7At(timestampMs), timestampMs),
-    turnContext(uuidV7At(timestampMs + 1), "/tmp/ccs-cost-project", model),
-    ...usages.map((usage, index) => tokenCount(
-      new Date(timestampMs + 2000 + index * 1000).toISOString(),
-      usage.model,
-      usage,
-    )),
-  ].map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
-
-  await sqliteRun(join(codexDir, "state.sqlite"), `
-    create table threads (
-      id text primary key,
-      rollout_path text not null,
-      created_at integer not null,
-      updated_at integer not null,
-      cwd text not null,
-      model text,
-      created_at_ms integer,
-      updated_at_ms integer
-    );
-    insert into threads values (
-      'thread-fixture',
-      '${sqlString(rolloutPath)}',
-      ${Math.floor(timestampMs / 1000)},
-      ${Math.floor((timestampMs + 120000) / 1000)},
-      '/tmp/ccs-cost-project',
-      '${sqlString(model)}',
-      ${timestampMs},
-      ${timestampMs + 120000}
-    );
-  `);
-}
-
-function taskStarted(turnId, timestampMs) {
-  return {
-    timestamp: new Date(timestampMs).toISOString(),
-    type: "event_msg",
-    payload: {
-      type: "task_started",
-      turn_id: turnId,
-      started_at: Math.floor(timestampMs / 1000),
-    },
-  };
-}
-
-function turnContext(turnId, cwd, model) {
-  return {
-    timestamp: new Date(uuidV7TimestampMs(turnId)).toISOString(),
-    type: "turn_context",
-    payload: {
-      turn_id: turnId,
-      cwd,
-      model,
-    },
-  };
-}
-
-function tokenCount(timestamp, model, usage) {
-  return {
-    timestamp,
-    type: "event_msg",
-    payload: {
-      type: "token_count",
-      model,
-      info: {
-        total_token_usage: tokenUsage(usage),
-        last_token_usage: tokenUsage(usage),
-      },
-    },
-  };
-}
-
-function tokenUsage(usage) {
-  return {
-    input_tokens: usage.input,
-    cached_input_tokens: usage.cached ?? 0,
-    output_tokens: usage.output,
-    reasoning_output_tokens: usage.reasoning ?? 0,
-    total_tokens: usage.input + usage.output,
-  };
-}
-
 async function startJsonServer(handler) {
   const server = createServer(handler);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1117,68 +958,6 @@ async function reservePort() {
   const port = address.port;
   await closeServer(server);
   return port;
-}
-
-async function waitForHttpOk(url) {
-  const deadline = Date.now() + 5000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-      lastError = new Error(`unexpected status ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw lastError ?? new Error(`timeout waiting for ${url}`);
-}
-
-async function waitForJsonOk(url) {
-  const deadline = Date.now() + 5000;
-  let lastError;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return await response.json();
-      }
-      lastError = new Error(`unexpected status ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw lastError ?? new Error(`timeout waiting for ${url}`);
-}
-
-function sqliteRun(dbPath, sql) {
-  return new Promise((resolve, reject) => {
-    const child = execFile("sqlite3", [dbPath], (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr.trim() || stdout.trim() || error.message));
-        return;
-      }
-      resolve();
-    });
-    child.stdin?.end(sql);
-  });
-}
-
-function sqlString(value) {
-  return value.replaceAll("'", "''");
-}
-
-function uuidV7At(timestampMs) {
-  const prefix = Math.floor(timestampMs).toString(16).padStart(12, "0");
-  return `${prefix.slice(0, 8)}-${prefix.slice(8, 12)}-7000-8000-000000000000`;
-}
-
-function uuidV7TimestampMs(value) {
-  return Number.parseInt(value.replaceAll("-", "").slice(0, 12), 16);
 }
 
 function closeServer(server) {

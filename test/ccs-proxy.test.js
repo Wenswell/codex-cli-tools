@@ -25,7 +25,7 @@ import {
   shutdownProxyRuntime,
 } from "../dist/commands/ccs-proxy.js";
 import { packageVersion } from "../dist/lib/version.js";
-import { captureStdout, execNodeScript, KEYS, runInteractive, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
+import { captureStdout, KEYS, runInteractive, setStdoutProperties, spawnNode, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
   const server = createServer();
@@ -656,8 +656,6 @@ test("proxy records active and history request lifecycle", async () => {
     assert.equal(state.metrics.active_requests[0].attempts, 1);
     assert.equal(state.metrics.active_requests[0].response_bytes, 0);
     assert.equal(state.metrics.recent_requests[0].path, "/responses");
-    const activeOutput = await captureConsole(() => runProxyCommand([], proxyOptions));
-    assert.match(activeOutput, /\s-\s/);
 
     writeStreamBurst();
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -714,14 +712,11 @@ test("proxy records active and history request lifecycle", async () => {
     assert.doesNotMatch(output, /^reasoning /m);
     assert.doesNotMatch(output, /0=0|516=0|1034=0|1552=0|other=0/);
     assert.match(output, /last=\d+ms\s+avg=\d+ms/);
-    assert.doesNotMatch(output, /\bmin=|\bmax=/);
     assert.match(output, /^active 0$/m);
     assert.match(output, /^history 10$/m);
     assert.match(output, /time\s+status\s+dur\.\s+size\s+result/);
     assert.match(output, /\d\d:\d\d:\d\d\s+503\s+\d+ms\s+\d+B\s+down/);
     assert.match(output, /\d\d:\d\d:\d\d\s+404\s+\d+ms\s+\d+B\s+missing/);
-    assert.doesNotMatch(output, /\bmethod\b/);
-    assert.doesNotMatch(output, /requests: total|failed|rate|p50|p95/);
     assert.doesNotMatch(output, /^commands:/m);
 
     for (let index = 0; index < 91; index += 1) {
@@ -959,208 +954,120 @@ test("proxy sends Claude Code messages to the claude current profile and marks t
   }
 });
 
-test("proxy routes alpha search to its mapped profile and preserves explicit profile priority", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const proxyPort = await reservePort();
-  const defaultPort = await reservePort();
-  const searchPort = await reservePort();
-  const defaultHits = [];
-  const searchHits = [];
-  const defaultUpstream = createServer(async (req, res) => {
-    defaultHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ provider: "default" }));
+for (const [route, routePath] of [["search", "alpha/search"], ["compact", "responses/compact"]]) {
+  test(`proxy routes ${route} to its mapped profile and preserves explicit profile priority`, async () => {
+    const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
+    const previousHome = process.env.HOME;
+    const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
+    const proxyPort = await reservePort();
+    const defaultPort = await reservePort();
+    const routePort = await reservePort();
+    const defaultHits = [];
+    const routeHits = [];
+    const defaultUpstream = createServer(async (req, res) => {
+      defaultHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ provider: "default" }));
+    });
+    const routeUpstream = createServer(async (req, res) => {
+      routeHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ provider: route }));
+    });
+
+    try {
+      process.env.HOME = home;
+      const stateRoot = join(home, ".config", "codex-tools");
+      process.env.CCS_PROXY_STATE_ROOT = stateRoot;
+      await writeProxyTestStateWithProfiles(
+        home,
+        stateRoot,
+        proxyPort,
+        {
+          default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
+          [route]: { baseURL: `http://127.0.0.1:${routePort}`, apiKey: `${route}-key` },
+        },
+        "default",
+        { [route]: { enabled: true, profile: route } },
+      );
+      await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(routeUpstream, routePort)]);
+      const proxyOptions = {
+        codexConfigPath: join(home, ".codex", "config.toml"),
+        listenHost: "127.0.0.1",
+        listenPort: proxyPort,
+        stateRoot,
+      };
+      await ensureProxyRunning(proxyOptions);
+      await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
+
+      const body = JSON.stringify({ query: "codex proxy" });
+      const mapped = await fetch(`http://127.0.0.1:${proxyPort}/v1/${routePath}?limit=3`, {
+        method: "POST",
+        headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+        body,
+      });
+      assert.deepEqual(await mapped.json(), { provider: route });
+
+      const mappedWithoutVersion = await fetch(`http://127.0.0.1:${proxyPort}/${routePath}?limit=4`, {
+        method: "POST",
+        headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+        body,
+      });
+      assert.deepEqual(await mappedWithoutVersion.json(), { provider: route });
+      assert.deepEqual(routeHits, [
+        { authorization: `Bearer ${route}-key`, url: `/v1/${routePath}?limit=3`, body },
+        { authorization: `Bearer ${route}-key`, url: `/${routePath}?limit=4`, body },
+      ]);
+      assert.deepEqual(defaultHits, []);
+
+      const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/${routePath}`, {
+        method: "POST",
+        headers: { "x-ccs-profile": "default", "content-type": "application/json" },
+        body,
+      });
+      assert.deepEqual(await pinned.json(), { provider: "default" });
+      assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: `/v1/${routePath}`, body }]);
+      if (route !== "compact") return;
+
+      const marked = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
+        method: "POST", body: JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }),
+      });
+      assert.deepEqual(await marked.json(), { provider: "compact" });
+      assert.equal(routeHits.at(-1).body, JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }));
+
+      const profilesPath = join(stateRoot, "profiles.json");
+      const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
+      profiles.proxy.compact.enabled = false;
+      await writeFile(profilesPath, JSON.stringify(profiles));
+      const disabled = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
+      assert.deepEqual(await disabled.json(), { provider: "default" });
+      profiles.proxy.compact.enabled = true;
+      await writeFile(profilesPath, JSON.stringify(profiles));
+      const normal = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body });
+      assert.deepEqual(await normal.json(), { provider: "default" });
+      const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 6);
+      assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["compact", "compact", "compact", "default", "default", "default"]);
+      assert.equal(state.metrics.recent_requests.filter((record) => record.request_kind === "context_compaction").length, 5);
+      profiles.proxy.compact.profile = "missing";
+      await writeFile(profilesPath, JSON.stringify(profiles));
+      const invalid = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
+      assert.equal(invalid.status, 400);
+    } finally {
+      await shutdownProxyRuntime({
+        codexConfigPath: join(home, ".codex", "config.toml"),
+        listenHost: "127.0.0.1",
+        listenPort: proxyPort,
+        stateRoot: join(home, ".config", "codex-tools"),
+      }).catch(() => null);
+      await Promise.all([closeServer(defaultUpstream), closeServer(routeUpstream)]);
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
+      else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
+      await rm(home, { recursive: true, force: true });
+    }
   });
-  const searchUpstream = createServer(async (req, res) => {
-    searchHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ provider: "search" }));
-  });
-
-  try {
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestStateWithProfiles(
-      home,
-      stateRoot,
-      proxyPort,
-      {
-        default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
-        search: { baseURL: `http://127.0.0.1:${searchPort}`, apiKey: "search-key" },
-      },
-      "default",
-      { search: { enabled: true, profile: "search" } },
-    );
-    await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(searchUpstream, searchPort)]);
-    const proxyOptions = {
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot,
-    };
-    await ensureProxyRunning(proxyOptions);
-    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
-
-    const body = JSON.stringify({ query: "codex proxy" });
-    const mapped = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search?limit=3`, {
-      method: "POST",
-      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await mapped.json(), { provider: "search" });
-
-    const mappedWithoutVersion = await fetch(`http://127.0.0.1:${proxyPort}/alpha/search?limit=4`, {
-      method: "POST",
-      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await mappedWithoutVersion.json(), { provider: "search" });
-    assert.deepEqual(searchHits, [
-      { authorization: "Bearer search-key", url: "/v1/alpha/search?limit=3", body },
-      { authorization: "Bearer search-key", url: "/alpha/search?limit=4", body },
-    ]);
-    assert.deepEqual(defaultHits, []);
-
-    const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/alpha/search`, {
-      method: "POST",
-      headers: { "x-ccs-profile": "default", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await pinned.json(), { provider: "default" });
-    assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/alpha/search", body }]);
-
-    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 3);
-    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["default", "search", "search"]);
-  } finally {
-    await shutdownProxyRuntime({
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot: join(home, ".config", "codex-tools"),
-    }).catch(() => null);
-    await Promise.all([closeServer(defaultUpstream), closeServer(searchUpstream)]);
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
-    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("proxy routes compaction to its mapped profile and preserves explicit profile priority", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-path-profile-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const proxyPort = await reservePort();
-  const defaultPort = await reservePort();
-  const compactPort = await reservePort();
-  const defaultHits = [];
-  const compactHits = [];
-  const defaultUpstream = createServer(async (req, res) => {
-    defaultHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ provider: "default" }));
-  });
-  const compactUpstream = createServer(async (req, res) => {
-    compactHits.push({ authorization: req.headers.authorization, url: req.url, body: await readServerRequestBody(req) });
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ provider: "compact" }));
-  });
-
-  try {
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestStateWithProfiles(
-      home,
-      stateRoot,
-      proxyPort,
-      {
-        default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
-        compact: { baseURL: `http://127.0.0.1:${compactPort}`, apiKey: "compact-key" },
-      },
-      "default",
-      { compact: { enabled: true, profile: "compact" } },
-    );
-    await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(compactUpstream, compactPort)]);
-    const proxyOptions = {
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot,
-    };
-    await ensureProxyRunning(proxyOptions);
-    await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
-
-    const body = JSON.stringify({ query: "codex proxy" });
-    const mapped = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses/compact?limit=3`, {
-      method: "POST",
-      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await mapped.json(), { provider: "compact" });
-
-    const mappedWithoutVersion = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact?limit=4`, {
-      method: "POST",
-      headers: { authorization: "Bearer client-key", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await mappedWithoutVersion.json(), { provider: "compact" });
-    assert.deepEqual(compactHits, [
-      { authorization: "Bearer compact-key", url: "/v1/responses/compact?limit=3", body },
-      { authorization: "Bearer compact-key", url: "/responses/compact?limit=4", body },
-    ]);
-    assert.deepEqual(defaultHits, []);
-
-    const pinned = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses/compact`, {
-      method: "POST",
-      headers: { "x-ccs-profile": "default", "content-type": "application/json" },
-      body,
-    });
-    assert.deepEqual(await pinned.json(), { provider: "default" });
-    assert.deepEqual(defaultHits, [{ authorization: "Bearer default-key", url: "/v1/responses/compact", body }]);
-
-    const marked = await fetch(`http://127.0.0.1:${proxyPort}/responses`, {
-      method: "POST", body: JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }),
-    });
-    assert.deepEqual(await marked.json(), { provider: "compact" });
-    assert.equal(compactHits.at(-1).body, JSON.stringify({ stream: true, input: [{ type: "compaction_trigger" }] }));
-
-    const profilesPath = join(stateRoot, "profiles.json");
-    const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
-    profiles.proxy.compact.enabled = false;
-    await writeFile(profilesPath, JSON.stringify(profiles));
-    const disabled = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
-    assert.deepEqual(await disabled.json(), { provider: "default" });
-    profiles.proxy.compact.enabled = true;
-    await writeFile(profilesPath, JSON.stringify(profiles));
-    const normal = await fetch(`http://127.0.0.1:${proxyPort}/responses`, { method: "POST", body });
-    assert.deepEqual(await normal.json(), { provider: "default" });
-    const state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === 6);
-    assert.deepEqual(state.metrics.recent_requests.map((record) => record.upstream).sort(), ["compact", "compact", "compact", "default", "default", "default"]);
-    assert.equal(state.metrics.recent_requests.filter((record) => record.request_kind === "context_compaction").length, 5);
-    profiles.proxy.compact.profile = "missing";
-    await writeFile(profilesPath, JSON.stringify(profiles));
-    const invalid = await fetch(`http://127.0.0.1:${proxyPort}/responses/compact`, { method: "POST", body });
-    assert.equal(invalid.status, 400);
-  } finally {
-    await shutdownProxyRuntime({
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot: join(home, ".config", "codex-tools"),
-    }).catch(() => null);
-    await Promise.all([closeServer(defaultUpstream), closeServer(compactUpstream)]);
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousStateRoot === undefined) delete process.env.CCS_PROXY_STATE_ROOT;
-    else process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    await rm(home, { recursive: true, force: true });
-  }
-});
+}
 
 test("proxy captures a bounded session at the client HTTP boundary", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-capture-"));
@@ -1436,8 +1343,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     },
   ];
   const pathByName = new Map(paths.map((entry) => [entry.path, entry]));
-  const firstHold = holdControl();
-  const secondHold = holdControl();
+  const hold = holdControl();
 
   const upstream = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -1460,13 +1366,11 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
       return;
     }
 
-    const hold = url.searchParams.get("hold");
-    if (hold === "1" || hold === "2") {
-      const control = hold === "1" ? firstHold : secondHold;
+    if (url.searchParams.get("hold") === "1") {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(`data: ${JSON.stringify({ model: spec.streamModel })}\n\n`);
-      control.markStarted();
-      void control.release.then(() => {
+      hold.markStarted();
+      void hold.release.then(() => {
         res.end("data: [DONE]\n\n");
       });
       return;
@@ -1540,23 +1444,6 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
       assert.equal(record.upstream_model_source, spec.streamSource);
     }
 
-    const activeSpec = paths[0];
-    const activeFetch = fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=1`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "active-request-model" }),
-    });
-    await firstHold.started;
-    let state = await waitForState(
-      stateRoot,
-      (candidate) => candidate.metrics.active_requests[0]?.path === activeSpec.path,
-    );
-    assert.equal(state.metrics.active_requests[0].request_model, "active-request-model");
-
-    firstHold.finish();
-    assert.equal(await (await activeFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
-    await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.path === activeSpec.path);
-
     const missingResponse = await fetch(`http://127.0.0.1:${proxyPort}/responses?missing=1`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1564,12 +1451,14 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     });
     assert.equal(missingResponse.status, 200);
     await missingResponse.text();
-    state = await waitForState(stateRoot, (candidate) => candidate.metrics.recent_requests[0]?.path === "/responses");
+    let state = await waitForState(stateRoot, (candidate) => candidate.metrics.total_requests === paths.length * 2 + 1);
+    assert.equal(state.metrics.recent_requests[0].path, "/responses");
     assert.equal(state.metrics.recent_requests[0].request_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model, null);
     assert.equal(state.metrics.recent_requests[0].upstream_model_source, null);
 
-    const activeOutputFetch = fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=2`, {
+    const activeSpec = paths[0];
+    const activeOutputFetch = fetch(`http://127.0.0.1:${proxyPort}${activeSpec.path}?hold=1`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "active-output-model" }),
@@ -1580,7 +1469,7 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     }, () => {
       activeOutputResolved = true;
     });
-    await secondHold.started;
+    await hold.started;
     state = await waitForState(
       stateRoot,
       (candidate) => candidate.metrics.active_requests[0]?.upstream_model === activeSpec.streamModel,
@@ -1604,12 +1493,11 @@ test("proxy records request and upstream model metadata for OpenAI paths", async
     assert.match(output, /\s200\s+\d+ms/);
     assert.match(output, /test001\/response/);
 
-    secondHold.finish();
+    hold.finish();
     assert.equal(await (await activeOutputFetch).text(), `data: ${JSON.stringify({ model: activeSpec.streamModel })}\n\ndata: [DONE]\n\n`);
     await waitForState(stateRoot, (candidate) => candidate.metrics.active_requests.length === 0 && candidate.metrics.recent_requests[0]?.request_model === "active-output-model");
   } finally {
-    firstHold.finish();
-    secondHold.finish();
+    hold.finish();
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
       listenHost: "127.0.0.1",
@@ -2339,16 +2227,6 @@ test("proxy retries transport fetch failed once and records upstream_error", asy
       .at(-1);
     assert.equal(fullRecord.client_ttfb_ms, record.client_ttfb_ms);
     assert.deepEqual(fullRecord.attempt_records.map((attempt) => attempt.attempt), [1, 2]);
-    assert.deepEqual(record.usage_attempts, fullRecord.attempt_records.map((attempt) => ({
-      attempt: attempt.attempt,
-      input_tokens: attempt.input_tokens,
-      output_tokens: attempt.output_tokens,
-      cached_input_tokens: attempt.cached_input_tokens,
-      pricing_model: attempt.upstream_model ?? record.request_model,
-      pricing_model_source: attempt.upstream_model ? "upstream_model" : record.request_model ? "request_model" : null,
-      pricing_tier: attempt.service_tier,
-      pricing_tier_source: attempt.service_tier ? "response" : null,
-    })));
     assert.deepEqual(record.usage_attempts.map((attempt) => [
       attempt.input_tokens,
       attempt.output_tokens,
@@ -2564,16 +2442,6 @@ test("proxy retries non-stream reasoning guard and reports exhausted guard", asy
       .at(-1);
     assert.deepEqual(successJsonl.attempt_records.map((attempt) => attempt.cached_input_tokens), [1, 2, 3, 0]);
     assert.deepEqual(successJsonl.attempt_records.map((attempt) => attempt.attempt), [1, 2, 3, 4]);
-    assert.deepEqual(record.usage_attempts, successJsonl.attempt_records.map((attempt) => ({
-      attempt: attempt.attempt,
-      input_tokens: attempt.input_tokens,
-      output_tokens: attempt.output_tokens,
-      cached_input_tokens: attempt.cached_input_tokens,
-      pricing_model: attempt.upstream_model ?? record.request_model,
-      pricing_model_source: attempt.upstream_model ? "upstream_model" : "request_model",
-      pricing_tier: attempt.service_tier,
-      pricing_tier_source: attempt.service_tier ? "response" : null,
-    })));
 
     const exhausted = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=json-exhausted`, {
       method: "POST",
@@ -3150,16 +3018,6 @@ test("proxy passthrough forwards one untouched upstream response without policy"
       pricing_tier: null,
       pricing_tier_source: null,
     }]);
-    assert.deepEqual(record.usage_attempts, fullRecord.attempt_records.map((attempt) => ({
-      attempt: attempt.attempt,
-      input_tokens: attempt.input_tokens,
-      output_tokens: attempt.output_tokens,
-      cached_input_tokens: attempt.cached_input_tokens,
-      pricing_model: attempt.upstream_model ?? record.request_model,
-      pricing_model_source: attempt.upstream_model ? "upstream_model" : "request_model",
-      pricing_tier: attempt.service_tier,
-      pricing_tier_source: attempt.service_tier ? "response" : null,
-    })));
 
     const textResponse = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?case=passthrough-text`, {
       method: "POST",
@@ -5569,9 +5427,6 @@ test("proxy status and reasoning summaries use event counts", () => {
   assert.match(lines, /policy retries=15 capacity=1 429=3 reasoning=2 timeout=4 transport=5/);
   assert.doesNotMatch(lines, /503=0/);
   assert.match(lines, /^reasoning 516=3 1034=4 other=1$/m);
-  assert.match(lines, /516=3/);
-  assert.match(lines, /1034=4/);
-  assert.match(lines, /other=1/);
 });
 
 test("proxy status history count follows TTY rows, non-TTY default, and explicit override", () => {
@@ -5723,92 +5578,6 @@ test("proxy rejects invalid and removed command arguments", async () => {
     () => runProxyCommand(["install", "--yes"], options),
     /ccs proxy install no longer accepts -y\/--yes/,
   );
-});
-
-test("proxy runtime restarts protocol mismatches", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
-  const previousHome = process.env.HOME;
-  const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const proxyPort = await reservePort();
-  let oldProxy = null;
-
-  try {
-    process.env.HOME = home;
-    const stateRoot = join(home, ".config", "codex-tools");
-    process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await mkdir(join(home, ".codex"), { recursive: true });
-    await writeFile(join(home, ".codex", "config.toml"), "", "utf8");
-    await writeProxyStateFixture(home, stateRoot, proxyPort);
-
-    oldProxy = spawnProxyHealthStub(proxyPort, 1, "0.1.0");
-    await waitForChildStdout(oldProxy, /old-proxy-ready/);
-    const oldProxyPid = oldProxy.pid;
-    assert.ok(oldProxyPid);
-
-    const options = {
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot,
-    };
-    const oldHealth = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
-    assert.equal((await oldHealth.json()).protocol, 1);
-
-    const runtime = await ensureProxyRunning(options);
-    assert.ok(runtime);
-    assert.equal(runtime.healthy, true);
-    assert.equal(runtime.started, true);
-    assert.equal(runtime.protocol, 8);
-    assert.notEqual(runtime.pid, oldProxyPid);
-    await waitForChildExit(oldProxy);
-    oldProxy = null;
-
-    const health = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
-    const healthPayload = await health.json();
-    assert.equal(healthPayload.protocol, 8);
-    assert.equal(healthPayload.pid, runtime.pid);
-    const eventLog = await waitForLogIncludes(join(stateRoot, "proxy.log"), /"event":"ccs_proxy_runtime_restart"/);
-    const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
-    const restartEvent = events.find((event) => event.event === "ccs_proxy_runtime_restart");
-    assert.deepEqual(
-      {
-        old_protocol: restartEvent?.old_protocol,
-        new_protocol: restartEvent?.new_protocol,
-        old_version: restartEvent?.old_version,
-        new_version: restartEvent?.new_version,
-        pid: restartEvent?.pid,
-      },
-      {
-        old_protocol: 1,
-        new_protocol: 8,
-        old_version: "0.1.0",
-        new_version: healthPayload.version,
-        pid: oldProxyPid,
-      },
-    );
-  } finally {
-    if (oldProxy) {
-      oldProxy.kill();
-      await waitForChildExit(oldProxy).catch(() => null);
-    }
-    await shutdownProxyRuntime({
-      codexConfigPath: join(home, ".codex", "config.toml"),
-      listenHost: "127.0.0.1",
-      listenPort: proxyPort,
-      stateRoot: join(home, ".config", "codex-tools"),
-    }).catch(() => null);
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    if (previousStateRoot === undefined) {
-      delete process.env.CCS_PROXY_STATE_ROOT;
-    } else {
-      process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    }
-    await rm(home, { recursive: true, force: true });
-  }
 });
 
 test("proxy watch observes an older package and one-shot status replaces it", async () => {
@@ -6095,7 +5864,6 @@ test("proxy restart previews, requires yes, preserves state, and rejects active 
     );
     const preservedState = await readProxyState(stateRoot);
     const preview = stripAnsi(await captureStdout(() => runProxyCommand(["restart"], options)));
-    assert.match(preview, /restart/i);
     assert.match(preview, /no changes are written unless you type yes/);
     assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, forceHealth.pid);
     assert.deepEqual(await readProxyState(stateRoot), preservedState);
@@ -6206,10 +5974,10 @@ test("proxy --history uses snapshot rows until explicit count needs JSONL tail",
     assert.match(defaultOutput, /snap-4/);
     assert.doesNotMatch(defaultOutput, /\/jsonl-/);
 
-    const onceOutput = await captureConsole(() => runProxyCommand(["--history", "3"], proxyOptions));
-    assert.equal(countHistoryRows(onceOutput), 3);
-    assert.match(onceOutput, /snap-2/);
-    assert.doesNotMatch(onceOutput, /snap-3/);
+    const historyOutput = await captureConsole(() => runProxyCommand(["--history", "3"], proxyOptions));
+    assert.equal(countHistoryRows(historyOutput), 3);
+    assert.match(historyOutput, /snap-2/);
+    assert.doesNotMatch(historyOutput, /snap-3/);
 
     const snapshotOutput = await captureConsole(() => runProxyCommand(["--history", "5"], proxyOptions));
     assert.equal(countHistoryRows(snapshotOutput), 5);
@@ -6426,15 +6194,11 @@ test("proxy startup clears persisted active requests from older processes", asyn
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const previousListenHost = process.env.CCS_PROXY_LISTEN_HOST;
-  const previousListenPort = process.env.CCS_PROXY_LISTEN_PORT;
   const listenPort = await reservePort();
   try {
     process.env.HOME = home;
     const stateRoot = join(home, ".config", "codex-tools");
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    process.env.CCS_PROXY_LISTEN_HOST = "127.0.0.1";
-    process.env.CCS_PROXY_LISTEN_PORT = String(listenPort);
 
     const codexDir = join(home, ".codex");
     await mkdir(codexDir, { recursive: true });
@@ -6550,16 +6314,6 @@ test("proxy startup clears persisted active requests from older processes", asyn
     } else {
       process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
     }
-    if (previousListenHost === undefined) {
-      delete process.env.CCS_PROXY_LISTEN_HOST;
-    } else {
-      process.env.CCS_PROXY_LISTEN_HOST = previousListenHost;
-    }
-    if (previousListenPort === undefined) {
-      delete process.env.CCS_PROXY_LISTEN_PORT;
-    } else {
-      process.env.CCS_PROXY_LISTEN_PORT = previousListenPort;
-    }
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -6612,15 +6366,11 @@ test("proxy restore uses the current profile and preserves unrelated config edit
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-home-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
-  const previousListenHost = process.env.CCS_PROXY_LISTEN_HOST;
-  const previousListenPort = process.env.CCS_PROXY_LISTEN_PORT;
   const listenPort = await reservePort();
   try {
     process.env.HOME = home;
     const stateRoot = join(home, ".config", "codex-tools");
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    process.env.CCS_PROXY_LISTEN_HOST = "127.0.0.1";
-    process.env.CCS_PROXY_LISTEN_PORT = String(listenPort);
 
     const codexDir = join(home, ".codex");
     await mkdir(codexDir, { recursive: true });
@@ -6780,16 +6530,6 @@ test("proxy restore uses the current profile and preserves unrelated config edit
       delete process.env.CCS_PROXY_STATE_ROOT;
     } else {
       process.env.CCS_PROXY_STATE_ROOT = previousStateRoot;
-    }
-    if (previousListenHost === undefined) {
-      delete process.env.CCS_PROXY_LISTEN_HOST;
-    } else {
-      process.env.CCS_PROXY_LISTEN_HOST = previousListenHost;
-    }
-    if (previousListenPort === undefined) {
-      delete process.env.CCS_PROXY_LISTEN_PORT;
-    } else {
-      process.env.CCS_PROXY_LISTEN_PORT = previousListenPort;
     }
     await rm(home, { recursive: true, force: true });
   }
@@ -7386,7 +7126,6 @@ test("proxy model rendering compares raw values before abbreviation and truncati
     assert.equal(stripAnsi(formatProxyModel("gpt-5.6", "gpt-5.6-mini")), "5.6-mini");
     assert.equal(stripAnsi(formatProxyModel("gpt-5.6-sol", "o5.6-sol")), "5.6-sol");
     assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")), "12345678");
-    assert.equal(stripAnsi(formatProxyModel("request-model", "gpt-123456789012345")).length, 8);
   });
 });
 

@@ -16,7 +16,7 @@ Tests should fail for product problems and durable contracts. They should stay f
 
 - Assert required fields, table shape, stable columns, meaningful labels, and machine-readable values.
 - Assert exact text when the text is the contract, such as a required confirmation prompt, a documented error code, or a public command line.
-- Assert exact color or spacing when that visual detail carries semantics.
+- When color or spacing carries meaning, assert the visible label, state, or alignment after stripping ANSI.
 - Prefer semantic assertions over full-output snapshots for monitor and table output.
 - For compact help footers, assert hierarchy, discoverability, and help routing;
   avoid full command strings, spacing, and line-count assertions unless the
@@ -33,7 +33,6 @@ Tests should fail for product problems and durable contracts. They should stay f
 
 - Incidental wording in decorative titles.
 - Exact gaps between unrelated header fields.
-- Cosmetic color choices without semantic meaning.
 - Do not turn documented visual styling into exact ANSI-code, palette-index, or dim/bold assertions. Test the visible label or state meaning after stripping ANSI; reserve control-sequence assertions for terminal lifecycle behavior such as clearing, cursor restoration, and alternate-screen handling.
 - Avoid spawning a TTY subprocess only to prove a documented color. This adds process and fixture cost while coupling tests to the current palette and renderer.
 - Full snapshots of terminal output that mix many unrelated concerns.
