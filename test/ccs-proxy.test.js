@@ -25,7 +25,7 @@ import {
   shutdownProxyRuntime,
 } from "../dist/commands/ccs-proxy.js";
 import { packageVersion } from "../dist/lib/version.js";
-import { captureStdout, execNodeScript, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
+import { captureStdout, execNodeScript, KEYS, runInteractive, setStdoutProperties, spawnNode, stdoutPropertiesScript, stripAnsi, withStdoutProperties } from "./helpers/terminal.js";
 
 async function reservePort() {
   const server = createServer();
@@ -1243,15 +1243,6 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
     await ensureProxyRunning(proxyOptions);
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
-    const output = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
-    assert.match(output, /capture:\s+active/);
-    assert.match(output, /count:\s+2/);
-    const cancelled = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "cancel"], proxyOptions)));
-    assert.match(cancelled, /capture:\s+inactive/);
-    assert.match(cancelled, /cancelled:\s+yes/);
-    const restarted = stripAnsi(await captureStdout(() => runProxyCommand(["capture", "session-a", "2"], proxyOptions)));
-    assert.match(restarted, /capture:\s+active/);
-
     async function send(sessionId, index) {
       const body = JSON.stringify({ session_id: sessionId, input: `secret prompt ${index}` });
       const response = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses?turn=${index}`, {
@@ -1267,13 +1258,42 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
       return { body, responseBody: await response.text() };
     }
 
-    await send("other-session", 0);
-    const first = await send("session-alpha-full", 1);
-    const second = await send("session-alpha-full", 2);
-    await send("session-alpha-full", 3);
+    const noSessions = stripAnsi(await captureStdout(() => runProxyCommand(["capture"], proxyOptions)));
+    assert.match(noSessions, /capture:\s+inactive/);
+    assert.match(noSessions, /run in an interactive terminal to start a capture/);
 
-    const inactive = stripAnsi(await captureStdout(() => runProxyCommand(["capture"], proxyOptions)));
-    assert.match(inactive, /capture:\s+inactive/);
+    await send("session-alpha-full", 0);
+    await waitForState(stateRoot, (state) => state.metrics.recent_requests.some((record) => record.session === "session-"));
+
+    const cancelled = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
+      ["Capture which session?", KEYS.enter],
+      ["How many requests?", `2${KEYS.enter}`],
+      ["c cancel capture", "c"],
+    ]);
+    assert.match(cancelled.output, /session-\s+recent/);
+    assert.match(cancelled.output, /capture:\s+cancelled/);
+    assert.match(cancelled.output, /progress:\s+0\/2/);
+
+    let first;
+    let second;
+    let sends;
+    const completed = await runInteractive(() => runProxyCommand(["capture"], proxyOptions), [
+      ["Capture which session?", KEYS.enter],
+      ["How many requests?", KEYS.enter],
+      ["progress:  0/5", () => {
+        sends = (async () => {
+          await send("other-session", 0);
+          first = await send("session-alpha-full", 1);
+          second = await send("session-alpha-full", 2);
+          for (let index = 3; index <= 6; index += 1) await send("session-alpha-full", index);
+        })();
+      }],
+    ]);
+    await sends;
+    assert.match(completed.output, /capture:\s+complete/);
+    assert.match(completed.output, /session:\s+session-alpha-full/);
+    assert.match(completed.output, /progress:\s+5\/5/);
+
     const captureRoot = join(stateRoot, "captures");
     const captureDirs = await readdir(captureRoot);
     assert.equal(captureDirs.length, 2);
@@ -1281,23 +1301,24 @@ test("proxy captures a bounded session at the client HTTP boundary", async () =>
       directory,
       metadataFiles: (await readdir(join(captureRoot, directory))).filter((file) => file.endsWith(".json")),
     })));
-    assert.deepEqual(captureDirEntries.map((entry) => entry.metadataFiles.length).sort(), [0, 2]);
-    const captureDir = join(captureRoot, captureDirEntries.find((entry) => entry.metadataFiles.length === 2).directory);
+    assert.deepEqual(captureDirEntries.map((entry) => entry.metadataFiles.length).sort(), [0, 5]);
+    const captureDir = join(captureRoot, captureDirEntries.find((entry) => entry.metadataFiles.length === 5).directory);
     assert.equal((await stat(captureDir)).mode & 0o777, 0o700);
     const files = (await readdir(captureDir)).sort();
     const metadataFiles = files.filter((file) => file.endsWith(".json"));
-    assert.equal(metadataFiles.length, 2);
+    assert.equal(metadataFiles.length, 5);
 
     const records = await Promise.all(metadataFiles.map(async (file) => JSON.parse(await readFile(join(captureDir, file), "utf8"))));
     records.sort((left, right) => left.sequence - right.sequence);
-    assert.deepEqual(records.map((record) => record.version), [2, 2]);
-    assert.deepEqual(records.map((record) => record.upstream_status), [200, 200]);
-    assert.deepEqual(records.map((record) => record.final_client_status), [200, 200]);
-    assert.deepEqual(records.map((record) => record.final_action), ["passed", "passed"]);
-    assert.deepEqual(records.map((record) => record.failure_summary), [null, null]);
-    assert.deepEqual(records.map((record) => record.retry_summary.total), [0, 0]);
-    assert.deepEqual(records.map((record) => record.session_id), ["session-alpha-full", "session-alpha-full"]);
-    assert.deepEqual(records.map((record) => record.url), ["/v1/responses?turn=1", "/v1/responses?turn=2"]);
+    const each = (value) => Array(5).fill(value);
+    assert.deepEqual(records.map((record) => record.version), each(2));
+    assert.deepEqual(records.map((record) => record.upstream_status), each(200));
+    assert.deepEqual(records.map((record) => record.final_client_status), each(200));
+    assert.deepEqual(records.map((record) => record.final_action), each("passed"));
+    assert.deepEqual(records.map((record) => record.failure_summary), each(null));
+    assert.deepEqual(records.map((record) => record.retry_summary.total), each(0));
+    assert.deepEqual(records.map((record) => record.session_id), each("session-alpha-full"));
+    assert.deepEqual(records.map((record) => record.url), [1, 2, 3, 4, 5].map((turn) => `/v1/responses?turn=${turn}`));
     assert.equal(records[0].request_headers.authorization, "[redacted]");
     assert.equal(records[0].request_headers.cookie, "[redacted]");
     assert.equal(records[0].request_headers["x-capture-request"], "kept");
@@ -3612,21 +3633,21 @@ test("proxy cancel stops a pinned session retry wait without another upstream re
     const rerouteStatus = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/reroute").then((response) => response.json());
     assert.deepEqual(rerouteStatus.requests, []);
 
-    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["cancel", session], options)));
-    assert.match(preview, /target:\s+01a051ad/);
-    assert.match(preview, /eligible:\s+1/);
-    assert.match(preview, /no requests are cancelled unless you type yes/);
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["cancel"], options)));
+    assert.match(preview, /waiting:\s+1/);
+    assert.match(preview, new RegExp(`request:\\s+${cancelStatus.requests[0].request_id} session=${session}`));
+    assert.match(preview, /run in an interactive terminal to cancel requests/);
 
     const allStatus = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel?target=all").then((response) => response.json());
     assert.equal(allStatus.requests.length, 1);
 
-    const applied = await fetch("http://127.0.0.1:" + proxyPort + "/__codex_proxy/cancel", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ request_ids: [cancelStatus.requests[0].request_id] }),
-    }).then((response) => response.json());
-    assert.deepEqual(applied.cancelled, [cancelStatus.requests[0].request_id]);
-    assert.deepEqual(applied.skipped, []);
+    const applied = await runInteractive(() => runProxyCommand(["cancel"], options), [
+      ["Cancel which waiting requests?", KEYS.enter],
+      ["select at least one request", `${KEYS.space}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.match(applied.output, /cancelled:\s+1/);
+    assert.match(applied.output, /skipped:\s+0/);
     const pendingResponse = await pending;
     assert.equal(pendingResponse.status, 499);
     const pendingJson = await pendingResponse.json();
@@ -5632,7 +5653,10 @@ test("proxy rejects invalid and removed command arguments", async () => {
     ["mode", "recovery", "extra"],
     ["reroute", "extra"],
     ["restart", "extra"],
-    ["restart", "--force", "extra"],
+    ["restart", "--force"],
+    ["capture", "session-a", "2"],
+    ["capture", "cancel"],
+    ["cancel", "all"],
     ["install", "extra"],
     ["restore", "extra"],
   ]) {
@@ -5997,31 +6021,19 @@ test("proxy restart previews, requires yes, preserves state, and rejects active 
     );
     assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
 
-    const forcePreview = stripAnsi(await captureStdout(() => runProxyCommand(["restart", "--force"], options)));
-    assert.match(forcePreview, /requests:\s+active=1/);
-    assert.match(forcePreview, /request:\s+restart-active/);
-    assert.match(forcePreview, /force terminates active client connections before restart/);
+    const kept = await runInteractive(() => runProxyCommand(["restart"], options), [
+      ["Restart anyway?", KEYS.enter],
+    ]);
+    assert.match(kept.output, /requests:\s+active=1/);
+    assert.match(kept.output, /request:\s+restart-active/);
+    assert.match(kept.output, /not applied\./);
     assert.equal((await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json())).pid, initialPid);
 
-    const stdinIsTtyForForce = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-    let forceAnswered = false;
-    let forceOutput;
-    Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
-    try {
-      forceOutput = stripAnsi(await captureStdout(() => runProxyCommand(["restart", "--force"], options), {
-        isTTY: true,
-        onWrite(currentOutput) {
-          if (!forceAnswered && currentOutput.includes("Apply changes?")) {
-            forceAnswered = true;
-            process.stdin.emit("data", Buffer.from("yes\n"));
-          }
-        },
-      }));
-    } finally {
-      if (stdinIsTtyForForce) Object.defineProperty(process.stdin, "isTTY", stdinIsTtyForForce);
-      else delete process.stdin.isTTY;
-    }
-    assert.equal(forceAnswered, true);
+    const { output: forceOutput } = await runInteractive(() => runProxyCommand(["restart"], options), [
+      ["Restart anyway?", `${KEYS.down}${KEYS.enter}`],
+      ["force terminates active client connections before restart", ""],
+      ["Apply changes?", "yes\n"],
+    ]);
     assert.match(forceOutput, /forcibly stopped/);
     const forceHealth = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`).then((response) => response.json());
     assert.notEqual(forceHealth.pid, initialPid);

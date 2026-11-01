@@ -25,6 +25,7 @@ Tests should fail for product problems and durable contracts. They should stay f
 ## Terminal And Subprocess Helpers
 
 - Use `test/helpers/terminal.js` for ANSI stripping, stdout property overrides, stdout capture, inline module scripts, and Node subprocess execution.
+- Drive interactive commands with `runInteractive` and `KEYS`: each step waits for visible prompt text, then sends keys. Assert the selected result and stored data, not prompt rendering details.
 - Use command-specific wrappers only for fixed command paths and environment defaults; keep process execution behavior in the shared helper.
 - Simulate TTY width, rows, color, and resize through shared helpers so tests restore stdout descriptors consistently.
 

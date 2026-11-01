@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer } from "node:http";
 import { performance } from "node:perf_hooks";
 import { Readable } from "node:stream";
+import stripAnsi from "strip-ansi";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
@@ -14,9 +15,10 @@ import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
-import { runLiveView } from "../lib/live-view.js";
+import { createLiveViewController, runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache } from "../lib/pricing.js";
 import { assertProfile, readProfiles, writeProfiles } from "../lib/profiles.js";
+import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
 import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
 import { renderTable, styleTableRow } from "../lib/table.js";
@@ -33,6 +35,8 @@ const HEALTH_PATH = "/__codex_proxy/health";
 const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
 const CAPTURE_PATH = "/__codex_proxy/capture";
+const PROXY_CAPTURE_DEFAULT_COUNT = 5;
+const PROXY_CAPTURE_REFRESH_MS = 1000;
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
 const PROXY_HEALTH_PROTOCOL = 8;
@@ -6008,8 +6012,8 @@ function usageHelpLines() {
         "  ccs proxy watch --history N              # watch proxy status with N history rows",
         "  ccs proxy watch --view overview|tokens|cost # select the initial watch view; v cycles; q or Ctrl-C exits",
         "  ccs proxy reroute                        # reroute waiting 429/503 requests to the current profile",
-        "  ccs proxy cancel TARGET                 # cancel waiting 429/503 requests by request or session id",
-        "  ccs proxy capture [TARGET COUNT|cancel] # capture or cancel a session capture",
+        "  ccs proxy cancel                         # choose waiting retry requests to cancel",
+        "  ccs proxy capture                        # choose a session to capture, then watch or cancel it",
         "  ccs proxy mode                           # print response mode and status retry state",
         "  ccs proxy mode passthrough [retry]       # set transparent forwarding; retry is independent",
         "  ccs proxy mode retry [on|off]            # enable or disable HTTP 429/503 retry",
@@ -6027,7 +6031,7 @@ function usageHelpLines() {
         "  ccs proxy config latency off             # disable latency deadlines after confirmation",
         "  ccs proxy config latency FIRST TOTAL [ACTION] # set latency milliseconds and first-progress action",
         "  ccs proxy install                        # back up config, install routing, and start background proxy",
-        "  ccs proxy restart [--force]              # restart; force terminates active requests after confirmation",
+        "  ccs proxy restart                        # restart; asks before terminating active requests",
         "  ccs proxy restore                        # restore active profile routing and remove proxy state",
         "  ccs proxy serve                          # run the proxy server in the foreground for debugging",
     ];
@@ -6199,6 +6203,233 @@ async function applyProxyRouteConfig(expectedProfiles, nextConfig, route) {
         proxy: { ...currentProfiles.proxy, [route]: nextConfig },
     });
 }
+function proxySessionChoices(state, nowMs) {
+    const sessions = new Map();
+    for (const [active, records] of [[true, state.metrics.active_requests], [false, state.metrics.recent_requests]]) {
+        for (const record of records) {
+            if (!record.session || sessions.has(record.session))
+                continue;
+            const at = Date.parse((active ? record.started_at : record.completed_at) ?? record.started_at);
+            sessions.set(record.session, { active, record, at: Number.isFinite(at) ? at : nowMs });
+        }
+    }
+    return [...sessions.entries()].map(([session, entry]) => ({
+        value: session,
+        label: session.padEnd(PROXY_TABLE_SESSION_WIDTH),
+        hint: `${entry.active ? "active" : "recent"}  ${stripAnsi(formatProxyRoute(entry.record))}  ${formatDurationMs(nowMs - entry.at)} ago`,
+    }));
+}
+function formatProxyWaitRequest(request) {
+    const waitedMs = Math.max(0, Date.now() - Date.parse(request.waiting_since));
+    return `${request.request_id} session=${request.session ?? "-"} upstream=${request.upstream} status=${request.status} attempt=${request.attempt} wait=${formatDurationMs(waitedMs)}`;
+}
+async function readCaptureSummary(directory) {
+    const files = (await readdir(directory).catch(() => [])).filter((file) => file.endsWith(".json")).sort();
+    if (files.length === 0)
+        return { count: 0, sessionId: null };
+    const first = await readFile(path.join(directory, files[0]), "utf8").then((text) => JSON.parse(text)).catch(() => null);
+    return { count: files.length, sessionId: typeof first?.session_id === "string" ? first.session_id : null };
+}
+function proxyCaptureFrame(status) {
+    const task = status.task;
+    return [
+        `${bgDarkBlue(" ccs proxy capture ")}  ${textDim(new Date().toLocaleTimeString("en-GB", { hour12: false }))}`,
+        "",
+        `capture:   ${textGreen("active")}`,
+        `target:    ${task.target}`,
+        `session:   ${task.sessionId ?? textDim("waiting for the next request")}`,
+        `progress:  ${textGreen(String(task.captured))}/${task.requested}`,
+        `directory: ${colorPath(formatProxyFilePath(status.directory))}`,
+        textDim("authentication headers are redacted; files remain until manually removed"),
+        "",
+        textDim("c cancel capture · q exit view (capture continues)"),
+    ];
+}
+async function watchProxyCapture(options, state, started) {
+    const task = started.task;
+    const directory = started.directory;
+    let latest = started;
+    let outcome = "detached";
+    let failure = null;
+    let timer = null;
+    let refreshing = false;
+    await new Promise((resolve) => {
+        const controller = createLiveViewController({
+            pinFooter: true,
+            onStop: () => {
+                if (timer)
+                    clearInterval(timer);
+                resolve();
+            },
+            onKey: (key, controls) => {
+                if (key === "q") {
+                    controls.stop();
+                }
+                else if (key === "c") {
+                    void proxyCaptureCancelRequest(state)
+                        .then(() => { outcome = "cancelled"; })
+                        .catch((error) => { failure = error; })
+                        .finally(() => controls.stop());
+                }
+            },
+        });
+        const refresh = async () => {
+            if (refreshing)
+                return;
+            refreshing = true;
+            try {
+                const status = await proxyCaptureRequest(state);
+                if (!status.active || status.task?.id !== task.id) {
+                    if (outcome === "detached")
+                        outcome = "finished";
+                    controller.stop();
+                    return;
+                }
+                latest = status;
+                controller.writeFrame(proxyCaptureFrame(latest));
+            }
+            catch (error) {
+                failure = error;
+                controller.stop();
+            }
+            finally {
+                refreshing = false;
+            }
+        };
+        controller.setResizeRender(() => controller.writeFrame(proxyCaptureFrame(latest)));
+        controller.start();
+        controller.writeFrame(proxyCaptureFrame(latest));
+        timer = setInterval(() => { void refresh(); }, PROXY_CAPTURE_REFRESH_MS);
+    });
+    if (failure)
+        throw failure;
+    const summary = outcome === "detached"
+        ? { count: latest.task.captured, sessionId: latest.task.sessionId }
+        : await readCaptureSummary(directory);
+    const captured = summary.count;
+    const result = outcome === "detached"
+        ? textGreen("active")
+        : outcome === "cancelled"
+            ? textYellow("cancelled")
+            : captured >= task.requested ? textGreen("complete") : textYellow("ended early");
+    printKeyValue("capture:", result, 10);
+    printKeyValue("session:", summary.sessionId ?? textDim("none"), 10);
+    printKeyValue("progress:", `${captured}/${task.requested}`, 10);
+    printKeyValue("directory:", colorPath(formatProxyFilePath(directory)), 10);
+    if (outcome === "detached") {
+        printKeyValue("note:", "capture continues; run ccs proxy capture to watch or cancel it", 10);
+    }
+    else if (outcome === "finished" && captured < task.requested) {
+        printKeyValue("note:", `the task stopped before the requested count; see ${formatProxyFilePath(proxyLogPath(options.stateRoot))}`, 10);
+    }
+}
+async function runProxyCaptureCommand(options) {
+    const { state, status } = await proxyCaptureStatus(options);
+    if (status.active && status.task) {
+        if (isInteractive()) {
+            await watchProxyCapture(options, state, status);
+            return;
+        }
+        printKeyValue("capture:", textGreen("active"), 10);
+        printKeyValue("target:", status.task.target, 10);
+        printKeyValue("session:", status.task.sessionId ?? textDim("waiting"), 10);
+        printKeyValue("progress:", `${status.task.captured}/${status.task.requested}`, 10);
+        printKeyValue("directory:", colorPath(formatProxyFilePath(status.directory)), 10);
+        return;
+    }
+    printKeyValue("capture:", textDim("inactive"), 10);
+    if (!isInteractive()) {
+        printKeyValue("note:", "run in an interactive terminal to start a capture", 10);
+        return;
+    }
+    const choices = proxySessionChoices(state, Date.now());
+    if (choices.length === 0) {
+        printKeyValue("result:", "no sessions yet; send a Codex request through the proxy first", 10);
+        return;
+    }
+    const target = await select("Capture which session?", choices);
+    const count = Number(await input("How many requests?", {
+        default: String(PROXY_CAPTURE_DEFAULT_COUNT),
+        validate: (value) => /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? null : "enter a positive integer",
+    }));
+    const started = await proxyCaptureRequest(state, {
+        method: "POST",
+        body: JSON.stringify({ target, count }),
+    });
+    await watchProxyCapture(options, state, started);
+}
+async function runProxyCancelCommand(options) {
+    const plan = await buildProxyCancelPlan(options, "all");
+    printKeyValue("waiting:", String(plan.status.requests.length), 9);
+    if (plan.status.requests.length === 0) {
+        printKeyValue("result:", "no waiting retry requests", 9);
+        return;
+    }
+    if (!isInteractive()) {
+        for (const request of plan.status.requests)
+            printKeyValue("request:", formatProxyWaitRequest(request), 9);
+        printKeyValue("note:", "run in an interactive terminal to cancel requests", 9);
+        return;
+    }
+    const selected = await multiSelect("Cancel which waiting requests?", plan.status.requests.map((request) => ({
+        value: request.request_id,
+        label: `${(request.session ?? "-").padEnd(PROXY_TABLE_SESSION_WIDTH)}  ${request.request_id.slice(0, 8)}`,
+        hint: `${request.upstream} ${request.status} x${request.attempt}  waiting ${formatDurationMs(Math.max(0, Date.now() - Date.parse(request.waiting_since)))}`,
+    })), { required: "select at least one request, or press esc to cancel" });
+    const requests = plan.status.requests.filter((request) => selected.includes(request.request_id));
+    for (const request of requests)
+        printKeyValue("request:", formatProxyWaitRequest(request), 9);
+    printKeyValue("confirm:", "no requests are cancelled unless you type yes", 9);
+    if (!(await confirmApply()))
+        return;
+    const result = await applyProxyCancelPlan({ ...plan, status: { ...plan.status, requests } });
+    printKeyValue("cancelled:", textGreen(String(result.cancelled.length)), 9);
+    printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
+}
+async function runProxyRestartCommand(options) {
+    let plan = await buildProxyRestartPlan(options, true);
+    if (plan.activeRequests.length > 0 && !isInteractive()) {
+        throw new Error(`proxy restart requires no active requests; active=${plan.activeRequests.length}`);
+    }
+    printKeyValue("provider:", plan.providerName, 9);
+    printKeyValue("routing:", `${colorUrl(plan.proxyBaseUrl)} (unchanged)`, 9);
+    printKeyValue("mode:", `${colorName(plan.mode)} (unchanged)`, 9);
+    printKeyValue("current:", plan.current.healthy
+        ? `PID=${plan.current.pid ?? "unknown"} server=${plan.current.version ?? "unknown"} protocol=${plan.current.protocol ?? "unknown"}`
+        : textDim("not running"), 9);
+    printKeyValue("target:", `server=${plan.targetVersion} protocol=${plan.targetProtocol}`, 9);
+    printKeyValue("requests:", plan.activeRequests.length === 0
+        ? textGreen("active=0")
+        : textRed(`active=${plan.activeRequests.length}`), 9);
+    for (const request of plan.activeRequests) {
+        printKeyValue("request:", `${request.id} session=${request.session ?? "-"} path=${request.path}`, 9);
+    }
+    if (plan.activeRequests.length > 0) {
+        const force = await select("Active requests are open. Restart anyway?", [
+            { value: false, label: "keep running", hint: "leave the current proxy and its requests alone" },
+            { value: true, label: "force restart", hint: `terminate ${plan.activeRequests.length} active client connection(s)` },
+        ]);
+        if (!force) {
+            console.log(textDim("not applied."));
+            return;
+        }
+    }
+    else {
+        plan = { ...plan, force: false };
+    }
+    printKeyValue("note:", plan.force
+        ? "force terminates active client connections before restart"
+        : "new requests are briefly unavailable during restart", 9);
+    printKeyValue("confirm:", "no changes are written unless you type yes", 9);
+    if (!(await confirmApply()))
+        return;
+    const result = await restartProxyRuntime(options, plan);
+    printKeyValue("stopped:", result.stopped, 9);
+    printKeyValue("started:", textGreen("healthy"), 9);
+    printKeyValue("pid:", result.runtime.pid === null ? textDim("none") : textGreen(String(result.runtime.pid)), 9);
+    printKeyValue("server:", result.runtime.version ? textGreen(result.runtime.version) : textDim("none"), 9);
+    printKeyValue("protocol:", result.runtime.protocol === null ? textDim("none") : textGreen(String(result.runtime.protocol)), 9);
+}
 export async function runProxyCommand(args, options) {
     if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
         console.log(usageHelpLines().join("\n"));
@@ -6234,10 +6465,8 @@ export async function runProxyCommand(args, options) {
         const plan = await buildProxyReroutePlan(options);
         printKeyValue("profile:", colorName(plan.status.profile), 9);
         printKeyValue("eligible:", String(plan.status.requests.length), 9);
-        for (const request of plan.status.requests) {
-            const waitedMs = Math.max(0, Date.now() - Date.parse(request.waiting_since));
-            printKeyValue("request:", `${request.request_id} session=${request.session ?? "-"} upstream=${request.upstream} status=${request.status} attempt=${request.attempt} wait=${formatDurationMs(waitedMs)}`, 9);
-        }
+        for (const request of plan.status.requests)
+            printKeyValue("request:", formatProxyWaitRequest(request), 9);
         if (plan.status.requests.length === 0) {
             printKeyValue("result:", "no waiting 429/503 requests", 9);
             return;
@@ -6252,70 +6481,13 @@ export async function runProxyCommand(args, options) {
         return;
     }
     if (command === "cancel") {
-        if (rest.length !== 1 || !rest[0]) {
-            throw new Error("ccs proxy cancel requires TARGET");
-        }
-        const plan = await buildProxyCancelPlan(options, rest[0]);
-        printKeyValue("target:", rest[0], 9);
-        printKeyValue("eligible:", String(plan.status.requests.length), 9);
-        for (const request of plan.status.requests) {
-            const waitedMs = Math.max(0, Date.now() - Date.parse(request.waiting_since));
-            printKeyValue("request:", `${request.request_id} session=${request.session ?? "-"} upstream=${request.upstream} status=${request.status} attempt=${request.attempt} wait=${formatDurationMs(waitedMs)}`, 9);
-        }
-        if (plan.status.requests.length === 0) {
-            printKeyValue("result:", "no waiting 429/503 requests", 9);
-            return;
-        }
-        printKeyValue("confirm:", "no requests are cancelled unless you type yes", 9);
-        if (!(await confirmApply()))
-            return;
-        const result = await applyProxyCancelPlan(plan);
-        printKeyValue("cancelled:", textGreen(String(result.cancelled.length)), 9);
-        printKeyValue("skipped:", result.skipped.length === 0 ? "0" : textYellow(String(result.skipped.length)), 9);
+        rejectProxyCommandArgs(rest, "ccs proxy cancel");
+        await runProxyCancelCommand(options);
         return;
     }
     if (command === "capture") {
-        if (rest.length === 1 && rest[0] === "cancel") {
-            const { state, status } = await proxyCaptureStatus(options);
-            if (!status.active) {
-                printKeyValue("capture:", textDim("inactive"), 10);
-                printKeyValue("result:", "no active capture", 10);
-                return;
-            }
-            const cancelled = await proxyCaptureCancelRequest(state);
-            printKeyValue("capture:", textDim("inactive"), 10);
-            printKeyValue("cancelled:", cancelled.cancelled ? textGreen("yes") : textYellow("no"), 10);
-            if (cancelled.directory) {
-                printKeyValue("directory:", colorPath(formatProxyFilePath(cancelled.directory)), 10);
-            }
-            return;
-        }
-        if (rest.length === 0) {
-            const { status } = await proxyCaptureStatus(options);
-            printKeyValue("capture:", status.active ? textGreen("active") : textDim("inactive"), 10);
-            if (status.task) {
-                printKeyValue("target:", status.task.target, 10);
-                printKeyValue("session:", status.task.sessionId ?? textDim("waiting"), 10);
-                printKeyValue("progress:", `${status.task.captured}/${status.task.requested}`, 10);
-                printKeyValue("directory:", colorPath(formatProxyFilePath(status.directory)), 10);
-            }
-            return;
-        }
-        if (rest.length !== 2 || !rest[0] || !/^[1-9]\d*$/.test(rest[1] ?? "")) {
-            throw new Error("ccs proxy capture requires TARGET and a positive integer COUNT");
-        }
-        const { state, status } = await proxyCaptureStatus(options);
-        if (status.active)
-            throw new Error("proxy capture already has an active task");
-        const started = await proxyCaptureRequest(state, {
-            method: "POST",
-            body: JSON.stringify({ target: rest[0], count: Number(rest[1]) }),
-        });
-        printKeyValue("capture:", textGreen("active"), 10);
-        printKeyValue("target:", rest[0], 10);
-        printKeyValue("count:", rest[1], 10);
-        printKeyValue("directory:", colorPath(formatProxyFilePath(started.directory)), 10);
-        printKeyValue("note:", "authentication headers are redacted; files remain until manually removed", 10);
+        rejectProxyCommandArgs(rest, "ccs proxy capture");
+        await runProxyCaptureCommand(options);
         return;
     }
     if (command === "mode") {
@@ -6476,37 +6648,8 @@ export async function runProxyCommand(args, options) {
     }
     if (command === "restart") {
         rejectRemovedYesFlags(rest, "ccs proxy restart");
-        if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== "--force")) {
-            throw new Error(`unknown argument for ccs proxy restart: ${rest[0] ?? ""}`);
-        }
-        const force = rest[0] === "--force";
-        const plan = await buildProxyRestartPlan(options, force);
-        printKeyValue("provider:", plan.providerName, 9);
-        printKeyValue("routing:", `${colorUrl(plan.proxyBaseUrl)} (unchanged)`, 9);
-        printKeyValue("mode:", `${colorName(plan.mode)} (unchanged)`, 9);
-        printKeyValue("current:", plan.current.healthy
-            ? `PID=${plan.current.pid ?? "unknown"} server=${plan.current.version ?? "unknown"} protocol=${plan.current.protocol ?? "unknown"}`
-            : textDim("not running"), 9);
-        printKeyValue("target:", `server=${plan.targetVersion} protocol=${plan.targetProtocol}`, 9);
-        printKeyValue("requests:", plan.activeRequests.length === 0
-            ? textGreen("active=0")
-            : textRed(`active=${plan.activeRequests.length}`), 9);
-        for (const request of plan.activeRequests) {
-            printKeyValue("request:", `${request.id} session=${request.session ?? "-"} path=${request.path}`, 9);
-        }
-        printKeyValue("note:", force
-            ? "force terminates active client connections before restart"
-            : "new requests are briefly unavailable during restart", 9);
-        printKeyValue("confirm:", "no changes are written unless you type yes", 9);
-        if (!(await confirmApply())) {
-            return;
-        }
-        const result = await restartProxyRuntime(options, plan);
-        printKeyValue("stopped:", result.stopped, 9);
-        printKeyValue("started:", textGreen("healthy"), 9);
-        printKeyValue("pid:", result.runtime.pid === null ? textDim("none") : textGreen(String(result.runtime.pid)), 9);
-        printKeyValue("server:", result.runtime.version ? textGreen(result.runtime.version) : textDim("none"), 9);
-        printKeyValue("protocol:", result.runtime.protocol === null ? textDim("none") : textGreen(String(result.runtime.protocol)), 9);
+        rejectProxyCommandArgs(rest, "ccs proxy restart");
+        await runProxyRestartCommand(options);
         return;
     }
     if (command === "serve") {

@@ -17,6 +17,14 @@ in the command-specific specifications.
 - File-changing commands print the complete preview, state that no changes are
   written without confirmation, and require typing exact `yes`. Do not add
   automatic-confirmation or separate dry-run flags.
+- Write operations that need a choice, a target picked from runtime data, or
+  several related values use one interactive command: print the current state,
+  collect every choice with `src/lib/prompt.ts` (arrow-key select, multi-select,
+  and text input with current values as defaults), then preview once and ask for
+  exact `yes` once. Do not keep equivalent positional-argument forms. Without a
+  terminal, these commands print their state and a short note, and write nothing.
+- Commands that follow a background task after starting it show live progress
+  until it finishes, and provide keys to cancel the task or leave the view.
 - Apply rechecks the preview source, writes only the previewed target, verifies
   the result, and reports backups and verification.
 

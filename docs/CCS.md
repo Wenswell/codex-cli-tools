@@ -36,10 +36,8 @@ ccs models [PROFILE] [--json]
 ccs proxy [--history N] [--view overview|tokens|cost]
 ccs proxy watch [--history N] [--view overview|tokens|cost]
 ccs proxy reroute
-ccs proxy cancel SESSION_OR_REQUEST|all
-ccs proxy capture SESSION_PREFIX COUNT
+ccs proxy cancel
 ccs proxy capture
-ccs proxy capture cancel
 ccs proxy mode [passthrough [retry]|retry [on|off]|recovery|intercept]
 ccs proxy config
 ccs proxy install|restore|serve
@@ -232,10 +230,8 @@ ccs proxy watch
 ccs proxy watch --history N
 ccs proxy watch --view overview|tokens|cost
 ccs proxy reroute
-ccs proxy cancel SESSION_OR_REQUEST|all
-ccs proxy capture SESSION_PREFIX COUNT
+ccs proxy cancel
 ccs proxy capture
-ccs proxy capture cancel
 ccs proxy mode
 ccs proxy mode passthrough
 ccs proxy mode passthrough retry
@@ -249,7 +245,6 @@ ccs proxy config latency off
 ccs proxy config latency FIRST TOTAL [return_502|retry_then_502]
 ccs proxy install
 ccs proxy restart
-ccs proxy restart --force
 ccs proxy restore
 ccs proxy serve
 ```
@@ -274,7 +269,7 @@ For a normal tool update, leave the installed routing and state in place:
 2. Run `ccs proxy restart` and confirm it with exact `yes`.
 3. Run `ccs proxy` and verify the new PID, current package version, health protocol, and preserved mode/history.
 
-`restart` preserves `config.toml` routing, proxy state, mode, and history. It refuses to restart while requests are active. Use `ccs proxy restart --force` to preview those requests, then, after exact `yes`, terminate the old proxy and all of its active client connections before starting the replacement. Proxy shutdown stops accepting new requests, drains active responses, and closes idle keep-alive connections immediately. Running one-shot `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI. `ccs proxy watch` only observes state and health, so a long-running watch from an earlier package cannot replace a newer runtime.
+`restart` preserves `config.toml` routing, proxy state, mode, and history. When requests are active, `restart` lists them and asks whether to keep running or force the restart; a forced restart terminates the old proxy and all of its active client connections after exact `yes`. Without a terminal it refuses while requests are active. Proxy shutdown stops accepting new requests, drains active responses, and closes idle keep-alive connections immediately. Running one-shot `ccs proxy` also replaces a healthy runtime automatically when its protocol or package version does not match the current CLI. `ccs proxy watch` only observes state and health, so a long-running watch from an earlier package cannot replace a newer runtime.
 
 `proxy.json` has an explicit state schema version. When an update changes that schema, the next installed proxy command automatically stops the old runtime, preserves local routing and installation metadata, resets policy to safe `passthrough` defaults, clears incompatible request metrics/history, and starts the current runtime when needed. Current-schema corruption remains an explicit error; manual cache-file deletion is not part of the update flow.
 
@@ -294,8 +289,8 @@ Behavior:
 - A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.
 - When status retry is enabled, configured HTTP error responses (default: 429, 503, and transient gateway 520) are withheld and retried while the configured total window allows another wait and dispatch. In `passthrough + retry`, every non-stream response body up to 1 MiB is checked for the Capacity message, including bodies returned with HTTP `200`; matching responses use the same window and backoff while counting as `upstream_capacity`. Non-matching responses follow the ordinary status rule. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original response. An aborted request, premature client socket close, or unfinished response close stops the wait and prevents another upstream attempt. In `passthrough`, final responses remain uninspected.
 - After `ccs toggle`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429, 503, 520, or a Capacity response. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
-- Use `ccs proxy cancel SESSION_OR_REQUEST` when a Codex UI session has been closed but its request connection is still open. The target is the displayed session prefix or an exact request ID. It previews only current 429, 503, 520, or Capacity retry waits and requires exact `yes`; ambiguous session prefixes are rejected. Cancellation also applies to pinned waits, prevents the next attempt, and records status `499`.
-- Use `ccs proxy capture SESSION_PREFIX COUNT` to save the next `COUNT` complete client-boundary HTTP exchanges for one Codex session. Use `ccs proxy capture cancel` to stop an active capture immediately; already written files are retained. The prefix follows the session matching rule used by `cancel`; the first match binds the full session id and an ambiguous later match ends the task with an explicit error. `ccs proxy capture` reports the active task. Captures start after arming, stop automatically after the requested count, and live under `~/.cache/codex-tools/proxy/captures/` as private metadata plus byte-exact request/response body files. Authentication and cookie headers are redacted; prompt and response bodies are intentionally retained until manually removed. Proxy restart discards an unfinished capture task.
+- Use `ccs proxy cancel` when a Codex UI session has been closed but its request connection is still open. It lists current 429, 503, 520, or Capacity retry waits, lets you select requests with space (`a` selects all), then previews the selection and requires exact `yes`. Cancellation also applies to pinned waits, prevents the next attempt, and records status `499`.
+- Use `ccs proxy capture` to save the next complete client-boundary HTTP exchanges for one Codex session. It lists sessions from active and recent requests; select one, enter a request count (default `5`), and the command shows live progress. Press `c` to cancel the capture (already written files are retained) or `q` to leave the view while the capture continues; running `ccs proxy capture` again reopens the view. The view closes by itself when the requested count is reached and prints the result. The selected short session id binds the first matching full session id; an ambiguous later match ends the task with an explicit error. Captures start after arming, stop automatically after the requested count, and live under `~/.cache/codex-tools/proxy/captures/` as private metadata plus byte-exact request/response body files. Authentication and cookie headers are redacted; prompt and response bodies are intentionally retained until manually removed. Proxy restart discards an unfinished capture task.
 - Upstream HTTP responses are forwarded as received when the active policy accepts them. Upstream `4xx` and `5xx` responses record `failure_summary.type=upstream_error` and render the upstream failure summary in the history `result` column. Summaries include only bounded non-secret `server`, request-id, and `cf-ray` diagnostics; a response-body read failure is labeled `upstream stream terminated`.
 - In `recovery` and `intercept`, upstream Capacity bodies retry the same upstream when a non-stream response body contains `Selected model is at capacity. Please try a different model.`, or contains both `selected model is at capacity` and `try a different model` case-insensitively, regardless of status including `200`. `passthrough + retry` applies the same Capacity recognition and uses the independent status-retry window. Plain `429` and `5xx` responses without that text are forwarded as received. Capacity defaults to `retry_then_pass_through`; HTTP 429 defaults to `pass_through` in intervention modes. Capacity, 429, reasoning, and first-progress retries share the three-retry policy budget in intervention modes; transport retry remains independent.
 - A retryable Capacity response uses `Retry-After` seconds or HTTP date when present. Values over 60 seconds are not waited; missing or invalid values use bounded jitter. Retry waits stop on client abort or the absolute total deadline.
