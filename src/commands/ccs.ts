@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createTwoFilesPatch } from "diff";
@@ -18,6 +17,7 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
+import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
 import {
   maskSecret,
   textBlue,
@@ -26,6 +26,7 @@ import {
   textGreen,
   textRed,
   textYellow,
+  truncateVisible,
 } from "../lib/text.js";
 import {
   colorHost,
@@ -38,6 +39,7 @@ import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptio
 import {
   syncTomlTemplate,
   readTomlBaseUrl,
+  tomlLeafDifferences,
   updateTomlBaseUrl,
 } from "../lib/toml.js";
 import { printTable, type TableColumn } from "../lib/table.js";
@@ -53,11 +55,6 @@ type ConfigSyncPlan = {
   nextContent: string;
   differentPaths: string[];
   updatedPaths: string[];
-};
-
-type SyncOptions = {
-  replaceAll: boolean;
-  replacePaths: string[];
 };
 
 type SyncPreviewPlan = PreviewPlan & {
@@ -78,22 +75,13 @@ type PreviewPlan = {
   warnings: string[];
 };
 
-type ConfigSyncAction = "status" | "push" | "pull";
-
-type ConfigSyncOptions = {
-  action: ConfigSyncAction;
-};
+type ConfigSyncAction = "push" | "pull";
 
 type ConfigFileSummary = {
   exists: boolean;
   size?: number;
   sha256?: string;
   mtime?: Date;
-};
-
-type Prompt = {
-  question(prompt: string): Promise<string>;
-  close(): void;
 };
 
 type ModelEntry = {
@@ -440,18 +428,12 @@ function printConfigSyncStatus(local: ConfigFileSummary): void {
   console.log(textBold("ccs config"));
   printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 8);
   printKeyValue("remote:", colorPath(configSyncRemoteDisplay), 8);
-  printCommandFooter([{
-    label: "commands:",
-    commands: ["push", "pull", "--help"],
-  }]);
 }
 
 function printConfigSyncHelp(): void {
   console.log([
     textBold("Usage:"),
-    "  ccs config        # show local and remote config sync endpoints",
-    "  ccs config push   # preview, confirm, and copy profiles.json to LAN server",
-    "  ccs config pull   # preview, confirm, and copy profiles.json from LAN server",
+    "  ccs config        # show sync endpoints, then choose push or pull, preview, and confirm",
   ].join("\n"));
 }
 
@@ -514,23 +496,30 @@ async function runConfigSync(args: string[]): Promise<void> {
     printConfigSyncHelp();
     return;
   }
+  if (args.length > 0) {
+    throw new Error(`unknown argument for ccs config: ${args[0]}`);
+  }
 
-  const options = parseConfigSyncArgs(args);
   const local = await localConfigSummary();
-  if (options.action === "status") {
-    printConfigSyncStatus(local);
+  printConfigSyncStatus(local);
+  if (!isInteractive()) {
+    printKeyValue("note:", "run in an interactive terminal to push or pull", 8);
     return;
   }
+  const action = await select<ConfigSyncAction>("Sync profiles.json", [
+    { value: "pull", label: "pull", hint: "replace the local file with the LAN server copy" },
+    { value: "push", label: "push", hint: "replace the LAN server copy with the local file" },
+  ]);
 
   const remote = await remoteConfigSummary();
   const localText = await readTextIfExists(profilesPath());
   const remoteText = await readRemoteConfigTextIfExists(remote);
-  printConfigSyncPlan(options.action, local, remote, localText, remoteText);
+  printConfigSyncPlan(action, local, remote, localText, remoteText);
 
   if (!(await confirmApply())) {
     return;
   }
-  if (options.action === "push") {
+  if (action === "push") {
     await pushConfigToServer(local, remote);
     return;
   }
@@ -547,18 +536,6 @@ function assertExactArgs(argv: string[], command: string, count: number): void {
   if (argv.length !== count) {
     throw new Error(`usage: ccs ${command}`);
   }
-}
-
-function parseConfigSyncArgs(args: string[]): ConfigSyncOptions {
-  if (args.length === 0) {
-    return { action: "status" };
-  }
-  const action = args[0];
-  if (action === "push" || action === "pull") {
-    assertExactArgs(args.slice(1), `config ${action}`, 0);
-    return { action };
-  }
-  throw new Error(`unknown argument for ccs config: ${action}`);
 }
 
 function printPreviewSummary(
@@ -771,26 +748,27 @@ async function buildInitPreviewPlan(): Promise<PreviewPlan> {
   };
 }
 
-async function buildSyncPreviewPlan(options: SyncOptions): Promise<SyncPreviewPlan> {
-  const nextProfiles = await planSyncProfiles();
+async function selectSyncReplacePaths(): Promise<string[]> {
   const defaults = await readDefaultCodexConfig();
-  const template = syncTomlTemplate(defaults, "", new Set());
-  const selectedPaths = options.replaceAll
-    ? template.leafPaths.filter((path) => !isProviderBaseUrlPath(path))
-    : options.replacePaths;
-  const templatePaths = new Set(template.leafPaths);
-  for (const path of selectedPaths) {
-    if (isProviderBaseUrlPath(path)) {
-      throw new Error(`ccs sync cannot replace proxy routing field: ${path}`);
-    }
-    if (!templatePaths.has(path)) {
-      const prefix = `${path}.`;
-      const kind = template.leafPaths.some((candidate) => candidate.startsWith(prefix)) ? "non-leaf" : "unknown";
-      throw new Error(`${kind} TOML path for ccs sync --replace: ${path}`);
-    }
-  }
-  const configPlan = await planCodexConfigSync(new Set(selectedPaths));
-  if (selectedPaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await proxyStateExists()) {
+  const existing = (await readTextIfExists(codexConfigPath())) ?? "";
+  const differences = tomlLeafDifferences(defaults, existing).filter((difference) => !isProviderBaseUrlPath(difference.path));
+  if (differences.length === 0 || !isInteractive()) return [];
+  const proxyInstalled = await proxyStateExists();
+  const choices = differences.map((difference) => ({
+    value: difference.path,
+    label: difference.path,
+    hint: `${truncateVisible(difference.current, 32)} -> ${truncateVisible(difference.template, 32)}`,
+    disabled: difference.path === "model_provider" && proxyInstalled ? "proxy installed" : undefined,
+  }));
+  if (choices.every((choice) => choice.disabled)) return [];
+  console.log(textDim("missing template fields are always added; existing values change only when selected."));
+  return multiSelect("Replace which existing values with the template?", choices);
+}
+
+async function buildSyncPreviewPlan(replacePaths: string[]): Promise<SyncPreviewPlan> {
+  const nextProfiles = await planSyncProfiles();
+  const configPlan = await planCodexConfigSync(new Set(replacePaths));
+  if (replacePaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await proxyStateExists()) {
     throw new Error("ccs sync cannot replace model_provider while proxy state exists");
   }
   const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
@@ -832,27 +810,6 @@ function isProviderBaseUrlPath(path: string): boolean {
   return /^model_providers\.[^.]+\.base_url$/.test(path);
 }
 
-function parseSyncOptions(args: string[]): SyncOptions {
-  const replacePaths: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== "--replace") {
-      throw new Error(`unknown argument for ccs sync: ${args[index]}`);
-    }
-    const path = args[index + 1];
-    if (!path || path === "--replace") {
-      throw new Error("ccs sync --replace requires a TOML path or all");
-    }
-    replacePaths.push(path);
-    index += 1;
-  }
-  const normalized = [...new Set(replacePaths)];
-  const replaceAll = normalized.includes("all");
-  if (replaceAll && normalized.length > 1) {
-    throw new Error("ccs sync --replace all cannot be combined with explicit paths");
-  }
-  return { replaceAll, replacePaths: replaceAll ? [] : normalized };
-}
-
 function formatSyncFieldSummary(label: string, paths: string[]): string {
   if (paths.length === 0) {
     return `${label.padEnd(11)}0`;
@@ -872,37 +829,49 @@ function printPreviewPlan(plan: PreviewPlan, dryRun: boolean): void {
   printWarnings(plan.warnings);
 }
 
-async function addProfile(defaultName?: string): Promise<void> {
+async function addProfile(): Promise<void> {
+  if (!isInteractive()) {
+    throw new Error("ccs add requires an interactive terminal");
+  }
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
-  const input = createPrompt();
-  let name = "";
+  const target = await select<string | null>("Add or edit which profile?", [
+    { value: null, label: "+ new profile" },
+    ...Object.entries(profiles).map(([name, profile]) => ({ value: name, label: name, hint: profile.baseURL })),
+  ]);
+  const name = target ?? await input("Profile name", {
+    validate: (value) => !value ? "a name is required"
+      : /\s/.test(value) ? "names cannot contain spaces"
+        : profiles[value] ? `profile ${value} exists; choose it from the list to edit` : null,
+  });
+  const existing = target ? assertProfile(profiles[target], target) : undefined;
+  const baseURL = await input("baseURL", {
+    default: existing?.baseURL,
+    validate: (value) => value ? null : "baseURL is required",
+  });
+  const apiKey = await input("apiKey", {
+    default: existing?.apiKey || undefined,
+    defaultLabel: existing?.apiKey ? maskSecret(existing.apiKey) : undefined,
+    mask: true,
+  });
+  const conversion = await select<boolean>("Provider API", [
+    { value: false, label: "Responses", hint: "send Codex Responses traffic unchanged" },
+    { value: true, label: "Chat Completions only", hint: "convert Responses traffic to Chat Completions" },
+  ], { default: existing?.routeConversion?.enabled ?? false });
 
-  try {
-    name = await askRequired(input, "name", defaultName);
-    const existing = profiles[name];
-    const baseURL = await askRequired(input, "baseURL", existing?.baseURL);
-    const apiKey = await askOptional(input, "apiKey", existing?.apiKey);
-
-    const enableConversion = await askYesNo(
-      input,
-      "Provider only supports Chat Completions (convert Responses → Chat)",
-      existing?.routeConversion?.enabled ?? false,
-    );
-
-    const profile: Profile = { baseURL, apiKey };
-
-    if (enableConversion) {
-      profile.routeConversion = { enabled: true };
-      console.log(textDim("  → Codex Responses traffic will use the provider's Chat Completions endpoint"));
-    }
-
-    profiles[name] = profile;
-  } finally {
-    input.close();
+  const profile: Profile = { baseURL, apiKey };
+  if (conversion) profile.routeConversion = { enabled: true };
+  printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
+  printKeyValue("conversion:", formatRouteConversion(profile), 11);
+  console.log(textDim("no changes are written unless you type yes at the prompt."));
+  if (!(await confirmApply())) {
+    return;
   }
-
-  await writeProfiles({ ...data, profiles, current: data.current ?? name });
+  const latest = await readProfiles();
+  if (JSON.stringify(latest) !== JSON.stringify(data)) {
+    throw new Error("profiles.json changed after preview; run ccs add again");
+  }
+  await writeProfiles({ ...data, profiles: { ...profiles, [name]: profile }, current: data.current ?? name });
   console.log(`profile saved: ${textGreen(name)}`);
 }
 
@@ -966,85 +935,41 @@ function formatRouteConversion(profile: Profile): string {
   return profile.routeConversion?.enabled ? textGreen("responses→chat") : textDim("off");
 }
 
-async function askRequired(
-  input: Prompt,
-  label: string,
-  current?: string,
-): Promise<string> {
-  const value = await askOptional(input, label, current);
-  if (!value) {
-    throw new Error(`${label} is required`);
-  }
-  return value;
-}
-
-async function askOptional(
-  input: Prompt,
-  label: string,
-  current?: string,
-): Promise<string> {
-  const suffix = current ? ` [${label === "apiKey" ? maskSecret(current) : current}]` : "";
-  const value = await input.question(`${label}${suffix}: `);
-  return value || current || "";
-}
-
-async function askYesNo(
-  input: Prompt,
-  label: string,
-  defaultValue: boolean,
-): Promise<boolean> {
-  const defaultText = defaultValue ? "Y/n" : "y/N";
-  const value = await input.question(`${label} [${defaultText}]: `);
-  const trimmed = value.trim().toLowerCase();
-
-  if (trimmed === "") {
-    return defaultValue;
-  }
-
-  if (trimmed === "y" || trimmed === "yes") {
-    return true;
-  }
-
-  if (trimmed === "n" || trimmed === "no") {
-    return false;
-  }
-
-  return defaultValue;
-}
-
-function createPrompt(): Prompt {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: process.stdin.isTTY,
-  });
-  const iterator = rl[Symbol.asyncIterator]();
-
-  return {
-    async question(prompt: string): Promise<string> {
-      process.stdout.write(prompt);
-      const next = await iterator.next();
-      return next.done ? "" : next.value;
-    },
-    close(): void {
-      rl.close();
-    },
-  };
-}
-
-async function removeProfile(name: string): Promise<void> {
-  if (!name) {
-    throw new Error("usage: ccs remove NAME");
-  }
+async function removeProfile(): Promise<void> {
   const data = await readProfiles();
-  const profiles = data.profiles ?? {};
-  if (!profiles[name]) {
-    throw new Error(`profile not found: ${name}`);
+  const names = Object.keys(data.profiles ?? {});
+  if (names.length === 0) {
+    console.log(textDim("no profiles to remove."));
+    return;
   }
-  delete profiles[name];
-  const names = Object.keys(profiles);
-  const current = data.current === name ? names[0] : data.current;
+  if (!isInteractive()) {
+    throw new Error("ccs remove requires an interactive terminal");
+  }
+  const name = await select("Remove which profile?", names.map((item) => ({
+    value: item,
+    label: item,
+    hint: `${data.profiles![item].baseURL}${item === data.current ? "  (current)" : ""}`,
+  })), { default: data.current });
+  const remaining = names.filter((item) => item !== name);
+  const current = data.current === name ? remaining[0] : data.current;
   const toggle = data.toggle?.filter((item) => item !== name);
+  printProfileSummary("remove", name, assertProfile(data.profiles![name], name));
+  if (current !== data.current) {
+    printKeyValue("current:", `${textYellow(name)} -> ${current ? colorName(current) : textDim("none")}`);
+  }
+  if (toggle && toggle.length !== data.toggle?.length) {
+    printKeyValue("toggle:", toggle.length === 0 ? textDim("none") : toggle.join(", "));
+  }
+  console.log(textDim("no changes are written unless you type yes at the prompt."));
+  if (!(await confirmApply())) {
+    return;
+  }
+  const latest = await readProfiles();
+  if (JSON.stringify(latest) !== JSON.stringify(data)) {
+    throw new Error("profiles.json changed after preview; run ccs remove again");
+  }
+  const profiles = { ...data.profiles };
+  delete profiles[name];
   await writeProfiles({ ...data, profiles, current, toggle });
   console.log(`profile removed: ${textRed(name)}`);
 }
@@ -1302,16 +1227,14 @@ function usageLines(): string[] {
     "  ccs PROFILE                          # show profile details",
     "  ccs models [PROFILE] [--json]        # list models from the profile v1/models endpoint",
     "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
-    "  ccs proxy [watch|reroute|cancel|mode|config|install|restart|restore|serve] # manage proxy state and runtime",
+    "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|config|install|restart|restore|serve] # manage proxy state and runtime",
     "  ccs toggle [PROFILE]                 # switch profile",
-    "  ccs config [push|pull]                # preview, confirm, and sync profiles.json with LAN server",
+    "  ccs config                           # choose push or pull, preview, and sync profiles.json with LAN server",
     "  ccs list | l                         # list profiles",
     "  ccs init                             # preview, confirm, and create config",
-    "  ccs sync                             # add missing template config fields",
-    "  ccs sync --replace TOML_PATH          # replace one repeatable template leaf field",
-    "  ccs sync --replace all                # replace every template leaf except provider base URLs",
-    "  ccs add [PROFILE]                     # add or update a profile",
-    "  ccs remove | rm | delete PROFILE      # remove a profile",
+    "  ccs sync                             # add missing template fields; choose existing values to replace",
+    "  ccs add                              # choose a profile to edit or create, then enter its values",
+    "  ccs remove                           # choose a profile to remove",
   ];
 }
 
@@ -1334,11 +1257,11 @@ function printUsageHelp(): void {
   printCommandFooter([
     {
       label: "commands:",
-      commands: ["version", "PROFILE", "models", "toggle", "list", "init", "sync", "add", "remove"],
+      commands: ["version", "PROFILE", "models", "toggle", "list", "init", "sync", "add", "remove", "config"],
     },
     {
       label: "namespaces:",
-      commands: ["proxy", "config", "--help"],
+      commands: ["proxy", "--help"],
     },
   ]);
 }
@@ -1397,7 +1320,8 @@ export async function runCcs(argv: string[]): Promise<void> {
 
   if (command === "sync") {
     rejectRemovedYesFlags(args, "ccs sync");
-    const previewPlan = await buildSyncPreviewPlan(parseSyncOptions(args));
+    assertExactArgs(args, "sync", 0);
+    const previewPlan = await buildSyncPreviewPlan(await selectSyncReplacePaths());
     console.log(formatSyncFieldSummary("different:", previewPlan.configSync.differentPaths));
     console.log(formatSyncFieldSummary("update:", previewPlan.configSync.updatedPaths));
     printPreviewPlan(previewPlan, true);
@@ -1447,17 +1371,14 @@ export async function runCcs(argv: string[]): Promise<void> {
   }
 
   if (command === "add") {
-    assertMaxArgs(args, "add [PROFILE]", 1);
-    if (args[0]?.startsWith("-")) {
-      throw new Error(`unknown argument for ccs add: ${args[0]}`);
-    }
-    await addProfile(args[0]);
+    assertExactArgs(args, "add", 0);
+    await addProfile();
     return;
   }
 
-  if (command === "remove" || command === "rm" || command === "delete") {
-    assertExactArgs(args, `${command} PROFILE`, 1);
-    await removeProfile(args[0]);
+  if (command === "remove") {
+    assertExactArgs(args, "remove", 0);
+    await removeProfile();
     return;
   }
 

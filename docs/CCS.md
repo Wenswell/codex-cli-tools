@@ -21,8 +21,8 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | PROFILE | models | toggle | list | init | sync | add | remove
-namespaces: proxy | config | --help
+commands:   version | PROFILE | models | toggle | list | init | sync | add | remove | config
+namespaces: proxy | --help
 ```
 
 Supported commands:
@@ -44,14 +44,12 @@ ccs proxy compact
 ccs proxy config
 ccs proxy install|restart|restore|serve
 ccs toggle [PROFILE]
-ccs config [push|pull]
+ccs config
 ccs list | l
 ccs init
 ccs sync
-ccs sync --replace TOML_PATH [--replace TOML_PATH ...]
-ccs sync --replace all
-ccs add [PROFILE]
-ccs remove | rm | delete PROFILE
+ccs add
+ccs remove
 ```
 
 `ccs list` marks the current profile with `*`.
@@ -166,11 +164,9 @@ If `config/ccs-profiles.json` changes later, run:
 ccs sync
 ```
 
-`ccs sync` prints `different` and `update` field summaries plus its masked diff, then writes the previewed result only if you type exact `yes` at the prompt.
+`ccs sync` always adds missing template fields. When existing `config.toml` values differ from `config/codex-config.toml`, it first lists those dotted leaf paths with `current -> template` values; select the values to replace with space (`a` selects all) and press Enter. Nothing is selected by default, so Enter alone keeps the sync additive. Provider `model_providers.*.base_url` fields are never listed, and `model_provider` cannot be selected while proxy state exists. The command then prints `different` and `update` field summaries plus its masked diff, and writes the previewed result only if you type exact `yes` at the prompt. Without a terminal, the preview is additive and nothing is written.
 
-Plain `ccs sync` keeps additive TOML behavior. Repeat `--replace` to select exact dotted leaf paths from `config/codex-config.toml`; duplicate paths count once. `--replace all` selects every template leaf except `model_providers.*.base_url`. Unknown paths, section paths, explicit provider `base_url` replacement, and combining `all` with explicit paths fail before preview. While proxy state exists, a selected `model_provider` change also fails before preview.
-
-Missing template fields remain additive in every form. Selected fields receive template values; other existing values and local-only fields remain unchanged. `different` lists every template leaf that differs or is missing, while `update` lists fields changed by this invocation. Empty lists show `0`.
+Selected fields receive template values; other existing values and local-only fields remain unchanged. `different` lists every template leaf that differs or is missing, while `update` lists fields changed by this invocation. Empty lists show `0`.
 
 When applied, `ccs sync` creates the same backup directory first, writes the exact previewed content, and verifies each result by reading it back. It merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys and local-only profiles, seeds `top.stateUrls` when `top` is missing, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
 
@@ -178,32 +174,25 @@ When applied, `ccs sync` creates the same backup directory first, writes the exa
 
 ```bash
 ccs config
-ccs config push
-ccs config pull
 ```
 
-Run `ccs config` without arguments to print the local file summary, fixed LAN target, and a compact command line without connecting to the server.
-
-```text
-commands: push | pull | --help
-```
-
-`push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. Only `push` and `pull` connect to the server and compare files. Both commands preview first and apply only after you type exact `yes`; explicit push/pull previews connect to the server, print a masked unified diff, replace the whole file instead of merging, and create a backup before overwriting an existing target.
+`ccs config` prints the local file summary and fixed LAN target, then asks whether to `pull` or `push`. Without a terminal, it prints the summary only and does not connect to the server. `push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. After the choice, the command connects to the server, prints a masked unified diff, and applies only after you type exact `yes`. Both directions replace the whole file instead of merging and create a backup before overwriting an existing target.
 
 Add or update a profile interactively:
 
 ```bash
 ccs add
-ccs add test002
 ```
 
-When editing an existing profile, press Enter to keep the current value. If `PROFILE` is passed, the name prompt uses it as the default.
+`ccs add` lists existing profiles plus `+ new profile`. Editing a profile shows its current `baseURL` and masked `apiKey`; press Enter to keep a value. A new profile asks for a name first. The API key is masked while typing. The last step chooses between a Responses provider and a Chat Completions-only provider. The result is previewed with a masked key and written after exact `yes`.
 
 Remove a profile:
 
 ```bash
-ccs remove local
+ccs remove
 ```
+
+`ccs remove` lists profiles with the current one marked, previews the removed profile, any `current` switch, and the remaining `toggle` list, then writes after exact `yes`. `ccs add` and `ccs remove` require an interactive terminal.
 
 `ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
 When proxy mode is installed, `ccs toggle` switches `profiles.current`, and the proxy uses that current profile as the active upstream and API key for new requests.

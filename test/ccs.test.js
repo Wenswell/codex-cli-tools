@@ -4,18 +4,17 @@ import { createServer } from "node:http";
 import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
 import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
-import { captureStdout, execNodeScript, execNodeStdout, spawnNode, stdoutPropertiesScript, stripAnsi } from "./helpers/terminal.js";
+import { captureStdout, execNodeScript, execNodeStdout, KEYS, runInteractive, spawnNode, stdoutPropertiesScript, stripAnsi } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
-  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|mode\|config\|install\|restart\|restore\|serve\]/);
+  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
   assert.doesNotMatch(output, /ccs run/);
@@ -59,7 +58,7 @@ test("ccs exposes route conversion in current, list, and profile views", async (
   }
 });
 
-test("ccs namespaces use compact footers and local help", async () => {
+test("ccs config shows sync endpoints and has local help", async () => {
   const home = await writeProfiles({
     profiles: { test001: { baseURL: "https://example.invalid", apiKey: "" } },
     current: "test001",
@@ -67,8 +66,12 @@ test("ccs namespaces use compact footers and local help", async () => {
   const env = { XDG_CACHE_HOME: join(home, ".cache") };
   try {
     const configOutput = await runCcs(["dist/bin/ccs.js", "config"], home, env);
-    assert.match(configOutput, /--help/);
-    assert.match(await runCcs(["dist/bin/ccs.js", "config", "--help"], home, env), /ccs config push/);
+    assert.match(configOutput, /^local:/m);
+    assert.match(configOutput, /run in an interactive terminal to push or pull/);
+    assert.match(await runCcs(["dist/bin/ccs.js", "config", "--help"], home, env), /choose push or pull/);
+    for (const removed of [["config", "push"], ["config", "pull"]]) {
+      await assert.rejects(() => runCcs(["dist/bin/ccs.js", ...removed], home, env), /unknown argument for ccs config/);
+    }
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -314,7 +317,7 @@ test("Codex profile launch uses the direct URL and rejects unknown profiles", as
   }
 });
 
-test("ccs sync stays additive by default and reports complete field summaries", async () => {
+test("ccs sync stays additive when no existing values are selected", async () => {
   const home = await writeSyncFixture([
     'model_provider = "codex"',
     'model = "local-model"',
@@ -328,8 +331,14 @@ test("ccs sync stays additive by default and reports complete field summaries", 
     '',
   ].join("\n"));
   try {
-    const output = await runCcsWithConfirmation(["sync"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const { output } = await runCcsInteractive(["sync"], home, [
+      ["Replace which existing values with the template?", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ]);
     const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    assert.match(output, /model\s+"local-model" -> "gpt-5\.6-sol"/);
+    assert.match(output, /features\.goals\s+false -> true/);
+    assert.doesNotMatch(output, /model_providers\.codex\.base_url\s+"https/);
     assert.match(output, /^different:\s+\d+\s+.*model.*features\.goals/m);
     assert.match(output, /^update:\s+\d+\s+/m);
     assert.match(config, /model = "local-model"/);
@@ -341,35 +350,7 @@ test("ccs sync stays additive by default and reports complete field summaries", 
   }
 });
 
-test("ccs sync replaces repeated exact leaf paths once and applies its preview", async () => {
-  const home = await writeSyncFixture([
-    'model_provider = "codex"',
-    'model = "local-model"',
-    '',
-    '[model_providers.codex]',
-    'base_url = "https://local.example"',
-    '',
-    '[features]',
-    'goals = false',
-    '',
-  ].join("\n"));
-  try {
-    const output = await runCcsWithConfirmation([
-      "sync", "--replace", "model", "--replace", "features.goals", "--replace", "model",
-    ], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
-    const updateLine = output.split("\n").find((line) => line.startsWith("update:"));
-    assert.ok(updateLine);
-    assert.equal((updateLine.match(/(?:^|, )model(?:,|$)/g) ?? []).length, 1);
-    assert.match(config, /model = "gpt-5\.6-sol"/);
-    assert.match(config, /goals = true/);
-    assert.match(config, /base_url = "https:\/\/local\.example"/);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs sync --replace all preserves provider base URLs and local-only fields", async () => {
+test("ccs sync replaces only the selected existing values and applies its preview", async () => {
   const home = await writeSyncFixture([
     'model_provider = "codex"',
     'model = "local-model"',
@@ -379,79 +360,57 @@ test("ccs sync --replace all preserves provider base URLs and local-only fields"
     'base_url = "https://local.example"',
     'wire_api = "chat"',
     '',
+    '[features]',
+    'goals = false',
+    '',
   ].join("\n"));
   try {
-    await runCcsWithConfirmation(["sync", "--replace", "all"], home, { XDG_CACHE_HOME: join(home, ".cache") });
+    const { output } = await runCcsInteractive(["sync"], home, [
+      ["Replace which existing values with the template?", `${KEYS.space}${KEYS.down}${KEYS.space}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
     const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    const updateLine = output.split("\n").find((line) => line.startsWith("update:"));
+    assert.ok(updateLine);
+    assert.match(updateLine, /(?:^|, |\s)model(?:,|$)/);
     assert.match(config, /model = "gpt-5\.6-sol"/);
     assert.match(config, /wire_api = "responses"/);
+    assert.match(config, /goals = false/);
     assert.match(config, /base_url = "https:\/\/local\.example"/);
     assert.match(config, /local_only = true/);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
 
-test("ccs sync rejects invalid replacement selections before preview", async () => {
-  const home = await writeSyncFixture('model_provider = "codex"\n');
-  try {
-    const cases = [
-      [["sync", "--replace", "missing.path"], /unknown TOML path/],
-      [["sync", "--replace", "features"], /non-leaf TOML path/],
-      [["sync", "--replace", "model_providers.codex.base_url"], /cannot replace proxy routing field/],
-      [["sync", "--replace", "all", "--replace", "model"], /cannot be combined/],
-    ];
-    for (const [args, pattern] of cases) {
-      await assert.rejects(() => runCcsDirect(args, home, { XDG_CACHE_HOME: join(home, ".cache") }), pattern);
+    const all = await writeSyncFixture('model_provider = "codex"\nmodel = "local-model"\n\n[features]\ngoals = false\n');
+    try {
+      await runCcsInteractive(["sync"], all, [
+        ["Replace which existing values with the template?", `a${KEYS.enter}`],
+        ["Apply changes?", "yes\n"],
+      ]);
+      const replaced = await readFile(join(all, ".codex", "config.toml"), "utf8");
+      assert.match(replaced, /model = "gpt-5\.6-sol"/);
+      assert.match(replaced, /goals = true/);
+    } finally {
+      await rm(all, { recursive: true, force: true });
     }
+    await assert.rejects(() => runCcsDirect(["sync", "--replace", "all"], home), /usage: ccs sync/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("ccs sync preserves proxy routing by rejecting a model_provider change", async () => {
-  const home = await writeSyncFixture('model_provider = "other"\n');
+test("ccs sync keeps model_provider unselectable while proxy state exists", async () => {
+  const home = await writeSyncFixture('model_provider = "other"\nmodel = "local-model"\n');
   try {
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
-    await writeFile(join(stateRoot, "proxy.json"), JSON.stringify({
-      state_schema_version: 4,
-      installed_at: "2026-01-01T00:00:00.000Z",
-      codex_config_path: join(home, ".codex", "config.toml"),
-      provider_name: "codex",
-      original_base_url: "https://proxy.example.com",
-      proxy_base_url: "http://127.0.0.1:4610",
-      mode: "recovery",
-      status_retry: {
-        enabled: false,
-        total_window_ms: 3_600_000,
-        backoff_base_ms: 1000,
-        backoff_max_ms: 30_000,
-      },
-      listen_host: "127.0.0.1",
-      listen_port: 4610,
-      latency_guard: {
-        enabled: false,
-        first_progress_timeout_ms: 0,
-        first_progress_action: "return_502",
-        total_timeout_ms: 0,
-      },
-      profile_order: ["test001"],
-      backup_path: join(stateRoot, "config.toml.backup"),
-      metrics: {
-        total_requests: 0,
-        active_requests: [],
-        status_counts: {},
-        reasoning_token_counts: {},
-        upstream_hit_counts: {},
-        latency_ms: { last: null, count: 0, sum: 0, min: null, max: null },
-        recent_requests: [],
-      },
-    }), "utf8");
-    await assert.rejects(
-      () => runCcsDirect(["sync", "--replace", "model_provider"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
-      /cannot replace model_provider while proxy state exists/,
-    );
+    await writeFile(join(stateRoot, "proxy.json"), "{}", "utf8");
+    const { output } = await runCcsInteractive(["sync"], home, [
+      ["Replace which existing values with the template?", `a${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.match(output, /model_provider\s+\(proxy installed\)/);
+    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    assert.match(config, /model_provider = "other"/);
+    assert.match(config, /model = "gpt-5\.6-sol"/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -462,14 +421,91 @@ test("ccs sync summaries compare TOML values semantically", async () => {
   const config = template.replace('model_provider = "codex"', "model_provider = 'codex' # local style");
   const home = await writeSyncFixture(config);
   try {
-    const output = await runCcsWithConfirmation(
-      ["sync", "--replace", "model_provider"],
-      home,
-      { XDG_CACHE_HOME: join(home, ".cache") },
-    );
+    const { output } = await runCcsInteractive(["sync"], home, [["Apply changes?", "yes\n"]]);
+    assert.doesNotMatch(output, /Replace which existing values/);
     assert.match(output, /^different:\s+0$/m);
     assert.match(output, /^update:\s+0$/m);
     assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /model_provider = 'codex' # local style/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs remove picks a profile, previews the current switch, and writes after yes", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" },
+      test002: { baseURL: "https://test002.example.test", apiKey: "test002-key-123456" },
+    },
+    current: "test001",
+    toggle: ["test001", "test002"],
+  });
+  const profilesFile = join(home, ".config", "codex-tools", "profiles.json");
+  try {
+    await assert.rejects(() => runCcsDirect(["remove"], home), /ccs remove requires an interactive terminal/);
+    await assert.rejects(() => runCcsDirect(["remove", "test001"], home), /usage: ccs remove/);
+
+    const declined = await runCcsInteractive(["remove"], home, [
+      ["Remove which profile?", KEYS.enter],
+      ["Apply changes?", "no\n"],
+    ]);
+    assert.match(declined.output, /test001\s+https:\/\/test001\.example\.test\s+\(current\)/);
+    assert.match(declined.output, /current:\s+test001 -> test002/);
+    assert.match(declined.output, /toggle:\s+test002/);
+    assert.equal(declined.output.includes("test001-key-123456"), false);
+    assert.ok(JSON.parse(await readFile(profilesFile, "utf8")).profiles.test001);
+
+    await runCcsInteractive(["remove"], home, [
+      ["Remove which profile?", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ]);
+    const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
+    assert.deepEqual(Object.keys(profiles.profiles), ["test002"]);
+    assert.equal(profiles.current, "test002");
+    assert.deepEqual(profiles.toggle, ["test002"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs add edits a chosen profile or creates a new one with masked keys", async () => {
+  const home = await writeProfiles({
+    profiles: { test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" } },
+    current: "test001",
+  });
+  const profilesFile = join(home, ".config", "codex-tools", "profiles.json");
+  try {
+    await assert.rejects(() => runCcsDirect(["add"], home), /ccs add requires an interactive terminal/);
+    await assert.rejects(() => runCcsDirect(["add", "test001"], home), /usage: ccs add/);
+
+    const edited = await runCcsInteractive(["add"], home, [
+      ["Add or edit which profile?", `${KEYS.down}${KEYS.enter}`],
+      ["baseURL", KEYS.enter],
+      ["apiKey", KEYS.enter],
+      ["Provider API", `${KEYS.down}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.equal(edited.output.includes("test001-key-123456"), false);
+    assert.deepEqual(JSON.parse(await readFile(profilesFile, "utf8")).profiles.test001, {
+      baseURL: "https://test001.example.test",
+      apiKey: "test001-key-123456",
+      routeConversion: { enabled: true },
+    });
+
+    const secret = "local-secret-abcdef";
+    const created = await runCcsInteractive(["add"], home, [
+      ["Add or edit which profile?", KEYS.enter],
+      ["Profile name", `test001${KEYS.enter}`],
+      ["profile test001 exists", `${KEYS.backspace.repeat(5)}local${KEYS.enter}`],
+      ["baseURL", `https://local.example.test${KEYS.enter}`],
+      ["apiKey", `${secret}${KEYS.enter}`],
+      ["Provider API", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.equal(created.output.includes(secret), false);
+    const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
+    assert.deepEqual(profiles.profiles.local, { baseURL: "https://local.example.test", apiKey: secret });
+    assert.equal(profiles.current, "test001");
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -543,18 +579,16 @@ async function runCcsDirect(args, home, env = {}, isTTY = false) {
   }
 }
 
-async function runCcsWithConfirmation(args, home, env = {}) {
-  const stdinDescriptor = Object.getOwnPropertyDescriptor(process, "stdin");
-  const input = new PassThrough();
-  Object.defineProperty(input, "isTTY", { configurable: true, value: true });
-  Object.defineProperty(process, "stdin", { configurable: true, value: input });
-  const timer = setTimeout(() => input.end("yes\n"), 10);
+async function runCcsInteractive(args, home, steps, env = {}) {
+  const values = { HOME: home, NO_COLOR: "1", XDG_CACHE_HOME: join(home, ".cache"), ...env };
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
   try {
-    return await runCcsDirect(args, home, env, true);
+    return await runInteractive(() => runCcsCommand(args), steps);
   } finally {
-    clearTimeout(timer);
-    if (stdinDescriptor) {
-      Object.defineProperty(process, "stdin", stdinDescriptor);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 }

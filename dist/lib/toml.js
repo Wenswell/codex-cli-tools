@@ -111,6 +111,19 @@ export function syncTomlTemplate(template, existing, replacePaths) {
         updatedPaths: leafPaths.filter((path) => updated.has(path)),
     };
 }
+// Template leaves that exist in `existing` with a different value; missing leaves are excluded.
+export function tomlLeafDifferences(template, existing) {
+    const existingLeaves = new Map(parseTomlLeaves(existing).map((leaf) => [leaf.path, leaf]));
+    return parseTomlLeaves(template).flatMap((leaf) => {
+        const current = existingLeaves.get(leaf.path);
+        if (!current || current.value === leaf.value)
+            return [];
+        return [{ path: leaf.path, current: displayTomlValue(current.line), template: displayTomlValue(leaf.line) }];
+    });
+}
+function displayTomlValue(line) {
+    return stripTomlComment(line.slice(line.indexOf("=") + 1)).trim();
+}
 function parseTomlLeaves(content) {
     const leaves = [];
     let section = "";

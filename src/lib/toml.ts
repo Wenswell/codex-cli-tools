@@ -145,6 +145,26 @@ export function syncTomlTemplate(
   };
 }
 
+export type TomlLeafDifference = {
+  path: string;
+  current: string;
+  template: string;
+};
+
+// Template leaves that exist in `existing` with a different value; missing leaves are excluded.
+export function tomlLeafDifferences(template: string, existing: string): TomlLeafDifference[] {
+  const existingLeaves = new Map(parseTomlLeaves(existing).map((leaf) => [leaf.path, leaf]));
+  return parseTomlLeaves(template).flatMap((leaf) => {
+    const current = existingLeaves.get(leaf.path);
+    if (!current || current.value === leaf.value) return [];
+    return [{ path: leaf.path, current: displayTomlValue(current.line), template: displayTomlValue(leaf.line) }];
+  });
+}
+
+function displayTomlValue(line: string): string {
+  return stripTomlComment(line.slice(line.indexOf("=") + 1)).trim();
+}
+
 function parseTomlLeaves(content: string): TomlLeaf[] {
   const leaves: TomlLeaf[] = [];
   let section = "";
