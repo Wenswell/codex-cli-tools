@@ -1,6 +1,13 @@
 # ccs
 
-`ccs` switches Codex between OpenAI-compatible provider profiles and can list usage-only keys.
+`ccs` switches client applications between provider profiles. Each profile belongs to one platform:
+
+| Platform | Client | Files written by `ccs use` | Proxied paths |
+| --- | --- | --- | --- |
+| `codex` (default) | Codex CLI | `~/.codex/config.toml` provider `base_url`, `~/.codex/auth.json` | everything except the Claude paths |
+| `claude` | Claude Code | `~/.claude/settings.json` `env.ANTHROPIC_BASE_URL` and `env.ANTHROPIC_AUTH_TOKEN` | `/v1/messages`, `/v1/messages/*` |
+
+Each platform has its own current profile in `profiles.current`, such as `{ "codex": "test001", "claude": "pool" }`; switching one never touches the other platform's files. A profile without `platform` is a `codex` profile.
 
 `ccs stats` summarizes the local usage records written by every tool (see [CLI runtime records](./CLI_RUNTIME_RECORDS.md#command-usage-records)): runs, last run, ok/error/cancelled counts, median duration, and shortcut share per command, then how often each interactive prompt was cancelled or answered with its default.
 
@@ -12,22 +19,14 @@ Profile config lives at:
 ~/.config/codex-tools/profiles.json
 ```
 
-`ccs` updates:
-
-```text
-~/.codex/config.toml
-~/.codex/AGENTS.md
-~/.codex/auth.json
-```
-
-Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
+Run `ccs` without arguments to print the current profile of each platform (Codex always, Claude Code once a claude profile exists), `user@host`, and a compact two-level command footer:
 
 ```text
 commands:   version | PROFILE | models | use | list | config | sync | add | remove | stats
 namespaces: proxy | --help
 ```
 
-In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `c`onfig, `s`ync, `a`dd, `r`emove, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, cl`a`ude, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
+In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `c`onfig, `s`ync, `a`dd, `r`emove, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
 
 Supported commands:
 
@@ -45,7 +44,6 @@ ccs proxy capture
 ccs proxy mode
 ccs proxy search
 ccs proxy compact
-ccs proxy claude
 ccs proxy config
 ccs proxy install|restart|restore|serve
 ccs use
@@ -57,7 +55,7 @@ ccs remove
 ccs stats
 ```
 
-`ccs list` marks the current profile with `*`.
+`ccs list` shows each profile's platform and marks the current profile of each platform with `*`.
 
 `ccs models [PROFILE]` reads the model list from the selected profile's `v1/models` endpoint and prints `model`, `owned_by`, and `created` columns. It uses the current profile unless `PROFILE` is given, sends the profile API key as `Authorization: Bearer`, and resolves the endpoint from the profile `baseURL`:
 
@@ -92,7 +90,9 @@ config/ccs-profiles.json
       }
     }
   },
-  "current": "test001",
+  "current": {
+    "codex": "test001"
+  },
   "proxy": {
     "search": {
       "enabled": true,
@@ -114,7 +114,6 @@ When proxy mode is installed, run `ccs proxy search` to show alpha-search forwar
 
 Run `ccs proxy compact` and pick a profile to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider; it works like `ccs proxy search`, and `off` disables it. Explicit `run PROFILE` selection takes priority. Native remote-compaction v2 requests with boolean stream: true and a compaction_trigger item anywhere in input[] are also routed and marked [C]. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
 
-Run `ccs proxy claude` and pick a profile to send Claude Code traffic from `ccx` and `ccxs` through the proxy; `off` turns it off. Add the Claude provider first with `ccs add` (its `baseURL` is the Anthropic-compatible base, such as the `ANTHROPIC_BASE_URL` from `~/.claude/settings.json`, and its key is the Bearer token). While the route is enabled and proxy state exists, `ccx` passes `--settings` with `ANTHROPIC_BASE_URL` set to the proxy and a placeholder `ANTHROPIC_AUTH_TOKEN`; the proxy sends `/v1/messages` and `/v1/messages/*` to that profile with `Authorization: Bearer <profile key>`. `~/.claude/settings.json` is not changed, so plain `claude` keeps its own provider. See [wrappers](./WRAPPERS.md#ccx--ccxs).
 
 
 ### Set up and update local files
@@ -158,7 +157,7 @@ Add or update a profile interactively:
 ccs add
 ```
 
-`ccs add` lists existing profiles plus `+ new profile`. Editing a profile shows its current `baseURL` and masked `apiKey`; press Enter to keep a value. A new profile asks for a name first. The API key is masked while typing. The last step chooses between a Responses provider and a Chat Completions-only provider. The result is previewed with a masked key and written after exact `yes`.
+`ccs add` lists existing profiles plus `+ new profile`. Editing a profile shows its current `baseURL` and masked `apiKey`; press Enter to keep a value. A new profile asks for a name, then its platform (`codex` or `claude`); an existing profile keeps its platform. The API key is masked while typing. A codex profile's last step chooses between a Responses provider and a Chat Completions-only provider. The first profile of a platform becomes that platform's current profile. The result is previewed with a masked key and written after exact `yes`.
 
 Remove a profile:
 
@@ -174,7 +173,7 @@ Switch the current profile:
 ccs use
 ```
 
-`ccs use` lists profiles with `current`, the last use, and the last switch time. The cursor starts on the most recently active profile other than the current one, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It writes the provider URL in `~/.codex/config.toml`, `~/.codex/auth.json`, and `profiles.current`; selecting the current profile changes nothing unless `auth.json` or the provider URL no longer match it, in which case it re-applies them (with proxy mode, only the key is compared). Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
+`ccs use` lists all profiles with their platform, `current`, the last use, and the last switch time. The cursor starts on the most recently active profile that is not current, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It makes the profile current for its platform and writes only that platform's files (see the table above); other keys in those files stay unchanged, and Claude Code `ANTHROPIC_API_KEY` is removed so only the Bearer token is sent. Selecting a current profile changes nothing unless its files no longer match it, in which case it re-applies them (with proxy mode, only the key is compared). A running Claude Code process reads `settings.json` at startup; with proxy mode it keeps using the proxy, which follows the new current profile. Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
 
 Profile times live in `~/.cache/codex-tools/profile-usage.json`, outside the device-synced `profiles.json`:
 
@@ -205,7 +204,6 @@ ccs proxy capture
 ccs proxy mode
 ccs proxy search
 ccs proxy compact
-ccs proxy claude
 ccs proxy config
 ccs proxy install
 ccs proxy restart
@@ -241,7 +239,7 @@ Use `ccs proxy restore` when removing the proxy or before a clean reinstall. It 
 
 Behavior:
 
-- `ccs proxy install` and `ccs proxy restore` semantically modify only `model_providers.<provider>.base_url` in `~/.codex/config.toml`. Install points it to `http://127.0.0.1:4610`; restore resolves `profiles.current` and points it to that profile's `baseURL`. Other TOML fields, profiles, authentication, and unrelated config text remain unchanged.
+- `ccs proxy install` and `ccs proxy restore` semantically modify only `model_providers.<provider>.base_url` in `~/.codex/config.toml`. With a claude current profile they also point `~/.claude/settings.json` `env.ANTHROPIC_BASE_URL` at the proxy (install) or back to that profile's `baseURL` (restore), shown in the same preview. Install points it to `http://127.0.0.1:4610`; restore resolves `profiles.current.codex` and points it to that profile's `baseURL`. Other TOML fields, profiles, authentication, and unrelated config text remain unchanged.
 - Writes `~/.codex/auth.json` as `{ "OPENAI_API_KEY": "..." }`.
 - `cx run`, `cxx run`, and `cxxs run` set `CODEX_TOOLS_PROFILE_API_KEY` only for the launched `codex` process and pass temporary provider `base_url` and `env_key` overrides. When proxy state exists, they also pass `http_headers.x-ccs-profile=PROFILE`; the proxy validates and uses that profile for the request, then strips the header before forwarding. The commands do not write `config.toml`, `auth.json`, or `profiles.json`.
 - `ccs proxy install` requires explicit `model_provider`, its existing `base_url`, a current profile, and absent proxy state. It previews the current and proxy URLs plus backup path, backs up the current config, starts and health-checks the proxy, then changes and verifies that provider's `base_url` is the local proxy URL. If apply fails after routing is written, it restores the preview source, removes proxy state, and keeps the backup. It starts in `passthrough` with status retry disabled.
@@ -249,10 +247,10 @@ Behavior:
 - `ccs proxy config` prints the active status-retry and latency settings, then asks which one to edit. Each value prompt shows the current value; press Enter to keep it. Invalid values are rejected at the prompt. Changes are previewed and written after exact `yes`.
 - The status retry policy prompts for the total window, base backoff, and maximum backoff in milliseconds (defaults `3600000`, `1000`, and `30000`; positive timer-range integers with `BASE <= MAX <= WINDOW`), then retryable statuses such as `400,429,502,503`, or `default` for `429,503,520`. Status codes must be integers from 400 through 599 and are sorted and deduplicated.
 - Latency deadlines are disabled by default. Choosing `on` prompts for the first-progress timeout, its action (`return_502` or `retry_then_502`, skipped when that timeout is `0`), and the total timeout; at least one timeout must be positive. Choosing `off` disables them.
-- `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
+- `ccs proxy restore` resolves `profiles.current.codex` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
 - `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs use`, while explicit profile launches remain pinned to their requested profile.
 - A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.
-- When status retry is enabled, configured HTTP error responses (default: 429, 503, and transient gateway 520) are withheld and retried while the configured total window allows another wait and dispatch. In `passthrough + retry`, every non-stream response body up to 1 MiB is checked for the Capacity message, including bodies returned with HTTP `200`; matching responses use the same window and backoff while counting as `upstream_capacity`. Non-matching responses follow the ordinary status rule. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original response. An aborted request, premature client socket close, or unfinished response close stops the wait and prevents another upstream attempt. In `passthrough`, final responses remain uninspected.
+- When status retry is enabled, configured HTTP error responses (default: 429, 503, and transient gateway 520) are withheld and retried while the configured total window allows another wait and dispatch. In `passthrough + retry`, every non-stream response body up to 1 MiB is checked for the Capacity message, including bodies returned with HTTP `200`; matching responses use the same window and backoff while counting as `upstream_capacity`. Non-matching responses follow the ordinary status rule. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current.codex`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original response. An aborted request, premature client socket close, or unfinished response close stops the wait and prevents another upstream attempt. In `passthrough`, final responses remain uninspected.
 - After `ccs use`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429, 503, 520, or a Capacity response. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
 - Use `ccs proxy cancel` when a Codex UI session has been closed but its request connection is still open. It lists current 429, 503, 520, or Capacity retry waits, lets you select requests with space (`a` selects all), then previews the selection and requires exact `yes`. Cancellation also applies to pinned waits, prevents the next attempt, and records status `499`.
 - Use `ccs proxy capture` to save the next complete client-boundary HTTP exchanges. The list starts with `all sessions` (every request through the proxy, including requests without a session) and `next new session` (the first Codex session created after the capture starts, such as a newly opened `cx`), followed by sessions from active and recent requests. Select one, enter a request count (default `5`), and the command shows live progress. Press `c` to cancel the capture (already written files are retained) or `q` to leave the view while the capture continues; running `ccs proxy capture` again reopens the view. The view closes by itself when the requested count is reached and prints the result. The selected short session id binds the first matching full session id; an ambiguous later match ends the task with an explicit error. Captures start after arming, stop automatically after the requested count, and live under `~/.cache/codex-tools/proxy/captures/` as private metadata plus byte-exact request/response body files. Authentication and cookie headers are redacted; prompt and response bodies are intentionally retained until manually removed. Proxy restart discards an unfinished capture task.

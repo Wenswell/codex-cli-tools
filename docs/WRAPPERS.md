@@ -53,7 +53,7 @@ cxx run test002 "check this repo"
 cxxs run test001 --last
 ```
 
-`run PROFILE` is local because the selected provider API key is scoped to that Codex process. It passes temporary provider `base_url` and `env_key` overrides. When proxy mode is installed, it keeps using the local proxy and sends a temporary `x-ccs-profile` provider header; the proxy uses that profile for the process without changing `profiles.current` and removes the internal header before contacting the provider. No profile, Codex config, auth, or proxy state file is modified.
+`run PROFILE` is local because the selected provider API key is scoped to that Codex process. It passes temporary provider `base_url` and `env_key` overrides. When proxy mode is installed, it keeps using the local proxy and sends a temporary `x-ccs-profile` provider header; the proxy uses that profile for the process without changing `profiles.current.codex` and removes the internal header before contacting the provider. No profile, Codex config, auth, or proxy state file is modified.
 
 Use `cxx` and `cxxs` only in directories and tasks you trust.
 
@@ -92,14 +92,6 @@ Equivalent to:
 ```bash
 claude --dangerously-skip-permissions --resume ARGS...
 ```
-
-When `ccs proxy` is installed and `ccs proxy claude` selects a profile, both wrappers route Claude Code through the local proxy:
-
-```bash
-claude --settings '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:4610","ANTHROPIC_AUTH_TOKEN":"ccs-proxy"}}' --dangerously-skip-permissions ARGS...
-```
-
-`--settings` takes precedence over `~/.claude/settings.json`, which is not modified; the proxy replaces the placeholder token with the selected profile's key and records the requests in proxy history with a green `[A]`. Without proxy state or with the route `off`, the wrappers run exactly as above.
 
 Use `ccx` and `ccxs` only in directories and tasks you trust.
 

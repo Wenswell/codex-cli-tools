@@ -52,3 +52,7 @@ export function codexAgentsPath(): string {
 export function codexAuthPath(): string {
   return join(codexDir(), "auth.json");
 }
+
+export function claudeSettingsPath(): string {
+  return join(process.env.CLAUDE_CONFIG_DIR || join(homeDir(), ".claude"), "settings.json");
+}

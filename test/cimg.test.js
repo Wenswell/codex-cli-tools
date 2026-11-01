@@ -22,7 +22,7 @@ import { captureStdout } from "./helpers/terminal.js";
 
 const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl9sAAAAASUVORK5CYII=", "base64");
 const profiles = async () => ({
-  current: "test",
+  current: { codex: "test" },
   profiles: {
     test: { baseURL: "https://images.example.test", apiKey: "secret-key" },
   },
@@ -405,7 +405,7 @@ test("cimg Ctrl-C aborts the request and logs a canceled terminal event", async 
 
 test("cimg respects configured defaults from profiles.json", () => {
   const configuredProfiles = {
-    current: "test001",
+    current: { codex: "test001" },
     profiles: {
       test001: { baseURL: "https://ai.example.test", apiKey: "key1" },
       fal: { baseURL: "https://fal.example.test", apiKey: "key2" },
@@ -448,7 +448,7 @@ test("cimg respects configured defaults from profiles.json", () => {
 test("cimg config interactive setup updates cimg defaults in profiles.json", async () => {
   let savedProfiles;
   const initialProfiles = {
-    current: "test001",
+    current: { codex: "test001" },
     profiles: {
       test001: { baseURL: "https://ai.example.test", apiKey: "key1" },
       fal: { baseURL: "https://fal.example.test", apiKey: "key2" },

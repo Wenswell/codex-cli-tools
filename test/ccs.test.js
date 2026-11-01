@@ -14,7 +14,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.ur
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
-  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|claude\|config\|install\|restart\|restore\|serve\]/);
+  assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|mode\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
   assert.doesNotMatch(output, /proxy.*stop|proxy.*--once/);
   assert.doesNotMatch(output, /ccs run/);
@@ -80,9 +80,10 @@ test("ccs exposes route conversion in current, list, and profile views", async (
     const list = await runCcs(["dist/bin/ccs.js", "list"], home, env);
     const profile = await runCcs(["dist/bin/ccs.js", "test001"], home, env);
 
-    assert.match(status, /^conversion:\s+responses→chat$/m);
-    assert.match(list, /test001\s+https:\/\/test001\.example\.test.*responses→chat/);
-    assert.match(list, /direct\s+https:\/\/direct\.example\.test.*off/);
+    assert.match(status, /^codex:\s+test001\s+https:\/\/test001\.example\.test\s+\S+\s+responses→chat$/m);
+    assert.doesNotMatch(status, /^claude:/m);
+    assert.match(list, /test001\s+codex\s+https:\/\/test001\.example\.test.*responses→chat/);
+    assert.match(list, /direct\s+codex\s+https:\/\/direct\.example\.test.*off/);
     assert.match(profile, /^conversion:\s+responses→chat$/m);
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -116,7 +117,7 @@ test("ccs config creates missing files and imports the current Codex provider", 
 
     const profilesPath = join(home, ".config", "codex-tools", "profiles.json");
     const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
-    assert.equal(profiles.current, "imported");
+    assert.deepEqual(profiles.current, { codex: "imported" });
     assert.deepEqual(profiles.profiles.imported, { baseURL: "https://own.example.test/v1", apiKey: "own-key-1234567890" });
     assert.ok(profiles.profiles.test001 && profiles.profiles.test002 && profiles.top);
     assert.equal((await stat(profilesPath)).mode & 0o777, 0o600);
@@ -339,44 +340,63 @@ test("Codex wrappers launch with a selected profile through an installed proxy",
   }
 });
 
-test("Claude wrappers route through the proxy only when proxy.claude is enabled", async () => {
+test("ccs use switches Claude Code settings independently of Codex", async () => {
   const home = await writeProfiles({
-    profiles: {
-      test001: { baseURL: "https://test001.example.com", apiKey: "test001-key" },
-      pool: { baseURL: "https://pool.example.com", apiKey: "pool-key" },
-    },
+    profiles: { test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" } },
     current: "test001",
-    proxy: { claude: { enabled: true, profile: "pool" } },
   });
-  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
-  const proxyPort = await reservePort();
-  const binDir = await mkdtemp(join(tmpdir(), "fake-claude-bin-"));
-  await writeFile(join(binDir, "claude"), "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n", "utf8");
-  await chmod(join(binDir, "claude"), 0o755);
-  const options = { codexConfigPath: join(home, ".codex", "config.toml"), listenHost: "127.0.0.1", listenPort: proxyPort, stateRoot };
-  const env = {
-    XDG_CACHE_HOME: join(home, ".cache"),
-    CCS_PROXY_STATE_ROOT: stateRoot,
-    CCS_PROXY_LISTEN_PORT: String(proxyPort),
-    PATH: `${binDir}:${process.env.PATH}`,
+  const settingsPath = join(home, ".claude", "settings.json");
+  const codexConfig = 'model_provider = "codex"\n\n[model_providers.codex]\nbase_url = "https://test001.example.test"\n';
+  const settings = {
+    $schema: "https://json.schemastore.org/claude-code-settings.json",
+    env: { ANTHROPIC_BASE_URL: "https://old.example.test", ANTHROPIC_API_KEY: "stale", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+    statusLine: { type: "command", command: "echo hi" },
   };
-  const run = async (tool, args = []) => JSON.parse(await runCcs([`dist/bin/${tool}.js`, ...args], home, env));
   try {
-    assert.deepEqual(await run("ccx"), ["--dangerously-skip-permissions"]);
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), codexConfig, "utf8");
+    await mkdir(dirname(settingsPath), { recursive: true });
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+    await chmod(settingsPath, 0o664);
 
-    await writeProxyStateForRunTest(home, stateRoot, proxyPort);
-    const settings = JSON.stringify({ env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${proxyPort}`, ANTHROPIC_AUTH_TOKEN: "ccs-proxy" } });
-    assert.deepEqual(await run("ccx", ["-p", "hi"]), ["--settings", settings, "--dangerously-skip-permissions", "-p", "hi"]);
-    assert.deepEqual(await run("ccxs"), ["--settings", settings, "--dangerously-skip-permissions", "--resume"]);
+    await runCcsInteractive(["add"], home, [
+      ["Add or edit which profile?", KEYS.enter],
+      ["Profile name", `pool${KEYS.enter}`],
+      ["Platform", `${KEYS.down}${KEYS.enter}`],
+      ["baseURL", `https://pool.example.test/${KEYS.enter}`],
+      ["apiKey", `pool-token-123456${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    const profilesFile = join(home, ".config", "codex-tools", "profiles.json");
+    const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
+    assert.deepEqual(profiles.profiles.pool, { baseURL: "https://pool.example.test/", apiKey: "pool-token-123456", platform: "claude" });
+    assert.deepEqual(profiles.current, { codex: "test001", claude: "pool" });
 
-    await replaceJson(join(home, ".config", "codex-tools", "profiles.json"), {
-      ...JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")),
-      proxy: { claude: { enabled: false, profile: "pool" } },
+    const status = await runCcsDirect([], home);
+    assert.match(status, /^codex:\s+test001\s+https:\/\/test001\.example\.test/m);
+    assert.match(status, /^claude:\s+pool\s+https:\/\/pool\.example\.test\//m);
+
+    // pool is current but settings.json still points elsewhere, so selecting it re-applies it.
+    const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    assert.match(output, /pool\s+claude · current/);
+    assert.match(output, /current:\s+pool\s+Claude Code files re-applied/);
+    const written = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.deepEqual(written, {
+      ...settings,
+      env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ANTHROPIC_BASE_URL: "https://pool.example.test/", ANTHROPIC_AUTH_TOKEN: "pool-token-123456" },
     });
-    assert.deepEqual(await run("ccx"), ["--dangerously-skip-permissions"]);
+    assert.equal((await stat(settingsPath)).mode & 0o777, 0o664);
+    assert.equal(await readFile(join(home, ".codex", "config.toml"), "utf8"), codexConfig);
+    await assert.rejects(access(join(home, ".codex", "auth.json")));
+
+    const again = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    assert.match(again.output, /no changes\./);
+
+    await assert.rejects(
+      () => runCcs(["dist/bin/cx.js", "run", "pool"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
+      /profile pool is a claude profile; Codex needs a codex profile/,
+    );
   } finally {
-    await shutdownProxyRuntime(options).catch(() => null);
-    await rm(binDir, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -539,14 +559,14 @@ test("ccs sync pushes and pulls profiles.json over ssh and keeps each device's c
     assert.match(pushed.output, /✔ Direction · push/);
     assert.match(pushed.output, /^pushed: me@box:2222$/m);
     assert.doesNotMatch(pushed.output, /a-key-1234567890/);
-    assert.deepEqual(JSON.parse(await readFile(remoteProfiles, "utf8")), JSON.parse(await readFile(localProfiles, "utf8")));
+    assert.deepEqual(JSON.parse(await readFile(remoteProfiles, "utf8")), { ...JSON.parse(await readFile(localProfiles, "utf8")), current: { codex: "a" } });
     assert.equal((await stat(remoteProfiles)).mode & 0o777, 0o600);
     const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.ok(calls.every((args) => args.includes("-p") && args.includes("2222") && args.includes("me@box")));
     assert.ok(calls.every((args) => !args.includes("BatchMode=yes")));
 
     const remoteData = JSON.parse(await readFile(remoteProfiles, "utf8"));
-    remoteData.current = "b";
+    remoteData.current = { codex: "b" };
     remoteData.profiles.a.apiKey = "a-key-rotated-0987654321";
     remoteData.profiles.c = { baseURL: "https://c.example.test", apiKey: "c-key-1234567890" };
     await writeFile(remoteProfiles, JSON.stringify(remoteData, null, 2), "utf8");
@@ -565,13 +585,13 @@ test("ccs sync pushes and pulls profiles.json over ssh and keeps each device's c
     ], env);
     assert.match(pulled.output, /me@box:2222\s+fakebox · synced just now \(push\)/);
     assert.match(pulled.output, /✔ Direction · pull/);
-    assert.match(pulled.output, /will switch to a as ccs use does/);
+    assert.match(pulled.output, /Codex settings will switch to a as ccs use does/);
     assert.match(pulled.output, /^backup: ~\/\.config\/codex-tools\/backups\/ccs-/m);
     const pulledData = JSON.parse(await readFile(localProfiles, "utf8"));
-    assert.equal(pulledData.current, "a");
+    assert.deepEqual(pulledData.current, { codex: "a" });
     assert.equal(pulledData.profiles.c.baseURL, "https://c.example.test");
     assert.equal(JSON.parse(await readFile(join(local, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "a-key-rotated-0987654321");
-    assert.equal(JSON.parse(await readFile(remoteProfiles, "utf8")).current, "b");
+    assert.deepEqual(JSON.parse(await readFile(remoteProfiles, "utf8")).current, { codex: "b" });
 
     const inSync = await runCcsDirect(["sync", "me@box:2222"], local, env);
     assert.match(inSync, /in sync\./);
@@ -630,8 +650,8 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
       ["Remove which profile?", KEYS.enter],
       ["Apply changes?", "no\n"],
     ]);
-    assert.match(declined.output, /test001\s+https:\/\/test001\.example\.test\s+\(current\)/);
-    assert.match(declined.output, /current:\s+test001 -> test002/);
+    assert.match(declined.output, /test001\s+codex\s+https:\/\/test001\.example\.test\s+\(current\)/);
+    assert.match(declined.output, /current:\s+codex test001 -> test002/);
     assert.equal(declined.output.includes("test001-key-123456"), false);
     assert.ok(JSON.parse(await readFile(profilesFile, "utf8")).profiles.test001);
 
@@ -641,7 +661,7 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
     ]);
     const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
     assert.deepEqual(Object.keys(profiles.profiles), ["test002"]);
-    assert.equal(profiles.current, "test002");
+    assert.deepEqual(profiles.current, { codex: "test002" });
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -680,11 +700,11 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     await assert.rejects(() => runCcsDirect(["use", "test002"], home), /usage: ccs use/);
 
     const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", KEYS.enter]]);
-    assert.match(output, /test001\s+current · used 1m ago · switched 3d ago/);
+    assert.match(output, /test001\s+codex · current · used 1m ago · switched 3d ago/);
     assert.match(output, /empty\s+\(missing apiKey\)/);
     assert.match(output, /✔ Switch to which profile\? · test002/);
-    assert.match(output, /current:\s+test001 -> test002/);
-    assert.equal(JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")).current, "test002");
+    assert.match(output, /current:\s+codex test001 -> test002/);
+    assert.deepEqual(JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")).current, { codex: "test002" });
     assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /base_url = "https:\/\/test002\.example\.test"/);
     assert.equal(JSON.parse(await readFile(join(home, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "test002-key-123456");
     const usage = JSON.parse(await readFile(usagePath, "utf8"));
@@ -738,6 +758,7 @@ test("ccs add edits a chosen profile or creates a new one with masked keys", asy
       ["Add or edit which profile?", KEYS.enter],
       ["Profile name", `test001${KEYS.enter}`],
       ["profile test001 exists", `${KEYS.backspace.repeat(5)}local${KEYS.enter}`],
+      ["Platform", KEYS.enter],
       ["baseURL", `https://local.example.test${KEYS.enter}`],
       ["apiKey", `${secret}${KEYS.enter}`],
       ["Provider API", KEYS.enter],
@@ -746,7 +767,7 @@ test("ccs add edits a chosen profile or creates a new one with masked keys", asy
     assert.equal(created.output.includes(secret), false);
     const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
     assert.deepEqual(profiles.profiles.local, { baseURL: "https://local.example.test", apiKey: secret });
-    assert.equal(profiles.current, "test001");
+    assert.deepEqual(profiles.current, { codex: "test001" });
   } finally {
     await rm(home, { recursive: true, force: true });
   }

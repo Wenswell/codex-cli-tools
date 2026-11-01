@@ -1,5 +1,5 @@
 import { codexConfigPath } from "../lib/paths.js";
-import { assertProfile, readProfiles, type Profile } from "../lib/profiles.js";
+import { assertProfile, profilePlatform, readProfiles, type Profile } from "../lib/profiles.js";
 import { readTextIfExists } from "../lib/fs.js";
 import { readTopLevelTomlString } from "../lib/toml.js";
 import { CCS_PROXY_PROFILE_HEADER, ensureProxyRunning, resolveProxyOptions, resolveProxySwitchBaseUrl } from "./ccs-proxy.js";
@@ -19,6 +19,9 @@ export async function resolveCodexProfileLaunch(name: string): Promise<CodexProf
     throw new Error(`profile not found: ${name}`);
   }
   const normalized = assertProfile(profile, name);
+  if (profilePlatform(normalized) !== "codex") {
+    throw new Error(`profile ${name} is a ${profilePlatform(normalized)} profile; Codex needs a codex profile`);
+  }
   if (!normalized.baseURL.trim()) {
     throw new Error(`profile ${name} is missing baseURL`);
   }

@@ -1,25 +1,9 @@
 import { spawn } from "node:child_process";
-import { readProfiles } from "../lib/profiles.js";
 import { flushUsage } from "../lib/usage.js";
-import { ensureProxyRunning, resolveProxyOptions, resolveProxySwitchBaseUrl } from "./ccs-proxy.js";
 import { textBold, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
 
-// Placeholder credential: the proxy replaces it with the routed profile's key.
-const PROXY_AUTH_TOKEN = "ccs-proxy";
-
-// With proxy state and `proxy.claude` enabled, Claude Code talks to the local proxy. `--settings`
-// outranks ~/.claude/settings.json, which stays unchanged, so plain `claude` remains direct.
-async function proxySettingsArgs(): Promise<string[]> {
-  const profiles = await readProfiles();
-  if (!profiles.proxy?.claude?.enabled) return [];
-  const runtime = await ensureProxyRunning(resolveProxyOptions());
-  const baseURL = runtime ? resolveProxySwitchBaseUrl(runtime.state) : null;
-  if (!baseURL) return [];
-  return ["--settings", JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseURL, ANTHROPIC_AUTH_TOKEN: PROXY_AUTH_TOKEN } })];
-}
-
-export async function runClaude(args: string[], options: { resume?: boolean } = {}): Promise<void> {
+export function runClaude(args: string[], options: { resume?: boolean } = {}): void {
   const toolName = toolNameFromArgv();
   if (isHelpArgument(args[0])) {
     if (args.length !== 1) {
@@ -40,7 +24,7 @@ export async function runClaude(args: string[], options: { resume?: boolean } = 
     return;
   }
 
-  const claudeArgs = [...await proxySettingsArgs(), "--dangerously-skip-permissions"];
+  const claudeArgs = ["--dangerously-skip-permissions"];
   if (options.resume) {
     claudeArgs.push("--resume");
   }

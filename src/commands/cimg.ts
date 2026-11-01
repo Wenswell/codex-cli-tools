@@ -7,7 +7,7 @@ import { ensureDir } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { codexToolsCacheDir, formatHomePath, homeDir, profilesPath } from "../lib/paths.js";
-import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
+import { assertProfile, currentProfileName, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { textDim, textGreen, textRed, textYellow } from "../lib/text.js";
 import { printToolVersionIfRequested } from "../lib/version.js";
@@ -709,7 +709,7 @@ function parseResponse(text: string): ImageResponse {
 }
 
 function resolveActiveProfile(profiles: ProfilesFile, explicitName?: string): { name: string; profile: Profile } {
-  const name = explicitName?.trim() || profiles.cimg?.profile?.trim() || profiles.current?.trim();
+  const name = explicitName?.trim() || profiles.cimg?.profile?.trim() || currentProfileName(profiles, "codex");
   if (!name) {
     throw new Error("profiles.json has no current profile");
   }
@@ -732,7 +732,7 @@ function printStatus(profiles: ProfilesFile): void {
       return undefined;
     }
   })();
-  const name = active?.name ?? profiles.current?.trim() ?? "-";
+  const name = active?.name ?? currentProfileName(profiles, "codex") ?? "-";
   const candidate = name === "-" ? undefined : profiles.profiles?.[name];
   const baseURL = candidate && typeof candidate.baseURL === "string" && candidate.baseURL.trim() ? candidate.baseURL : "-";
   const apiKey = candidate && typeof candidate.apiKey === "string" && candidate.apiKey.trim() ? textGreen("set") : textRed("missing");

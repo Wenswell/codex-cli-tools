@@ -6,8 +6,9 @@ import { createTwoFilesPatch } from "diff";
 import { confirmApply } from "../lib/confirm.js";
 import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
-import { assertProfile, parseProfiles, readProfiles, writeProfiles } from "../lib/profiles.js";
+import { codexAgentsPath, codexConfigPath, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
+import { PLATFORM_LABELS, readPlatformConnection, writePlatformConnection } from "../lib/platforms.js";
+import { PLATFORMS, assertProfile, currentProfileName, parseProfiles, profilePlatform, profilesOf, readProfiles, writeProfiles, } from "../lib/profiles.js";
 import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select } from "../lib/prompt.js";
 import { parseSyncTarget, readRemoteProfiles, readSyncHosts, recordSyncHost, syncTargetError, writeRemoteProfiles, } from "../lib/remote-sync.js";
@@ -16,7 +17,7 @@ import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow
 import { colorHost, colorName, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
 import { runCcsStats } from "./ccs-stats.js";
 import { ensureProxyRunning, proxyStateExists, resolveProxyOptions as proxyOptions, resolveProxySwitchBaseUrl, runProxyCommand } from "./ccs-proxy.js";
-import { syncTomlTemplate, readTomlBaseUrl, tomlLeafDifferences, updateTomlBaseUrl, } from "../lib/toml.js";
+import { syncTomlTemplate, tomlLeafDifferences, } from "../lib/toml.js";
 import { printTable } from "../lib/table.js";
 import { formatCommandFooterLines } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
@@ -35,14 +36,6 @@ async function readDefaultCodexConfig() {
 async function readDefaultCodexAgents() {
     const path = fileURLToPath(new URL("../../config/codex-agents.md", import.meta.url));
     return readFile(path, "utf-8");
-}
-async function readCurrentCodexProfile() {
-    const configText = (await readTextIfExists(codexConfigPath())) ?? "";
-    const baseURL = readTomlBaseUrl(configText) ?? "";
-    const authText = (await readTextIfExists(codexAuthPath())) ?? "";
-    const authJson = authText ? parseJsonObject(authText) : {};
-    const apiKey = typeof authJson.OPENAI_API_KEY === "string" ? authJson.OPENAI_API_KEY : "";
-    return { baseURL, apiKey };
 }
 function formatBackupStamp(date) {
     const pad = (value, size = 2) => value.toString().padStart(size, "0");
@@ -108,7 +101,7 @@ function planProfilesFromTemplate(template, codex) {
             name = `imported-${index}`;
         profiles[name] = codex;
     }
-    return { profiles: { ...template, profiles, current: name }, imported: name };
+    return { profiles: { ...template, profiles, current: { ...template.current, codex: name } }, imported: name };
 }
 function missingTemplateProfiles(existing, template) {
     return Object.keys(template.profiles ?? {}).filter((name) => !existing.profiles?.[name]);
@@ -194,7 +187,7 @@ function planConfigWrites(selected, files, templates, codex) {
                 label: "profiles.json",
                 path: profilesPath(),
                 current: files.profiles,
-                next: stringifyJson({ ...existing, profiles, current: existing.current ?? added[0] }),
+                next: stringifyJson({ ...existing, profiles, current: existing.current ?? { codex: added[0] } }),
             });
         }
     }
@@ -266,7 +259,7 @@ async function runConfig(args) {
     const files = await readConfigFiles();
     const templates = await readConfigTemplates();
     // The current Codex provider only matters when profiles.json is being created.
-    const codex = files.profiles === null ? await readCurrentCodexProfile() : null;
+    const codex = files.profiles === null ? await readPlatformConnection("codex") : null;
     const choices = configChoices(files, templates, codex, await proxyStateExists());
     printConfigStatus(files, templates);
     if (!choices.some((choice) => !choice.disabled)) {
@@ -321,17 +314,31 @@ function compareSyncedProfiles(local, remote) {
 function isInSync(comparison) {
     return comparison.localOnly.length + comparison.remoteOnly.length + comparison.changed.length + comparison.settings.length === 0;
 }
-// The source replaces the target file, except that the target keeps its own `current` when the source still has it.
+// The source replaces the target file, except that the target keeps each platform's current profile
+// while the source still has it.
 function planSyncedProfiles(source, target) {
-    const keep = target?.current && source.profiles?.[target.current] ? target.current : source.current;
-    return { ...source, ...(keep ? { current: keep } : {}) };
+    const current = {};
+    for (const platform of PLATFORMS) {
+        const kept = currentProfileName(target ?? {}, platform);
+        const name = kept && source.profiles?.[kept] ? kept : currentProfileName(source, platform);
+        if (name)
+            current[platform] = name;
+    }
+    return { ...source, ...(Object.keys(current).length > 0 ? { current } : {}) };
+}
+function formatCurrentMap(profiles) {
+    const entries = PLATFORMS.flatMap((platform) => {
+        const name = currentProfileName(profiles ?? {}, platform);
+        return name ? [`${platform} ${colorName(name)}`] : [];
+    });
+    return entries.length > 0 ? entries.join(" · ") : textDim("none");
 }
 function formatSyncSide(label, text, profiles, mtime) {
     if (text === null)
         return `${label}  ${textYellow("missing")}`;
     const count = Object.keys(profiles?.profiles ?? {}).length;
     const when = mtime ? `  ${textDim(`modified ${formatAgo(mtime.getTime())}`)}` : "";
-    return `${label}  ${textDim(`${count} profiles`)}  current ${colorName(profiles?.current ?? "-")}${when}`;
+    return `${label}  ${textDim(`${count} profiles`)}  current ${formatCurrentMap(profiles)}${when}`;
 }
 function printSyncComparison(target, remote, local, remoteProfiles, comparison) {
     console.log(textBold(`ccs sync  ${colorHost(target.raw)}`));
@@ -432,23 +439,28 @@ async function runDeviceSync(args) {
         current: direction === "pull" ? localText : remote.text,
         next: nextText,
     };
-    const currentName = targetProfiles?.current;
-    const currentChanged = Boolean(currentName && targetProfiles?.profiles?.[currentName]
-        && JSON.stringify(targetProfiles.profiles[currentName]) !== JSON.stringify(next.profiles?.[next.current ?? ""]));
-    const currentDropped = Boolean(currentName && next.current !== currentName);
-    // After a pull, the local Codex files follow the current profile when its URL or key changed.
-    const refresh = direction === "pull" && (currentChanged || currentDropped)
-        && Boolean(next.current && next.profiles?.[next.current]?.apiKey);
+    // Platforms whose current profile changes name or content on the receiving device.
+    const affected = PLATFORMS.filter((platform) => {
+        const before = currentProfileName(targetProfiles ?? {}, platform);
+        const after = currentProfileName(next, platform);
+        return Boolean(before) && (before !== after
+            || JSON.stringify(targetProfiles?.profiles?.[before]) !== JSON.stringify(next.profiles?.[after ?? ""]));
+    });
+    const dropped = affected.filter((platform) => currentProfileName(next, platform) !== currentProfileName(targetProfiles ?? {}, platform));
+    // After a pull, local client files follow the current profile when its URL or key changed.
+    const refresh = direction === "pull"
+        ? affected.filter((platform) => Boolean(next.profiles?.[currentProfileName(next, platform) ?? ""]?.apiKey))
+        : [];
     console.log(textBold(`ccs sync ${direction}`));
     printDiffBlock(preview);
-    if (currentDropped) {
-        console.log(`${textYellow("warning:")} current ${currentName} is not in the incoming file; current becomes ${next.current ?? "none"}`);
+    for (const platform of dropped) {
+        console.log(`${textYellow("warning:")} current ${platform} ${currentProfileName(targetProfiles ?? {}, platform)} is not in the incoming file; it becomes ${currentProfileName(next, platform) ?? "none"}`);
     }
-    if (refresh) {
-        console.log(textDim(`~/.codex/config.toml and auth.json will switch to ${next.current} as ccs use does.`));
+    for (const platform of refresh) {
+        console.log(textDim(`${PLATFORM_LABELS[platform]} settings will switch to ${currentProfileName(next, platform)} as ccs use does.`));
     }
-    else if (direction === "push" && (currentChanged || currentDropped)) {
-        console.log(`${textYellow("note:")} run ccs use on ${remote.host} so its Codex files follow the new current profile`);
+    if (direction === "push" && affected.length > 0) {
+        console.log(`${textYellow("note:")} run ccs use on ${remote.host} so its ${affected.map((platform) => PLATFORM_LABELS[platform]).join(" and ")} settings follow the new current profile`);
     }
     console.log(textDim("no changes are written unless you type yes at the prompt."));
     if (!(await confirmApply())) {
@@ -462,8 +474,8 @@ async function runDeviceSync(args) {
         }
         backup = await backupPreviewFiles([preview], stamp);
         await writeVerified(preview);
-        if (refresh) {
-            await switchProfile(next.current);
+        for (const platform of refresh) {
+            await switchProfile(currentProfileName(next, platform));
         }
     }
     else {
@@ -620,6 +632,11 @@ async function addProfile() {
                 : profiles[value] ? `profile ${value} exists; choose it from the list to edit` : null,
     });
     const existing = target ? assertProfile(profiles[target], target) : undefined;
+    const platform = existing ? profilePlatform(existing) : await select("Platform", PLATFORMS.map((value) => ({
+        value,
+        label: value,
+        hint: PLATFORM_LABELS[value],
+    })));
     const baseURL = await input("baseURL", {
         default: existing?.baseURL,
         validate: (value) => value ? null : "baseURL is required",
@@ -629,15 +646,16 @@ async function addProfile() {
         defaultLabel: existing?.apiKey ? maskSecret(existing.apiKey) : undefined,
         mask: true,
     });
-    const conversion = await select("Provider API", [
+    const conversion = platform === "codex" && await select("Provider API", [
         { value: false, label: "Responses", hint: "send Codex Responses traffic unchanged" },
         { value: true, label: "Chat Completions only", hint: "convert Responses traffic to Chat Completions" },
     ], { default: existing?.routeConversion?.enabled ?? false });
-    const profile = { baseURL, apiKey };
+    const profile = { baseURL, apiKey, ...(platform === "codex" ? {} : { platform }) };
     if (conversion)
         profile.routeConversion = { enabled: true };
-    printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
-    printKeyValue("conversion:", formatRouteConversion(profile), 11);
+    printKeyValue(existing ? "update:" : "add:", `${colorName(name)}  ${textDim(platform)}  ${colorUrl(profile.baseURL)}  ${formatApiKey(profile.apiKey)}`, 11);
+    if (platform === "codex")
+        printKeyValue("conversion:", formatRouteConversion(profile), 11);
     console.log(textDim("no changes are written unless you type yes at the prompt."));
     if (!(await confirmApply())) {
         return;
@@ -646,7 +664,9 @@ async function addProfile() {
     if (JSON.stringify(latest) !== JSON.stringify(data)) {
         throw new Error("profiles.json changed after preview; run ccs add again");
     }
-    await writeProfiles({ ...data, profiles: { ...profiles, [name]: profile }, current: data.current ?? name });
+    // The first profile of a platform becomes its current profile.
+    const current = currentProfileName(data, platform) ? data.current : { ...data.current, [platform]: name };
+    await writeProfiles({ ...data, profiles: { ...profiles, [name]: profile }, current });
     console.log(`profile saved: ${textGreen(name)}`);
 }
 function printProfile(name, profiles) {
@@ -654,13 +674,13 @@ function printProfile(name, profiles) {
     if (!profile) {
         throw new Error(`profile not found: ${name}`);
     }
-    const normalized = assertProfile(profile, name);
-    printProfileSummary("profile", name, normalized);
-    printKeyValue("conversion:", formatRouteConversion(normalized));
+    printProfileDetails(name, assertProfile(profile, name));
 }
 function printProfileDetails(name, profile) {
     printProfileSummary("profile", name, profile);
-    printKeyValue("conversion:", formatRouteConversion(profile));
+    printKeyValue("platform:", profilePlatform(profile));
+    if (profilePlatform(profile) === "codex")
+        printKeyValue("conversion:", formatRouteConversion(profile));
 }
 async function resolveRunRoute(profileBaseUrl) {
     const runtime = await ensureProxyRunning(proxyOptions());
@@ -710,16 +730,24 @@ async function removeProfile() {
     if (!isInteractive()) {
         throw new Error("ccs remove requires an interactive terminal");
     }
+    const isCurrent = (item) => currentProfileName(data, profilePlatform(data.profiles[item])) === item;
     const name = await select("Remove which profile?", names.map((item) => ({
         value: item,
         label: item,
-        hint: `${data.profiles[item].baseURL}${item === data.current ? "  (current)" : ""}`,
-    })), { default: data.current });
-    const remaining = names.filter((item) => item !== name);
-    const current = data.current === name ? remaining[0] : data.current;
+        hint: `${profilePlatform(data.profiles[item])}  ${data.profiles[item].baseURL}${isCurrent(item) ? "  (current)" : ""}`,
+    })));
+    const platform = profilePlatform(data.profiles[name]);
+    const replacement = profilesOf(data, platform).find((item) => item !== name);
+    const current = { ...data.current };
+    if (isCurrent(name)) {
+        if (replacement)
+            current[platform] = replacement;
+        else
+            delete current[platform];
+    }
     printProfileSummary("remove", name, assertProfile(data.profiles[name], name));
-    if (current !== data.current) {
-        printKeyValue("current:", `${textYellow(name)} -> ${current ? colorName(current) : textDim("none")}`);
+    if (isCurrent(name)) {
+        printKeyValue("current:", `${platform} ${textYellow(name)} -> ${replacement ? colorName(replacement) : textDim("none")}`);
     }
     console.log(textDim("no changes are written unless you type yes at the prompt."));
     if (!(await confirmApply())) {
@@ -745,30 +773,32 @@ async function switchProfile(name) {
     if (!normalized.apiKey) {
         throw new Error(`profile ${name} is missing apiKey`);
     }
-    await ensureDir(codexDir());
-    const currentConfig = (await readTextIfExists(codexConfigPath())) ?? "";
-    const nextConfig = updateTomlBaseUrl(currentConfig, await resolveActiveBaseUrl(normalized.baseURL));
-    await writeTextFile(codexConfigPath(), nextConfig);
-    await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: normalized.apiKey }), 0o600);
+    const platform = profilePlatform(normalized);
+    // With proxy mode every platform points at the proxy, which picks the profile per request.
+    await writePlatformConnection(platform, { baseURL: await resolveActiveBaseUrl(normalized.baseURL), apiKey: normalized.apiKey });
     await writeProfiles({
         ...data,
-        current: name,
+        current: { ...data.current, [platform]: name },
         profiles,
     });
     printProfileDetails(name, normalized);
     return normalized;
 }
 // With proxy mode the provider URL points at the proxy, which reads the profile itself; only the key is compared.
-async function codexFilesMatch(profile) {
-    const codex = await readCurrentCodexProfile().catch(() => null);
-    if (!codex || codex.apiKey !== profile.apiKey)
+async function platformFilesMatch(profile) {
+    const active = await readPlatformConnection(profilePlatform(profile)).catch(() => null);
+    if (!active || active.apiKey !== profile.apiKey)
         return false;
-    return (await proxyStateExists()) || sameBaseUrl(codex.baseURL, profile.baseURL);
+    return (await proxyStateExists()) || sameBaseUrl(active.baseURL, profile.baseURL);
 }
-function profileUsageHint(name, current, entry, nowMs) {
+function isCurrentProfile(profiles, name) {
+    return currentProfileName(profiles, profilePlatform(profiles.profiles?.[name])) === name;
+}
+function profileUsageHint(profiles, name, entry, nowMs) {
     const used = profileLastUsedMs(entry);
     const parts = [
-        ...(name === current ? ["current"] : []),
+        profilePlatform(profiles.profiles?.[name]),
+        ...(isCurrentProfile(profiles, name) ? ["current"] : []),
         used === null ? "never used" : `used ${formatAgo(used, nowMs)}`,
         ...(entry?.switched_at ? [`switched ${formatAgo(Date.parse(entry.switched_at), nowMs)}`] : []),
     ];
@@ -784,71 +814,80 @@ async function useProfile(profiles) {
     const nowMs = Date.now();
     if (!isInteractive()) {
         for (const name of names) {
-            console.log(`${name === profiles.current ? textGreen("*") : " "} ${colorName(name)}  ${textDim(profileUsageHint(name, profiles.current, usage[name], nowMs))}`);
+            console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${textDim(profileUsageHint(profiles, name, usage[name], nowMs))}`);
         }
         console.log(textDim("run in an interactive terminal to switch."));
         return;
     }
     const lastActive = (name) => Math.max(profileLastUsedMs(usage[name]) ?? 0, usage[name]?.switched_at ? Date.parse(usage[name].switched_at) : 0);
     const previous = names
-        .filter((name) => name !== profiles.current)
+        .filter((name) => !isCurrentProfile(profiles, name))
         .sort((left, right) => lastActive(right) - lastActive(left))[0];
     const name = await select("Switch to which profile?", names.map((item) => ({
         value: item,
         label: item,
-        hint: profileUsageHint(item, profiles.current, usage[item], nowMs),
+        hint: profileUsageHint(profiles, item, usage[item], nowMs),
         disabled: profiles.profiles[item].apiKey ? undefined : "missing apiKey",
-    })), { default: previous ?? profiles.current });
-    if (name === profiles.current) {
-        // Selecting the current profile re-applies it when the Codex files no longer match it,
+    })), { default: previous });
+    const platform = profilePlatform(profiles.profiles[name]);
+    const label = PLATFORM_LABELS[platform];
+    if (isCurrentProfile(profiles, name)) {
+        // Selecting the current profile re-applies it when the client files no longer match it,
         // for example after `ccs sync` pulled a new key.
-        if (await codexFilesMatch(assertProfile(profiles.profiles[name], name))) {
+        if (await platformFilesMatch(assertProfile(profiles.profiles[name], name))) {
             console.log(textDim("no changes."));
         }
         else {
             await switchProfile(name);
-            printKeyValue("current:", `${colorName(name)}  ${textDim("Codex files re-applied")}`);
+            printKeyValue("current:", `${colorName(name)}  ${textDim(`${label} files re-applied`)}`);
         }
         return;
     }
-    const previousName = profiles.current;
+    const previousName = currentProfileName(profiles, platform);
     await switchProfile(name);
     await recordProfileUsage(name, "switched_at");
-    printKeyValue("current:", `${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
+    printKeyValue("current:", `${textDim(platform)} ${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
 }
+// One line per platform that has profiles; Codex always shows.
 async function printStatus() {
     const profiles = await readProfiles();
-    const current = profiles.current ?? "test001";
-    const profile = profiles.profiles?.[current];
-    const systemLabel = formatSystemLabel();
-    if (!profile) {
-        printKeyValue("current:", `${textDim("none")}  ${colorHost(systemLabel)}`);
-        printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
-        return null;
+    const usage = await readProfileUsage();
+    for (const platform of PLATFORMS) {
+        const name = currentProfileName(profiles, platform);
+        if (platform !== "codex" && !name && profilesOf(profiles, platform).length === 0)
+            continue;
+        const profile = name ? profiles.profiles?.[name] : undefined;
+        if (!name || !profile) {
+            printKeyValue(`${platform}:`, textDim(name ? `${name} (missing)` : "none"), 11);
+            continue;
+        }
+        const normalized = assertProfile(profile, name);
+        const switchedAt = usage[name]?.switched_at;
+        printKeyValue(`${platform}:`, [
+            colorName(name),
+            colorUrl(normalized.baseURL),
+            formatApiKey(normalized.apiKey),
+            ...(platform === "codex" && normalized.routeConversion?.enabled ? [formatRouteConversion(normalized)] : []),
+            ...(switchedAt ? [textDim(`switched ${formatAgo(Date.parse(switchedAt))}`)] : []),
+        ].join("  "), 11);
     }
-    const normalized = assertProfile(profile, current);
-    const usage = (await readProfileUsage())[current];
-    const switched = usage?.switched_at ? textDim(`switched ${formatAgo(Date.parse(usage.switched_at))}`) : "";
-    printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}${switched ? `  ${switched}` : ""}`);
-    printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
-    printKeyValue("conversion:", formatRouteConversion(normalized));
-    printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
-    return normalized;
+    printKeyValue("host:", colorHost(formatSystemLabel()), 11);
+    printKeyValue("files:", colorPath(formatDisplayPath(profilesPath())), 11);
 }
 async function printProfileList(profiles) {
     const entries = Object.entries(profiles.profiles ?? {});
-    const current = profiles.current ?? "";
     const usage = await readProfileUsage();
     const nowMs = Date.now();
     const rows = entries.map(([name, profile]) => ({
         name,
         profile,
-        marker: name === current ? textGreen("*") : "",
-        conversion: formatRouteConversion(profile),
+        marker: isCurrentProfile(profiles, name) ? textGreen("*") : "",
+        conversion: profilePlatform(profile) === "codex" ? formatRouteConversion(profile) : textDim("-"),
     }));
     const columns = [
         { key: "marker", title: "" },
         { key: "name", title: "" },
+        { key: "platform", title: "" },
         { key: "url", title: "" },
         { key: "key", title: "" },
         { key: "conversion", title: "" },
@@ -860,6 +899,7 @@ async function printProfileList(profiles) {
         return {
             marker: row.marker,
             name: colorName(row.name),
+            platform: textDim(profilePlatform(row.profile)),
             url: colorUrl(row.profile.baseURL),
             key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
             conversion: row.conversion,
@@ -981,7 +1021,7 @@ async function printModels(profiles, args) {
         return;
     }
     const options = parseModelsArgs(args);
-    const name = options.profile ?? profiles.current ?? "test001";
+    const name = options.profile ?? currentProfileName(profiles, "codex") ?? "test001";
     const profile = profiles.profiles?.[name];
     if (!profile) {
         throw new Error(`profile not found: ${name}`);
@@ -1032,7 +1072,7 @@ function usageLines() {
         "  ccs PROFILE                          # show profile details",
         "  ccs models [PROFILE] [--json]        # list models from the profile v1/models endpoint",
         "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
-        "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|claude|config|install|restart|restore|serve] # manage proxy state and runtime",
+        "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|config|install|restart|restore|serve] # manage proxy state and runtime",
         "  ccs use                              # choose the current profile; shows last use and switch times",
         "  ccs list | l                         # list profiles",
         "  ccs config                           # create or update profiles.json, config.toml, and AGENTS.md from the templates",

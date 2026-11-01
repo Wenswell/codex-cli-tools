@@ -40,3 +40,6 @@ export function codexAgentsPath() {
 export function codexAuthPath() {
     return join(codexDir(), "auth.json");
 }
+export function claudeSettingsPath() {
+    return join(process.env.CLAUDE_CONFIG_DIR || join(homeDir(), ".claude"), "settings.json");
+}

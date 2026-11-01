@@ -884,7 +884,7 @@ test("proxy transparently forwards non-policy paths and rejects unknown local co
   }
 });
 
-test("proxy routes Claude Code messages to the claude profile and marks them in history", async () => {
+test("proxy sends Claude Code messages to the claude current profile and marks them in history", async () => {
   const home = await mkdtemp(join(tmpdir(), "ccs-proxy-claude-"));
   const previousHome = process.env.HOME;
   const previousStateRoot = process.env.CCS_PROXY_STATE_ROOT;
@@ -915,10 +915,9 @@ test("proxy routes Claude Code messages to the claude profile and marks them in 
       proxyPort,
       {
         default: { baseURL: `http://127.0.0.1:${defaultPort}`, apiKey: "default-key" },
-        pool: { baseURL: `http://127.0.0.1:${claudePort}/`, apiKey: "pool-key" },
+        pool: { baseURL: `http://127.0.0.1:${claudePort}/`, apiKey: "pool-key", platform: "claude" },
       },
-      "default",
-      { claude: { enabled: true, profile: "pool" } },
+      { codex: "default", claude: "pool" },
     );
     await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(claudeUpstream, claudePort)]);
     await ensureProxyRunning(proxyOptions);
@@ -2234,7 +2233,7 @@ test("proxy rejects current profile without api key before upstream request", as
       body: JSON.stringify({ model: "gpt-test" }),
     });
     assert.equal(response.status, 500);
-    assert.deepEqual(await response.json(), { error: { message: "profiles.current test001 has no apiKey" } });
+    assert.deepEqual(await response.json(), { error: { message: "profiles.current.codex test001 has no apiKey" } });
 
     const state = await waitForState(
       stateRoot,
@@ -2245,7 +2244,7 @@ test("proxy rejects current profile without api key before upstream request", as
     assert.equal(state.metrics.recent_requests[0].status, 500);
     assert.equal(state.metrics.recent_requests[0].upstream, null);
     assert.equal(state.metrics.recent_requests[0].attempts, 0);
-    assert.equal(state.metrics.recent_requests[0].error, "profiles.current test001 has no apiKey");
+    assert.equal(state.metrics.recent_requests[0].error, "profiles.current.codex test001 has no apiKey");
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -6561,6 +6560,50 @@ test("proxy startup clears persisted active requests from older processes", asyn
     } else {
       process.env.CCS_PROXY_LISTEN_PORT = previousListenPort;
     }
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("proxy install and restore point Claude Code settings at the proxy and back", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-proxy-claude-install-"));
+  const previousHome = process.env.HOME;
+  const listenPort = await reservePort();
+  const stateRoot = join(home, ".cache", "codex-tools", "proxy");
+  const codexConfigPath = join(home, ".codex", "config.toml");
+  const settingsPath = join(home, ".claude", "settings.json");
+  const options = { codexConfigPath, listenHost: "127.0.0.1", listenPort, stateRoot };
+  try {
+    process.env.HOME = home;
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(codexConfigPath, 'model_provider = "codex"\n\n[model_providers.codex]\nbase_url = "https://test001.example.com"\n', "utf8");
+    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
+    await writeFile(join(home, ".config", "codex-tools", "profiles.json"), JSON.stringify({
+      profiles: {
+        test001: { baseURL: "https://test001.example.com", apiKey: "test001-key" },
+        pool: { baseURL: "https://pool.example.com/", apiKey: "pool-key", platform: "claude" },
+      },
+      current: { codex: "test001", claude: "pool" },
+    }), "utf8");
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await writeFile(settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://pool.example.com/", ANTHROPIC_AUTH_TOKEN: "pool-key" }, theme: "dark" }), "utf8");
+
+    const preview = stripAnsi(await captureStdout(() => runProxyCommand(["install"], options)));
+    assert.match(preview, new RegExp(`claude:\\s+~/\\.claude/settings\\.json\\s+pool\\s+http://127\\.0\\.0\\.1:${listenPort}`));
+    const installed = await installProxy(options);
+    assert.equal(installed.claude?.profileName, "pool");
+    const proxied = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.deepEqual(proxied, { env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${listenPort}`, ANTHROPIC_AUTH_TOKEN: "pool-key" }, theme: "dark" });
+    assert.equal(JSON.parse(await readFile(installed.claude.backupPath, "utf8")).env.ANTHROPIC_BASE_URL, "https://pool.example.com/");
+
+    await restoreProxy(options);
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      env: { ANTHROPIC_BASE_URL: "https://pool.example.com/", ANTHROPIC_AUTH_TOKEN: "pool-key" },
+      theme: "dark",
+    });
+  } finally {
+    await shutdownProxyRuntime(options).catch(() => null);
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await rm(home, { recursive: true, force: true });
   }
 });

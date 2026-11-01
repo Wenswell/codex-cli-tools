@@ -10,14 +10,15 @@ import stripAnsi from "strip-ansi";
 import { fileURLToPath } from "node:url";
 import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexConfigPath, codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
+import { claudeSettingsPath, codexConfigPath, codexToolsCacheDir, formatHomePath } from "../lib/paths.js";
+import { writePlatformConnection } from "../lib/platforms.js";
 import { readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { formatCompactBytes, formatDurationMs } from "../lib/format.js";
 import { colorCost, colorCount, colorName, colorPath, colorUrl, printKeyValue } from "../lib/output.js";
 import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { createLiveViewController, runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache, type ModelPriceCache } from "../lib/pricing.js";
-import { assertProfile, readProfiles, writeProfiles, type ProfilesFile, type ProxyRouteConfig, type ProxyRouteName } from "../lib/profiles.js";
+import { assertProfile, currentProfileName, readProfiles, writeProfiles, type Platform, type ProfilesFile, type ProxyRouteConfig, type ProxyRouteName } from "../lib/profiles.js";
 import { recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select, type Choice, type Shortcut } from "../lib/prompt.js";
 import { setUsageCommand } from "../lib/usage.js";
@@ -273,7 +274,17 @@ type ProxyGuardActionRecord = {
   error: string | null;
 };
 
+// Claude Code follows install and restore when a claude profile is current.
+type ProxyClaudePlan = {
+  profileName: string;
+  apiKey: string;
+  settingsPath: string;
+  backupPath: string;
+  targetBaseUrl: string;
+};
+
 type ProxyInstallPlan = {
+  claude: ProxyClaudePlan | null;
   backupPath: string;
   statePath: string;
   state: ProxyState;
@@ -285,6 +296,7 @@ type ProxyInstallPlan = {
 };
 
 type ProxyRestorePlan = {
+  claude: ProxyClaudePlan | null;
   backupPath: string;
   state: ProxyState;
   profileName: string;
@@ -1208,37 +1220,39 @@ function currentProviderBaseUrl(content: string): string {
 }
 
 function buildProfileOrder(profiles: ProfilesFile): string[] {
-  return profiles.current ? [profiles.current] : [];
+  const current = currentProfileName(profiles, "codex");
+  return current ? [current] : [];
 }
 
 function resolveProxyUpstream(profiles: ProfilesFile, requestedProfile?: string, requestPath?: string, requestKind?: ProxyRequestKind): ProxyUpstream {
-  const route = requestKind === REQUEST_KIND_CONTEXT_COMPACTION ? "compact"
-    : requestPath && isProxySearchPath(requestPath) ? "search"
-      : requestPath && isClaudeProxyPath(requestPath) ? "claude" : undefined;
+  const platform = proxyRequestPlatform(requestPath);
+  const route = platform !== "codex" ? undefined
+    : requestKind === REQUEST_KIND_CONTEXT_COMPACTION ? "compact"
+      : requestPath && isProxySearchPath(requestPath) ? "search" : undefined;
   const routeProfile = route && profiles.proxy?.[route]?.enabled ? profiles.proxy[route].profile : undefined;
-  const name = requestedProfile || routeProfile || profiles.current;
+  const name = requestedProfile || routeProfile || currentProfileName(profiles, platform);
   if (!name) {
-    throw new Error("profiles.current was not found");
+    throw new Error(`profiles.current.${platform} was not found`);
   }
   const profile = profiles.profiles?.[name];
   if (!profile) {
     if (requestedProfile || routeProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} was not found`);
     }
-    throw new Error(`profiles.current ${name} was not found in profiles`);
+    throw new Error(`profiles.current.${platform} ${name} was not found in profiles`);
   }
   const baseURL = profile?.baseURL;
   if (!baseURL) {
     if (requestedProfile || routeProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no baseURL`);
     }
-    throw new Error(`profiles.current ${name} has no baseURL`);
+    throw new Error(`profiles.current.${platform} ${name} has no baseURL`);
   }
   if (!profile.apiKey) {
     if (requestedProfile || routeProfile) {
       throw new ProxyProfileSelectionError(`proxy profile ${name} has no apiKey`);
     }
-    throw new Error(`profiles.current ${name} has no apiKey`);
+    throw new Error(`profiles.current.${platform} ${name} has no apiKey`);
   }
   return {
     name,
@@ -1254,6 +1268,11 @@ function isProxySearchPath(requestPath: string): boolean {
 
 function isClaudeProxyPath(requestPath: string): boolean {
   return CLAUDE_PROXY_PATH.test(requestPath);
+}
+
+// Claude Code requests use the claude current profile; everything else is Codex traffic.
+function proxyRequestPlatform(requestPath: string | undefined): Platform {
+  return requestPath && isClaudeProxyPath(requestPath) ? "claude" : "codex";
 }
 
 function createProxyMetrics(): ProxyMetrics {
@@ -5433,11 +5452,12 @@ async function buildProxyInstallPlan(options: ProxyOptions): Promise<ProxyInstal
 
   const codexConfigText = await readFile(options.codexConfigPath, "utf8");
   const profiles = await readProfiles();
-  if (!profiles.current) {
-    throw new Error("profiles.current was not found");
+  const codexCurrent = currentProfileName(profiles, "codex");
+  if (!codexCurrent) {
+    throw new Error("profiles.current.codex was not found");
   }
-  if (!profiles.profiles?.[profiles.current]) {
-    throw new Error(`profiles.current ${profiles.current} was not found in profiles`);
+  if (!profiles.profiles?.[codexCurrent]) {
+    throw new Error(`profiles.current.codex ${codexCurrent} was not found in profiles`);
   }
   const backupPath = path.join(options.stateRoot, "backups", `config-${Date.now()}.toml`);
   const state = {
@@ -5447,6 +5467,7 @@ async function buildProxyInstallPlan(options: ProxyOptions): Promise<ProxyInstal
   const targetConfig = updateTomlProviderBaseUrl(codexConfigText, state.provider_name, state.proxy_base_url);
   assertProxyInstallTarget(targetConfig, state.provider_name, state.proxy_base_url);
   return {
+    claude: buildProxyClaudePlan(profiles, options, state.proxy_base_url, "install"),
     backupPath,
     statePath: statePath(options.stateRoot),
     state,
@@ -5477,6 +5498,7 @@ async function applyProxyInstallPlan(options: ProxyOptions, plan: ProxyInstallPl
       throw new Error(`failed to verify proxy routing in Codex config: ${options.codexConfigPath}`);
     }
     assertProxyInstallTarget(installedConfig, plan.state.provider_name, plan.state.proxy_base_url);
+    await applyProxyClaudePlan(plan.claude);
     return { ...plan, runtime };
   } catch (error) {
     const rollbackErrors: string[] = [];
@@ -5526,13 +5548,13 @@ async function buildProxyRestorePlan(options: ProxyOptions): Promise<ProxyRestor
     throw new Error(`Codex config file was not found: ${options.codexConfigPath}`);
   }
   const profiles = await readProfiles();
-  const current = profiles.current;
+  const current = currentProfileName(profiles, "codex");
   if (!current) {
-    throw new Error("profiles.current was not found");
+    throw new Error("profiles.current.codex was not found");
   }
   const targetBaseUrl = profiles.profiles?.[current]?.baseURL;
   if (!targetBaseUrl) {
-    throw new Error(`profiles.current ${current} has no baseURL`);
+    throw new Error(`profiles.current.codex ${current} has no baseURL`);
   }
   const sourceConfig = await readFile(options.codexConfigPath, "utf8");
   const currentBaseUrl = readTomlProviderBaseUrl(sourceConfig, state.provider_name);
@@ -5541,6 +5563,7 @@ async function buildProxyRestorePlan(options: ProxyOptions): Promise<ProxyRestor
   }
   const targetConfig = updateTomlProviderBaseUrl(sourceConfig, state.provider_name, targetBaseUrl);
   return {
+    claude: buildProxyClaudePlan(profiles, options, null, "restore"),
     backupPath: path.join(options.stateRoot, "backups", `config-restore-${Date.now()}.toml`),
     state,
     profileName: current,
@@ -5568,9 +5591,38 @@ async function applyProxyRestorePlan(options: ProxyOptions, plan: ProxyRestorePl
   if (await readFile(options.codexConfigPath, "utf8") !== plan.targetConfig) {
     throw new Error(`failed to verify direct routing in Codex config: ${options.codexConfigPath}`);
   }
+  await applyProxyClaudePlan(plan.claude);
   const stopped = await shutdownProxyRuntime(options);
   await removeProxyState(options.stateRoot);
   return stopped;
+}
+
+// `targetBaseUrl` null means the claude current profile's own URL (restore).
+function buildProxyClaudePlan(profiles: ProfilesFile, options: ProxyOptions, proxyBaseUrl: string | null, kind: "install" | "restore"): ProxyClaudePlan | null {
+  const name = currentProfileName(profiles, "claude");
+  const profile = name ? profiles.profiles?.[name] : undefined;
+  if (!name || !profile?.baseURL || !profile.apiKey) return null;
+  return {
+    profileName: name,
+    apiKey: profile.apiKey,
+    settingsPath: claudeSettingsPath(),
+    backupPath: path.join(options.stateRoot, "backups", `claude-settings-${kind}-${Date.now()}.json`),
+    targetBaseUrl: proxyBaseUrl ?? profile.baseURL,
+  };
+}
+
+async function applyProxyClaudePlan(plan: ProxyClaudePlan | null): Promise<void> {
+  if (!plan) return;
+  if (fs.existsSync(plan.settingsPath)) {
+    await mkdir(path.dirname(plan.backupPath), { recursive: true });
+    await copyFile(plan.settingsPath, plan.backupPath);
+  }
+  await writePlatformConnection("claude", { baseURL: plan.targetBaseUrl, apiKey: plan.apiKey });
+}
+
+function printProxyClaudePlan(plan: ProxyClaudePlan | null, applied: boolean): void {
+  if (!plan) return;
+  printKeyValue("claude:", `${applied ? textGreen(formatProxyFilePath(plan.settingsPath)) : formatProxyFilePath(plan.settingsPath)}  ${colorName(plan.profileName)}  ${colorUrl(plan.targetBaseUrl)}`, 8);
 }
 
 export async function restoreProxy(options: ProxyOptions): Promise<string> {
@@ -7218,7 +7270,6 @@ function usageHelpLines(): string[] {
     "  ccs proxy mode                           # show, then choose response mode and status retry",
     "  ccs proxy compact                        # show, then choose the compaction profile or off",
     "  ccs proxy search                         # show, then choose the alpha search profile or off",
-    "  ccs proxy claude                         # show, then choose the Claude Code profile for ccx/ccxs or off",
     "  ccs proxy config                         # show, then edit the status retry policy or latency deadlines",
     "  ccs proxy install                        # back up config, install routing, and start background proxy",
     "  ccs proxy restart                        # restart; asks before terminating active requests",
@@ -7344,7 +7395,7 @@ async function runProxyRouteCommand(route: ProxyRouteName): Promise<void> {
   }
   const current = proxyRouteConfig(profiles, route);
   const purpose = route === "search" ? "/alpha/search requests"
-    : route === "claude" ? "Claude Code /v1/messages requests" : "compaction requests";
+    : "compaction requests";
   const choice = await select<string | null>(`Route ${purpose} to`, [
     { value: null, label: "off", hint: `use the current profile for ${purpose}` },
     ...Object.entries(profiles.profiles ?? {}).map(([name, profile]) => ({
@@ -7761,7 +7812,6 @@ const PROXY_SHORTCUTS: Shortcut[] = [
   { key: "m", label: "mode" },
   { key: "s", label: "search" },
   { key: "p", label: "compact", at: 3 },
-  { key: "a", label: "claude", at: 2 },
   { key: "f", label: "config", at: 3 },
   { key: "t", label: "restart", at: 3 },
 ];
@@ -7774,7 +7824,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
 
   const command = args[0] ?? "";
   const rest = args.slice(1);
-  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "claude", "config", "restore", "restart", "serve"]);
+  const installedCommands = new Set(["", "--history", "--view", "reroute", "cancel", "capture", "mode", "search", "compact", "config", "restore", "restart", "serve"]);
   const reset = installedCommands.has(command) ? await resetIncompatibleProxyState(options) : null;
   if (reset) {
     printKeyValue(
@@ -7841,7 +7891,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     await runProxyModeCommand(options);
     return;
   }
-  if (command === "search" || command === "compact" || command === "claude") {
+  if (command === "search" || command === "compact") {
     rejectProxyCommandArgs(rest, `ccs proxy ${command}`);
     await runProxyRouteCommand(command);
     return;
@@ -7859,6 +7909,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     printKeyValue("provider:", plan.state.provider_name, 8);
     printKeyValue("current:", colorUrl(plan.currentBaseUrl), 8);
     printKeyValue("local:", colorUrl(plan.targetBaseUrl), 8);
+    printProxyClaudePlan(plan.claude, false);
     printKeyValue("backup:", colorPath(formatProxyFilePath(plan.backupPath)), 8);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
@@ -7868,6 +7919,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     const runtime = applied.runtime;
     printKeyValue("backup:", textBlue(formatProxyFilePath(applied.backupPath)), 8);
     printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
+    printProxyClaudePlan(applied.claude, true);
     printKeyValue("state:", textGreen(formatProxyFilePath(applied.statePath)), 8);
     printKeyValue("proxy:", textGreen(applied.state.proxy_base_url), 8);
     printKeyValue("mode:", textGreen(applied.state.mode), 8);
@@ -7890,6 +7942,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     printKeyValue("current:", colorUrl(plan.currentBaseUrl), 8);
     printKeyValue("target:", colorUrl(plan.targetBaseUrl), 8);
     printKeyValue("profile:", colorName(plan.profileName), 8);
+    printProxyClaudePlan(plan.claude, false);
     printKeyValue("backup:", colorPath(formatProxyFilePath(plan.backupPath)), 8);
     printKeyValue("note:", "no changes are written unless you type yes", 5);
     if (!(await confirmApply())) {
@@ -7898,6 +7951,7 @@ export async function runProxyCommand(args: string[], options: ProxyOptions): Pr
     const stopped = await applyProxyRestorePlan(options, plan);
     printKeyValue("backup:", textBlue(formatProxyFilePath(plan.backupPath)), 8);
     printKeyValue("config:", textGreen(formatProxyFilePath(options.codexConfigPath)), 8);
+    printProxyClaudePlan(plan.claude, true);
     printKeyValue("runtime:", stopped, 8);
     printKeyValue("state:", textGreen("removed"), 8);
     return;

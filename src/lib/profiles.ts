@@ -3,9 +3,15 @@ import { parseJsonObject, stringifyJson } from "./json.js";
 import { profilesPath } from "./paths.js";
 import type { ModelPriceOverride } from "./pricing.js";
 
+// Client applications whose provider settings ccs manages. A profile belongs to one platform.
+export const PLATFORMS = ["codex", "claude"] as const;
+export type Platform = typeof PLATFORMS[number];
+
 export type Profile = {
   baseURL: string;
   apiKey: string;
+  /** Missing means codex. */
+  platform?: Platform;
   /** Convert Codex Responses traffic for a Chat Completions-only provider. */
   routeConversion?: {
     /** Convert Responses requests to Chat Completions and responses back. */
@@ -13,7 +19,7 @@ export type Profile = {
   };
 };
 
-export type ProxyRouteName = "search" | "compact" | "claude";
+export type ProxyRouteName = "search" | "compact";
 
 export type ProxyRouteConfig = {
   enabled: boolean;
@@ -36,12 +42,11 @@ export type ProfilesFile = {
     search?: ProxyRouteConfig;
     /** Route standalone and explicitly marked compaction requests. */
     compact?: ProxyRouteConfig;
-    /** Route Claude Code `/v1/messages` requests from ccx and ccxs. */
-    claude?: ProxyRouteConfig;
   };
   cimg?: CimgConfig;
   usage?: Record<string, Profile>;
-  current?: string;
+  /** The active profile of each platform. */
+  current?: Partial<Record<Platform, string>>;
   pricing?: {
     overrides?: Record<string, ModelPriceOverride>;
   };
@@ -64,6 +69,12 @@ export function assertProfile(value: unknown, name: string): Profile {
     baseURL: profile.baseURL,
     apiKey: profile.apiKey,
   };
+  if (profile.platform !== undefined) {
+    if (!PLATFORMS.includes(profile.platform)) {
+      throw new Error(`profile ${name} has unknown platform: ${String(profile.platform)}`);
+    }
+    if (profile.platform !== "codex") result.platform = profile.platform;
+  }
 
   if (profile.routeConversion !== undefined) {
     if (
@@ -93,6 +104,7 @@ export async function readProfiles(): Promise<ProfilesFile> {
 export function parseProfiles(text: string, label = "profiles.json", strict = false): ProfilesFile {
   try {
     const { toggle: _removedToggle, ...profiles } = parseJsonObject(text) as ProfilesFile & { toggle?: unknown };
+    profiles.current = parseCurrent((profiles as { current?: unknown }).current);
     if (strict) {
       if (profiles.profiles !== undefined && (!profiles.profiles || typeof profiles.profiles !== "object" || Array.isArray(profiles.profiles))) {
         throw new Error("profiles must be an object");
@@ -103,13 +115,39 @@ export function parseProfiles(text: string, label = "profiles.json", strict = fa
     }
     assertProxyRoute(profiles.proxy?.search, "search");
     assertProxyRoute(profiles.proxy?.compact, "compact");
-    assertProxyRoute(profiles.proxy?.claude, "claude");
     assertCimgConfig(profiles.cimg);
     return profiles;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`invalid ${label}: ${message.replace(/^invalid profiles\.json: /, "")}`);
   }
+}
+
+// A plain string is the codex current from before profiles had platforms.
+function parseCurrent(value: unknown): ProfilesFile["current"] {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return value ? { codex: value } : {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("current must be an object of platform names");
+  }
+  for (const [platform, name] of Object.entries(value)) {
+    if (!PLATFORMS.includes(platform as Platform) || typeof name !== "string") {
+      throw new Error(`current.${platform} must be a profile name of a known platform`);
+    }
+  }
+  return value as ProfilesFile["current"];
+}
+
+export function profilePlatform(profile: Pick<Profile, "platform"> | undefined): Platform {
+  return profile?.platform ?? "codex";
+}
+
+export function currentProfileName(profiles: ProfilesFile, platform: Platform): string | undefined {
+  return profiles.current?.[platform] || undefined;
+}
+
+export function profilesOf(profiles: ProfilesFile, platform: Platform): string[] {
+  return Object.entries(profiles.profiles ?? {}).filter(([, profile]) => profilePlatform(profile) === platform).map(([name]) => name);
 }
 
 function assertProxyRoute(value: unknown, route: ProxyRouteName): void {
