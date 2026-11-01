@@ -47,6 +47,10 @@ Large raw payloads should use content-addressed archives:
 - Redact secret-like headers and metadata before writing enabled raw records.
 - Explicit finite packet captures may preserve byte-exact bodies without automatic retention when the user chooses both the target and record count. Keep them in a dedicated private directory, redact authentication headers, fail visibly on incomplete writes, and leave ordinary state/history contracts unchanged.
 
+## Profile usage times
+
+`~/.cache/codex-tools/profile-usage.json` stores `{ version: 1, profiles: { NAME: { switched_at, launched_at, requested_at } } }` with ISO timestamps. It is written atomically with `0600` permissions. It holds display hints only: readers treat a missing, unreadable, or unknown-version file as empty, and it is never synced with `profiles.json`.
+
 ## Counters
 
 Status summaries should be computed from the state-file window rather than an unbounded hidden counter when the state file is the visible source of truth.

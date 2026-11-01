@@ -38,7 +38,6 @@ export type ProfilesFile = {
   cimg?: CimgConfig;
   usage?: Record<string, Profile>;
   current?: string;
-  toggle?: string[];
   pricing?: {
     overrides?: Record<string, ModelPriceOverride>;
   };

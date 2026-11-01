@@ -21,7 +21,7 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | PROFILE | models | toggle | list | init | sync | add | remove | config
+commands:   version | PROFILE | models | use | list | init | sync | add | remove | config
 namespaces: proxy | --help
 ```
 
@@ -43,7 +43,7 @@ ccs proxy search
 ccs proxy compact
 ccs proxy config
 ccs proxy install|restart|restore|serve
-ccs toggle [PROFILE]
+ccs use
 ccs config
 ccs list | l
 ccs init
@@ -88,7 +88,6 @@ config/ccs-profiles.json
     }
   },
   "current": "test001",
-  "toggle": ["test001", "test002"],
   "proxy": {
     "search": {
       "enabled": true,
@@ -192,18 +191,23 @@ Remove a profile:
 ccs remove
 ```
 
-`ccs remove` lists profiles with the current one marked, previews the removed profile, any `current` switch, and the remaining `toggle` list, then writes after exact `yes`. `ccs add` and `ccs remove` require an interactive terminal.
+`ccs remove` lists profiles with the current one marked, previews the removed profile and any `current` switch, then writes after exact `yes`. `ccs add` and `ccs remove` require an interactive terminal.
 
-`ccs toggle` uses the `toggle` array in `profiles.json`; it is not hard-coded to specific profile names.
-When proxy mode is installed, `ccs toggle` switches `profiles.current`, and the proxy uses that current profile as the active upstream and API key for new requests.
-
-Switching profile:
+Switch the current profile:
 
 ```bash
-ccs toggle test001
-ccs toggle test002
-ccs toggle
+ccs use
 ```
+
+`ccs use` lists profiles with `current`, the last use, and the last switch time. The cursor starts on the most recently active profile other than the current one, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It writes the provider URL in `~/.codex/config.toml`, `~/.codex/auth.json`, and `profiles.current`; selecting the current profile changes nothing. Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
+
+Profile times live in `~/.cache/codex-tools/profile-usage.json`, outside the LAN-synced `profiles.json`:
+
+- `switched_at`: the profile became current through `ccs use`.
+- `launched_at`: `cx run`, `cxx run`, or `cxxs run` started Codex with the profile.
+- `requested_at`: the proxy sent a request with the profile, including search, compaction, and pinned `run PROFILE` routing. The proxy writes it at most once per minute per profile.
+
+"Used" is the newer of `launched_at` and `requested_at`. `ccs` shows when the current profile was switched to, and `ccs list` adds `used` and `switched` columns. The file is a display aid: a missing or unreadable file shows no times, and concurrent writers can drop one timestamp update.
 
 Show a profile without switching:
 
@@ -270,10 +274,10 @@ Behavior:
 - The status retry policy prompts for the total window, base backoff, and maximum backoff in milliseconds (defaults `3600000`, `1000`, and `30000`; positive timer-range integers with `BASE <= MAX <= WINDOW`), then retryable statuses such as `400,429,502,503`, or `default` for `429,503,520`. Status codes must be integers from 400 through 599 and are sorted and deduplicated.
 - Latency deadlines are disabled by default. Choosing `on` prompts for the first-progress timeout, its action (`return_502` or `retry_then_502`, skipped when that timeout is `0`), and the total timeout; at least one timeout must be positive. Choosing `off` disables them.
 - `ccs proxy restore` resolves `profiles.current` when preview is built, backs up the current config, changes and verifies only the installed provider's `base_url` to that profile's `baseURL`, stops the proxy, and removes state. Install and restore backups remain available for manual recovery; unrelated config edits, profiles, and authentication stay unchanged.
-- `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs toggle`, while explicit profile launches remain pinned to their requested profile.
+- `ccs proxy` reads one active upstream for each new request. A validated internal `x-ccs-profile` header from a Codex wrapper `run PROFILE` selects that profile for the request; otherwise the proxy uses `profiles.current`. It removes the internal routing header and overwrites incoming `Authorization`, `api-key`, and `x-api-key` headers with `Authorization: Bearer <selected profile apiKey>`. Long-running ordinary Codex CLI processes therefore keep using the proxy URL after `ccs use`, while explicit profile launches remain pinned to their requested profile.
 - A profile can set `routeConversion.enabled` when its provider only supports Chat Completions. `ccs add` prompts for this setting. Codex continues to send `/responses`; the proxy sends `/v1/chat/completions` upstream and returns equivalent Responses JSON or SSE events, including the terminal `response.completed` event.
 - When status retry is enabled, configured HTTP error responses (default: 429, 503, and transient gateway 520) are withheld and retried while the configured total window allows another wait and dispatch. In `passthrough + retry`, every non-stream response body up to 1 MiB is checked for the Capacity message, including bodies returned with HTTP `200`; matching responses use the same window and backoff while counting as `upstream_capacity`. Non-matching responses follow the ordinary status rule. The proxy honors `Retry-After` seconds or HTTP dates when they fit the configured window; otherwise it uses full-jitter exponential backoff capped by `backoff_max_ms`. The window starts with the first upstream fetch. Before every retry dispatch, an unpinned request reloads `profiles.current`; explicit `x-ccs-profile` requests stay pinned. Expiry returns the last original response. An aborted request, premature client socket close, or unfinished response close stops the wait and prevents another upstream attempt. In `passthrough`, final responses remain uninspected.
-- After `ccs toggle`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429, 503, 520, or a Capacity response. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
+- After `ccs use`, run `ccs proxy reroute` to preview default-profile requests currently waiting after 429, 503, 520, or a Capacity response. Exact `yes` wakes every still-eligible wait immediately; its next attempt uses the new current profile on the original client connection. Fetching, forwarding, completed, and explicitly pinned requests are excluded. Reroute preserves the original retry deadline and counters.
 - Use `ccs proxy cancel` when a Codex UI session has been closed but its request connection is still open. It lists current 429, 503, 520, or Capacity retry waits, lets you select requests with space (`a` selects all), then previews the selection and requires exact `yes`. Cancellation also applies to pinned waits, prevents the next attempt, and records status `499`.
 - Use `ccs proxy capture` to save the next complete client-boundary HTTP exchanges. The list starts with `all sessions` (every request through the proxy, including requests without a session) and `next new session` (the first Codex session created after the capture starts, such as a newly opened `cx`), followed by sessions from active and recent requests. Select one, enter a request count (default `5`), and the command shows live progress. Press `c` to cancel the capture (already written files are retained) or `q` to leave the view while the capture continues; running `ccs proxy capture` again reopens the view. The view closes by itself when the requested count is reached and prints the result. The selected short session id binds the first matching full session id; an ambiguous later match ends the task with an explicit error. Captures start after arming, stop automatically after the requested count, and live under `~/.cache/codex-tools/proxy/captures/` as private metadata plus byte-exact request/response body files. Authentication and cookie headers are redacted; prompt and response bodies are intentionally retained until manually removed. Proxy restart discards an unfinished capture task.
 - Upstream HTTP responses are forwarded as received when the active policy accepts them. Upstream `4xx` and `5xx` responses record `failure_summary.type=upstream_error` and render the upstream failure summary in the history `result` column. Summaries include only bounded non-secret `server`, request-id, and `cf-ray` diagnostics; a response-body read failure is labeled `upstream stream terminated`.

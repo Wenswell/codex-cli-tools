@@ -23,6 +23,9 @@ in the command-specific specifications.
   and text input with current values as defaults), then preview once and ask for
   exact `yes` once. Do not keep equivalent positional-argument forms. Without a
   terminal, these commands print their state and a short note, and write nothing.
+- Exception: a command whose only effect is selecting one value that the user
+  can select back, such as `ccs use`, applies the selection on Enter without a
+  separate `yes`. The selection list must show the current value.
 - Commands that follow a background task after starting it show live progress
   until it finishes, and provide keys to cancel the task or leave the view.
 - Apply rechecks the preview source, writes only the previewed target, verifies

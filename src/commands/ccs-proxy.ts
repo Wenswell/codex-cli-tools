@@ -18,6 +18,7 @@ import { appendBoundedJsonLine } from "../lib/runtime-log.js";
 import { createLiveViewController, runLiveView } from "../lib/live-view.js";
 import { modelPriceParts, readModelPriceCache, type ModelPriceCache } from "../lib/pricing.js";
 import { assertProfile, readProfiles, writeProfiles, type ProfilesFile, type ProxyRouteConfig } from "../lib/profiles.js";
+import { recordProfileUsage } from "../lib/profile-usage.js";
 import { input, isInteractive, multiSelect, select, type Choice } from "../lib/prompt.js";
 import { bgDarkBlue, textAnsi256, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, visibleLength } from "../lib/text.js";
 import { readTomlBaseUrl, readTomlProviderBaseUrl, readTopLevelTomlString, updateTomlProviderBaseUrl } from "../lib/toml.js";
@@ -453,6 +454,7 @@ const REROUTE_PATH = "/__codex_proxy/reroute";
 const CANCEL_PATH = "/__codex_proxy/cancel";
 const CAPTURE_PATH = "/__codex_proxy/capture";
 const PROXY_CAPTURE_DEFAULT_COUNT = 5;
+const PROXY_PROFILE_USAGE_INTERVAL_MS = 60_000;
 const PROXY_CAPTURE_REFRESH_MS = 1000;
 export const CCS_PROXY_PROFILE_HEADER = "x-ccs-profile";
 const SEARCH_PROXY_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
@@ -6305,6 +6307,20 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
   let closing = false;
   const statusRetryWaits = new Map<string, ProxyStatusRetryWaitEntry>();
   let captureTask: ProxyCaptureTask | null = null;
+  const profileUsageWrittenAt = new Map<string, number>();
+  let profileUsageQueue = Promise.resolve();
+  const noteProfileRequest = (name: string): void => {
+    const nowMs = Date.now();
+    if (nowMs - (profileUsageWrittenAt.get(name) ?? 0) < PROXY_PROFILE_USAGE_INTERVAL_MS) return;
+    profileUsageWrittenAt.set(name, nowMs);
+    profileUsageQueue = profileUsageQueue
+      .then(() => recordProfileUsage(name, "requested_at", new Date(nowMs)))
+      .catch((error: unknown) => appendProxyJsonLine(proxyLogPath(options.stateRoot), {
+        event: "ccs_proxy_profile_usage_failed",
+        profile: name,
+        error: error instanceof Error ? error.message : String(error),
+      }).catch(() => undefined));
+  };
   const server = createServer((req, res) => {
     res.once("finish", () => {
       if (closing) server.closeIdleConnections();
@@ -6639,6 +6655,7 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
           const requestedProfile = headerSignal(req.headers, CCS_PROXY_PROFILE_HEADER);
           const requestKind = detectProxyRequestKind(req.headers, requestJson, url.pathname);
           const upstreamProfile = resolveProxyUpstream(profiles, requestedProfile, url.pathname, requestKind);
+          noteProfileRequest(upstreamProfile.name);
           requestServiceTier = jsonStringAt(requestJson, ["service_tier"]);
           requestHeaders = sanitizeWhitelistedRequestHeaders(req.headers);
           activeRecord.request_bytes = body.length;
@@ -6653,7 +6670,11 @@ async function serveProxy(options: ProxyOptions): Promise<void> {
             signal: downstreamAbort.signal,
             resolveRetryUpstream: requestedProfile
               ? undefined
-              : async () => resolveProxyUpstream(await readProfiles(), undefined, url.pathname, requestKind),
+              : async () => {
+                const retryUpstream = resolveProxyUpstream(await readProfiles(), undefined, url.pathname, requestKind);
+                noteProfileRequest(retryUpstream.name);
+                return retryUpstream;
+              },
             onStatusRetryWait: (wait) => {
               const entry: ProxyStatusRetryWaitEntry = {
                 request_id: wait.requestId,

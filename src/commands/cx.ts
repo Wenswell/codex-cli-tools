@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { colorName, colorUrl, printKeyValue } from "../lib/output.js";
 import { maskSecret, textBold, textDim, textRed } from "../lib/text.js";
 import { isVersionArgument, printToolVersion, toolNameFromArgv } from "../lib/version.js";
+import { recordProfileUsage } from "../lib/profile-usage.js";
 import { resolveCodexProfileLaunch } from "./codex-profile.js";
 
 type CodexSearchOptions = {
@@ -102,7 +103,10 @@ export async function runCodexCommand(
   }
   const launch = await resolveCodexProfileLaunch(name);
   printKeyValue("profile:", `${colorName(name)}  ${colorUrl(launch.profile.baseURL)}  ${textDim(maskSecret(launch.profile.apiKey))}`);
-  printKeyValue("mode:", "temporary codex launch; no files changed");
+  printKeyValue("mode:", "temporary codex launch; config and profiles unchanged");
+  await recordProfileUsage(name, "launched_at").catch((error: unknown) => {
+    console.error(textDim(`profile usage not recorded: ${error instanceof Error ? error.message : String(error)}`));
+  });
   runCodexSearch(args.slice(2), {
     ...options,
     configOverrides: launch.configOverrides,

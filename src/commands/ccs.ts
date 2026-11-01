@@ -17,6 +17,7 @@ import {
   profilesPath,
 } from "../lib/paths.js";
 import { assertProfile, readProfiles, writeProfiles, type Profile, type ProfilesFile } from "../lib/profiles.js";
+import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage, type ProfileUsageEntry } from "../lib/profile-usage.js";
 import { input, isInteractive, multiSelect, select } from "../lib/prompt.js";
 import {
   maskSecret,
@@ -213,7 +214,6 @@ async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
     return {
       current: currentName,
       profiles,
-      toggle: defaultProfiles.toggle ?? Object.keys(profiles).slice(0, 2),
     };
   }
 
@@ -238,7 +238,6 @@ async function planInitProfilesFromCurrent(): Promise<ProfilesFile> {
   return {
     current: currentName,
     profiles,
-    toggle: defaultProfiles.toggle ?? Object.keys(profiles).slice(0, 2),
   };
 }
 
@@ -259,11 +258,11 @@ async function planSyncProfiles(): Promise<ProfilesFile> {
     }
   }
 
+  const { toggle: _removedToggle, ...rest } = currentProfiles as ProfilesFile & { toggle?: unknown };
   return {
-    ...currentProfiles,
+    ...rest,
     current: currentProfiles.current ?? defaultProfiles.current ?? Object.keys(profiles)[0] ?? "test001",
     profiles,
-    toggle: currentProfiles.toggle ?? defaultProfiles.toggle ?? Object.keys(profiles).slice(0, 2),
   };
 }
 
@@ -952,13 +951,9 @@ async function removeProfile(): Promise<void> {
   })), { default: data.current });
   const remaining = names.filter((item) => item !== name);
   const current = data.current === name ? remaining[0] : data.current;
-  const toggle = data.toggle?.filter((item) => item !== name);
   printProfileSummary("remove", name, assertProfile(data.profiles![name], name));
   if (current !== data.current) {
     printKeyValue("current:", `${textYellow(name)} -> ${current ? colorName(current) : textDim("none")}`);
-  }
-  if (toggle && toggle.length !== data.toggle?.length) {
-    printKeyValue("toggle:", toggle.length === 0 ? textDim("none") : toggle.join(", "));
   }
   console.log(textDim("no changes are written unless you type yes at the prompt."));
   if (!(await confirmApply())) {
@@ -970,7 +965,7 @@ async function removeProfile(): Promise<void> {
   }
   const profiles = { ...data.profiles };
   delete profiles[name];
-  await writeProfiles({ ...data, profiles, current, toggle });
+  await writeProfiles({ ...data, profiles, current });
   console.log(`profile removed: ${textRed(name)}`);
 }
 
@@ -1005,6 +1000,54 @@ async function switchProfile(name: string): Promise<Profile> {
   return normalized;
 }
 
+function profileUsageHint(name: string, current: string | undefined, entry: ProfileUsageEntry | undefined, nowMs: number): string {
+  const used = profileLastUsedMs(entry);
+  const parts = [
+    ...(name === current ? ["current"] : []),
+    used === null ? "never used" : `used ${formatAgo(used, nowMs)}`,
+    ...(entry?.switched_at ? [`switched ${formatAgo(Date.parse(entry.switched_at), nowMs)}`] : []),
+  ];
+  return parts.join(" · ");
+}
+
+async function useProfile(profiles: ProfilesFile): Promise<void> {
+  const names = Object.keys(profiles.profiles ?? {});
+  if (names.length === 0) {
+    console.log(textDim("no profiles; run ccs add first."));
+    return;
+  }
+  const usage = await readProfileUsage();
+  const nowMs = Date.now();
+  if (!isInteractive()) {
+    for (const name of names) {
+      console.log(`${name === profiles.current ? textGreen("*") : " "} ${colorName(name)}  ${textDim(profileUsageHint(name, profiles.current, usage[name], nowMs))}`);
+    }
+    console.log(textDim("run in an interactive terminal to switch."));
+    return;
+  }
+  const lastActive = (name: string): number => Math.max(
+    profileLastUsedMs(usage[name]) ?? 0,
+    usage[name]?.switched_at ? Date.parse(usage[name].switched_at!) : 0,
+  );
+  const previous = names
+    .filter((name) => name !== profiles.current)
+    .sort((left, right) => lastActive(right) - lastActive(left))[0];
+  const name = await select("Switch to which profile?", names.map((item) => ({
+    value: item,
+    label: item,
+    hint: profileUsageHint(item, profiles.current, usage[item], nowMs),
+    disabled: profiles.profiles![item].apiKey ? undefined : "missing apiKey",
+  })), { default: previous ?? profiles.current });
+  if (name === profiles.current) {
+    console.log(textDim("no changes."));
+    return;
+  }
+  const previousName = profiles.current;
+  await switchProfile(name);
+  await recordProfileUsage(name, "switched_at");
+  printKeyValue("current:", `${previousName ? `${textYellow(previousName)} -> ` : ""}${colorName(name)}`);
+}
+
 async function printStatus(): Promise<Profile | null> {
   const profiles = await readProfiles();
   const current = profiles.current ?? "test001";
@@ -1016,7 +1059,9 @@ async function printStatus(): Promise<Profile | null> {
     return null;
   }
   const normalized = assertProfile(profile, current);
-  printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}`);
+  const usage = (await readProfileUsage())[current];
+  const switched = usage?.switched_at ? textDim(`switched ${formatAgo(Date.parse(usage.switched_at))}`) : "";
+  printKeyValue("current:", `${colorName(current)}  ${colorHost(systemLabel)}${switched ? `  ${switched}` : ""}`);
   printKeyValue("api:", `${colorUrl(normalized.baseURL)}  ${formatApiKey(normalized.apiKey)}`);
   printKeyValue("conversion:", formatRouteConversion(normalized));
   printKeyValue("files:", `${colorPath(formatDisplayPath(profilesPath()))}  ${colorPath(formatDisplayPath(codexConfigPath()))}`);
@@ -1026,6 +1071,8 @@ async function printStatus(): Promise<Profile | null> {
 async function printProfileList(profiles: ProfilesFile): Promise<void> {
   const entries = Object.entries(profiles.profiles ?? {});
   const current = profiles.current ?? "";
+  const usage = await readProfileUsage();
+  const nowMs = Date.now();
   const rows = entries.map(([name, profile]) => ({
     name,
     profile,
@@ -1039,14 +1086,21 @@ async function printProfileList(profiles: ProfilesFile): Promise<void> {
     { key: "url", title: "" },
     { key: "key", title: "" },
     { key: "conversion", title: "" },
+    { key: "used", title: "" },
+    { key: "switched", title: "" },
   ];
-  printTable(columns, rows.map((row) => ({
-    marker: row.marker,
-    name: colorName(row.name),
-    url: colorUrl(row.profile.baseURL),
-    key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-    conversion: row.conversion,
-  })));
+  printTable(columns, rows.map((row) => {
+    const switchedAt = usage[row.name]?.switched_at;
+    return {
+      marker: row.marker,
+      name: colorName(row.name),
+      url: colorUrl(row.profile.baseURL),
+      key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
+      conversion: row.conversion,
+      used: textDim(`used ${formatAgo(profileLastUsedMs(usage[row.name]), nowMs)}`),
+      switched: textDim(`switched ${formatAgo(switchedAt ? Date.parse(switchedAt) : null, nowMs)}`),
+    };
+  }));
 }
 
 function buildModelsUrl(baseURL: string): string | null {
@@ -1228,7 +1282,7 @@ function usageLines(): string[] {
     "  ccs models [PROFILE] [--json]        # list models from the profile v1/models endpoint",
     "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
     "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|config|install|restart|restore|serve] # manage proxy state and runtime",
-    "  ccs toggle [PROFILE]                 # switch profile",
+    "  ccs use                              # choose the current profile; shows last use and switch times",
     "  ccs config                           # choose push or pull, preview, and sync profiles.json with LAN server",
     "  ccs list | l                         # list profiles",
     "  ccs init                             # preview, confirm, and create config",
@@ -1257,7 +1311,7 @@ function printUsageHelp(): void {
   printCommandFooter([
     {
       label: "commands:",
-      commands: ["version", "PROFILE", "models", "toggle", "list", "init", "sync", "add", "remove", "config"],
+      commands: ["version", "PROFILE", "models", "use", "list", "init", "sync", "add", "remove", "config"],
     },
     {
       label: "namespaces:",
@@ -1382,23 +1436,9 @@ export async function runCcs(argv: string[]): Promise<void> {
     return;
   }
 
-  if (command === "toggle") {
-    assertMaxArgs(args, "toggle [PROFILE]", 1);
-    if (args[0]) {
-      if (args[0].startsWith("-")) {
-        throw new Error(`unknown argument for ccs toggle: ${args[0]}`);
-      }
-      await switchProfile(args[0]);
-      return;
-    }
-
-    const toggle = profiles.toggle ?? [];
-    if (toggle.length < 2) {
-      throw new Error("toggle requires at least two profile names in profiles.json toggle");
-    }
-    const index = Math.max(0, toggle.indexOf(profiles.current ?? ""));
-    const next = toggle[(index + 1) % toggle.length];
-    await switchProfile(next);
+  if (command === "use") {
+    assertExactArgs(args, "use", 0);
+    await useProfile(profiles);
     return;
   }
 

@@ -299,6 +299,8 @@ test("Codex profile launch uses the direct URL and rejects unknown profiles", as
     };
 
     await runCcs(["dist/bin/cx.js", "run", "test001", "hello"], home, env);
+    const usage = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "profile-usage.json"), "utf8"));
+    assert.ok(Number.isFinite(Date.parse(usage.profiles.test001.launched_at)));
     const captured = JSON.parse(await readFile(capturePath, "utf8"));
     assert.equal(captured.apiKey, "test001-key");
     assert.deepEqual(captured.args, [
@@ -336,6 +338,7 @@ test("ccs sync stays additive when no existing values are selected", async () =>
       ["Apply changes?", "yes\n"],
     ]);
     const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
+    assert.equal("toggle" in JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")), false);
     assert.match(output, /model\s+"local-model" -> "gpt-5\.6-sol"/);
     assert.match(output, /features\.goals\s+false -> true/);
     assert.doesNotMatch(output, /model_providers\.codex\.base_url\s+"https/);
@@ -438,7 +441,6 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
       test002: { baseURL: "https://test002.example.test", apiKey: "test002-key-123456" },
     },
     current: "test001",
-    toggle: ["test001", "test002"],
   });
   const profilesFile = join(home, ".config", "codex-tools", "profiles.json");
   try {
@@ -451,7 +453,6 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
     ]);
     assert.match(declined.output, /test001\s+https:\/\/test001\.example\.test\s+\(current\)/);
     assert.match(declined.output, /current:\s+test001 -> test002/);
-    assert.match(declined.output, /toggle:\s+test002/);
     assert.equal(declined.output.includes("test001-key-123456"), false);
     assert.ok(JSON.parse(await readFile(profilesFile, "utf8")).profiles.test001);
 
@@ -462,7 +463,63 @@ test("ccs remove picks a profile, previews the current switch, and writes after 
     const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
     assert.deepEqual(Object.keys(profiles.profiles), ["test002"]);
     assert.equal(profiles.current, "test002");
-    assert.deepEqual(profiles.toggle, ["test002"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs use defaults to the previously used profile, switches on enter, and records the switch", async () => {
+  const home = await writeProfiles({
+    profiles: {
+      test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" },
+      test002: { baseURL: "https://test002.example.test", apiKey: "test002-key-123456" },
+      local: { baseURL: "https://local.example.test", apiKey: "local-key-123456" },
+      empty: { baseURL: "https://empty.example.test", apiKey: "" },
+    },
+    current: "test001",
+  });
+  const usagePath = join(home, ".cache", "codex-tools", "profile-usage.json");
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  try {
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), 'model_provider = "codex"\n\n[model_providers.codex]\nbase_url = "https://test001.example.test"\n', "utf8");
+    await mkdir(dirname(usagePath), { recursive: true });
+    await writeFile(usagePath, JSON.stringify({
+      version: 1,
+      profiles: {
+        test001: { requested_at: ago(60_000), switched_at: ago(3 * 86_400_000) },
+        test002: { launched_at: ago(5 * 3_600_000) },
+        local: { switched_at: ago(10 * 86_400_000) },
+      },
+    }), "utf8");
+
+    const list = await runCcsDirect(["list"], home);
+    assert.match(list, /input .*used 1m ago\s+switched 3d ago/);
+    assert.match(list, /local .*used -\s+switched 10d ago/);
+    const plain = await runCcsDirect(["use"], home);
+    assert.match(plain, /run in an interactive terminal to switch/);
+    await assert.rejects(() => runCcsDirect(["use", "test002"], home), /usage: ccs use/);
+
+    const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", KEYS.enter]]);
+    assert.match(output, /test001\s+current · used 1m ago · switched 3d ago/);
+    assert.match(output, /empty\s+\(missing apiKey\)/);
+    assert.match(output, /✔ Switch to which profile\? · test002/);
+    assert.match(output, /current:\s+test001 -> test002/);
+    assert.equal(JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")).current, "test002");
+    assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /base_url = "https:\/\/test002\.example\.test"/);
+    assert.equal(JSON.parse(await readFile(join(home, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "test002-key-123456");
+    const usage = JSON.parse(await readFile(usagePath, "utf8"));
+    assert.ok(Date.now() - Date.parse(usage.profiles.test002.switched_at) < 60_000);
+    assert.ok(Date.now() - Date.parse(usage.profiles.test002.launched_at) > 4 * 3_600_000);
+
+    const unchanged = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    assert.match(unchanged.output, /✔ Switch to which profile\? · test002/);
+    assert.match(unchanged.output, /no changes\./);
+
+    await assert.rejects(
+      () => runCcs(["dist/bin/ccs.js", "toggle"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
+      /unknown command: toggle/,
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -530,6 +587,7 @@ async function createFakeCodex(source) {
 
 async function writeSyncFixture(config) {
   const home = await mkdtemp(join(tmpdir(), "ccs-sync-home-"));
+  const profiles = JSON.parse(await readFile(join(repoRoot, "config", "ccs-profiles.json"), "utf8"));
   await mkdir(join(home, ".codex"), { recursive: true });
   await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
   await writeFile(join(home, ".codex", "config.toml"), config, "utf8");
@@ -540,7 +598,7 @@ async function writeSyncFixture(config) {
   );
   await writeFile(
     join(home, ".config", "codex-tools", "profiles.json"),
-    await readFile(join(repoRoot, "config", "ccs-profiles.json"), "utf8"),
+    JSON.stringify({ ...profiles, toggle: ["test001", "test002"] }, null, 2),
     "utf8",
   );
   return home;

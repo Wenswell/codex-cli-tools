@@ -78,7 +78,6 @@ test("proxy install replaces a direct current URL with the local proxy URL", asy
             test002: { baseURL: "https://codex.example.com", apiKey: "test002-key" },
           },
           current: "test002",
-          toggle: ["test001", "test002"],
         },
         null,
         2,
@@ -557,7 +556,6 @@ test("proxy records active and history request lifecycle", async () => {
             test001: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "test001-key" },
           },
           current: "test001",
-          toggle: ["test001"],
         },
         null,
         2,
@@ -919,7 +917,6 @@ test("proxy routes alpha search to its mapped profile and preserves explicit pro
         search: { baseURL: `http://127.0.0.1:${searchPort}`, apiKey: "search-key" },
       },
       "default",
-      ["default", "search"],
       { search: { enabled: true, profile: "search" } },
     );
     await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(searchUpstream, searchPort)]);
@@ -1011,7 +1008,6 @@ test("proxy routes compaction to its mapped profile and preserves explicit profi
         compact: { baseURL: `http://127.0.0.1:${compactPort}`, apiKey: "compact-key" },
       },
       "default",
-      ["default", "compact"],
       { compact: { enabled: true, profile: "compact" } },
     );
     await Promise.all([listenServer(defaultUpstream, defaultPort), listenServer(compactUpstream, compactPort)]);
@@ -1608,7 +1604,6 @@ test("proxy uses an explicit run profile or profiles.current and passes upstream
         test002: { baseURL: `http://127.0.0.1:${currentPort}`, apiKey: "test002-key" },
       },
       "test002",
-      ["test001", "test002"],
     );
     await listenServer(current, currentPort);
     await listenServer(other, otherPort);
@@ -1624,6 +1619,7 @@ test("proxy uses an explicit run profile or profiles.current and passes upstream
     assert.equal(runtime.healthy, true);
     await waitForFetchOk(`http://127.0.0.1:${proxyPort}/__codex_proxy/health`);
 
+    const beforeFirstRequest = Date.now();
     for (const status of statuses) {
       const response = await fetch(`http://127.0.0.1:${proxyPort}/responses?status=${status}`, {
         method: "POST",
@@ -1685,6 +1681,11 @@ test("proxy uses an explicit run profile or profiles.current and passes upstream
     const output = await captureConsole(() => runProxyCommand([], proxyOptions));
     assert.match(output, /^\s+-\s+test002\/-$/m);
     assert.match(output, /^\s+-\s+test001\/-$/m);
+
+    const usage = JSON.parse(await readFile(join(home, ".cache", "codex-tools", "profile-usage.json"), "utf8")).profiles;
+    const firstCurrentRequest = Date.parse(usage.test002.requested_at);
+    assert.ok(firstCurrentRequest >= beforeFirstRequest && firstCurrentRequest < Date.parse(usage.input.requested_at));
+    assert.equal(usage.missing, undefined);
   } finally {
     await shutdownProxyRuntime({
       codexConfigPath: join(home, ".codex", "config.toml"),
@@ -2032,7 +2033,7 @@ test("proxy rereads current profile and overwrites stale client api key", async 
       test001: { baseURL: `http://127.0.0.1:${test001Port}`, apiKey: "test001-key" },
       test002: { baseURL: `http://127.0.0.1:${test002Port}`, apiKey: "test002-key" },
     };
-    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "test001", ["test001", "test002"]);
+    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "test001");
     await listenServer(input, test001Port);
     await listenServer(test002, test002Port);
 
@@ -2060,7 +2061,7 @@ test("proxy rereads current profile and overwrites stale client api key", async 
 
     await writeFile(
       join(stateRoot, "profiles.json"),
-      JSON.stringify({ profiles, current: "test002", toggle: ["test001", "test002"] }, null, 2),
+      JSON.stringify({ profiles, current: "test002" }, null, 2),
       "utf8",
     );
 
@@ -2134,7 +2135,6 @@ test("proxy rejects current profile without api key before upstream request", as
       proxyPort,
       { test001: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "" } },
       "test001",
-      ["test001"],
     );
     await listenServer(upstream, upstreamPort);
 
@@ -3437,7 +3437,7 @@ test("proxy reroute moves waiting default-profile requests to the current provid
   try {
     process.env.HOME = home;
     process.env.CCS_PROXY_STATE_ROOT = stateRoot;
-    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "old", ["old", "next"]);
+    await writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, "old");
     const stateFile = join(stateRoot, "proxy.json");
     const configured = JSON.parse(await readFile(stateFile, "utf8"));
     configured.mode = "passthrough";
@@ -3470,7 +3470,7 @@ test("proxy reroute moves waiting default-profile requests to the current provid
 
     await writeFile(
       join(stateRoot, "profiles.json"),
-      JSON.stringify({ profiles, current: "next", toggle: ["old", "next"] }, null, 2),
+      JSON.stringify({ profiles, current: "next" }, null, 2),
       "utf8",
     );
     const preview = stripAnsi(await captureStdout(() => runProxyCommand(["reroute"], options)));
@@ -3481,7 +3481,7 @@ test("proxy reroute moves waiting default-profile requests to the current provid
 
     await writeFile(
       join(stateRoot, "profiles.json"),
-      JSON.stringify({ profiles, current: "old", toggle: ["old", "next"] }, null, 2),
+      JSON.stringify({ profiles, current: "old" }, null, 2),
       "utf8",
     );
     const staleApply = await fetch(`http://127.0.0.1:${proxyPort}/__codex_proxy/reroute`, {
@@ -3493,7 +3493,7 @@ test("proxy reroute moves waiting default-profile requests to the current provid
     assert.equal(nextHits, 0);
     await writeFile(
       join(stateRoot, "profiles.json"),
-      JSON.stringify({ profiles, current: "next", toggle: ["old", "next"] }, null, 2),
+      JSON.stringify({ profiles, current: "next" }, null, 2),
       "utf8",
     );
 
@@ -6206,7 +6206,6 @@ test("proxy watch uses terminal frame repaint and omits file path lines", async 
       proxyPort,
       { test001: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "test001-key" } },
       "test001",
-      ["test001"],
     );
 
     const output = await captureStdout(
@@ -6388,7 +6387,6 @@ test("proxy startup clears persisted active requests from older processes", asyn
             test001: { baseURL: "https://proxy.example.com", apiKey: "" },
           },
           current: "test001",
-          toggle: ["test001"],
         },
         null,
         2,
@@ -6531,7 +6529,6 @@ test("proxy restore uses the current profile and preserves unrelated config edit
             test001: { baseURL: "https://ai.example.com", apiKey: "" },
           },
           current: "test001",
-          toggle: ["test001"],
         },
         null,
         2,
@@ -6585,7 +6582,6 @@ test("proxy restore uses the current profile and preserves unrelated config edit
             switched: { baseURL: "https://switched.example.com/v1", apiKey: "switched-key" },
           },
           current: "switched",
-          toggle: ["test001", "switched"],
         },
         null,
         2,
@@ -6832,11 +6828,10 @@ async function writeProxyTestState(home, stateRoot, proxyPort, upstreamPort) {
       test001: { baseURL: `http://127.0.0.1:${upstreamPort}`, apiKey: "test001-key" },
     },
     "test001",
-    ["test001"],
   );
 }
 
-async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, current, toggle = [current], proxy) {
+async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profiles, current, proxy) {
   await mkdir(stateRoot, { recursive: true });
   await writeFile(
     join(stateRoot, "profiles.json"),
@@ -6844,7 +6839,6 @@ async function writeProxyTestStateWithProfiles(home, stateRoot, proxyPort, profi
       {
         profiles,
         current,
-        toggle,
         ...(proxy ? { proxy } : {}),
       },
       null,
@@ -6896,7 +6890,6 @@ async function writeProxyStateFixture(home, stateRoot, proxyPort, metrics = {}) 
           test001: { baseURL: `http://127.0.0.1:${proxyPort}`, apiKey: "test001-key" },
         },
         current: "test001",
-        toggle: ["test001"],
       },
       null,
       2,
