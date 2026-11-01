@@ -25,7 +25,7 @@
 - For documentation-only changes, check local Markdown links and run
   `node --test test/cli-surface.test.js`. A full build and test run is unnecessary.
 - Run `git diff --check` before every commit.
-- Use a temporary `HOME` for manual `ccs init` or `ccs sync` apply checks.
+- Use a temporary `HOME` for manual `ccs config` or `ccs sync` apply checks.
 - Commit each completed change. Releases are GitHub-first (`git push origin main`);
   push only when requested, and publish to npm only when explicitly requested.
 

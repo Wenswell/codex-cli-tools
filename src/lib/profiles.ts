@@ -81,16 +81,29 @@ export async function readProfiles(): Promise<ProfilesFile> {
   if (!text) {
     return {};
   }
+  return parseProfiles(text);
+}
 
+// Validates profiles.json text. The removed `toggle` field is dropped so the next write cleans it up.
+// `strict` also checks every profile entry, for files arriving from another device.
+export function parseProfiles(text: string, label = "profiles.json", strict = false): ProfilesFile {
   try {
-    const profiles = parseJsonObject(text) as ProfilesFile;
+    const { toggle: _removedToggle, ...profiles } = parseJsonObject(text) as ProfilesFile & { toggle?: unknown };
+    if (strict) {
+      if (profiles.profiles !== undefined && (!profiles.profiles || typeof profiles.profiles !== "object" || Array.isArray(profiles.profiles))) {
+        throw new Error("profiles must be an object");
+      }
+      for (const [name, profile] of Object.entries(profiles.profiles ?? {})) {
+        assertProfile(profile, name);
+      }
+    }
     assertProxyRoute(profiles.proxy?.search, "search");
     assertProxyRoute(profiles.proxy?.compact, "compact");
     assertCimgConfig(profiles.cimg);
     return profiles;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid profiles.json: ${message}`);
+    throw new Error(`invalid ${label}: ${message.replace(/^invalid profiles\.json: /, "")}`);
   }
 }
 

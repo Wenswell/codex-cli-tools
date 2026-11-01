@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,20 +89,49 @@ test("ccs exposes route conversion in current, list, and profile views", async (
   }
 });
 
-test("ccs config shows sync endpoints and has local help", async () => {
-  const home = await writeProfiles({
-    profiles: { test001: { baseURL: "https://example.invalid", apiKey: "" } },
-    current: "test001",
-  });
-  const env = { XDG_CACHE_HOME: join(home, ".cache") };
+test("ccs config creates missing files and imports the current Codex provider", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ccs-config-home-"));
   try {
-    const configOutput = await runCcs(["dist/bin/ccs.js", "config"], home, env);
-    assert.match(configOutput, /^local:/m);
-    assert.match(configOutput, /run in an interactive terminal to push or pull/);
-    assert.match(await runCcs(["dist/bin/ccs.js", "config", "--help"], home, env), /choose push or pull/);
-    for (const removed of [["config", "push"], ["config", "pull"]]) {
-      await assert.rejects(() => runCcs(["dist/bin/ccs.js", ...removed], home, env), /unknown argument for ccs config/);
-    }
+    await mkdir(join(home, ".codex"), { recursive: true });
+    await writeFile(join(home, ".codex", "config.toml"), 'model_provider = "codex"\n\n[model_providers.codex]\nbase_url = "https://own.example.test/v1"\n', "utf8");
+    await writeFile(join(home, ".codex", "auth.json"), JSON.stringify({ OPENAI_API_KEY: "own-key-1234567890" }), "utf8");
+
+    const plain = await runCcsDirect(["config"], home);
+    assert.match(plain, /^profiles\.json\s+~\/\.config\/codex-tools\/profiles\.json\s+missing$/m);
+    assert.match(plain, /^AGENTS\.md\s+~\/\.codex\/AGENTS\.md\s+missing$/m);
+    assert.match(plain, /run in an interactive terminal to choose and apply changes/);
+    await assert.rejects(access(join(home, ".config", "codex-tools", "profiles.json")));
+
+    const { output } = await runCcsInteractive(["config"], home, [
+      ["Apply which changes?", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ]);
+    assert.match(output, /profiles\.json\s+create\s+template profiles \+ current Codex provider as imported/);
+    assert.match(output, /config\.toml\s+add missing fields\s+\d+: personality/);
+    assert.match(output, /AGENTS\.md\s+create\s+from the template/);
+    assert.doesNotMatch(output, /own-key-1234567890/);
+    assert.match(output, /^backup: ~\/\.config\/codex-tools\/backups\/ccs-\d{8}-\d{6}-\d{3}$/m);
+    assert.match(output, /^created: ~\/\.config\/codex-tools\/profiles\.json$/m);
+    assert.match(output, /^updated: ~\/\.codex\/config\.toml$/m);
+
+    const profilesPath = join(home, ".config", "codex-tools", "profiles.json");
+    const profiles = JSON.parse(await readFile(profilesPath, "utf8"));
+    assert.equal(profiles.current, "imported");
+    assert.deepEqual(profiles.profiles.imported, { baseURL: "https://own.example.test/v1", apiKey: "own-key-1234567890" });
+    assert.ok(profiles.profiles.test001 && profiles.profiles.test002 && profiles.top);
+    assert.equal((await stat(profilesPath)).mode & 0o777, 0o600);
+    assert.equal(await readFile(join(home, ".codex", "AGENTS.md"), "utf8"), await readFile(join(repoRoot, "config", "codex-agents.md"), "utf8"));
+    assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /personality = "pragmatic"/);
+
+    const again = await runCcsDirect(["config"], home);
+    assert.match(again, /^config\.toml\s+\S+\s+matches template$/m);
+    assert.match(again, /everything is up to date/);
+    assert.match(await runCcsDirect(["config", "--help"], home), /create or update profiles\.json/);
+    await assert.rejects(() => runCcsDirect(["config", "push"], home), /usage: ccs config/);
+    await assert.rejects(
+      () => runCcs(["dist/bin/ccs.js", "init"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
+      /unknown command: init/,
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -350,42 +379,8 @@ test("Codex profile launch uses the direct URL and rejects unknown profiles", as
   }
 });
 
-test("ccs sync stays additive when no existing values are selected", async () => {
-  const home = await writeSyncFixture([
-    'model_provider = "codex"',
-    'model = "local-model"',
-    'local_only = true',
-    '',
-    '[model_providers.codex]',
-    'base_url = "https://local.example"',
-    '',
-    '[features]',
-    'goals = false',
-    '',
-  ].join("\n"));
-  try {
-    const { output } = await runCcsInteractive(["sync"], home, [
-      ["Replace which existing values with the template?", KEYS.enter],
-      ["Apply changes?", "yes\n"],
-    ]);
-    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
-    assert.equal("toggle" in JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")), false);
-    assert.match(output, /model\s+"local-model" -> "gpt-5\.6-sol"/);
-    assert.match(output, /features\.goals\s+false -> true/);
-    assert.doesNotMatch(output, /model_providers\.codex\.base_url\s+"https/);
-    assert.match(output, /^different:\s+\d+\s+.*model.*features\.goals/m);
-    assert.match(output, /^update:\s+\d+\s+/m);
-    assert.match(config, /model = "local-model"/);
-    assert.match(config, /goals = false/);
-    assert.match(config, /local_only = true/);
-    assert.match(config, /personality = "pragmatic"/);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("ccs sync replaces only the selected existing values and applies its preview", async () => {
-  const home = await writeSyncFixture([
+test("ccs config adds missing fields by default and replaces only selected values", async () => {
+  const fixture = [
     'model_provider = "codex"',
     'model = "local-model"',
     'local_only = true',
@@ -397,51 +392,56 @@ test("ccs sync replaces only the selected existing values and applies its previe
     '[features]',
     'goals = false',
     '',
-  ].join("\n"));
+  ].join("\n");
+  const additive = await writeSyncFixture(fixture);
   try {
-    const { output } = await runCcsInteractive(["sync"], home, [
-      ["Replace which existing values with the template?", `${KEYS.space}${KEYS.down}${KEYS.space}${KEYS.enter}`],
+    const { output } = await runCcsInteractive(["config"], additive, [
+      ["Apply which changes?", KEYS.enter],
       ["Apply changes?", "yes\n"],
     ]);
-    const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
-    const updateLine = output.split("\n").find((line) => line.startsWith("update:"));
-    assert.ok(updateLine);
-    assert.match(updateLine, /(?:^|, |\s)model(?:,|$)/);
+    assert.match(output, /^config\.toml\s+\S+\s+\d+ missing fields · \d+ values differ$/m);
+    assert.match(output, /config\.toml\s+model\s+"local-model" -> "gpt-5\.6-sol"/);
+    assert.match(output, /config\.toml\s+features\.goals\s+false -> true/);
+    assert.doesNotMatch(output, /model_providers\.codex\.base_url\s+"https/);
+    assert.doesNotMatch(output, /AGENTS\.md\s+replace/);
+    const config = await readFile(join(additive, ".codex", "config.toml"), "utf8");
+    assert.match(config, /model = "local-model"/);
+    assert.match(config, /goals = false/);
+    assert.match(config, /local_only = true/);
+    assert.match(config, /personality = "pragmatic"/);
+  } finally {
+    await rm(additive, { recursive: true, force: true });
+  }
+
+  const selected = await writeSyncFixture(fixture);
+  try {
+    // Choices: add missing fields (checked), model, model_providers.codex.wire_api, features.goals, ...
+    await runCcsInteractive(["config"], selected, [
+      ["Apply which changes?", `${KEYS.space}${KEYS.down}${KEYS.space}${KEYS.down}${KEYS.space}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    const config = await readFile(join(selected, ".codex", "config.toml"), "utf8");
     assert.match(config, /model = "gpt-5\.6-sol"/);
     assert.match(config, /wire_api = "responses"/);
     assert.match(config, /goals = false/);
     assert.match(config, /base_url = "https:\/\/local\.example"/);
-    assert.match(config, /local_only = true/);
-
-    const all = await writeSyncFixture('model_provider = "codex"\nmodel = "local-model"\n\n[features]\ngoals = false\n');
-    try {
-      await runCcsInteractive(["sync"], all, [
-        ["Replace which existing values with the template?", `a${KEYS.enter}`],
-        ["Apply changes?", "yes\n"],
-      ]);
-      const replaced = await readFile(join(all, ".codex", "config.toml"), "utf8");
-      assert.match(replaced, /model = "gpt-5\.6-sol"/);
-      assert.match(replaced, /goals = true/);
-    } finally {
-      await rm(all, { recursive: true, force: true });
-    }
-    await assert.rejects(() => runCcsDirect(["sync", "--replace", "all"], home), /usage: ccs sync/);
+    assert.doesNotMatch(config, /personality/);
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await rm(selected, { recursive: true, force: true });
   }
 });
 
-test("ccs sync keeps model_provider unselectable while proxy state exists", async () => {
+test("ccs config keeps model_provider unselectable while proxy state exists", async () => {
   const home = await writeSyncFixture('model_provider = "other"\nmodel = "local-model"\n');
   try {
     const stateRoot = join(home, ".cache", "codex-tools", "proxy");
     await mkdir(stateRoot, { recursive: true });
     await writeFile(join(stateRoot, "proxy.json"), "{}", "utf8");
-    const { output } = await runCcsInteractive(["sync"], home, [
-      ["Replace which existing values with the template?", `a${KEYS.enter}`],
+    const { output } = await runCcsInteractive(["config"], home, [
+      ["Apply which changes?", `a${KEYS.enter}`],
       ["Apply changes?", "yes\n"],
     ]);
-    assert.match(output, /model_provider\s+\(proxy installed\)/);
+    assert.match(output, /config\.toml\s+model_provider\s+\(proxy installed\)/);
     const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
     assert.match(config, /model_provider = "other"/);
     assert.match(config, /model = "gpt-5\.6-sol"/);
@@ -450,18 +450,124 @@ test("ccs sync keeps model_provider unselectable while proxy state exists", asyn
   }
 });
 
-test("ccs sync summaries compare TOML values semantically", async () => {
+test("ccs config compares TOML values semantically and offers AGENTS.md replacement unchecked", async () => {
   const template = await readFile(join(repoRoot, "config", "codex-config.toml"), "utf8");
-  const config = template.replace('model_provider = "codex"', "model_provider = 'codex' # local style");
-  const home = await writeSyncFixture(config);
+  const home = await writeSyncFixture(template.replace('model_provider = "codex"', "model_provider = 'codex' # local style"));
   try {
-    const { output } = await runCcsInteractive(["sync"], home, [["Apply changes?", "yes\n"]]);
-    assert.doesNotMatch(output, /Replace which existing values/);
-    assert.match(output, /^different:\s+0$/m);
-    assert.match(output, /^update:\s+0$/m);
+    assert.match(await runCcsDirect(["config"], home), /everything is up to date/);
+    await writeFile(join(home, ".codex", "AGENTS.md"), "# local rules\n", "utf8");
+    const { output } = await runCcsInteractive(["config"], home, [["Apply which changes?", KEYS.enter]]);
+    assert.match(output, /^AGENTS\.md\s+\S+\s+differs from template$/m);
+    assert.match(output, /◯ AGENTS\.md\s+replace\s+with the template; local edits are lost/);
+    assert.match(output, /no changes\./);
+    assert.equal(await readFile(join(home, ".codex", "AGENTS.md"), "utf8"), "# local rules\n");
     assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /model_provider = 'codex' # local style/);
   } finally {
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync pushes and pulls profiles.json over ssh and keeps each device's current", async () => {
+  const local = await writeProfiles({
+    profiles: {
+      a: { baseURL: "https://a.example.test", apiKey: "a-key-1234567890" },
+      b: { baseURL: "https://b.example.test", apiKey: "b-key-1234567890" },
+    },
+    current: "a",
+  });
+  const remote = await mkdtemp(join(tmpdir(), "ccs-sync-remote-"));
+  const { binDir, logPath } = await createFakeSsh();
+  const env = {
+    PATH: `${binDir}:${process.env.PATH}`,
+    FAKE_SSH_HOME: remote,
+    FAKE_SSH_LOG: logPath,
+    CCS_PROXY_STATE_ROOT: join(local, ".cache", "codex-tools", "proxy"),
+  };
+  const remoteProfiles = join(remote, ".config", "codex-tools", "profiles.json");
+  const localProfiles = join(local, ".config", "codex-tools", "profiles.json");
+  try {
+    await assert.rejects(() => runCcsDirect(["sync", "-oProxyCommand=x"], local, env), /invalid sync target/);
+    await assert.rejects(() => runCcsDirect(["sync", "a", "b"], local, env), /usage: ccs sync/);
+
+    const pushed = await runCcsInteractive(["sync", "me@box:2222"], local, [
+      ["Direction", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ], env);
+    assert.match(pushed.output, /remote:\s+fakebox\s+missing/);
+    assert.match(pushed.output, /✔ Direction · push/);
+    assert.match(pushed.output, /^pushed: me@box:2222$/m);
+    assert.doesNotMatch(pushed.output, /a-key-1234567890/);
+    assert.deepEqual(JSON.parse(await readFile(remoteProfiles, "utf8")), JSON.parse(await readFile(localProfiles, "utf8")));
+    assert.equal((await stat(remoteProfiles)).mode & 0o777, 0o600);
+    const calls = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(calls.every((args) => args.includes("-p") && args.includes("2222") && args.includes("me@box")));
+    assert.ok(calls.every((args) => !args.includes("BatchMode=yes")));
+
+    const remoteData = JSON.parse(await readFile(remoteProfiles, "utf8"));
+    remoteData.current = "b";
+    remoteData.profiles.a.apiKey = "a-key-rotated-0987654321";
+    remoteData.profiles.c = { baseURL: "https://c.example.test", apiKey: "c-key-1234567890" };
+    await writeFile(remoteProfiles, JSON.stringify(remoteData, null, 2), "utf8");
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    await utimes(localProfiles, hourAgo, hourAgo);
+
+    const unattended = await runCcsDirect(["sync", "me@box:2222"], local, env);
+    assert.match(unattended, /remote only:\s+c/);
+    assert.match(unattended, /differ:\s+a/);
+    assert.match(unattended, /run in an interactive terminal to pull or push/);
+
+    const pulled = await runCcsInteractive(["sync"], local, [
+      ["Sync with which device?", KEYS.enter],
+      ["Direction", KEYS.enter],
+      ["Apply changes?", "yes\n"],
+    ], env);
+    assert.match(pulled.output, /me@box:2222\s+fakebox · synced just now \(push\)/);
+    assert.match(pulled.output, /✔ Direction · pull/);
+    assert.match(pulled.output, /will switch to a as ccs use does/);
+    assert.match(pulled.output, /^backup: ~\/\.config\/codex-tools\/backups\/ccs-/m);
+    const pulledData = JSON.parse(await readFile(localProfiles, "utf8"));
+    assert.equal(pulledData.current, "a");
+    assert.equal(pulledData.profiles.c.baseURL, "https://c.example.test");
+    assert.equal(JSON.parse(await readFile(join(local, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "a-key-rotated-0987654321");
+    assert.equal(JSON.parse(await readFile(remoteProfiles, "utf8")).current, "b");
+
+    const inSync = await runCcsDirect(["sync", "me@box:2222"], local, env);
+    assert.match(inSync, /in sync\./);
+    const hosts = JSON.parse(await readFile(join(local, ".cache", "codex-tools", "sync-hosts.json"), "utf8"));
+    assert.equal(hosts.hosts["me@box:2222"].direction, "pull");
+    assert.equal(hosts.hosts["me@box:2222"].host, "fakebox");
+    assert.match(await runCcsDirect(["sync"], local, env), /me@box:2222\s+fakebox · synced just now \(pull\)/);
+  } finally {
+    await rm(binDir, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+    await rm(local, { recursive: true, force: true });
+  }
+});
+
+test("ccs sync refuses to push over a remote file that changed after the preview", async () => {
+  const local = await writeProfiles({ profiles: { a: { baseURL: "https://a.example.test", apiKey: "a-key" } }, current: "a" });
+  const remote = await mkdtemp(join(tmpdir(), "ccs-sync-remote-"));
+  const { binDir, logPath } = await createFakeSsh();
+  const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_SSH_HOME: remote, FAKE_SSH_LOG: logPath };
+  const remoteProfiles = join(remote, ".config", "codex-tools", "profiles.json");
+  try {
+    await mkdir(dirname(remoteProfiles), { recursive: true });
+    await writeFile(remoteProfiles, JSON.stringify({ profiles: {}, current: "x" }), "utf8");
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    await utimes(remoteProfiles, hourAgo, hourAgo);
+    await assert.rejects(() => runCcsInteractive(["sync", "box"], local, [
+      ["Direction", KEYS.enter],
+      ["Apply changes?", async () => {
+        await writeFile(remoteProfiles, JSON.stringify({ profiles: {}, current: "edited" }), "utf8");
+        process.stdin.write("yes\n");
+      }],
+    ], env), /remote profiles\.json changed after preview/);
+    assert.equal(JSON.parse(await readFile(remoteProfiles, "utf8")).current, "edited");
+    await assert.rejects(access(join(remote, ".config", "codex-tools", "backups")));
+  } finally {
+    await rm(binDir, { recursive: true, force: true });
+    await rm(remote, { recursive: true, force: true });
+    await rm(local, { recursive: true, force: true });
   }
 });
 
@@ -547,6 +653,11 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     assert.match(unchanged.output, /✔ Switch to which profile\? · test002/);
     assert.match(unchanged.output, /no changes\./);
 
+    await writeFile(join(home, ".codex", "auth.json"), JSON.stringify({ OPENAI_API_KEY: "stale-key" }), "utf8");
+    const reapplied = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    assert.match(reapplied.output, /current:\s+test002\s+Codex files re-applied/);
+    assert.equal(JSON.parse(await readFile(join(home, ".codex", "auth.json"), "utf8")).OPENAI_API_KEY, "test002-key-123456");
+
     await assert.rejects(
       () => runCcs(["dist/bin/ccs.js", "toggle"], home, { XDG_CACHE_HOME: join(home, ".cache") }),
       /unknown command: toggle/,
@@ -614,6 +725,32 @@ async function createFakeCodex(source) {
   await writeFile(codexPath, `#!/usr/bin/env node\n${source}`, "utf8");
   await chmod(codexPath, 0o755);
   return binDir;
+}
+
+// Stands in for ssh: logs its arguments, prints a login banner, and runs the remote command
+// locally with FAKE_SSH_HOME as the remote HOME.
+async function createFakeSsh() {
+  const binDir = await mkdtemp(join(tmpdir(), "fake-ssh-bin-"));
+  const logPath = join(binDir, "calls.jsonl");
+  await writeFile(join(binDir, "ssh"), `#!/usr/bin/env node
+const { appendFileSync, writeSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(args) + "\\n");
+let index = 0;
+while (args[index] === "-o" || args[index] === "-p") index += 2;
+const command = args.slice(index + 1).join(" ");
+writeSync(1, "Welcome to fakebox\\n");
+const result = spawnSync("sh", ["-c", command], {
+  stdio: "inherit",
+  env: { ...process.env, HOME: process.env.FAKE_SSH_HOME },
+});
+process.exit(result.status ?? 255);
+`, "utf8");
+  await chmod(join(binDir, "ssh"), 0o755);
+  await writeFile(join(binDir, "uname"), "#!/bin/sh\necho fakebox\n", "utf8");
+  await chmod(join(binDir, "uname"), 0o755);
+  return { binDir, logPath };
 }
 
 async function writeSyncFixture(config) {

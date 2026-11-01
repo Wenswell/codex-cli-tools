@@ -41,7 +41,7 @@ type UsageSession = {
 const USAGE_MAX_BYTES = 16 * 1024 * 1024;
 const USAGE_TRIM_BYTES = 12 * 1024 * 1024;
 
-const CCS_COMMANDS = new Set(["version", "-v", "help", "-h", "--help", "models", "use", "list", "l", "init", "sync", "add", "remove", "config", "stats"]);
+const CCS_COMMANDS = new Set(["version", "-v", "help", "-h", "--help", "models", "use", "list", "l", "sync", "add", "remove", "config", "stats"]);
 const CCS_PROXY_COMMANDS = new Set([
   "help", "-h", "--help", "watch", "reroute", "cancel", "capture", "mode", "search", "compact", "config",
   "install", "restart", "restore",

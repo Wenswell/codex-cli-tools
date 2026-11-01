@@ -105,7 +105,9 @@ export function syncTomlTemplate(
   template: string,
   existing: string,
   replacePaths: ReadonlySet<string>,
+  options: { addMissing?: boolean } = {},
 ): TomlTemplateSyncResult {
+  const addMissing = options.addMissing ?? true;
   const templateLeaves = parseTomlLeaves(template);
   const existingLeaves = new Map(parseTomlLeaves(existing).map((leaf) => [leaf.path, leaf]));
   const leafPaths = templateLeaves.map((leaf) => leaf.path);
@@ -114,10 +116,11 @@ export function syncTomlTemplate(
     .map((leaf) => leaf.path);
   const different = new Set(differentPaths);
   const updated = new Set(templateLeaves
-    .filter((leaf) => !existingLeaves.has(leaf.path) || (replacePaths.has(leaf.path) && existingLeaves.get(leaf.path)?.value !== leaf.value))
+    .filter((leaf) => (addMissing && !existingLeaves.has(leaf.path))
+      || (replacePaths.has(leaf.path) && existingLeaves.has(leaf.path) && existingLeaves.get(leaf.path)?.value !== leaf.value))
     .map((leaf) => leaf.path));
 
-  let content = mergeTomlDefaults(template, existing);
+  let content = addMissing ? mergeTomlDefaults(template, existing) : ensureTrailingNewline(existing.replace(/\r\n/g, "\n"));
   if (replacePaths.size > 0) {
     const templateByPath = new Map(templateLeaves.map((leaf) => [leaf.path, leaf]));
     const lines = content.replace(/\r\n/g, "\n").split("\n");

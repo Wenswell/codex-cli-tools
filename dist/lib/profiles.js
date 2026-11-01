@@ -29,8 +29,21 @@ export async function readProfiles() {
     if (!text) {
         return {};
     }
+    return parseProfiles(text);
+}
+// Validates profiles.json text. The removed `toggle` field is dropped so the next write cleans it up.
+// `strict` also checks every profile entry, for files arriving from another device.
+export function parseProfiles(text, label = "profiles.json", strict = false) {
     try {
-        const profiles = parseJsonObject(text);
+        const { toggle: _removedToggle, ...profiles } = parseJsonObject(text);
+        if (strict) {
+            if (profiles.profiles !== undefined && (!profiles.profiles || typeof profiles.profiles !== "object" || Array.isArray(profiles.profiles))) {
+                throw new Error("profiles must be an object");
+            }
+            for (const [name, profile] of Object.entries(profiles.profiles ?? {})) {
+                assertProfile(profile, name);
+            }
+        }
         assertProxyRoute(profiles.proxy?.search, "search");
         assertProxyRoute(profiles.proxy?.compact, "compact");
         assertCimgConfig(profiles.cimg);
@@ -38,7 +51,7 @@ export async function readProfiles() {
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`invalid profiles.json: ${message}`);
+        throw new Error(`invalid ${label}: ${message.replace(/^invalid profiles\.json: /, "")}`);
     }
 }
 function assertProxyRoute(value, route) {

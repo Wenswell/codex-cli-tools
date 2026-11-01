@@ -23,11 +23,11 @@ Profile config lives at:
 Run `ccs` without arguments to print the current profile, `user@host`, and a compact two-level command footer:
 
 ```text
-commands:   version | PROFILE | models | use | list | init | sync | add | remove | config | stats
+commands:   version | PROFILE | models | use | list | config | sync | add | remove | stats
 namespaces: proxy | --help
 ```
 
-In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `i`nit, `s`ync, `a`dd, `r`emove, `c`onfig, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
+In a terminal, the footer highlights one letter per command and waits for a key: `v`ersion, `m`odels, `u`se, `l`ist, `c`onfig, `s`ync, `a`dd, `r`emove, s`t`ats, `p`roxy, and `h`elp. The key runs that command once and exits; any other key exits. `ccs proxy` works the same way after its snapshot: `w`atch, `c`apture, ca`n`cel, r`e`route, `m`ode, `s`earch, com`p`act, con`f`ig, and res`t`art. Each key target is read-only or opens a selection or preview that `Esc` or a declined `yes` leaves unchanged. Without a terminal, the footer is plain text and the command exits immediately.
 
 Supported commands:
 
@@ -48,10 +48,9 @@ ccs proxy compact
 ccs proxy config
 ccs proxy install|restart|restore|serve
 ccs use
-ccs config
 ccs list | l
-ccs init
-ccs sync
+ccs config
+ccs sync [user@host]
 ccs add
 ccs remove
 ccs stats
@@ -72,7 +71,7 @@ Initial profile defaults are stored in this repository:
 config/ccs-profiles.json
 ```
 
-`ccs init` creates `profiles.json` from that template if it does not already contain profiles:
+`ccs config` creates `profiles.json` from that template when the file is missing:
 
 ```json
 {
@@ -115,72 +114,40 @@ When proxy mode is installed, run `ccs proxy search` to show alpha-search forwar
 Run `ccs proxy compact` and pick a profile to route standalone `/responses/compact` and `/v1/responses/compact` calls, plus explicitly marked compaction requests, through a dedicated provider; it works like `ccs proxy search`, and `off` disables it. Explicit `run PROFILE` selection takes priority. Native remote-compaction v2 requests with boolean stream: true and a compaction_trigger item anywhere in input[] are also routed and marked [C]. The request model and body stay unchanged. The provider must support the compact API and return compaction items accepted by the main provider; cross-provider interoperability requires verification. Compaction performed inside a normal server response cannot be routed separately.
 
 
-`ccs init` first reads the current Codex API settings from:
-
-```text
-~/.codex/config.toml
-~/.codex/auth.json
-~/.codex/AGENTS.md
-```
-
-It stores the current `base_url` and `OPENAI_API_KEY` as a profile named `current`, then makes `current` the active profile.
-
-`ccs init` then syncs:
-
-```text
-~/.codex/config.toml
-~/.codex/AGENTS.md
-```
-
-from:
-
-```text
-config/codex-config.toml
-config/codex-agents.md
-```
-
-Preview first:
-
-```bash
-ccs init
-```
-
-After printing the plan, `ccs init` writes only if you type exact `yes` at the prompt.
-
-Before writing, it backs up the current files to:
-
-```text
-~/.config/codex-tools/backups/ccs-YYYYMMDD-HHMMSS/
-```
-
-`ccs init` keeps the existing `~/.codex/config.toml` as the base file, appends missing top-level keys, missing sections, and missing section keys from `config/codex-config.toml`, and syncs the default global Codex guidelines to `~/.codex/AGENTS.md`. Existing Codex config keys, sections, comments, and local settings stay in place. Later profile switches only change the active provider API URL and `~/.codex/auth.json`.
-
-`ccs init` shows:
-
-- a short summary of files to modify and back up
-- unified diff style output for each file that would change
-- masked secrets in `profiles.json` and `auth.json`
-- warnings for risky changes such as current-profile switches
-
-If `config/ccs-profiles.json` changes later, run:
-
-```bash
-ccs sync
-```
-
-`ccs sync` always adds missing template fields. When existing `config.toml` values differ from `config/codex-config.toml`, it first lists those dotted leaf paths with `current -> template` values; select the values to replace with space (`a` selects all) and press Enter. Nothing is selected by default, so Enter alone keeps the sync additive. Provider `model_providers.*.base_url` fields are never listed, and `model_provider` cannot be selected while proxy state exists. The command then prints `different` and `update` field summaries plus its masked diff, and writes the previewed result only if you type exact `yes` at the prompt. Without a terminal, the preview is additive and nothing is written.
-
-Selected fields receive template values; other existing values and local-only fields remain unchanged. `different` lists every template leaf that differs or is missing, while `update` lists fields changed by this invocation. Empty lists show `0`.
-
-When applied, `ccs sync` creates the same backup directory first, writes the exact previewed content, and verifies each result by reading it back. It merges template profiles into `~/.config/codex-tools/profiles.json`, keeps existing local API keys and local-only profiles, seeds `top.stateUrls` when `top` is missing, and syncs `~/.codex/AGENTS.md` from `config/codex-agents.md`.
-
-`ccs config` manages local `~/.config/codex-tools/profiles.json` sync with the LAN server copy at `ravvss@10.126.126.1:/home/ravvss/.config/codex-tools/profiles.json` over SSH port `32753`:
+### Set up and update local files
 
 ```bash
 ccs config
 ```
 
-`ccs config` prints the local file summary and fixed LAN target, then asks whether to `pull` or `push`. Without a terminal, it prints the summary only and does not connect to the server. `push` uploads the local file to the LAN server. `pull` downloads the LAN server file to the local machine. After the choice, the command connects to the server, prints a masked unified diff, and applies only after you type exact `yes`. Both directions replace the whole file instead of merging and create a backup before overwriting an existing target.
+`ccs config` keeps three local files in line with the templates in `config/`:
+
+| File | Template | Missing file | Existing file |
+| --- | --- | --- | --- |
+| `~/.config/codex-tools/profiles.json` | `ccs-profiles.json` | created | template profiles that are absent can be added |
+| `~/.codex/config.toml` | `codex-config.toml` | created | missing keys and sections can be added; differing values can be replaced |
+| `~/.codex/AGENTS.md` | `codex-agents.md` | created | can be replaced as a whole |
+
+It prints one status line per file, then one checklist of every available change. Additive changes (create a file, add a template profile, add missing `config.toml` fields) start checked. Replacing an existing `config.toml` value (`current -> template`) or an existing `AGENTS.md` starts unchecked, so Enter alone never overwrites local settings. Provider `model_providers.*.base_url` values are never listed, and `model_provider` cannot be selected while proxy state exists. Adding missing fields keeps existing keys, sections, comments, and local-only settings in place.
+
+The selected changes are previewed as a masked diff for each file and written after exact `yes`. Before writing, existing targets are copied to `~/.config/codex-tools/backups/ccs-YYYYMMDD-HHMMSS-mmm/`; each result is read back and verified. When every file matches its template, it prints `everything is up to date.` Without a terminal, it prints the status only.
+
+When `profiles.json` is created and `~/.codex/config.toml` plus `~/.codex/auth.json` hold a direct provider URL and `OPENAI_API_KEY`, that provider becomes the current profile: a template profile with the same URL and an empty key receives the key, otherwise it is added as `imported`. A local proxy URL is never imported. `ccs config` does not write `auth.json`; `ccs use` does.
+
+### Sync profiles between devices
+
+```bash
+ccs sync
+ccs sync user@host
+```
+
+`ccs sync` copies `~/.config/codex-tools/profiles.json` between this device and another over the system `ssh`, so authentication follows your keys, agent, `~/.ssh/config`, and known hosts, and password prompts appear in the terminal. The target is `[user@]host[:port]` or an `~/.ssh/config` alias. Without an argument, it lists remembered devices, newest first, plus `+ new device`. The remote device needs a POSIX shell and the same path under its home directory; it does not need `ccs`.
+
+The command reads the remote file and prints both sides: profile count, current profile, modification time, and which profiles exist on one side only or differ, plus differing top-level settings such as `proxy`. When the files match, it prints `in sync.` Otherwise choose `pull` (remote replaces local) or `push` (local replaces remote); the newer file's direction is preselected. The masked diff is printed and the file is written after exact `yes`.
+
+Sync replaces the whole file, with one exception: `current` belongs to each device, so the target keeps its own current profile while the incoming file still contains it. Before writing, the target file is backed up to `backups/ccs-…/profiles.json` beside it, on the device that receives it. A push writes through a temporary file, refuses to replace a remote file that changed after the preview, and keeps the file at `0600`. When a pull changes the URL or key of the local current profile, the local Codex files switch to it as `ccs use` does. After a push that changes the remote current profile, run `ccs use` on that device and select its current profile to re-apply it.
+
+Without a terminal, `ccs sync user@host` connects with `BatchMode=yes`, prints the comparison, and writes nothing. Remembered devices live in `~/.cache/codex-tools/sync-hosts.json` (see [CLI runtime records](./CLI_RUNTIME_RECORDS.md#sync-devices)).
 
 Add or update a profile interactively:
 
@@ -204,9 +171,9 @@ Switch the current profile:
 ccs use
 ```
 
-`ccs use` lists profiles with `current`, the last use, and the last switch time. The cursor starts on the most recently active profile other than the current one, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It writes the provider URL in `~/.codex/config.toml`, `~/.codex/auth.json`, and `profiles.current`; selecting the current profile changes nothing. Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
+`ccs use` lists profiles with `current`, the last use, and the last switch time. The cursor starts on the most recently active profile other than the current one, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It writes the provider URL in `~/.codex/config.toml`, `~/.codex/auth.json`, and `profiles.current`; selecting the current profile changes nothing unless `auth.json` or the provider URL no longer match it, in which case it re-applies them (with proxy mode, only the key is compared). Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
 
-Profile times live in `~/.cache/codex-tools/profile-usage.json`, outside the LAN-synced `profiles.json`:
+Profile times live in `~/.cache/codex-tools/profile-usage.json`, outside the device-synced `profiles.json`:
 
 - `switched_at`: the profile became current through `ccs use`.
 - `launched_at`: `cx run`, `cxx run`, or `cxxs run` started Codex with the profile.

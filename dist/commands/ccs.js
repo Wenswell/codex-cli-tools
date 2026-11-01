@@ -1,18 +1,16 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { hostname, tmpdir, userInfo } from "node:os";
+import { readFile, stat } from "node:fs/promises";
+import { hostname, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { createTwoFilesPatch } from "diff";
-import { confirmApply, rejectRemovedYesFlags } from "../lib/confirm.js";
+import { confirmApply } from "../lib/confirm.js";
 import { ensureDir, readTextIfExists, writeTextFile, writeTextFileAtomic } from "../lib/fs.js";
 import { parseJsonObject, stringifyJson } from "../lib/json.js";
-import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, profilesPath, } from "../lib/paths.js";
-import { assertProfile, readProfiles, writeProfiles } from "../lib/profiles.js";
+import { codexAgentsPath, codexAuthPath, codexConfigPath, codexDir, codexToolsConfigDir, profilesPath, } from "../lib/paths.js";
+import { assertProfile, parseProfiles, readProfiles, writeProfiles } from "../lib/profiles.js";
 import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage } from "../lib/profile-usage.js";
 import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select } from "../lib/prompt.js";
+import { parseSyncTarget, readRemoteProfiles, readSyncHosts, recordSyncHost, syncTargetError, writeRemoteProfiles, } from "../lib/remote-sync.js";
 import { setUsageCommand } from "../lib/usage.js";
 import { maskSecret, textBlue, textBold, textDim, textGreen, textRed, textYellow, truncateVisible, } from "../lib/text.js";
 import { colorHost, colorName, colorPath, colorUrl, printKeyValue, } from "../lib/output.js";
@@ -22,13 +20,9 @@ import { syncTomlTemplate, readTomlBaseUrl, tomlLeafDifferences, updateTomlBaseU
 import { printTable } from "../lib/table.js";
 import { formatCommandFooterLines } from "../lib/terminal.js";
 import { isVersionArgument, printToolVersionIfRequested } from "../lib/version.js";
-const execFile = promisify(execFileCallback);
 const modelsHttpTimeoutMs = 5_000;
-const configSyncUser = "ravvss";
-const configSyncHost = "10.126.126.1";
-const configSyncPort = "32753";
-const configSyncRemotePath = "/home/ravvss/.config/codex-tools/profiles.json";
-const configSyncRemoteDisplay = `${configSyncUser}@${configSyncHost}:${configSyncRemotePath}`;
+// Matches the proxy URL that `ccs proxy install` writes; it is never imported as a provider profile.
+const localProxyUrlPattern = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/;
 async function readDefaultProfiles() {
     const path = fileURLToPath(new URL("../../config/ccs-profiles.json", import.meta.url));
     const content = await readFile(path, "utf-8");
@@ -50,338 +44,436 @@ async function readCurrentCodexProfile() {
     const apiKey = typeof authJson.OPENAI_API_KEY === "string" ? authJson.OPENAI_API_KEY : "";
     return { baseURL, apiKey };
 }
-function getCcsBackupFiles() {
-    return [
-        { source: profilesPath(), target: `${profilesPath()}.bak` },
-        { source: codexConfigPath(), target: `${codexConfigPath()}.bak` },
-        { source: codexAuthPath(), target: `${codexAuthPath()}.bak` },
-        { source: codexAgentsPath(), target: `${codexAgentsPath()}.bak` },
-    ];
+function formatBackupStamp(date) {
+    const pad = (value, size = 2) => value.toString().padStart(size, "0");
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-`
+        + `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}`;
 }
-async function getExistingBackupFiles() {
-    const existing = [];
-    for (const file of getCcsBackupFiles()) {
-        const exists = await readTextIfExists(file.source);
-        if (exists !== null) {
-            existing.push(file);
-        }
-    }
-    return existing;
-}
-async function backupCcsFiles(files) {
-    if (files.length === 0) {
+// Copies the current content of every existing preview target into one backup directory.
+async function backupPreviewFiles(files, stamp) {
+    const existing = files.filter((file) => file.current !== null);
+    if (existing.length === 0) {
         return null;
     }
-    const timestamp = formatTimestamp(new Date());
-    const backupDir = join(codexDir(), "backups", timestamp);
+    const backupDir = join(codexToolsConfigDir(), "backups", `ccs-${stamp}`);
     await ensureDir(backupDir);
-    for (const file of files) {
-        const content = await readTextIfExists(file.source);
-        if (content !== null) {
-            await writeTextFile(join(backupDir, basename(file.source)), content);
-        }
+    for (const file of existing) {
+        await writeTextFile(join(backupDir, basename(file.path)), file.current, 0o600);
     }
     return backupDir;
 }
-function formatTimestamp(date) {
-    const pad = (value) => value.toString().padStart(2, "0");
-    const year = date.getFullYear();
-    const month = pad(date.getMonth() + 1);
-    const day = pad(date.getDate());
-    const hours = pad(date.getHours());
-    const minutes = pad(date.getMinutes());
-    const seconds = pad(date.getSeconds());
-    return `${year}${month}${day}_${hours}${minutes}${seconds}`;
-}
-async function planCodexConfigSync(replacePaths = new Set()) {
-    const defaults = await readDefaultCodexConfig();
-    const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-    const syncResult = syncTomlTemplate(defaults, existing, replacePaths);
-    return {
-        nextContent: syncResult.content,
-        differentPaths: syncResult.differentPaths,
-        updatedPaths: syncResult.updatedPaths,
-    };
-}
-async function syncCodexConfigFromTemplate() {
-    const plan = await planCodexConfigSync();
-    await ensureDir(codexDir());
-    await writeTextFile(codexConfigPath(), plan.nextContent);
-    return plan;
-}
-async function syncCodexAgentsFromTemplate() {
-    const defaultAgents = await readDefaultCodexAgents();
-    await ensureDir(codexDir());
-    await writeTextFile(codexAgentsPath(), defaultAgents);
-    return defaultAgents;
-}
-async function planInitProfilesFromCurrent() {
-    const defaultProfiles = await readDefaultProfiles();
-    const current = await readCurrentCodexProfile();
-    const profiles = { ...(defaultProfiles.profiles ?? {}) };
-    let currentName = defaultProfiles.current ?? "test001";
-    if (!current.baseURL && !current.apiKey) {
-        return {
-            current: currentName,
-            profiles,
-        };
-    }
-    const existingEntry = Object.entries(profiles).find(([, profile]) => (profile.baseURL === current.baseURL && profile.apiKey === current.apiKey));
-    if (existingEntry) {
-        currentName = existingEntry[0];
-    }
-    else if (!profiles.test001) {
-        profiles.test001 = current;
-        currentName = "test001";
+async function writeVerified(file) {
+    if (file.path === profilesPath()) {
+        await writeTextFileAtomic(file.path, file.next, 0o600);
     }
     else {
-        let index = 1;
-        while (profiles[`test001-${index}`]) {
-            index += 1;
+        await writeTextFile(file.path, file.next);
+    }
+    if ((await readTextIfExists(file.path)) !== file.next) {
+        throw new Error(`write verification failed: ${file.path}`);
+    }
+}
+async function readConfigFiles() {
+    return {
+        profiles: await readTextIfExists(profilesPath()),
+        config: await readTextIfExists(codexConfigPath()),
+        agents: await readTextIfExists(codexAgentsPath()),
+    };
+}
+async function readConfigTemplates() {
+    return {
+        profiles: await readDefaultProfiles(),
+        config: await readDefaultCodexConfig(),
+        agents: await readDefaultCodexAgents(),
+    };
+}
+function sameBaseUrl(left, right) {
+    return left.replace(/\/+$/, "") === right.replace(/\/+$/, "");
+}
+// A new profiles.json starts from the template. A direct Codex provider URL and key become a profile:
+// a template profile with the same URL and an empty key receives the key, otherwise `imported` is added.
+function planProfilesFromTemplate(template, codex) {
+    const profiles = { ...(template.profiles ?? {}) };
+    if (!codex || !codex.baseURL || !codex.apiKey || localProxyUrlPattern.test(codex.baseURL)) {
+        return { profiles: { ...template, profiles }, imported: null };
+    }
+    const match = Object.entries(profiles).find(([, profile]) => (sameBaseUrl(profile.baseURL, codex.baseURL) && (!profile.apiKey || profile.apiKey === codex.apiKey)));
+    let name = match?.[0];
+    if (name) {
+        profiles[name] = { ...profiles[name], apiKey: codex.apiKey };
+    }
+    else {
+        name = "imported";
+        for (let index = 1; profiles[name]; index += 1)
+            name = `imported-${index}`;
+        profiles[name] = codex;
+    }
+    return { profiles: { ...template, profiles, current: name }, imported: name };
+}
+function missingTemplateProfiles(existing, template) {
+    return Object.keys(template.profiles ?? {}).filter((name) => !existing.profiles?.[name]);
+}
+function missingConfigPaths(config, template) {
+    return syncTomlTemplate(template, config, new Set()).updatedPaths;
+}
+function isProviderBaseUrlPath(path) {
+    return /^model_providers\.[^.]+\.base_url$/.test(path);
+}
+function differingConfigValues(config, template) {
+    return tomlLeafDifferences(template, config).filter((difference) => !isProviderBaseUrlPath(difference.path));
+}
+function listPreview(items, limit = 4) {
+    return items.length <= limit ? items.join(", ") : `${items.slice(0, limit).join(", ")}, +${items.length - limit} more`;
+}
+// Additive changes start checked; replacing an existing value or file starts unchecked.
+function configChoices(files, templates, codex, proxyInstalled) {
+    const choices = [];
+    if (files.profiles === null) {
+        const { imported } = planProfilesFromTemplate(templates.profiles, codex);
+        choices.push({
+            value: "profiles",
+            label: "profiles.json  create",
+            hint: imported ? `template profiles + current Codex provider as ${imported}` : "template profiles",
+            checked: true,
+        });
+    }
+    else {
+        for (const name of missingTemplateProfiles(parseProfiles(files.profiles), templates.profiles)) {
+            choices.push({
+                value: `profile:${name}`,
+                label: `profiles.json  add ${name}`,
+                hint: templates.profiles.profiles[name].baseURL,
+                checked: true,
+            });
         }
-        currentName = `test001-${index}`;
-        profiles[currentName] = current;
     }
-    return {
-        current: currentName,
-        profiles,
-    };
-}
-async function initProfilesFromCurrent() {
-    const profiles = await planInitProfilesFromCurrent();
-    await writeProfiles(profiles);
-    return profiles;
-}
-async function planSyncProfiles() {
-    const defaultProfiles = await readDefaultProfiles();
-    const currentProfiles = await readProfiles();
-    const profiles = { ...(currentProfiles.profiles ?? {}) };
-    for (const [name, profile] of Object.entries(defaultProfiles.profiles ?? {})) {
-        if (!profiles[name]) {
-            profiles[name] = profile;
+    if (files.config === null) {
+        choices.push({ value: "config:create", label: "config.toml    create", hint: "from the template", checked: true });
+    }
+    else {
+        const missing = missingConfigPaths(files.config, templates.config);
+        if (missing.length > 0) {
+            choices.push({
+                value: "config:add",
+                label: "config.toml    add missing fields",
+                hint: `${missing.length}: ${listPreview(missing)}`,
+                checked: true,
+            });
+        }
+        for (const difference of differingConfigValues(files.config, templates.config)) {
+            choices.push({
+                value: `config:set:${difference.path}`,
+                label: `config.toml    ${difference.path}`,
+                hint: `${truncateVisible(difference.current, 32)} -> ${truncateVisible(difference.template, 32)}`,
+                disabled: difference.path === "model_provider" && proxyInstalled ? "proxy installed" : undefined,
+            });
         }
     }
-    const { toggle: _removedToggle, ...rest } = currentProfiles;
-    return {
-        ...rest,
-        current: currentProfiles.current ?? defaultProfiles.current ?? Object.keys(profiles)[0] ?? "test001",
-        profiles,
+    if (files.agents === null) {
+        choices.push({ value: "agents", label: "AGENTS.md      create", hint: "from the template", checked: true });
+    }
+    else if (files.agents !== templates.agents) {
+        choices.push({ value: "agents", label: "AGENTS.md      replace", hint: "with the template; local edits are lost" });
+    }
+    return choices;
+}
+function planConfigWrites(selected, files, templates, codex) {
+    const writes = [];
+    if (selected.has("profiles")) {
+        const { profiles } = planProfilesFromTemplate(templates.profiles, codex);
+        writes.push({ label: "profiles.json", path: profilesPath(), current: null, next: stringifyJson(profiles) });
+    }
+    else if (files.profiles !== null) {
+        const existing = parseProfiles(files.profiles);
+        const added = missingTemplateProfiles(existing, templates.profiles).filter((name) => selected.has(`profile:${name}`));
+        if (added.length > 0) {
+            const profiles = { ...existing.profiles };
+            for (const name of added)
+                profiles[name] = templates.profiles.profiles[name];
+            writes.push({
+                label: "profiles.json",
+                path: profilesPath(),
+                current: files.profiles,
+                next: stringifyJson({ ...existing, profiles, current: existing.current ?? added[0] }),
+            });
+        }
+    }
+    if (selected.has("config:create")) {
+        writes.push({ label: "config.toml", path: codexConfigPath(), current: null, next: templates.config });
+    }
+    else if (files.config !== null) {
+        const replace = new Set([...selected].flatMap((value) => value.startsWith("config:set:") ? [value.slice("config:set:".length)] : []));
+        const addMissing = selected.has("config:add");
+        if (addMissing || replace.size > 0) {
+            const next = syncTomlTemplate(templates.config, files.config, replace, { addMissing }).content;
+            if (next !== files.config) {
+                writes.push({ label: "config.toml", path: codexConfigPath(), current: files.config, next });
+            }
+        }
+    }
+    if (selected.has("agents")) {
+        writes.push({ label: "AGENTS.md", path: codexAgentsPath(), current: files.agents, next: templates.agents });
+    }
+    return writes;
+}
+function printConfigStatus(files, templates) {
+    const missing = textYellow("missing");
+    const profilesState = () => {
+        if (files.profiles === null)
+            return missing;
+        const existing = parseProfiles(files.profiles);
+        const absent = missingTemplateProfiles(existing, templates.profiles);
+        const count = `${Object.keys(existing.profiles ?? {}).length} profiles`;
+        return absent.length > 0 ? `${count} · ${textYellow(`template adds ${absent.join(", ")}`)}` : textDim(count);
     };
-}
-function configFileHash(text) {
-    return createHash("sha256").update(text).digest("hex");
-}
-function formatConfigSummary(summary) {
-    if (!summary.exists) {
-        return textDim("missing");
-    }
-    const sha = summary.sha256 ? summary.sha256.slice(0, 8) : "unknown";
-    const size = summary.size !== undefined ? `${summary.size}B` : "unknown";
-    return `${textBlue(sha)}  ${textDim(size)}`;
-}
-async function readLocalConfigText() {
-    const content = await readTextIfExists(profilesPath());
-    if (content === null) {
-        throw new Error(`local profiles.json not found: ${profilesPath()}`);
-    }
-    return content;
-}
-async function localConfigSummary() {
-    try {
-        const fileStat = await stat(profilesPath());
-        const content = await readFile(profilesPath(), "utf-8");
-        return {
-            exists: true,
-            size: fileStat.size,
-            sha256: configFileHash(content),
-            mtime: fileStat.mtime,
-        };
-    }
-    catch {
-        return { exists: false };
-    }
-}
-async function execConfigSyncFile(command, args) {
-    try {
-        return await execFile(command, args);
-    }
-    catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const stderr = typeof error === "object" && error && "stderr" in error && typeof error.stderr === "string"
-            ? error.stderr.trim()
-            : "";
-        const detail = stderr || message;
-        throw new Error(`${command} ${args.join(" ")} failed: ${detail}`);
-    }
-}
-async function configSyncSsh(script) {
-    const result = await execConfigSyncFile("ssh", [
-        "-p",
-        configSyncPort,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
-        `${configSyncUser}@${configSyncHost}`,
-        script,
-    ]);
-    return result.stdout;
-}
-async function configSyncScp(source, target) {
-    await execConfigSyncFile("scp", [
-        "-P",
-        configSyncPort,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
-        source,
-        target,
-    ]);
-}
-async function remoteConfigSummary() {
-    const script = [
-        `if [ -f "${configSyncRemotePath}" ]; then`,
-        `  size=$(wc -c < "${configSyncRemotePath}")`,
-        `  sha=$(sha256sum "${configSyncRemotePath}" | awk '{print $1}')`,
-        `  mtime=$(stat -c %Y "${configSyncRemotePath}" 2>/dev/null || stat -f %m "${configSyncRemotePath}")`,
-        `  echo "exists=true;$size;$sha;$mtime"`,
-        "else",
-        '  echo "exists=false"',
-        "fi",
-    ].join("\n");
-    const output = (await configSyncSsh(script)).trim();
-    if (output === "exists=false") {
-        return { exists: false };
-    }
-    const [, size, sha256, mtime] = output.split(";");
-    const mtimeSeconds = Number.parseInt(mtime ?? "", 10);
-    return {
-        exists: true,
-        size: Number.parseInt(size ?? "", 10),
-        sha256,
-        mtime: Number.isNaN(mtimeSeconds) ? undefined : new Date(mtimeSeconds * 1000),
+    const configState = () => {
+        if (files.config === null)
+            return missing;
+        const absent = missingConfigPaths(files.config, templates.config).length;
+        const differing = differingConfigValues(files.config, templates.config).length;
+        const parts = [
+            ...(absent > 0 ? [textYellow(`${absent} missing fields`)] : []),
+            ...(differing > 0 ? [`${differing} values differ`] : []),
+        ];
+        return parts.length > 0 ? parts.join(" · ") : textGreen("matches template");
     };
-}
-async function readRemoteConfigTextIfExists(remote) {
-    if (!remote.exists) {
-        return null;
-    }
-    return configSyncSsh(`cat "${configSyncRemotePath}"`);
-}
-function printConfigSyncPlan(action, local, remote, localText, remoteText) {
-    const source = action === "push" ? "local -> remote" : "remote -> local";
-    console.log(textBold(`ccs config ${action}`));
-    printKeyValue("direction:", source, 10);
-    printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 10);
-    printKeyValue("remote:", `${colorPath(configSyncRemoteDisplay)}  ${formatConfigSummary(remote)}`, 10);
-    if (action === "push" && !local.exists) {
-        throw new Error(`local profiles.json not found: ${profilesPath()}`);
-    }
-    if (action === "pull" && !remote.exists) {
-        throw new Error(`remote profiles.json not found: ${configSyncRemoteDisplay}`);
-    }
-    printConfigSyncDiff(action, localText, remoteText);
-    console.log(textDim("no changes are written unless you type yes at the prompt."));
-}
-function printConfigSyncDiff(action, localText, remoteText) {
-    const current = action === "push" ? remoteText : localText;
-    const next = action === "push" ? localText : remoteText;
-    const targetLabel = action === "push" ? "remote" : "local";
-    if (current === next) {
-        console.log(textDim(`${targetLabel} is already up to date`));
-        return;
-    }
-    const patch = createTwoFilesPatch(`a/${targetLabel}`, `b/${targetLabel}`, redactPreviewSecrets(current ?? ""), redactPreviewSecrets(next ?? ""), "", "", { context: 3 });
-    console.log(textDim(patch.trimEnd()));
-}
-function printConfigSyncStatus(local) {
+    const agentsState = files.agents === null ? missing
+        : files.agents === templates.agents ? textGreen("matches template") : "differs from template";
     console.log(textBold("ccs config"));
-    printKeyValue("local:", `${colorPath(profilesPath())}  ${formatConfigSummary(local)}`, 8);
-    printKeyValue("remote:", colorPath(configSyncRemoteDisplay), 8);
+    printTable([
+        { key: "file", title: "" },
+        { key: "path", title: "" },
+        { key: "state", title: "" },
+    ], [
+        { file: "profiles.json", path: colorPath(formatDisplayPath(profilesPath())), state: profilesState() },
+        { file: "config.toml", path: colorPath(formatDisplayPath(codexConfigPath())), state: configState() },
+        { file: "AGENTS.md", path: colorPath(formatDisplayPath(codexAgentsPath())), state: agentsState },
+    ], { header: false });
 }
-function printConfigSyncHelp() {
+function printConfigHelp() {
     console.log([
         textBold("Usage:"),
-        "  ccs config        # show sync endpoints, then choose push or pull, preview, and confirm",
+        "  ccs config        # create or update profiles.json, config.toml, and AGENTS.md from the templates",
     ].join("\n"));
 }
-async function pushConfigToServer(local, remote) {
-    const localText = await readLocalConfigText();
-    parseJsonObject(localText);
-    const timestamp = formatTimestamp(new Date());
-    const backupScript = [
-        `if [ -f "${configSyncRemotePath}" ]; then`,
-        `  mkdir -p "${configSyncRemotePath}.backups"`,
-        `  cp "${configSyncRemotePath}" "${configSyncRemotePath}.backups/profiles.${timestamp}.json"`,
-        `  echo "${configSyncRemotePath}.backups/profiles.${timestamp}.json"`,
-        "fi",
-    ].join("\n");
-    const backupPath = (await configSyncSsh(backupScript)).trim();
-    await configSyncSsh(`mkdir -p "$(dirname "${configSyncRemotePath}")"`);
-    const remoteTarget = `${configSyncUser}@${configSyncHost}:${configSyncRemotePath}`;
-    await configSyncScp(profilesPath(), remoteTarget);
-    if (backupPath) {
-        console.log(`remote backup: ${textBlue(backupPath)}`);
-    }
-    console.log(`config pushed: ${textGreen(configSyncRemoteDisplay)}`);
-}
-async function pullConfigFromServer(local, remote) {
-    const remoteText = await readRemoteConfigTextIfExists(remote);
-    if (remoteText === null) {
-        throw new Error(`remote profiles.json not found: ${configSyncRemoteDisplay}`);
-    }
-    parseJsonObject(remoteText);
-    const tempDir = await mkdtemp(join(tmpdir(), "ccs-config-pull-"));
-    const tempPath = join(tempDir, "profiles.json");
-    try {
-        const remoteSource = `${configSyncUser}@${configSyncHost}:${configSyncRemotePath}`;
-        await configSyncScp(remoteSource, tempPath);
-        const pulledText = await readFile(tempPath, "utf-8");
-        parseJsonObject(pulledText);
-        const backupDir = await backupCcsFiles(await getExistingBackupFiles());
-        await ensureDir(join(profilesPath(), ".."));
-        await writeTextFileAtomic(profilesPath(), pulledText, 0o600);
-        if (backupDir) {
-            console.log(`backup: ${textBlue(backupDir)}`);
-        }
-        console.log(`config pulled: ${textGreen(profilesPath())}`);
-    }
-    finally {
-        await rm(tempDir, { recursive: true, force: true });
-    }
-}
-async function runConfigSync(args) {
+async function runConfig(args) {
     if (isHelpArgument(args[0])) {
         assertExactArgs(args.slice(1), "config help", 0);
-        printConfigSyncHelp();
+        printConfigHelp();
         return;
     }
-    if (args.length > 0) {
-        throw new Error(`unknown argument for ccs config: ${args[0]}`);
+    assertExactArgs(args, "config", 0);
+    const files = await readConfigFiles();
+    const templates = await readConfigTemplates();
+    // The current Codex provider only matters when profiles.json is being created.
+    const codex = files.profiles === null ? await readCurrentCodexProfile() : null;
+    const choices = configChoices(files, templates, codex, await proxyStateExists());
+    printConfigStatus(files, templates);
+    if (!choices.some((choice) => !choice.disabled)) {
+        console.log(textDim("everything is up to date."));
+        return;
     }
-    const local = await localConfigSummary();
-    printConfigSyncStatus(local);
     if (!isInteractive()) {
-        printKeyValue("note:", "run in an interactive terminal to push or pull", 8);
+        console.log(textDim("run in an interactive terminal to choose and apply changes."));
         return;
     }
-    const action = await select("Sync profiles.json", [
-        { value: "pull", label: "pull", hint: "replace the local file with the LAN server copy" },
-        { value: "push", label: "push", hint: "replace the LAN server copy with the local file" },
-    ]);
-    const remote = await remoteConfigSummary();
-    const localText = await readTextIfExists(profilesPath());
-    const remoteText = await readRemoteConfigTextIfExists(remote);
-    printConfigSyncPlan(action, local, remote, localText, remoteText);
+    const selected = new Set(await multiSelect("Apply which changes?", choices));
+    const writes = planConfigWrites(selected, files, templates, codex);
+    if (writes.length === 0) {
+        console.log(textDim("no changes."));
+        return;
+    }
+    printPreviewSummary("ccs config", writes);
+    for (const file of writes) {
+        printDiffBlock(file);
+    }
     if (!(await confirmApply())) {
         return;
     }
-    if (action === "push") {
-        await pushConfigToServer(local, remote);
+    const latest = await readConfigFiles();
+    if (latest.profiles !== files.profiles || latest.config !== files.config || latest.agents !== files.agents) {
+        throw new Error("files changed after preview; run ccs config again");
+    }
+    const backupDir = await backupPreviewFiles(writes, formatBackupStamp(new Date()));
+    for (const file of writes) {
+        await writeVerified(file);
+    }
+    if (backupDir) {
+        console.log(`backup: ${textBlue(formatDisplayPath(backupDir))}`);
+    }
+    for (const file of writes) {
+        console.log(`${file.current === null ? "created" : "updated"}: ${textGreen(formatDisplayPath(file.path))}`);
+    }
+}
+// `current` is per device: each device keeps its own active profile.
+function compareSyncedProfiles(local, remote) {
+    const localProfiles = local.profiles ?? {};
+    const remoteProfiles = remote.profiles ?? {};
+    const settingKeys = new Set([...Object.keys(local), ...Object.keys(remote)].filter((key) => key !== "profiles" && key !== "current"));
+    const field = (file, key) => JSON.stringify(file[key] ?? null);
+    return {
+        localOnly: Object.keys(localProfiles).filter((name) => !remoteProfiles[name]),
+        remoteOnly: Object.keys(remoteProfiles).filter((name) => !localProfiles[name]),
+        changed: Object.keys(localProfiles).filter((name) => (remoteProfiles[name] && JSON.stringify(localProfiles[name]) !== JSON.stringify(remoteProfiles[name]))),
+        settings: [...settingKeys].filter((key) => field(local, key) !== field(remote, key)),
+    };
+}
+function isInSync(comparison) {
+    return comparison.localOnly.length + comparison.remoteOnly.length + comparison.changed.length + comparison.settings.length === 0;
+}
+// The source replaces the target file, except that the target keeps its own `current` when the source still has it.
+function planSyncedProfiles(source, target) {
+    const keep = target?.current && source.profiles?.[target.current] ? target.current : source.current;
+    return { ...source, ...(keep ? { current: keep } : {}) };
+}
+function formatSyncSide(label, text, profiles, mtime) {
+    if (text === null)
+        return `${label}  ${textYellow("missing")}`;
+    const count = Object.keys(profiles?.profiles ?? {}).length;
+    const when = mtime ? `  ${textDim(`modified ${formatAgo(mtime.getTime())}`)}` : "";
+    return `${label}  ${textDim(`${count} profiles`)}  current ${colorName(profiles?.current ?? "-")}${when}`;
+}
+function printSyncComparison(target, remote, local, remoteProfiles, comparison) {
+    console.log(textBold(`ccs sync  ${colorHost(target.raw)}`));
+    printKeyValue("local:", formatSyncSide(colorHost(formatSystemLabel()), local.text, local.profiles, local.mtime), 10);
+    printKeyValue("remote:", formatSyncSide(colorHost(remote.host), remote.text, remoteProfiles, remote.mtime), 10);
+    if (local.text === null || remote.text === null)
+        return;
+    const rows = [
+        ["local only:", comparison.localOnly],
+        ["remote only:", comparison.remoteOnly],
+        ["differ:", comparison.changed],
+        ["settings:", comparison.settings],
+    ];
+    for (const [label, names] of rows) {
+        if (names.length > 0)
+            printKeyValue(label, names.map(colorName).join(", "), 13);
+    }
+}
+function syncHostHint(entry, nowMs) {
+    const parts = [
+        ...(entry.host ? [entry.host] : []),
+        entry.synced_at ? `synced ${formatAgo(Date.parse(entry.synced_at), nowMs)} (${entry.direction ?? "?"})`
+            : entry.connected_at ? `connected ${formatAgo(Date.parse(entry.connected_at), nowMs)}` : "never connected",
+    ];
+    return parts.join(" · ");
+}
+function sortedSyncHosts(hosts) {
+    const time = (raw) => Date.parse(hosts[raw].connected_at ?? "") || 0;
+    return Object.keys(hosts).sort((left, right) => time(right) - time(left));
+}
+async function chooseSyncTarget(hosts) {
+    const nowMs = Date.now();
+    const known = sortedSyncHosts(hosts);
+    const picked = known.length === 0 ? null : await select("Sync with which device?", [
+        ...known.map((raw) => ({ value: raw, label: raw, hint: syncHostHint(hosts[raw], nowMs) })),
+        { value: null, label: "+ new device", hint: "user@host[:port] or an ssh config alias" },
+    ]);
+    const raw = picked ?? await input("Device (user@host[:port] or ssh alias)", { validate: (value) => syncTargetError(value) });
+    return parseSyncTarget(raw);
+}
+function printSyncHelp() {
+    console.log([
+        textBold("Usage:"),
+        "  ccs sync              # choose a remembered device or enter user@host, then pull or push profiles.json",
+        "  ccs sync user@host    # sync with this device; user@host:port and ssh config aliases also work",
+    ].join("\n"));
+}
+async function runDeviceSync(args) {
+    if (isHelpArgument(args[0])) {
+        assertExactArgs(args.slice(1), "sync help", 0);
+        printSyncHelp();
         return;
     }
-    await pullConfigFromServer(local, remote);
+    assertMaxArgs(args, "sync [user@host]", 1);
+    const hosts = await readSyncHosts();
+    const interactive = isInteractive();
+    if (!args[0] && !interactive) {
+        console.log(textBold("ccs sync"));
+        for (const raw of sortedSyncHosts(hosts)) {
+            printKeyValue(`${raw}`, textDim(syncHostHint(hosts[raw], Date.now())));
+        }
+        console.log(textDim("run in an interactive terminal to choose a device, or pass user@host."));
+        return;
+    }
+    const target = args[0] ? parseSyncTarget(args[0]) : await chooseSyncTarget(hosts);
+    // Without a terminal ssh cannot ask for a password, so it fails instead of waiting.
+    const remote = await readRemoteProfiles(target, { batch: !interactive });
+    await recordSyncHost(target.raw, { connected_at: new Date().toISOString(), host: remote.host });
+    const localText = await readTextIfExists(profilesPath());
+    const localMtime = localText === null ? undefined : (await stat(profilesPath())).mtime;
+    const localProfiles = localText === null ? null : parseProfiles(localText);
+    const remoteProfiles = remote.text === null ? null : parseProfiles(remote.text, `remote profiles.json (${target.raw})`, true);
+    if (!localProfiles && !remoteProfiles) {
+        throw new Error(`profiles.json is missing on both devices; run ccs config first`);
+    }
+    const comparison = compareSyncedProfiles(localProfiles ?? {}, remoteProfiles ?? {});
+    printSyncComparison(target, remote, { text: localText, profiles: localProfiles, mtime: localMtime }, remoteProfiles, comparison);
+    if (localProfiles && remoteProfiles && isInSync(comparison)) {
+        console.log(textGreen("in sync."));
+        return;
+    }
+    if (!interactive) {
+        console.log(textDim("run in an interactive terminal to pull or push."));
+        return;
+    }
+    const remoteNewer = (remote.mtime?.getTime() ?? 0) > (localMtime?.getTime() ?? 0);
+    const direction = await select("Direction", [
+        { value: "pull", label: "pull", hint: `replace local profiles.json with ${remote.host}'s`, disabled: remoteProfiles ? undefined : "remote missing" },
+        { value: "push", label: "push", hint: `replace ${remote.host}'s profiles.json with local`, disabled: localProfiles ? undefined : "local missing" },
+    ], { default: !localProfiles || (remoteProfiles && remoteNewer) ? "pull" : "push" });
+    const source = direction === "pull" ? remoteProfiles : localProfiles;
+    const targetProfiles = direction === "pull" ? localProfiles : remoteProfiles;
+    const next = planSyncedProfiles(source, targetProfiles);
+    const nextText = stringifyJson(next);
+    const preview = {
+        label: "profiles.json",
+        path: direction === "pull" ? profilesPath() : `${target.raw}:~/.config/codex-tools/profiles.json`,
+        current: direction === "pull" ? localText : remote.text,
+        next: nextText,
+    };
+    const currentName = targetProfiles?.current;
+    const currentChanged = Boolean(currentName && targetProfiles?.profiles?.[currentName]
+        && JSON.stringify(targetProfiles.profiles[currentName]) !== JSON.stringify(next.profiles?.[next.current ?? ""]));
+    const currentDropped = Boolean(currentName && next.current !== currentName);
+    // After a pull, the local Codex files follow the current profile when its URL or key changed.
+    const refresh = direction === "pull" && (currentChanged || currentDropped)
+        && Boolean(next.current && next.profiles?.[next.current]?.apiKey);
+    console.log(textBold(`ccs sync ${direction}`));
+    printDiffBlock(preview);
+    if (currentDropped) {
+        console.log(`${textYellow("warning:")} current ${currentName} is not in the incoming file; current becomes ${next.current ?? "none"}`);
+    }
+    if (refresh) {
+        console.log(textDim(`~/.codex/config.toml and auth.json will switch to ${next.current} as ccs use does.`));
+    }
+    else if (direction === "push" && (currentChanged || currentDropped)) {
+        console.log(`${textYellow("note:")} run ccs use on ${remote.host} so its Codex files follow the new current profile`);
+    }
+    console.log(textDim("no changes are written unless you type yes at the prompt."));
+    if (!(await confirmApply())) {
+        return;
+    }
+    const stamp = formatBackupStamp(new Date());
+    let backup;
+    if (direction === "pull") {
+        if ((await readTextIfExists(profilesPath())) !== localText) {
+            throw new Error("local profiles.json changed after preview; run ccs sync again");
+        }
+        backup = await backupPreviewFiles([preview], stamp);
+        await writeVerified(preview);
+        if (refresh) {
+            await switchProfile(next.current);
+        }
+    }
+    else {
+        backup = (await writeRemoteProfiles(target, nextText, remote.checksum, stamp)).backup;
+    }
+    await recordSyncHost(target.raw, { synced_at: new Date().toISOString(), direction });
+    if (backup) {
+        console.log(`backup: ${textBlue(direction === "pull" ? formatDisplayPath(backup) : `${remote.host}:${backup}`)}`);
+    }
+    console.log(`${direction === "pull" ? "pulled" : "pushed"}: ${textGreen(direction === "pull" ? formatDisplayPath(profilesPath()) : `${target.raw}`)}`);
 }
 function assertMaxArgs(argv, command, count) {
     if (argv.length > count) {
@@ -393,24 +485,17 @@ function assertExactArgs(argv, command, count) {
         throw new Error(`usage: ccs ${command}`);
     }
 }
-function printPreviewSummary(title, labels, backupFiles) {
+function printPreviewSummary(title, files) {
     console.log(textBold(title));
-    if (backupFiles.length > 0) {
-        console.log(`backup: ${textBlue(backupFiles.map((file) => basename(file.source)).join(", "))}`);
+    const backups = files.filter((file) => file.current !== null);
+    if (backups.length > 0) {
+        console.log(`backup: ${textBlue(backups.map((file) => file.label).join(", "))}`);
     }
-    console.log(`files: ${textGreen(labels.join(", "))}`);
+    console.log(`files: ${textGreen(files.map((file) => file.label).join(", "))}`);
     console.log(textDim("no changes are written unless you type yes at the prompt."));
 }
-function collectChangedPreviewFiles(files) {
-    return files.filter((file) => file.current !== file.next);
-}
-async function collectExistingBackupFilesForPaths(paths) {
-    const targetPaths = new Set(paths);
-    const files = await getExistingBackupFiles();
-    return files.filter((file) => targetPaths.has(file.source));
-}
 function printDiffBlock(file) {
-    const currentNormalized = normalizePreviewContent(file.label, file.current);
+    const currentNormalized = normalizePreviewContent(file.label, file.current ?? "");
     const nextNormalized = normalizePreviewContent(file.label, file.next);
     const patch = createTwoFilesPatch(`a/${file.label}`, `b/${file.label}`, currentNormalized, nextNormalized, "", "", { context: 3 });
     console.log();
@@ -518,125 +603,6 @@ function printWarnings(warnings) {
     for (const warning of warnings) {
         console.log(`${textYellow("warning:")} ${warning}`);
     }
-}
-async function buildInitPreviewPlan() {
-    const plannedProfiles = await planInitProfilesFromCurrent();
-    const nextProfilesText = `${stringifyJson(plannedProfiles)}\n`;
-    const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
-    const configSync = await planCodexConfigSync();
-    const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
-    const defaultAgentsText = await readDefaultCodexAgents();
-    const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
-    const previewFiles = collectChangedPreviewFiles([
-        {
-            label: "profiles.json",
-            path: profilesPath(),
-            current: currentProfilesText,
-            next: nextProfilesText,
-        },
-        {
-            label: "config.toml",
-            path: codexConfigPath(),
-            current: currentConfigText,
-            next: configSync.nextContent,
-        },
-        {
-            label: "AGENTS.md",
-            path: codexAgentsPath(),
-            current: currentAgentsText,
-            next: defaultAgentsText,
-        },
-    ]);
-    const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
-    const warnings = [];
-    if (currentProfilesText) {
-        warnings.push(`profiles.json already exists: ${profilesPath()}`);
-    }
-    if (currentConfigText) {
-        warnings.push(`config.toml already exists: ${codexConfigPath()}`);
-    }
-    if (currentAgentsText) {
-        warnings.push(`AGENTS.md already exists: ${codexAgentsPath()}`);
-    }
-    return {
-        title: "ccs init",
-        previewFiles,
-        backupFiles,
-        warnings,
-    };
-}
-async function selectSyncReplacePaths() {
-    const defaults = await readDefaultCodexConfig();
-    const existing = (await readTextIfExists(codexConfigPath())) ?? "";
-    const differences = tomlLeafDifferences(defaults, existing).filter((difference) => !isProviderBaseUrlPath(difference.path));
-    if (differences.length === 0 || !isInteractive())
-        return [];
-    const proxyInstalled = await proxyStateExists();
-    const choices = differences.map((difference) => ({
-        value: difference.path,
-        label: difference.path,
-        hint: `${truncateVisible(difference.current, 32)} -> ${truncateVisible(difference.template, 32)}`,
-        disabled: difference.path === "model_provider" && proxyInstalled ? "proxy installed" : undefined,
-    }));
-    if (choices.every((choice) => choice.disabled))
-        return [];
-    console.log(textDim("missing template fields are always added; existing values change only when selected."));
-    return multiSelect("Replace which existing values with the template?", choices);
-}
-async function buildSyncPreviewPlan(replacePaths) {
-    const nextProfiles = await planSyncProfiles();
-    const configPlan = await planCodexConfigSync(new Set(replacePaths));
-    if (replacePaths.includes("model_provider") && configPlan.differentPaths.includes("model_provider") && await proxyStateExists()) {
-        throw new Error("ccs sync cannot replace model_provider while proxy state exists");
-    }
-    const currentProfilesText = (await readTextIfExists(profilesPath())) ?? "";
-    const currentConfigText = (await readTextIfExists(codexConfigPath())) ?? "";
-    const currentAgentsText = (await readTextIfExists(codexAgentsPath())) ?? "";
-    const nextAgentsText = await readDefaultCodexAgents();
-    const previewFiles = collectChangedPreviewFiles([
-        {
-            label: "profiles.json",
-            path: profilesPath(),
-            current: currentProfilesText,
-            next: stringifyJson(nextProfiles),
-        },
-        {
-            label: "config.toml",
-            path: codexConfigPath(),
-            current: currentConfigText,
-            next: configPlan.nextContent,
-        },
-        {
-            label: "AGENTS.md",
-            path: codexAgentsPath(),
-            current: currentAgentsText,
-            next: nextAgentsText,
-        },
-    ]);
-    const backupFiles = await collectExistingBackupFilesForPaths(previewFiles.map((file) => file.path));
-    return {
-        title: "ccs sync",
-        previewFiles,
-        backupFiles,
-        warnings: [],
-        configSync: configPlan,
-    };
-}
-function isProviderBaseUrlPath(path) {
-    return /^model_providers\.[^.]+\.base_url$/.test(path);
-}
-function formatSyncFieldSummary(label, paths) {
-    if (paths.length === 0) {
-        return `${label.padEnd(11)}0`;
-    }
-    return `${label.padEnd(11)}${paths.length}  ${paths.join(", ")}`.trimEnd();
-}
-function printPreviewPlan(plan, dryRun) {
-    printPreviewSummary(plan.title, plan.previewFiles.map((file) => file.label), plan.backupFiles);
-    for (const file of plan.previewFiles) {
-        printDiffBlock(file);
-    }
-    printWarnings(plan.warnings);
 }
 async function addProfile() {
     if (!isInteractive()) {
@@ -792,6 +758,13 @@ async function switchProfile(name) {
     printProfileDetails(name, normalized);
     return normalized;
 }
+// With proxy mode the provider URL points at the proxy, which reads the profile itself; only the key is compared.
+async function codexFilesMatch(profile) {
+    const codex = await readCurrentCodexProfile().catch(() => null);
+    if (!codex || codex.apiKey !== profile.apiKey)
+        return false;
+    return (await proxyStateExists()) || sameBaseUrl(codex.baseURL, profile.baseURL);
+}
 function profileUsageHint(name, current, entry, nowMs) {
     const used = profileLastUsedMs(entry);
     const parts = [
@@ -827,7 +800,15 @@ async function useProfile(profiles) {
         disabled: profiles.profiles[item].apiKey ? undefined : "missing apiKey",
     })), { default: previous ?? profiles.current });
     if (name === profiles.current) {
-        console.log(textDim("no changes."));
+        // Selecting the current profile re-applies it when the Codex files no longer match it,
+        // for example after `ccs sync` pulled a new key.
+        if (await codexFilesMatch(assertProfile(profiles.profiles[name], name))) {
+            console.log(textDim("no changes."));
+        }
+        else {
+            await switchProfile(name);
+            printKeyValue("current:", `${colorName(name)}  ${textDim("Codex files re-applied")}`);
+        }
         return;
     }
     const previousName = profiles.current;
@@ -1053,10 +1034,9 @@ function usageLines() {
         "  ccs proxy [--view overview|tokens|cost] # show proxy status with the selected request view",
         "  ccs proxy [watch|reroute|cancel|capture|mode|search|compact|config|install|restart|restore|serve] # manage proxy state and runtime",
         "  ccs use                              # choose the current profile; shows last use and switch times",
-        "  ccs config                           # choose push or pull, preview, and sync profiles.json with LAN server",
         "  ccs list | l                         # list profiles",
-        "  ccs init                             # preview, confirm, and create config",
-        "  ccs sync                             # add missing template fields; choose existing values to replace",
+        "  ccs config                           # create or update profiles.json, config.toml, and AGENTS.md from the templates",
+        "  ccs sync [user@host]                 # pull or push profiles.json with another device over ssh",
         "  ccs add                              # choose a profile to edit or create, then enter its values",
         "  ccs remove                           # choose a profile to remove",
         "  ccs stats                            # summarize local command and prompt usage",
@@ -1079,11 +1059,10 @@ const CCS_COMMAND_SHORTCUTS = [
     { key: "m", label: "models" },
     { key: "u", label: "use" },
     { key: "l", label: "list" },
-    { key: "i", label: "init" },
+    { key: "c", label: "config" },
     { key: "s", label: "sync" },
     { key: "a", label: "add" },
     { key: "r", label: "remove" },
-    { key: "c", label: "config" },
     { key: "t", label: "stats", at: 1 },
 ];
 const CCS_NAMESPACE_SHORTCUTS = [
@@ -1124,7 +1103,11 @@ export async function runCcs(argv) {
         return;
     }
     if (command === "config") {
-        await runConfigSync(args);
+        await runConfig(args);
+        return;
+    }
+    if (command === "sync") {
+        await runDeviceSync(args);
         return;
     }
     if (command === "stats") {
@@ -1141,66 +1124,6 @@ export async function runCcs(argv) {
             return;
         setUsageCommand("ccs", [shortcut.label], "shortcut");
         await runCcs([shortcut.label]);
-        return;
-    }
-    if (command === "init") {
-        rejectRemovedYesFlags(args, "ccs init");
-        assertExactArgs(args, "init", 0);
-        const previewPlan = await buildInitPreviewPlan();
-        printPreviewPlan(previewPlan, true);
-        if (!(await confirmApply())) {
-            return;
-        }
-        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
-        const initialized = await initProfilesFromCurrent();
-        await syncCodexConfigFromTemplate();
-        await syncCodexAgentsFromTemplate();
-        const profile = initialized.profiles?.[initialized.current ?? ""];
-        if (profile?.apiKey) {
-            await writeTextFile(codexAuthPath(), stringifyJson({ OPENAI_API_KEY: profile.apiKey }), 0o600);
-        }
-        if (backupDir) {
-            console.log(`backup: ${textBlue(backupDir)}`);
-        }
-        console.log(`profiles written: ${textGreen(profilesPath())}`);
-        console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
-        console.log(`codex agents synced: ${textGreen(codexAgentsPath())}`);
-        return;
-    }
-    if (command === "sync") {
-        rejectRemovedYesFlags(args, "ccs sync");
-        assertExactArgs(args, "sync", 0);
-        const previewPlan = await buildSyncPreviewPlan(await selectSyncReplacePaths());
-        console.log(formatSyncFieldSummary("different:", previewPlan.configSync.differentPaths));
-        console.log(formatSyncFieldSummary("update:", previewPlan.configSync.updatedPaths));
-        printPreviewPlan(previewPlan, true);
-        if (!(await confirmApply())) {
-            return;
-        }
-        const backupDir = await backupCcsFiles(previewPlan.backupFiles);
-        await ensureDir(codexDir());
-        for (const file of previewPlan.previewFiles) {
-            if (file.path === profilesPath()) {
-                await writeTextFileAtomic(file.path, file.next, 0o600);
-            }
-            else {
-                await writeTextFile(file.path, file.next);
-            }
-            const applied = await readTextIfExists(file.path);
-            if (applied !== file.next) {
-                throw new Error(`ccs sync verification failed: ${file.path}`);
-            }
-        }
-        if (backupDir) {
-            console.log(`backup: ${textBlue(backupDir)}`);
-        }
-        console.log(`profiles synced: ${textGreen(profilesPath())}`);
-        console.log(`codex config synced: ${textGreen(codexConfigPath())}`);
-        console.log(`codex agents synced: ${textGreen(codexAgentsPath())}`);
-        const synced = await readProfiles();
-        for (const name of Object.keys(synced.profiles ?? {})) {
-            console.log(`  ${textBlue(name)}`);
-        }
         return;
     }
     if (command === "list" || command === "l") {

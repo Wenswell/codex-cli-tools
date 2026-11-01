@@ -59,6 +59,10 @@ Record version `1` fields: `recorded_at`, `tool`, `command`, `flags`, `via` (`ar
 
 `~/.cache/codex-tools/profile-usage.json` stores `{ version: 1, profiles: { NAME: { switched_at, launched_at, requested_at } } }` with ISO timestamps. It is written atomically with `0600` permissions. It holds display hints only: readers treat a missing, unreadable, or unknown-version file as empty, and it is never synced with `profiles.json`.
 
+## Sync devices
+
+`~/.cache/codex-tools/sync-hosts.json` stores `{ version: 1, hosts: { TARGET: { connected_at, synced_at, direction, host } } }`, keyed by the `ccs sync` target as typed (`[user@]host[:port]` or an ssh alias). `connected_at` is written after every successful remote read, `synced_at` and `direction` (`pull` or `push`) after an applied sync, and `host` is the remote `uname -n`. It is written atomically with `0600` permissions, holds no profile data, and readers treat a missing, unreadable, or unknown-version file as empty.
+
 ## Counters
 
 Status summaries should be computed from the state-file window rather than an unbounded hidden counter when the state file is the visible source of truth.
