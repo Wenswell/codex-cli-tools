@@ -57,7 +57,12 @@ ccs remove
 ccs stats
 ```
 
-`ccs list` shows each profile's platform and marks the current profile of each platform with `*`.
+`ccs list`, `ccs use`, `ccs add`, and `ccs remove` show CODEX / CLAUDE tabs
+in a terminal, starting on CODEX. Use Left/Right to switch platform and Up/Down
+to move within its profiles. Empty tabs remain available. Enter selects a profile;
+for `ccs list`, Enter closes the read-only browser. Esc cancels. Non-interactive
+`list` and `use` output separate platform groups. `ccs list` marks each platform's
+current profile with `*` and shows URL, masked key, conversion, and usage times.
 
 `ccs models [PROFILE]` reads the model list from the selected profile's `v1/models` endpoint and prints `model`, `owned_by`, and `created` columns. It uses the current profile unless `PROFILE` is given, sends the profile API key as `Authorization: Bearer`, and resolves the endpoint from the profile `baseURL`:
 
@@ -159,7 +164,7 @@ Add or update a profile interactively:
 ccs add
 ```
 
-`ccs add` lists existing profiles plus `+ new profile`. Editing a profile shows its current `baseURL` and masked `apiKey`; press Enter to keep a value. A new profile asks for a name, then its platform (`codex` or `claude`); an existing profile keeps its platform. The API key is masked while typing. A codex profile's last step chooses between a Responses provider and a Chat Completions-only provider. The first profile of a platform becomes that platform's current profile. The result is previewed with a masked key and written after exact `yes`.
+`ccs add` lists existing profiles plus `+ new profile`. Editing a profile shows its current `baseURL` and masked `apiKey`; press Enter to keep a value. A new profile uses the active platform tab and asks for a name; an existing profile keeps its platform. The API key is masked while typing. A codex profile's last step chooses between a Responses provider and a Chat Completions-only provider. The first profile of a platform becomes that platform's current profile. The result is previewed with a masked key and written after exact `yes`. After a new profile is saved, `ccs add` automatically runs `models` for that profile. Model-query failures return an explicit error while keeping the saved profile. Editing a profile does not query models.
 
 Remove a profile:
 
@@ -175,7 +180,7 @@ Switch the current profile:
 ccs use
 ```
 
-`ccs use` lists all profiles with their platform, `current`, the last use, and the last switch time. The cursor starts on the most recently active profile that is not current, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It makes the profile current for its platform and writes only that platform's files (see the table above); other keys in those files stay unchanged, and Claude Code `ANTHROPIC_API_KEY` is removed so only the Bearer token is sent. Selecting a current profile changes nothing unless its files no longer match it, in which case it re-applies them; with proxy mode the files must point at the proxy, so selecting the current profile after `ccs proxy install` routes that client through the proxy. A running Claude Code process reads `settings.json` at startup; with proxy mode it keeps using the proxy, which follows the new current profile. Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
+`ccs use` lists all profiles with their platform, `current`, the last use, and the last switch time. Within the initial CODEX tab, the cursor starts on the most recently active selectable Codex profile that is not current, so `ccs use` followed by Enter returns to the previous profile. Profiles without an API key cannot be selected. Selecting a profile switches immediately: the selection is the confirmation. It makes the profile current for its platform and writes only that platform's files (see the table above); other keys in those files stay unchanged, and Claude Code `ANTHROPIC_API_KEY` is removed so only the Bearer token is sent. Selecting a current profile changes nothing unless its files no longer match it, in which case it re-applies them; with proxy mode the files must point at the proxy, so selecting the current profile after `ccs proxy install` routes that client through the proxy. A running Claude Code process reads `settings.json` at startup; with proxy mode it keeps using the proxy, which follows the new current profile. Without a terminal, it prints the list only. When proxy mode is installed, the proxy uses the new current profile as the active upstream and API key for new requests.
 
 Profile times live in `~/.cache/codex-tools/profile-usage.json`, outside the device-synced `profiles.json`:
 

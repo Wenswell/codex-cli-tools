@@ -218,6 +218,45 @@ export function select(message, choices, options = {}) {
         usage: () => ({ kept_default: focus === initialFocus }),
     });
 }
+export function selectTabs(message, tabs, options = {}) {
+    let tab = 0;
+    const focuses = tabs.map(({ choices }) => {
+        const preferred = choices.findIndex((choice) => !choice.disabled && Object.is(choice.value, options.default));
+        return preferred >= 0 ? preferred : choices.findIndex((choice) => !choice.disabled);
+    });
+    const initialFocus = focuses[0];
+    let offset = 0;
+    return runPrompt({
+        message,
+        render: () => {
+            const { choices } = tabs[tab];
+            const size = visibleChoiceCount(choices.length);
+            offset = scrollOffset(offset, Math.max(0, focuses[tab]), size, choices.length);
+            return { lines: [
+                    promptHeader(message, `←→ platform · ↑↓ move · enter ${options.browse ? "close" : "select"} · esc cancel`),
+                    tabs.map((item, index) => index === tab ? textBold(`[${item.label}]`) : textDim(item.label)).join("  "),
+                    ...(choices.length ? choiceLines(choices, focuses[tab], offset, size, () => "") : [textDim("  no profiles")]),
+                ] };
+        },
+        onKey: (key) => {
+            if (key === "left" || key === "right") {
+                tab = (tab + (key === "left" ? -1 : 1) + tabs.length) % tabs.length;
+                offset = 0;
+            }
+            else if (key === "up" || key === "k" || key === "down" || key === "j") {
+                focuses[tab] = moveFocus(tabs[tab].choices, focuses[tab], key === "up" || key === "k" ? -1 : 1);
+            }
+            else if (key === "enter") {
+                if (options.browse)
+                    return { value: { tab, value: null } };
+                if (focuses[tab] >= 0)
+                    return { value: { tab, value: tabs[tab].choices[focuses[tab]].value } };
+            }
+        },
+        summary: () => `${tabs[tab].label}${options.browse ? "" : ` · ${plainLabel(tabs[tab].choices[focuses[tab]])}`}`,
+        usage: () => ({ kept_default: tab === 0 && focuses[tab] === initialFocus }),
+    });
+}
 export function multiSelect(message, choices, options = {}) {
     const selectable = choices.flatMap((choice, index) => choice.disabled ? [] : [index]);
     if (selectable.length === 0) {

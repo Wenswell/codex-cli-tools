@@ -27,7 +27,7 @@ import {
   type ProfilesFile,
 } from "../lib/profiles.js";
 import { formatAgo, profileLastUsedMs, readProfileUsage, recordProfileUsage, type ProfileUsageEntry } from "../lib/profile-usage.js";
-import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select, type Choice, type Shortcut } from "../lib/prompt.js";
+import { formatShortcut, input, isInteractive, multiSelect, readShortcutKey, select, selectTabs, type Choice, type Shortcut } from "../lib/prompt.js";
 import {
   parseSyncTarget,
   readRemoteProfiles,
@@ -782,21 +782,21 @@ async function addProfile(): Promise<void> {
   }
   const data = await readProfiles();
   const profiles = data.profiles ?? {};
-  const target = await select<string | null>("Add or edit which profile?", [
-    { value: null, label: "+ new profile" },
-    ...Object.entries(profiles).map(([name, profile]) => ({ value: name, label: name, hint: profile.baseURL })),
-  ]);
+  const selection = await selectTabs<string | null>("Add or edit which profile?", PLATFORMS.map((platform) => ({
+    label: colorPlatform(platform),
+    choices: [
+      { value: null, label: "+ new profile" },
+      ...profilesOf(data, platform).map((name) => ({ value: name, label: name, hint: profiles[name].baseURL })),
+    ],
+  })));
+  const target = selection.value;
   const name = target ?? await input("Profile name", {
     validate: (value) => !value ? "a name is required"
       : /\s/.test(value) ? "names cannot contain spaces"
         : profiles[value] ? `profile ${value} exists; choose it from the list to edit` : null,
   });
   const existing = target ? assertProfile(profiles[target], target) : undefined;
-  const platform = existing ? profilePlatform(existing) : await select<Platform>("Platform", PLATFORMS.map((value) => ({
-    value,
-    label: colorPlatform(value),
-    hint: PLATFORM_LABELS[value],
-  })));
+  const platform = PLATFORMS[selection.tab];
   const baseURL = await input("baseURL", {
     default: existing?.baseURL,
     validate: (value) => value ? null : "baseURL is required",
@@ -825,8 +825,10 @@ async function addProfile(): Promise<void> {
   }
   // The first profile of a platform becomes its current profile.
   const current = currentProfileName(data, platform) ? data.current : { ...data.current, [platform]: name };
-  await writeProfiles({ ...data, profiles: { ...profiles, [name]: profile }, current });
+  const saved = { ...data, profiles: { ...profiles, [name]: profile }, current };
+  await writeProfiles(saved);
   console.log(`profile saved: ${textGreen(name)}`);
+  if (!existing) await printModels(saved, [name]);
 }
 
 function printProfile(name: string, profiles: ProfilesFile): void {
@@ -899,11 +901,15 @@ async function removeProfile(): Promise<void> {
     throw new Error("ccs remove requires an interactive terminal");
   }
   const isCurrent = (item: string): boolean => currentProfileName(data, profilePlatform(data.profiles![item])) === item;
-  const name = await select("Remove which profile?", names.map((item) => ({
-    value: item,
-    label: item,
-    hint: `${colorPlatform(profilePlatform(data.profiles![item]))}  ${textDim(`${data.profiles![item].baseURL}${isCurrent(item) ? "  (current)" : ""}`)}`,
+  const { value: name } = await selectTabs("Remove which profile?", PLATFORMS.map((platform) => ({
+    label: colorPlatform(platform),
+    choices: profilesOf(data, platform).map((item) => ({
+      value: item,
+      label: item,
+      hint: `${colorPlatform(profilePlatform(data.profiles![item]))}  ${textDim(`${data.profiles![item].baseURL}${isCurrent(item) ? "  (current)" : ""}`)}`,
+    })),
   })));
+  if (name === null) return;
   const platform = profilePlatform(data.profiles![name]);
   const replacement = profilesOf(data, platform).find((item) => item !== name);
   const current = { ...data.current };
@@ -985,8 +991,11 @@ async function useProfile(profiles: ProfilesFile): Promise<void> {
   const usage = await readProfileUsage();
   const nowMs = Date.now();
   if (!isInteractive()) {
-    for (const name of names) {
-      console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${profileUsageHint(profiles, name, usage[name], nowMs)}`);
+    for (const platform of PLATFORMS) {
+      console.log(colorPlatform(platform));
+      for (const name of profilesOf(profiles, platform)) {
+        console.log(`${isCurrentProfile(profiles, name) ? textGreen("*") : " "} ${colorName(name)}  ${profileUsageHint(profiles, name, usage[name], nowMs)}`);
+      }
     }
     console.log(textDim("run in an interactive terminal to switch."));
     return;
@@ -996,14 +1005,18 @@ async function useProfile(profiles: ProfilesFile): Promise<void> {
     usage[name]?.switched_at ? Date.parse(usage[name].switched_at!) : 0,
   );
   const previous = names
-    .filter((name) => !isCurrentProfile(profiles, name))
+    .filter((name) => profilePlatform(profiles.profiles![name]) === "codex" && profiles.profiles![name].apiKey && !isCurrentProfile(profiles, name))
     .sort((left, right) => lastActive(right) - lastActive(left))[0];
-  const name = await select("Switch to which profile?", names.map((item) => ({
-    value: item,
-    label: item,
-    hint: profileUsageHint(profiles, item, usage[item], nowMs),
-    disabled: profiles.profiles![item].apiKey ? undefined : "missing apiKey",
+  const { value: name } = await selectTabs("Switch to which profile?", PLATFORMS.map((platform) => ({
+    label: colorPlatform(platform),
+    choices: profilesOf(profiles, platform).map((item) => ({
+      value: item,
+      label: item,
+      hint: profileUsageHint(profiles, item, usage[item], nowMs),
+      disabled: profiles.profiles![item].apiKey ? undefined : "missing apiKey",
+    })),
   })), { default: previous });
+  if (name === null) return;
   const platform = profilePlatform(profiles.profiles![name]);
   const label = PLATFORM_LABELS[platform];
   if (isCurrentProfile(profiles, name)) {
@@ -1053,12 +1066,17 @@ async function printProfileList(profiles: ProfilesFile): Promise<void> {
   const entries = Object.entries(profiles.profiles ?? {});
   const usage = await readProfileUsage();
   const nowMs = Date.now();
-  const rows = entries.map(([name, profile]) => ({
-    name,
-    profile,
-    marker: isCurrentProfile(profiles, name) ? textGreen("*") : "",
-    conversion: profilePlatform(profile) === "codex" ? formatRouteConversion(profile) : textDim("-"),
-  }));
+  if (isInteractive()) {
+    await selectTabs("Profiles", PLATFORMS.map((platform) => ({
+      label: colorPlatform(platform),
+      choices: profilesOf(profiles, platform).map((name) => ({
+        value: name,
+        label: `${isCurrentProfile(profiles, name) ? "* " : "  "}${name}`,
+        hint: `${colorUrl(profiles.profiles![name].baseURL)}  ${formatApiKey(profiles.profiles![name].apiKey)}  ${platform === "codex" ? formatRouteConversion(profiles.profiles![name]) : textDim("-")}  ${profileUsageHint(profiles, name, usage[name], nowMs)}`,
+      })),
+    })), { browse: true });
+    return;
+  }
 
   const columns: TableColumn[] = [
     { key: "marker", title: "" },
@@ -1070,19 +1088,22 @@ async function printProfileList(profiles: ProfilesFile): Promise<void> {
     { key: "used", title: "" },
     { key: "switched", title: "" },
   ];
-  printTable(columns, rows.map((row) => {
-    const switchedAt = usage[row.name]?.switched_at;
-    return {
-      marker: row.marker,
-      name: colorName(row.name),
-      platform: colorPlatform(profilePlatform(row.profile)),
-      url: colorUrl(row.profile.baseURL),
-      key: row.profile.apiKey ? textDim(maskSecret(row.profile.apiKey)) : textDim("(empty)"),
-      conversion: row.conversion,
-      used: textDim(`used ${formatAgo(profileLastUsedMs(usage[row.name]), nowMs)}`),
-      switched: textDim(`switched ${formatAgo(switchedAt ? Date.parse(switchedAt) : null, nowMs)}`),
-    };
-  }));
+  for (const platform of PLATFORMS) {
+    console.log(colorPlatform(platform));
+    printTable(columns, entries.filter(([, profile]) => profilePlatform(profile) === platform).map(([name, profile]) => {
+      const switchedAt = usage[name]?.switched_at;
+      return {
+        marker: isCurrentProfile(profiles, name) ? textGreen("*") : "",
+        name: colorName(name),
+        platform: colorPlatform(profilePlatform(profile)),
+        url: colorUrl(profile.baseURL),
+        key: profile.apiKey ? textDim(maskSecret(profile.apiKey)) : textDim("(empty)"),
+        conversion: platform === "codex" ? formatRouteConversion(profile) : textDim("-"),
+        used: textDim(`used ${formatAgo(profileLastUsedMs(usage[name]), nowMs)}`),
+        switched: textDim(`switched ${formatAgo(switchedAt ? Date.parse(switchedAt) : null, nowMs)}`),
+      };
+    }));
+  }
 }
 
 function buildModelsUrl(baseURL: string): string | null {

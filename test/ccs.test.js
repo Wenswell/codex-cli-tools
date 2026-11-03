@@ -338,6 +338,11 @@ test("Codex wrappers launch with a selected profile through an installed proxy",
 });
 
 test("ccs use switches Claude Code settings independently of Codex", async () => {
+  const requests = [];
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    requests.push({ url: request.url, authorization: request.headers.authorization });
+    response.end(JSON.stringify({ data: [{ id: "claude-sonnet", owned_by: "anthropic" }] }));
+  });
   const home = await writeProfiles({
     profiles: { test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" } },
     current: "test001",
@@ -357,36 +362,36 @@ test("ccs use switches Claude Code settings independently of Codex", async () =>
     await chmod(settingsPath, 0o664);
 
     await runCcsInteractive(["add"], home, [
-      ["Add or edit which profile?", KEYS.enter],
+      ["Add or edit which profile?", `${KEYS.right}${KEYS.enter}`],
       ["Profile name", `pool${KEYS.enter}`],
-      ["Platform", `${KEYS.down}${KEYS.enter}`],
-      ["baseURL", `https://pool.example.test/${KEYS.enter}`],
+      ["baseURL", `${baseUrl}/${KEYS.enter}`],
       ["apiKey", `pool-token-123456${KEYS.enter}`],
       ["Apply changes?", "yes\n"],
     ]);
+    assert.deepEqual(requests, [{ url: "/v1/models", authorization: "Bearer pool-token-123456" }]);
     const profilesFile = join(home, ".config", "codex-tools", "profiles.json");
     const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
-    assert.deepEqual(profiles.profiles.pool, { baseURL: "https://pool.example.test/", apiKey: "pool-token-123456", platform: "claude" });
+    assert.deepEqual(profiles.profiles.pool, { baseURL: `${baseUrl}/`, apiKey: "pool-token-123456", platform: "claude" });
     assert.deepEqual(profiles.current, { codex: "test001", claude: "pool" });
 
     const status = await runCcsDirect([], home);
     assert.match(status, /^CODEX:\s+test001\s+https:\/\/test001\.example\.test/m);
-    assert.match(status, /^CLAUDE:\s+pool\s+https:\/\/pool\.example\.test\//m);
+    assert.match(status, /^CLAUDE:\s+pool\s+http:\/\/127\.0\.0\.1/m);
 
     // pool is current but settings.json still points elsewhere, so selecting it re-applies it.
-    const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.right}${KEYS.enter}`]]);
     assert.match(output, /pool\s+CLAUDE · current/);
     assert.match(output, /current:\s+pool\s+Claude Code files re-applied/);
     const written = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.deepEqual(written, {
       ...settings,
-      env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ANTHROPIC_BASE_URL: "https://pool.example.test/", ANTHROPIC_AUTH_TOKEN: "pool-token-123456" },
+      env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ANTHROPIC_BASE_URL: `${baseUrl}/`, ANTHROPIC_AUTH_TOKEN: "pool-token-123456" },
     });
     assert.equal((await stat(settingsPath)).mode & 0o777, 0o664);
     assert.equal(await readFile(join(home, ".codex", "config.toml"), "utf8"), codexConfig);
     await assert.rejects(access(join(home, ".codex", "auth.json")));
 
-    const again = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
+    const again = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.right}${KEYS.enter}`]]);
     assert.match(again.output, /no changes\./);
 
     // Installing the proxy later: selecting the current profile now points Claude Code at the proxy.
@@ -394,7 +399,7 @@ test("ccs use switches Claude Code settings independently of Codex", async () =>
     const proxyPort = await reservePort();
     await writeProxyStateForRunTest(home, stateRoot, proxyPort);
     try {
-      const proxied = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]], {
+      const proxied = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.right}${KEYS.enter}`]], {
         CCS_PROXY_STATE_ROOT: stateRoot,
         CCS_PROXY_LISTEN_PORT: String(proxyPort),
       });
@@ -409,6 +414,7 @@ test("ccs use switches Claude Code settings independently of Codex", async () =>
       /profile pool is a claude profile; Codex needs a codex profile/,
     );
   } finally {
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -714,7 +720,7 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     const { output } = await runCcsInteractive(["use"], home, [["Switch to which profile?", KEYS.enter]]);
     assert.match(output, /test001\s+CODEX · current · used 1m ago · switched 3d ago/);
     assert.match(output, /empty\s+\(missing apiKey\)/);
-    assert.match(output, /✔ Switch to which profile\? · test002/);
+    assert.match(output, /✔ Switch to which profile\? · CODEX · test002/);
     assert.match(output, /current:\s+CODEX test001 -> test002/);
     assert.deepEqual(JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8")).current, { codex: "test002" });
     assert.match(await readFile(join(home, ".codex", "config.toml"), "utf8"), /base_url = "https:\/\/test002\.example\.test"/);
@@ -724,7 +730,7 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     assert.ok(Date.now() - Date.parse(usage.profiles.test002.launched_at) > 4 * 3_600_000);
 
     const unchanged = await runCcsInteractive(["use"], home, [["Switch to which profile?", `${KEYS.down}${KEYS.enter}`]]);
-    assert.match(unchanged.output, /✔ Switch to which profile\? · test002/);
+    assert.match(unchanged.output, /✔ Switch to which profile\? · CODEX · test002/);
     assert.match(unchanged.output, /no changes\./);
 
     await writeFile(join(home, ".codex", "auth.json"), JSON.stringify({ OPENAI_API_KEY: "stale-key" }), "utf8");
@@ -741,7 +747,76 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
   }
 });
 
+test("profile tabs browse and remove only the selected platform", async () => {
+  const home = await writeProfiles({ profiles: {
+    pool: { platform: "claude", baseURL: "https://claude.example.test", apiKey: "claude-token" },
+    test001: { baseURL: "https://codex.example.test", apiKey: "codex-token" },
+  }, current: { codex: "test001", claude: "pool" } });
+  const file = join(home, ".config", "codex-tools", "profiles.json");
+  try {
+    const before = await readFile(file, "utf8");
+    const list = await runCcsInteractive(["list"], home, [
+      ["codex.example.test", KEYS.right],
+      ["claude.example.test", KEYS.left],
+      ["codex.example.test", KEYS.enter],
+    ]);
+    assert.doesNotMatch(list.output.slice(0, list.output.indexOf("[CLAUDE]")), /claude.example.test/);
+    assert.equal(await readFile(file, "utf8"), before);
+    const plain = await runCcsDirect(["list"], home);
+    assert.match(plain, /^CODEX\n[\s\S]*test001[\s\S]*\nCLAUDE\n[\s\S]*pool/m);
+    await runCcsInteractive(["remove"], home, [
+      ["Remove which profile?", `${KEYS.right}${KEYS.enter}`],
+      ["Apply changes?", "yes\n"],
+    ]);
+    const data = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(Object.keys(data.profiles), ["test001"]);
+    assert.deepEqual(data.current, { codex: "test001" });
+    await runCcsInteractive(["remove"], home, [
+      ["Remove which profile?", `${KEYS.right}${KEYS.enter}`],
+      ["no profiles", `${KEYS.left}${KEYS.enter}`],
+      ["Apply changes?", "no\n"],
+    ]);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), data);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("ccs add queries models only after saving and retains the profile on query failure", async () => {
+  let requests = 0;
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    requests += 1;
+    response.writeHead(503);
+    response.end();
+  });
+  const home = await writeProfiles({ profiles: {} });
+  const steps = (answer) => [
+    ["Add or edit which profile?", KEYS.enter],
+    ["Profile name", `local${KEYS.enter}`],
+    ["baseURL", `${baseUrl}${KEYS.enter}`],
+    ["apiKey", `test-key${KEYS.enter}`],
+    ["Provider API", KEYS.enter],
+    ["Apply changes?", `${answer}\n`],
+  ];
+  try {
+    await runCcsInteractive(["add"], home, steps("no"));
+    assert.equal(requests, 0);
+    await assert.rejects(runCcsInteractive(["add"], home, steps("yes")), /HTTP 503/);
+    assert.equal(requests, 1);
+    const data = JSON.parse(await readFile(join(home, ".config", "codex-tools", "profiles.json"), "utf8"));
+    assert.deepEqual(data.profiles.local, { baseURL: baseUrl, apiKey: "test-key" });
+  } finally {
+    await closeServer(server);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("ccs add edits a chosen profile or creates a new one with masked keys", async () => {
+  const requests = [];
+  const { server, baseUrl } = await startJsonServer((request, response) => {
+    requests.push({ url: request.url, authorization: request.headers.authorization });
+    response.end(JSON.stringify({ data: [{ id: "gpt-local", owned_by: "openai" }] }));
+  });
   const home = await writeProfiles({
     profiles: { test001: { baseURL: "https://test001.example.test", apiKey: "test001-key-123456" } },
     current: "test001",
@@ -770,17 +845,19 @@ test("ccs add edits a chosen profile or creates a new one with masked keys", asy
       ["Add or edit which profile?", KEYS.enter],
       ["Profile name", `test001${KEYS.enter}`],
       ["profile test001 exists", `${KEYS.backspace.repeat(5)}local${KEYS.enter}`],
-      ["Platform", KEYS.enter],
-      ["baseURL", `https://local.example.test${KEYS.enter}`],
+      ["baseURL", `${baseUrl}${KEYS.enter}`],
       ["apiKey", `${secret}${KEYS.enter}`],
       ["Provider API", KEYS.enter],
       ["Apply changes?", "yes\n"],
     ]);
     assert.equal(created.output.includes(secret), false);
+    assert.match(created.output, /gpt-local/);
+    assert.deepEqual(requests, [{ url: "/v1/models", authorization: `Bearer ${secret}` }]);
     const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
-    assert.deepEqual(profiles.profiles.local, { baseURL: "https://local.example.test", apiKey: secret });
+    assert.deepEqual(profiles.profiles.local, { baseURL: baseUrl, apiKey: secret });
     assert.deepEqual(profiles.current, { codex: "test001" });
   } finally {
+    await closeServer(server);
     await rm(home, { recursive: true, force: true });
   }
 });

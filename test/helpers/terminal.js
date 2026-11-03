@@ -139,6 +139,8 @@ export function stdoutPropertiesScript(properties = {}) {
 }
 
 export const KEYS = {
+  left: "\u001b[D",
+  right: "\u001b[C",
   up: "\u001b[A",
   down: "\u001b[B",
   enter: "\r",
