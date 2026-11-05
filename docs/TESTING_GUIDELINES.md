@@ -28,6 +28,10 @@ Tests should fail for product problems and durable contracts. They should stay f
 - Drive interactive commands with `runInteractive` and `KEYS`: each step waits for visible prompt text, then sends keys. Assert the selected result and stored data, not prompt rendering details.
 - Use command-specific wrappers only for fixed command paths and environment defaults; keep process execution behavior in the shared helper.
 - Simulate TTY width, rows, color, and resize through shared helpers so tests restore stdout descriptors consistently.
+- Test formatting through shared formatter tests and rendering through renderer tests.
+  Use HTTP servers and CLI subprocesses when transport or command wiring is the behavior under test.
+- For template synchronization tests, read expected values from the template; assert
+  preservation and selected replacement rather than pinning changeable defaults.
 
 ## Low-Value Tests
 

@@ -6,30 +6,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { runCcs as runCcsCommand } from "../dist/commands/ccs.js";
+import { readTopLevelTomlString } from "../dist/lib/toml.js";
 import { shutdownProxyRuntime } from "../dist/commands/ccs-proxy.js";
 import { captureStdout, execNodeStdout, KEYS, runInteractive } from "./helpers/terminal.js";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+const templateModel = readTopLevelTomlString(await readFile(join(repoRoot, "config", "codex-config.toml"), "utf8"), "model");
+assert.ok(templateModel);
 
 test("ccs help lists the current proxy command surface", async () => {
   const output = await captureStdout(() => runCcsCommand(["help"]));
   assert.match(output, /ccs proxy \[watch\|reroute\|cancel\|capture\|search\|compact\|config\|install\|restart\|restore\|serve\]/);
   assert.match(output, /ccs models \[PROFILE\] \[--json\]/);
-});
-
-test("ccs status footer separates direct commands from namespaces", async () => {
-  const home = await writeProfiles({
-    profiles: { test001: { baseURL: "https://example.invalid", apiKey: "" } },
-    current: "test001",
-  });
-  try {
-    const output = await runCcs(["dist/bin/ccs.js"], home, { XDG_CACHE_HOME: join(home, ".cache") });
-    assert.match(output, /^commands:/m);
-    assert.match(output, /^namespaces:/m);
-    assert.doesNotMatch(output, /^commands:.*\[/m);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
 });
 
 test("ccs status keys run one highlighted command and other keys exit", async () => {
@@ -40,8 +28,8 @@ test("ccs status keys run one highlighted command and other keys exit", async ()
   try {
     const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
     const version = await runCcsInteractive([], home, [["press a highlighted key", "v"]]);
-    assert.match(version.output, /^commands:\s+version \| PROFILE \| models \| use \| list .* \| stats$/m);
-    assert.match(version.output, /^namespaces:\s+proxy \| help/m);
+    assert.match(version.output, /^commands:.*\bversion\b/m);
+    assert.match(version.output, /^namespaces:.*\bproxy\b/m);
     assert.match(version.output, new RegExp(`^ccs ${packageJson.version.replaceAll(".", "\\.")}$`, "m"));
 
     const exited = await runCcsInteractive([], home, [["press a highlighted key", "x"]]);
@@ -57,7 +45,9 @@ test("ccs status keys run one highlighted command and other keys exit", async ()
     assert.match(proxy.output, /history=on\s+t:history q:quit/);
 
     const plain = await runCcsDirect([], home);
-    assert.match(plain, /^commands:\s+version \| PROFILE \| models \| use/m);
+    assert.match(plain, /^commands:.*\bmodels\b/m);
+    assert.match(plain, /^namespaces:.*\bproxy\b/m);
+    assert.doesNotMatch(plain, /^commands:.*\[/m);
     assert.doesNotMatch(plain, /press a highlighted key/);
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -480,7 +470,7 @@ test("ccs config adds missing fields by default and replaces only selected value
       ["Apply changes?", "yes\n"],
     ]);
     assert.match(output, /^config\.toml\s+\S+\s+\d+ missing fields · \d+ values differ$/m);
-    assert.match(output, /config\.toml\s+model\s+"local-model" -> "gpt-5\.6-sol"/);
+    assert.ok(output.includes(`"local-model" -> ${JSON.stringify(templateModel)}`));
     assert.match(output, /config\.toml\s+features\.goals\s+false -> true/);
     assert.doesNotMatch(output, /model_providers\.codex\.base_url\s+"https/);
     assert.doesNotMatch(output, /AGENTS\.md\s+replace/);
@@ -501,7 +491,7 @@ test("ccs config adds missing fields by default and replaces only selected value
       ["Apply changes?", "yes\n"],
     ]);
     const config = await readFile(join(selected, ".codex", "config.toml"), "utf8");
-    assert.match(config, /model = "gpt-5\.6-sol"/);
+    assert.equal(readTopLevelTomlString(config, "model"), templateModel);
     assert.match(config, /wire_api = "responses"/);
     assert.match(config, /goals = false/);
     assert.match(config, /base_url = "https:\/\/local\.example"/);
@@ -524,7 +514,7 @@ test("ccs config keeps model_provider unselectable while proxy state exists", as
     assert.match(output, /config\.toml\s+model_provider\s+\(proxy installed\)/);
     const config = await readFile(join(home, ".codex", "config.toml"), "utf8");
     assert.match(config, /model_provider = "other"/);
-    assert.match(config, /model = "gpt-5\.6-sol"/);
+    assert.equal(readTopLevelTomlString(config, "model"), templateModel);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

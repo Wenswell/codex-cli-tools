@@ -35,7 +35,11 @@ test("cimg no-argument output shows active state and compact commands", async ()
   assert.match(output, /^model:\s+gpt-image-2$/m);
   assert.match(output, /^defaults:\s+1:1 1024x1024 auto$/m);
   assert.match(output, /^output:\s+~\/Pictures\/cimg$/m);
-  assert.match(output, /^commands: cimg -p TEXT \[-i FILE \.\.\.\] \| config \| version\|-v \| --help$/m);
+  const commands = output.split("\n").find((line) => line.startsWith("commands:"));
+  assert.ok(commands);
+  for (const command of ["cimg -p TEXT", "config", "version", "--help"]) {
+    assert.ok(commands.includes(command));
+  }
 });
 
 test("cimg defaults images to the user Pictures directory and keeps explicit output paths", () => {
@@ -50,7 +54,7 @@ test("cimg defaults images to the user Pictures directory and keeps explicit out
 test("cimg help exposes output and image input options", async () => {
   const output = await captureStdout(() => runCimg(["--help"]));
   assert.match(output, /default: ~\/Pictures\/cimg\/image-<timestamp>\.png/);
-  assert.match(output, /-i, --image FILE input PNG, JPEG, or WebP; repeat for multiple reference images/);
+  assert.match(output, /-i, --image FILE/);
 });
 
 test("cimg accepts ordered repeatable image inputs and rejects unsupported or excessive inputs", () => {

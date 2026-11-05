@@ -224,122 +224,28 @@ test("parses duration and aligned delay", () => {
   ]);
 });
 
-test("pads unknown speed columns", async () => {
-  const server = createServer((req, res) => {
-    if (req.url === "/connections" && req.method === "GET") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        connections: [
-          {
-            id: "abc",
-            metadata: { host: "api.example.com", destinationPort: 443 },
-            upload: 100,
-            download: 200,
-            start: "2026-06-10T00:00:00.000Z",
-            chains: ["Proxy", "HK-01"],
-            rule: "DOMAIN-SUFFIX",
-            rulePayload: "example.com",
-          },
-        ],
-      }));
-      return;
-    }
-
-    res.writeHead(404);
-    res.end();
-  });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-
-  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
-  try {
-    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
-    await writeFile(
-      join(home, ".config", "codex-tools", "clvm.json"),
-      `${JSON.stringify({
-        baseUrl: `http://127.0.0.1:${address.port}`,
-        secret: "",
-        domains: ["example.com"],
-      }, null, 2)}\n`,
-    );
-
-    const stdout = await runClvmCommand(home);
-
-    const row = stdout
-      .split("\n")
-      .find((line) => line.includes("api.example.com:443"));
-    assert.ok(row);
-    assert.match(row, /\/0ms\s+-\s+-\s+/);
-    assert.doesNotMatch(row, /\[unknown\]/);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-    await rm(home, { recursive: true, force: true });
-  }
-});
-
-test("formats traffic numbers with three significant digits", async () => {
-  const server = createServer((req, res) => {
-    if (req.url === "/connections" && req.method === "GET") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        connections: [
-          {
-            id: "abc",
-            metadata: { host: "api.example.com", destinationPort: 443 },
-            upload: 160 * 1024,
-            download: 43.2 * 1024 * 1024,
-            uploadSpeed: 160 * 1024,
-            downloadSpeed: 43.2 * 1024 * 1024,
-            start: "2026-06-10T00:00:00.000Z",
-            chains: ["Proxy", "HK-01"],
-            rule: "DOMAIN-SUFFIX",
-            rulePayload: "example.com",
-          },
-        ],
-      }));
-      return;
-    }
-
-    res.writeHead(404);
-    res.end();
-  });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-
-  const home = await mkdtemp(join(tmpdir(), "clvm-home-"));
-  try {
-    await mkdir(join(home, ".config", "codex-tools"), { recursive: true });
-    await writeFile(
-      join(home, ".config", "codex-tools", "clvm.json"),
-      `${JSON.stringify({
-        baseUrl: `http://127.0.0.1:${address.port}`,
-        secret: "",
-        domains: ["example.com"],
-        zeroSpeedThreshold: 160 * 1024,
-      }, null, 2)}\n`,
-    );
-
-    const stdout = await runClvmCommand(home);
-
-    assert.match(stdout, /zero speed:\s+160K\/s/);
-    assert.match(stdout, /zero<=160K\/s/);
-    const row = stdout
-      .split("\n")
-      .find((line) => line.includes("api.example.com:443") && line.includes("43.2M"));
-    assert.ok(row);
-    assert.match(row, /\b160K\b/);
-    assert.match(row, /\b43\.2M\b/);
-    assert.doesNotMatch(row, /\b160K\/s\b/);
-    assert.doesNotMatch(row, /\b43\.2M\/s\b/);
-    assert.doesNotMatch(stdout, /\bKB|MB|GB\b/);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-    await rm(home, { recursive: true, force: true });
-  }
+test("renders unknown speeds as placeholders", () => {
+  const sampler = new ConnectionSampler({ now: () => new Date("2026-06-10T00:00:00.000Z") });
+  const result = sampler.sample({ connections: [{
+    id: "abc",
+    metadata: { host: "api.example.com", destinationPort: 443 },
+    upload: 100,
+    download: 200,
+    start: "2026-06-10T00:00:00.000Z",
+    chains: ["Proxy", "HK-01"],
+    rule: "DOMAIN-SUFFIX",
+    rulePayload: "example.com",
+  }] }, { domains: ["example.com"], zeroSpeedThreshold: 0 });
+  const config = buildRuntimeConfig({
+    baseUrl: "http://127.0.0.1:9090", secret: "", domains: ["example.com"],
+    interval: "1s", zeroSpeedThreshold: 160 * 1024, closeZeroForSeconds: null, rawArchive: false,
+  }, { color: false }, { autoCloseEnabled: false, clear: false, once: true });
+  const lines = withStdoutProperties({ columns: 140 }, () => renderMonitorResultLines(result, config));
+  assert.match(lines[0], /zero<=160K\/s/);
+  const row = lines.find((line) => line.includes("api.example.com:443"));
+  assert.ok(row);
+  assert.match(row, /\/0ms\s+-\s+-\s+/);
+  assert.doesNotMatch(row, /\[unknown\]/);
 });
 
 test("records clvm status state and history", async () => {

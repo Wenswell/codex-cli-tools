@@ -47,7 +47,7 @@ max_depth = 2 # 子代理递归派生最大深度
 
 [tui] # 终端 UI 配置
 show_tooltips = false # 是否显示工具提示
-status_line = ["model-with-reasoning", "project-name", "branch-changes", "run-state", "context-remaining", "total-output-tokens", "context-window-size"]
+status_line = ["model-with-reasoning", "project-name", "context-remaining", "run-state", "branch-changes", "total-output-tokens", "context-window-size"]
 status_line_use_colors = true
 session_picker_view = "dense"
 screen_reader_detection_done = true
