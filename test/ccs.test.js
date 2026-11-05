@@ -711,7 +711,7 @@ test("ccs use defaults to the previously used profile, switches on enter, and re
     }), "utf8");
 
     const list = await runCcsDirect(["list"], home);
-    assert.match(list, /input .*used 1m ago\s+switched 3d ago/);
+    assert.match(list, /test001 .*used 1m ago\s+switched 3d ago/);
     assert.match(list, /local .*used -\s+switched 10d ago/);
     const plain = await runCcsDirect(["use"], home);
     assert.match(plain, /run in an interactive terminal to switch/);
@@ -844,7 +844,7 @@ test("ccs add edits a chosen profile or creates a new one with masked keys", asy
     const created = await runCcsInteractive(["add"], home, [
       ["Add or edit which profile?", KEYS.enter],
       ["Profile name", `test001${KEYS.enter}`],
-      ["profile test001 exists", `${KEYS.backspace.repeat(5)}local${KEYS.enter}`],
+      ["profile test001 exists", `${KEYS.backspace.repeat(7)}local${KEYS.enter}`],
       ["baseURL", `${baseUrl}${KEYS.enter}`],
       ["apiKey", `${secret}${KEYS.enter}`],
       ["Provider API", KEYS.enter],
